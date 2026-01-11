@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* SkyNet Custom Styles */
+body {
+  @apply bg-skynet-dark text-white min-h-screen;
+}
+
+/* Glowing effect for SkyNet branding */
+.skynet-glow {
+  text-shadow: 0 0 10px rgba(59, 130, 246, 0.5), 
+               0 0 20px rgba(59, 130, 246, 0.3), 
+               0 0 30px rgba(59, 130, 246, 0.2);
+}
+
+/* Brighter calendar icon for date inputs */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+  cursor: pointer;
+}

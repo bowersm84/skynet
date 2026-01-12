@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { 
   ChevronDown, 
   ChevronRight, 
@@ -10,7 +11,8 @@ import {
   CheckCircle, 
   Clock,
   X,
-  FileText
+  FileText,
+  Loader2
 } from 'lucide-react'
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
@@ -18,6 +20,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [jobDetails, setJobDetails] = useState({})
   const [uploading, setUploading] = useState(null)
   const [approving, setApproving] = useState(null)
+  const [viewingDoc, setViewingDoc] = useState(null)
 
   const loadJobDetails = async (jobId) => {
     if (jobDetails[jobId]) return
@@ -86,36 +89,30 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     
     try {
       const job = jobs.find(j => j.id === jobId)
-      const fileExt = file.name.split('.').pop()
-      const fileName = job.job_number + '_' + documentTypeCode + '_' + Date.now() + '.' + fileExt
-      const filePath = 'jobs/' + jobId + '/' + fileName
+      const s3Path = `jobs/${jobId}`
 
-      const { error: uploadError } = await supabase.storage
-        .from('documents')
-        .upload(filePath, file)
+      // Upload to S3
+      const { fileName, filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
 
-      if (uploadError) throw uploadError
-
-      const { data: urlData } = supabase.storage
-        .from('documents')
-        .getPublicUrl(filePath)
-
-      // Always upload to job_documents so each job has its own approval workflow
+      // Save reference to job_documents table
+      // Note: We store file_path (S3 key) instead of file_url
+      // URLs are generated on-demand with signed URLs
       const { error: dbError } = await supabase
         .from('job_documents')
         .insert({
           job_id: jobId,
           document_type_id: documentTypeId,
           file_name: file.name,
-          file_url: urlData.publicUrl,
-          file_size: file.size,
-          mime_type: file.type,
+          file_url: filePath, // Storing S3 path here - we'll generate signed URLs on view
+          file_size: fileSize,
+          mime_type: mimeType,
           uploaded_by: profile.id,
           status: 'pending'
         })
 
       if (dbError) throw dbError
 
+      // Refresh job details
       setJobDetails(prev => ({ ...prev, [jobId]: null }))
       await loadJobDetails(jobId)
       
@@ -125,6 +122,20 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
     
     setUploading(null)
+  }
+
+  const handleViewDocument = async (filePath) => {
+    if (!filePath) return
+    
+    setViewingDoc(filePath)
+    try {
+      const signedUrl = await getDocumentUrl(filePath)
+      window.open(signedUrl, '_blank')
+    } catch (err) {
+      console.error('Error getting document URL:', err)
+      alert('Failed to open document: ' + err.message)
+    }
+    setViewingDoc(null)
   }
 
   const handleApproveDocument = async (docId, jobId) => {
@@ -173,29 +184,28 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     setApproving(null)
   }
 
-    const handleCancelJob = async (jobId) => {
+  const handleCancelJob = async (jobId) => {
     if (!confirm('Are you sure you want to cancel this job?')) return
 
     try {
-        const { error } = await supabase
+      const { error } = await supabase
         .from('jobs')
         .update({ status: 'cancelled' })
         .eq('id', jobId)
 
-        if (error) throw error
-        onUpdate()
-        
+      if (error) throw error
+      onUpdate()
+      
     } catch (err) {
-        console.error('Cancel job error:', err)
-        alert('Failed to cancel job: ' + err.message)
+      console.error('Cancel job error:', err)
+      alert('Failed to cancel job: ' + err.message)
     }
-    }
+  }
 
   const getDocumentStatus = (jobId, docTypeId) => {
     const details = jobDetails[jobId]
     if (!details) return { status: 'loading', doc: null }
 
-    // All documents now go through job_documents for per-job approval
     const jobDoc = details.jobDocs.find(d => d.document_type_id === docTypeId)
     if (!jobDoc) return { status: 'missing', doc: null }
     if (jobDoc.status === 'approved') return { status: 'approved', doc: jobDoc }
@@ -207,7 +217,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     if (!details) return false
     if (details.noComponent) return true
     
-    // Only check requirements that are needed at compliance_review stage
     const complianceReqs = details.requirements.filter(r => 
       r.required_at === 'compliance_review' || !r.required_at
     )
@@ -220,7 +229,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       
       const docStatus = getDocumentStatus(jobId, req.document_type_id)
       
-      // All docs must be approved
       if (docStatus.status !== 'approved') return false
     }
     
@@ -257,13 +265,19 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     return 'Compliance Review'
   }
 
-  const ViewButton = ({ url }) => {
-    if (!url) return null
+  const ViewButton = ({ filePath }) => {
+    if (!filePath) return null
+    const isLoading = viewingDoc === filePath
+    
     return (
-      <a href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 text-white rounded">
-        <Eye size={12} />
+      <button
+        onClick={() => handleViewDocument(filePath)}
+        disabled={isLoading}
+        className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 text-white rounded disabled:opacity-50"
+      >
+        {isLoading ? <Loader2 size={12} className="animate-spin" /> : <Eye size={12} />}
         View
-      </a>
+      </button>
     )
   }
 
@@ -286,7 +300,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           const borderClass = getPriorityBorder(job.priority)
           const dotClass = getPriorityColor(job.priority)
 
-          // Split requirements by stage
           const complianceReqs = details?.requirements?.filter(r => 
             r.required_at === 'compliance_review' || !r.required_at
           ) || []
@@ -342,11 +355,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
               {isExpanded && (
                 <div className="border-t border-gray-700 p-4">
-                  {/* Required Documents - Compliance Review Stage */}
                   <h4 className="text-gray-400 text-sm font-medium mb-3">Required Documents</h4>
                   
                   {!details && (
-                    <div className="text-gray-500 text-sm">Loading documents...</div>
+                    <div className="text-gray-500 text-sm flex items-center gap-2">
+                      <Loader2 size={16} className="animate-spin" />
+                      Loading documents...
+                    </div>
                   )}
 
                   {details && details.noComponent && (
@@ -387,13 +402,17 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                             </div>
 
                             <div className="flex items-center gap-2">
-                              {/* View button - show if doc exists */}
-                              {docStatus.doc && <ViewButton url={docStatus.doc.file_url} />}
+                              {/* View button - uses signed URL */}
+                              {docStatus.doc && <ViewButton filePath={docStatus.doc.file_url} />}
 
-                              {/* Upload button - show if not approved */}
+                              {/* Upload button */}
                               {!isDocApproved && (
                                 <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
-                                  <Upload size={12} />
+                                  {isUploading ? (
+                                    <Loader2 size={12} className="animate-spin" />
+                                  ) : (
+                                    <Upload size={12} />
+                                  )}
                                   {isUploading ? 'Uploading...' : 'Upload'}
                                   <input
                                     type="file"
@@ -409,14 +428,18 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                 </label>
                               )}
 
-                              {/* Approve button - show if doc uploaded but not approved */}
+                              {/* Approve button */}
                               {docStatus.status === 'pending' && docStatus.doc && (
                                 <button
                                   onClick={() => handleApproveDocument(docStatus.doc.id, job.id)}
                                   disabled={approving === docStatus.doc.id}
                                   className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
                                 >
-                                  <Check size={12} />
+                                  {approving === docStatus.doc.id ? (
+                                    <Loader2 size={12} className="animate-spin" />
+                                  ) : (
+                                    <Check size={12} />
+                                  )}
                                   {approving === docStatus.doc.id ? '...' : 'Approve'}
                                 </button>
                               )}
@@ -453,7 +476,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                   {hasDoc && <div className="text-xs text-green-500">Already uploaded</div>}
                                 </div>
                               </div>
-                              {hasDoc && <ViewButton url={docStatus.doc.file_url} />}
+                              {hasDoc && <ViewButton filePath={docStatus.doc.file_url} />}
                             </div>
                           )
                         })}
@@ -489,7 +512,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                         disabled={!jobCanApprove || approving === job.id}
                         className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <CheckCircle size={16} />
+                        {approving === job.id ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <CheckCircle size={16} />
+                        )}
                         {approving === job.id ? 'Approving...' : 'Approve Job'}
                       </button>
                     </div>

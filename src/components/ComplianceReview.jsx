@@ -12,7 +12,9 @@ import {
   Clock,
   X,
   FileText,
-  Loader2
+  Loader2,
+  Plus,
+  RefreshCw
 } from 'lucide-react'
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
@@ -20,26 +22,25 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [jobDetails, setJobDetails] = useState({})
   const [uploading, setUploading] = useState(null)
   const [approving, setApproving] = useState(null)
+  const [replacing, setReplacing] = useState(null)
   const [viewingDoc, setViewingDoc] = useState(null)
 
-  const loadJobDetails = async (jobId) => {
-    if (jobDetails[jobId]) return
+  // Check if user has compliance permissions
+  const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin'
 
+  // Fetch job details from database - always fetches fresh data
+  const fetchJobDetails = async (jobId) => {
     const job = jobs.find(j => j.id === jobId)
-    console.log('Loading details for job:', job)
+    console.log('Fetching details for job:', job)
     
     if (!job?.component?.id) {
       console.log('No component ID found for job')
-      setJobDetails(prev => ({
-        ...prev,
-        [jobId]: {
-          requirements: [],
-          partDocs: [],
-          jobDocs: [],
-          noComponent: true
-        }
-      }))
-      return
+      return {
+        requirements: [],
+        partDocs: [],
+        jobDocs: [],
+        noComponent: true
+      }
     }
 
     const { data: requirements, error: reqError } = await supabase
@@ -61,16 +62,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       .from('job_documents')
       .select('*, document_type:document_types(*)')
       .eq('job_id', jobId)
+      .order('created_at', { ascending: true })
     
     console.log('Job docs:', jobDocs, 'Error:', jobError)
 
+    return {
+      requirements: requirements || [],
+      partDocs: partDocs || [],
+      jobDocs: jobDocs || []
+    }
+  }
+
+  // Load job details with optional cache check
+  const loadJobDetails = async (jobId, forceRefresh = false) => {
+    // Skip fetch if we already have cached data (unless forcing refresh)
+    if (!forceRefresh && jobDetails[jobId]) return
+
+    const details = await fetchJobDetails(jobId)
     setJobDetails(prev => ({
       ...prev,
-      [jobId]: {
-        requirements: requirements || [],
-        partDocs: partDocs || [],
-        jobDocs: jobDocs || []
-      }
+      [jobId]: details
     }))
   }
 
@@ -95,15 +106,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       const { fileName, filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
 
       // Save reference to job_documents table
-      // Note: We store file_path (S3 key) instead of file_url
-      // URLs are generated on-demand with signed URLs
       const { error: dbError } = await supabase
         .from('job_documents')
         .insert({
           job_id: jobId,
           document_type_id: documentTypeId,
           file_name: file.name,
-          file_url: filePath, // Storing S3 path here - we'll generate signed URLs on view
+          file_url: filePath,
           file_size: fileSize,
           mime_type: mimeType,
           uploaded_by: profile.id,
@@ -112,9 +121,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       if (dbError) throw dbError
 
-      // Refresh job details
-      setJobDetails(prev => ({ ...prev, [jobId]: null }))
-      await loadJobDetails(jobId)
+      // Fetch fresh data and update state directly
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
       
     } catch (err) {
       console.error('Upload error:', err)
@@ -122,6 +131,46 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
     
     setUploading(null)
+  }
+
+  const handleReplaceDocument = async (docId, jobId, documentTypeId, file) => {
+    setReplacing(docId)
+    
+    try {
+      const s3Path = `jobs/${jobId}`
+
+      // Upload new file to S3
+      const { fileName, filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
+
+      // Update the existing document record with new file info
+      // Reset status to pending since it needs re-approval
+      const { error: dbError } = await supabase
+        .from('job_documents')
+        .update({
+          file_name: file.name,
+          file_url: filePath,
+          file_size: fileSize,
+          mime_type: mimeType,
+          uploaded_by: profile.id,
+          status: 'pending',
+          approved_by: null,
+          approved_at: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', docId)
+
+      if (dbError) throw dbError
+
+      // Fetch fresh data and update state
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+      
+    } catch (err) {
+      console.error('Replace error:', err)
+      alert('Failed to replace document: ' + err.message)
+    }
+    
+    setReplacing(null)
   }
 
   const handleViewDocument = async (filePath) => {
@@ -153,8 +202,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       if (error) throw error
 
-      setJobDetails(prev => ({ ...prev, [jobId]: null }))
-      await loadJobDetails(jobId)
+      // Fetch fresh data and update state directly
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
       
     } catch (err) {
       console.error('Approve error:', err)
@@ -202,14 +252,17 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
   }
 
-  const getDocumentStatus = (jobId, docTypeId) => {
+  // Get ALL documents for a given type (returns array)
+  const getDocumentsForType = (jobId, docTypeId) => {
     const details = jobDetails[jobId]
-    if (!details) return { status: 'loading', doc: null }
+    if (!details) return []
+    return details.jobDocs.filter(d => d.document_type_id === docTypeId)
+  }
 
-    const jobDoc = details.jobDocs.find(d => d.document_type_id === docTypeId)
-    if (!jobDoc) return { status: 'missing', doc: null }
-    if (jobDoc.status === 'approved') return { status: 'approved', doc: jobDoc }
-    return { status: 'pending', doc: jobDoc }
+  // Check if requirement has at least one approved document
+  const hasApprovedDocument = (jobId, docTypeId) => {
+    const docs = getDocumentsForType(jobId, docTypeId)
+    return docs.some(d => d.status === 'approved')
   }
 
   const canApproveJob = (jobId) => {
@@ -227,9 +280,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       const req = complianceReqs[i]
       if (!req.is_required) continue
       
-      const docStatus = getDocumentStatus(jobId, req.document_type_id)
-      
-      if (docStatus.status !== 'approved') return false
+      // Check if at least one document of this type is approved
+      if (!hasApprovedDocument(jobId, req.document_type_id)) return false
     }
     
     return true
@@ -377,73 +429,125 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                   )}
                   
                   {details && !details.noComponent && complianceReqs.length > 0 && (
-                    <div className="space-y-2">
+                    <div className="space-y-4">
                       {complianceReqs.map(req => {
-                        const docStatus = getDocumentStatus(job.id, req.document_type_id)
+                        const docsForType = getDocumentsForType(job.id, req.document_type_id)
+                        const hasAnyDocs = docsForType.length > 0
                         const uploadKey = job.id + '-' + req.document_type_id
                         const isUploading = uploading === uploadKey
-                        const isDocApproved = docStatus.status === 'approved'
-                        const bgClass = getDocBgClass(docStatus.status)
 
                         return (
-                          <div key={req.id} className={"flex items-center justify-between p-3 rounded border " + bgClass}>
-                            <div className="flex items-center gap-3">
-                              {isDocApproved && <CheckCircle size={18} className="text-green-500" />}
-                              {docStatus.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
-                              {docStatus.status === 'missing' && <AlertCircle size={18} className="text-gray-500" />}
-                              
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-white text-sm">{req.document_type.name}</span>
-                                  {req.is_required && <span className="text-xs text-red-400">Required</span>}
-                                </div>
-                                {docStatus.doc && <div className="text-xs text-gray-500">{docStatus.doc.file_name}</div>}
+                          <div key={req.id} className="space-y-2">
+                            {/* Document Type Header */}
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className="text-white text-sm font-medium">{req.document_type.name}</span>
+                                {req.is_required && <span className="text-xs text-red-400">Required</span>}
+                                {hasApprovedDocument(job.id, req.document_type_id) && (
+                                  <CheckCircle size={14} className="text-green-500" />
+                                )}
                               </div>
+                              
+                              {/* Add More / Initial Upload button */}
+                              <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
+                                {isUploading ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : hasAnyDocs ? (
+                                  <Plus size={12} />
+                                ) : (
+                                  <Upload size={12} />
+                                )}
+                                {isUploading ? 'Uploading...' : hasAnyDocs ? 'Add More' : 'Upload'}
+                                <input
+                                  type="file"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const selectedFile = e.target.files[0]
+                                    if (selectedFile) {
+                                      handleFileUpload(job.id, req.document_type_id, req.document_type.code, selectedFile)
+                                    }
+                                    e.target.value = '' // Reset input
+                                  }}
+                                  disabled={isUploading}
+                                />
+                              </label>
                             </div>
 
-                            <div className="flex items-center gap-2">
-                              {/* View button - uses signed URL */}
-                              {docStatus.doc && <ViewButton filePath={docStatus.doc.file_url} />}
+                            {/* No documents yet */}
+                            {!hasAnyDocs && (
+                              <div className="flex items-center gap-2 p-3 rounded border border-gray-600 bg-gray-700">
+                                <AlertCircle size={16} className="text-gray-500" />
+                                <span className="text-gray-400 text-sm">No document uploaded</span>
+                              </div>
+                            )}
 
-                              {/* Upload button */}
-                              {!isDocApproved && (
-                                <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
-                                  {isUploading ? (
-                                    <Loader2 size={12} className="animate-spin" />
-                                  ) : (
-                                    <Upload size={12} />
-                                  )}
-                                  {isUploading ? 'Uploading...' : 'Upload'}
-                                  <input
-                                    type="file"
-                                    className="hidden"
-                                    onChange={(e) => {
-                                      const selectedFile = e.target.files[0]
-                                      if (selectedFile) {
-                                        handleFileUpload(job.id, req.document_type_id, req.document_type.code, selectedFile)
-                                      }
-                                    }}
-                                    disabled={isUploading}
-                                  />
-                                </label>
-                              )}
+                            {/* List of documents for this type */}
+                            {docsForType.map((doc, index) => {
+                              const isDocApproved = doc.status === 'approved'
+                              const bgClass = getDocBgClass(doc.status)
+                              const isReplacing = replacing === doc.id
 
-                              {/* Approve button */}
-                              {docStatus.status === 'pending' && docStatus.doc && (
-                                <button
-                                  onClick={() => handleApproveDocument(docStatus.doc.id, job.id)}
-                                  disabled={approving === docStatus.doc.id}
-                                  className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
-                                >
-                                  {approving === docStatus.doc.id ? (
-                                    <Loader2 size={12} className="animate-spin" />
-                                  ) : (
-                                    <Check size={12} />
-                                  )}
-                                  {approving === docStatus.doc.id ? '...' : 'Approve'}
-                                </button>
-                              )}
-                            </div>
+                              return (
+                                <div key={doc.id} className={"flex items-center justify-between p-3 rounded border " + bgClass}>
+                                  <div className="flex items-center gap-3">
+                                    {isDocApproved && <CheckCircle size={18} className="text-green-500" />}
+                                    {doc.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
+                                    
+                                    <div>
+                                      <div className="text-xs text-gray-500">{doc.file_name}</div>
+                                      {docsForType.length > 1 && (
+                                        <div className="text-xs text-gray-600">Document {index + 1}</div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-2">
+                                    {/* View button */}
+                                    <ViewButton filePath={doc.file_url} />
+
+                                    {/* Replace button - Compliance only */}
+                                    {isComplianceUser && (
+                                      <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
+                                        {isReplacing ? (
+                                          <Loader2 size={12} className="animate-spin" />
+                                        ) : (
+                                          <RefreshCw size={12} />
+                                        )}
+                                        {isReplacing ? '...' : 'Replace'}
+                                        <input
+                                          type="file"
+                                          className="hidden"
+                                          onChange={(e) => {
+                                            const selectedFile = e.target.files[0]
+                                            if (selectedFile) {
+                                              handleReplaceDocument(doc.id, job.id, req.document_type_id, selectedFile)
+                                            }
+                                            e.target.value = '' // Reset input
+                                          }}
+                                          disabled={isReplacing}
+                                        />
+                                      </label>
+                                    )}
+
+                                    {/* Approve button - only for pending docs */}
+                                    {doc.status === 'pending' && (
+                                      <button
+                                        onClick={() => handleApproveDocument(doc.id, job.id)}
+                                        disabled={approving === doc.id}
+                                        className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
+                                      >
+                                        {approving === doc.id ? (
+                                          <Loader2 size={12} className="animate-spin" />
+                                        ) : (
+                                          <Check size={12} />
+                                        )}
+                                        {approving === doc.id ? '...' : 'Approve'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              )
+                            })}
                           </div>
                         )
                       })}
@@ -459,8 +563,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       </h4>
                       <div className="space-y-2">
                         {futureReqs.map(req => {
-                          const docStatus = getDocumentStatus(job.id, req.document_type_id)
-                          const hasDoc = docStatus.doc !== null
+                          const docsForType = getDocumentsForType(job.id, req.document_type_id)
+                          const hasDoc = docsForType.length > 0
 
                           return (
                             <div key={req.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800/50">
@@ -473,10 +577,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                       {getStageLabel(req.required_at)}
                                     </span>
                                   </div>
-                                  {hasDoc && <div className="text-xs text-green-500">Already uploaded</div>}
+                                  {hasDoc && <div className="text-xs text-green-500">Already uploaded ({docsForType.length})</div>}
                                 </div>
                               </div>
-                              {hasDoc && <ViewButton filePath={docStatus.doc.file_url} />}
+                              {hasDoc && <ViewButton filePath={docsForType[0].file_url} />}
                             </div>
                           )
                         })}

@@ -13,7 +13,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
   const [generatingWO, setGeneratingWO] = useState(false)
   
   // Make to Stock vs Make to Order
-  const [orderType, setOrderType] = useState('make_to_order') // 'make_to_stock' or 'make_to_order'
+  const [orderType, setOrderType] = useState('make_to_order')
   const [customer, setCustomer] = useState('')
   const [poNumber, setPoNumber] = useState('')
   
@@ -45,11 +45,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
     setGeneratingWO(true)
     try {
       const now = new Date()
-      const year = String(now.getFullYear()).slice(-2) // "25"
-      const month = String(now.getMonth() + 1).padStart(2, '0') // "01"
+      const year = String(now.getFullYear()).slice(-2)
+      const month = String(now.getMonth() + 1).padStart(2, '0')
       const prefix = `WO-${year}${month}-`
       
-      // Find the highest WO number this month
       const { data, error } = await supabase
         .from('work_orders')
         .select('wo_number')
@@ -66,7 +65,6 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
       setWoNumber(`${prefix}${String(nextNum).padStart(4, '0')}`)
     } catch (err) {
       console.error('Error generating WO number:', err)
-      // Fallback
       const now = new Date()
       const fallback = `WO-${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}-0001`
       setWoNumber(fallback)
@@ -140,7 +138,6 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
   const updateAssemblyQuantity = (index, quantity) => {
     const updated = [...selectedAssemblies]
     updated[index].quantity = quantity
-    // Update default quantity for any jobs that haven't been customized
     updated[index].jobs = updated[index].jobs.map(job => ({
       ...job,
       quantity: job.quantityCustomized ? job.quantity : quantity
@@ -156,7 +153,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         componentId: bom.component.id,
         partNumber: bom.component.part_number,
         description: bom.component.description,
-        quantity: updated[assemblyIndex].quantity, // Default to assembly quantity
+        quantity: updated[assemblyIndex].quantity,
         quantityCustomized: false
       })
       setSelectedAssemblies(updated)
@@ -208,8 +205,21 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
 
       if (woError) throw woError
 
+      // Get next job number (J-######)
+      const { data: lastJob } = await supabase
+        .from('jobs')
+        .select('job_number')
+        .like('job_number', 'J-%')
+        .order('job_number', { ascending: false })
+        .limit(1)
+      
+      let nextJobNum = 1
+      if (lastJob && lastJob.length > 0) {
+        const lastNum = parseInt(lastJob[0].job_number.replace('J-', '')) || 0
+        nextJobNum = lastNum + 1
+      }
+
       // Create Work Order Assemblies and Jobs
-      let globalJobNum = 1
       for (const assembly of selectedAssemblies) {
         if (!assembly.assemblyId || assembly.jobs.length === 0) continue
 
@@ -226,21 +236,23 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         if (woaError) throw woaError
 
         for (const job of assembly.jobs) {
+          const jobNumber = `J-${String(nextJobNum).padStart(6, '0')}`
+          
           const { error: jobError } = await supabase
             .from('jobs')
             .insert({
               work_order_id: workOrder.id,
               work_order_assembly_id: woAssembly.id,
               component_id: job.componentId,
-              job_number: `${woNumber}-${String(globalJobNum).padStart(2, '0')}`,
-              quantity: job.quantity, // Use job-specific quantity
+              job_number: jobNumber,
+              quantity: job.quantity,
               priority: priority,
               assigned_machine_id: null,
               status: 'pending_compliance'
             })
 
           if (jobError) throw jobError
-          globalJobNum++
+          nextJobNum++
         }
       }
 
@@ -462,7 +474,6 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
 
                             return (
                               <div key={bom.id}>
-                                {/* Component Row */}
                                 <div 
                                   className={`rounded p-3 flex items-center justify-between ${
                                     isManufactured 
@@ -500,7 +511,6 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                                   </div>
                                 </div>
 
-                                {/* Job Row (if added) */}
                                 {hasJob && (
                                   <div className="ml-6 mt-1 bg-green-900/20 border border-green-800 rounded p-2 flex items-center justify-between">
                                     <div className="flex items-center gap-3">

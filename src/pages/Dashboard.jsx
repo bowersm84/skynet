@@ -11,6 +11,7 @@ export default function Dashboard({ user, profile }) {
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [expandedLocations, setExpandedLocations] = useState({})
+  const [selectedView, setSelectedView] = useState('lineup')
 
   useEffect(() => {
     fetchData()
@@ -31,8 +32,6 @@ export default function Dashboard({ user, profile }) {
     try {
       console.log('🔄 Starting fetchData...')
       
-      // Fetch machines
-      console.log('📍 Fetching machines...')
       const { data: machinesData, error: machinesError } = await supabase
         .from('machines')
         .select(`
@@ -44,14 +43,11 @@ export default function Dashboard({ user, profile }) {
 
       if (machinesError) {
         console.error('❌ Error fetching machines:', machinesError)
-        console.error('Machine error details:', JSON.stringify(machinesError, null, 2))
       } else {
         console.log('✅ Machines fetched:', machinesData?.length || 0, 'machines')
         setMachines(machinesData || [])
       }
 
-      // Fetch jobs
-      console.log('📋 Fetching jobs...')
       const { data: jobsData, error: jobsError } = await supabase
         .from('jobs')
         .select(`
@@ -66,7 +62,6 @@ export default function Dashboard({ user, profile }) {
 
       if (jobsError) {
         console.error('❌ Error fetching jobs:', jobsError)
-        console.error('Job error details:', JSON.stringify(jobsError, null, 2))
       } else {
         console.log('✅ Jobs fetched:', jobsData?.length || 0, 'jobs')
         setJobs(jobsData || [])
@@ -94,7 +89,6 @@ export default function Dashboard({ user, profile }) {
     return acc
   }, {})
 
-  // Initialize all locations as expanded on first load
   useEffect(() => {
     const initialExpanded = {}
     Object.keys(machinesByLocation).forEach(locationName => {
@@ -103,7 +97,6 @@ export default function Dashboard({ user, profile }) {
     setExpandedLocations(initialExpanded)
   }, [machines.length])
 
-  // Toggle location expand/collapse
   const toggleLocation = (locationName) => {
     setExpandedLocations(prev => ({
       ...prev,
@@ -111,9 +104,15 @@ export default function Dashboard({ user, profile }) {
     }))
   }
 
-  const pendingComplianceJobs = jobs.filter(job => job.status === 'pending_compliance')
+  // Job categorization
+  const pendingComplianceJobs = jobs.filter(job => 
+    job.status === 'pending_compliance' || job.status === 'pending_post_manufacturing'
+  )
   const unassignedJobs = jobs.filter(job => !job.assigned_machine_id && job.status === 'ready')
-  const activeJobs = jobs.filter(job => job.status !== 'pending_compliance')
+  const activeJobs = jobs.filter(job => 
+    job.assigned_machine_id && 
+    (job.status === 'assigned' || job.status === 'in_progress')
+  )
 
   const getPriorityColor = (priority) => {
     switch (priority) {
@@ -133,6 +132,23 @@ export default function Dashboard({ user, profile }) {
       case 'low': return 'border-gray-700'
       default: return 'border-gray-700'
     }
+  }
+
+  const StatCard = ({ id, label, value, colorClass = 'text-white', borderClass = 'border-gray-800', onClick }) => {
+    const isSelected = selectedView === id
+    return (
+      <button
+        onClick={() => onClick(id)}
+        className={`bg-gray-900 rounded-lg border p-4 text-left transition-all ${
+          isSelected 
+            ? 'border-skynet-accent ring-2 ring-skynet-accent/50' 
+            : borderClass + ' hover:border-gray-600'
+        }`}
+      >
+        <p className={`text-sm ${isSelected ? 'text-skynet-accent' : 'text-gray-500'}`}>{label}</p>
+        <p className={`text-2xl font-bold ${colorClass}`}>{value}</p>
+      </button>
+    )
   }
 
   if (loading) {
@@ -161,29 +177,36 @@ export default function Dashboard({ user, profile }) {
       </div>
 
       {/* Stats Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <p className="text-gray-500 text-sm">Machines</p>
-          <p className="text-2xl font-bold text-white">{machines.length}</p>
-        </div>
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <p className="text-gray-500 text-sm">Active Jobs</p>
-          <p className="text-2xl font-bold text-skynet-accent">{activeJobs.length}</p>
-        </div>
-        <div className="bg-gray-900 rounded-lg border border-purple-800 p-4">
-          <p className="text-purple-400 text-sm">Pending Compliance</p>
-          <p className="text-2xl font-bold text-purple-400">{pendingComplianceJobs.length}</p>
-        </div>
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <p className="text-gray-500 text-sm">Unassigned</p>
-          <p className="text-2xl font-bold text-yellow-500">{unassignedJobs.length}</p>
-        </div>
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <p className="text-gray-500 text-sm">Critical</p>
-          <p className="text-2xl font-bold text-red-500">
-            {jobs.filter(j => j.priority === 'critical').length}
-          </p>
-        </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard
+          id="lineup"
+          label="Machine Lineup"
+          value={machines.length}
+          onClick={setSelectedView}
+        />
+        <StatCard
+          id="active"
+          label="Active Jobs"
+          value={activeJobs.length}
+          colorClass="text-skynet-accent"
+          onClick={setSelectedView}
+        />
+        <StatCard
+          id="compliance"
+          label="Pending Compliance"
+          value={pendingComplianceJobs.length}
+          colorClass="text-purple-400"
+          borderClass={pendingComplianceJobs.length > 0 ? 'border-purple-800' : 'border-gray-800'}
+          onClick={setSelectedView}
+        />
+        <StatCard
+          id="unassigned"
+          label="Unassigned"
+          value={unassignedJobs.length}
+          colorClass="text-yellow-500"
+          borderClass={unassignedJobs.length > 0 ? 'border-yellow-800' : 'border-gray-800'}
+          onClick={setSelectedView}
+        />
       </div>
 
       {/* Priority Legend */}
@@ -207,92 +230,150 @@ export default function Dashboard({ user, profile }) {
         </div>
       </div>
 
-      {/* Pending Compliance Section */}
-      <ComplianceReview 
-        jobs={pendingComplianceJobs} 
-        onUpdate={fetchData}
-        profile={profile}
-      />
-
-      {/* Machine Grid - Grouped by Location */}
-      {Object.keys(machinesByLocation).length === 0 ? (
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
-          <p className="text-gray-500">No machines configured</p>
-        </div>
-      ) : (
-        <div className="space-y-6">
-          {Object.entries(machinesByLocation).map(([locationName, locationMachines]) => (
-            <div key={locationName} className="space-y-3">
-              {/* Location Header - Clickable */}
-              <button
-                onClick={() => toggleLocation(locationName)}
-                className="w-full flex items-center gap-3 pb-2 border-b border-gray-800 hover:border-gray-700 transition-colors cursor-pointer group"
-              >
-                <div className="w-2 h-2 bg-skynet-accent rounded-full"></div>
-                <h3 className="text-lg font-semibold text-white group-hover:text-skynet-accent transition-colors">
-                  {locationName}
-                </h3>
-                <span className="text-gray-500 text-sm">
-                  ({locationMachines.length} {locationMachines.length === 1 ? 'machine' : 'machines'})
-                </span>
-                <ChevronDown 
-                  size={20} 
-                  className={`ml-auto text-gray-500 group-hover:text-skynet-accent transition-all ${
-                    expandedLocations[locationName] ? 'rotate-0' : '-rotate-90'
-                  }`}
-                />
-              </button>
-
-              {/* Machine Cards Grid - Collapsible */}
-              {expandedLocations[locationName] && (
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-                  {locationMachines.map(machine => (
-                    <MachineCard 
-                      key={machine.id} 
-                      machine={machine} 
-                      jobs={getJobsForMachine(machine.id)}
-                      getPriorityColor={getPriorityColor}
-                    />
-                  ))}
-                </div>
-              )}
+      {/* Machine Lineup View */}
+      {selectedView === 'lineup' && (
+        <>
+          {Object.keys(machinesByLocation).length === 0 ? (
+            <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
+              <p className="text-gray-500">No machines configured</p>
             </div>
-          ))}
+          ) : (
+            <div className="space-y-6">
+              {Object.entries(machinesByLocation).map(([locationName, locationMachines]) => (
+                <div key={locationName} className="space-y-3">
+                  <button
+                    onClick={() => toggleLocation(locationName)}
+                    className="w-full flex items-center gap-3 pb-2 border-b border-gray-800 hover:border-gray-700 transition-colors cursor-pointer group"
+                  >
+                    <div className="w-2 h-2 bg-skynet-accent rounded-full"></div>
+                    <h3 className="text-lg font-semibold text-white group-hover:text-skynet-accent transition-colors">
+                      {locationName}
+                    </h3>
+                    <span className="text-gray-500 text-sm">
+                      ({locationMachines.length} {locationMachines.length === 1 ? 'machine' : 'machines'})
+                    </span>
+                    <ChevronDown 
+                      size={20} 
+                      className={`ml-auto text-gray-500 group-hover:text-skynet-accent transition-all ${
+                        expandedLocations[locationName] ? 'rotate-0' : '-rotate-90'
+                      }`}
+                    />
+                  </button>
+
+                  {expandedLocations[locationName] && (
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+                      {locationMachines.map(machine => (
+                        <MachineCard 
+                          key={machine.id} 
+                          machine={machine} 
+                          jobs={getJobsForMachine(machine.id)}
+                          getPriorityColor={getPriorityColor}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Active Jobs View */}
+      {selectedView === 'active' && (
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <h3 className="text-skynet-accent font-semibold mb-3 flex items-center gap-2">
+            <span className="w-2 h-2 bg-skynet-accent rounded-full"></span>
+            Active Jobs ({activeJobs.length})
+          </h3>
+          {activeJobs.length === 0 ? (
+            <p className="text-gray-500 text-center py-8">No jobs currently in the lineup</p>
+          ) : (
+            <div className="space-y-2">
+              {activeJobs.map(job => (
+                <div 
+                  key={job.id} 
+                  className={`flex items-center justify-between bg-gray-800 rounded p-3 border-l-4 ${getPriorityBorder(job.priority)}`}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-mono">{job.job_number}</span>
+                        <span className="text-gray-500">•</span>
+                        <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        <span className="text-skynet-accent">{job.component?.part_number}</span>
+                        <span className="mx-2">•</span>
+                        <span>Qty: {job.quantity}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-skynet-accent text-sm">{job.assigned_machine?.name}</span>
+                    <p className="text-xs text-gray-500 capitalize">{job.status.replace('_', ' ')}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Unassigned Jobs */}
-      {unassignedJobs.length > 0 && (
+      {/* Pending Compliance View - Now passes ALL jobs for ComplianceReview to filter */}
+      {selectedView === 'compliance' && (
+        <>
+          {jobs.length === 0 ? (
+            <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
+              <p className="text-gray-500">No jobs in the system</p>
+            </div>
+          ) : (
+            <ComplianceReview 
+              jobs={jobs} 
+              onUpdate={fetchData}
+              profile={profile}
+            />
+          )}
+        </>
+      )}
+
+      {/* Unassigned Jobs View */}
+      {selectedView === 'unassigned' && (
         <div className="bg-gray-900 rounded-lg border border-yellow-800 p-4">
           <h3 className="text-yellow-500 font-semibold mb-3 flex items-center gap-2">
             <span className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></span>
             Ready for Assignment ({unassignedJobs.length})
           </h3>
-          <div className="space-y-2">
-            {unassignedJobs.map(job => (
-              <div 
-                key={job.id} 
-                className={`flex items-center justify-between bg-gray-800 rounded p-3 border-l-4 ${getPriorityBorder(job.priority)}`}
-              >
-                <div className="flex items-center gap-4">
-                  <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-white font-mono">{job.job_number}</span>
-                      <span className="text-gray-500">•</span>
-                      <span className="text-gray-400">{job.work_order?.wo_number}</span>
-                    </div>
-                    <div className="text-sm text-gray-500">
-                      <span className="text-skynet-accent">{job.component?.part_number}</span>
-                      <span className="mx-2">•</span>
-                      <span>Qty: {job.quantity}</span>
+          {unassignedJobs.length === 0 ? (
+            <p className="text-gray-500 text-center py-8">No jobs awaiting assignment</p>
+          ) : (
+            <div className="space-y-2">
+              {unassignedJobs.map(job => (
+                <div 
+                  key={job.id} 
+                  className={`flex items-center justify-between bg-gray-800 rounded p-3 border-l-4 ${getPriorityBorder(job.priority)}`}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-mono">{job.job_number}</span>
+                        <span className="text-gray-500">•</span>
+                        <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        <span className="text-skynet-accent">{job.component?.part_number}</span>
+                        <span className="mx-2">•</span>
+                        <span>Qty: {job.quantity}</span>
+                      </div>
                     </div>
                   </div>
+                  <span className="text-yellow-500 text-sm">Needs Assignment</span>
                 </div>
-                <span className="text-yellow-500 text-sm">Needs Assignment</span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

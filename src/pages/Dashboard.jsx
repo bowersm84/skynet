@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus } from 'lucide-react'
+import { Plus, ChevronDown } from 'lucide-react'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import ComplianceReview from '../components/ComplianceReview'
@@ -10,6 +10,7 @@ export default function Dashboard({ user, profile }) {
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [expandedLocations, setExpandedLocations] = useState({})
 
   useEffect(() => {
     fetchData()
@@ -27,43 +28,87 @@ export default function Dashboard({ user, profile }) {
   }, [])
 
   const fetchData = async () => {
-    const { data: machinesData, error: machinesError } = await supabase
-      .from('machines')
-      .select(`
-        *,
-        location:locations(name, code)
-      `)
-      .eq('is_active', true)
-      .order('display_order')
+    try {
+      console.log('🔄 Starting fetchData...')
+      
+      // Fetch machines
+      console.log('📍 Fetching machines...')
+      const { data: machinesData, error: machinesError } = await supabase
+        .from('machines')
+        .select(`
+          *,
+          location:locations(name, code)
+        `)
+        .eq('is_active', true)
+        .order('display_order')
 
-    if (machinesError) {
-      console.error('Error fetching machines:', machinesError)
-    } else {
-      setMachines(machinesData || [])
+      if (machinesError) {
+        console.error('❌ Error fetching machines:', machinesError)
+        console.error('Machine error details:', JSON.stringify(machinesError, null, 2))
+      } else {
+        console.log('✅ Machines fetched:', machinesData?.length || 0, 'machines')
+        setMachines(machinesData || [])
+      }
+
+      // Fetch jobs
+      console.log('📋 Fetching jobs...')
+      const { data: jobsData, error: jobsError } = await supabase
+        .from('jobs')
+        .select(`
+          *,
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type),
+          component:parts!component_id(id, part_number, description),
+          assigned_machine:machines(id, name, code)
+        `)
+        .not('status', 'eq', 'complete')
+        .not('status', 'eq', 'cancelled')
+        .order('created_at', { ascending: true })
+
+      if (jobsError) {
+        console.error('❌ Error fetching jobs:', jobsError)
+        console.error('Job error details:', JSON.stringify(jobsError, null, 2))
+      } else {
+        console.log('✅ Jobs fetched:', jobsData?.length || 0, 'jobs')
+        setJobs(jobsData || [])
+      }
+
+      console.log('✅ fetchData complete!')
+    } catch (error) {
+      console.error('💥 Unexpected error in fetchData:', error)
+    } finally {
+      setLoading(false)
     }
-
-    const { data: jobsData, error: jobsError } = await supabase
-      .from('jobs')
-      .select(`
-        *,
-        work_order:work_orders(wo_number, customer, priority, due_date, order_type),
-        component:parts!jobs_component_id_fkey(id, part_number, description),
-        assigned_machine:machines(id, name, code)
-      `)
-      .not('status', 'eq', 'complete')
-      .order('created_at', { ascending: true })
-
-    if (jobsError) {
-      console.error('Error fetching jobs:', jobsError)
-    } else {
-      setJobs(jobsData || [])
-    }
-
-    setLoading(false)
   }
 
   const getJobsForMachine = (machineId) => {
     return jobs.filter(job => job.assigned_machine_id === machineId && job.status !== 'pending_compliance')
+  }
+
+  // Group machines by location
+  const machinesByLocation = machines.reduce((acc, machine) => {
+    const locationName = machine.location?.name || 'Unknown Location'
+    if (!acc[locationName]) {
+      acc[locationName] = []
+    }
+    acc[locationName].push(machine)
+    return acc
+  }, {})
+
+  // Initialize all locations as expanded on first load
+  useEffect(() => {
+    const initialExpanded = {}
+    Object.keys(machinesByLocation).forEach(locationName => {
+      initialExpanded[locationName] = true
+    })
+    setExpandedLocations(initialExpanded)
+  }, [machines.length])
+
+  // Toggle location expand/collapse
+  const toggleLocation = (locationName) => {
+    setExpandedLocations(prev => ({
+      ...prev,
+      [locationName]: !prev[locationName]
+    }))
   }
 
   const pendingComplianceJobs = jobs.filter(job => job.status === 'pending_compliance')
@@ -169,17 +214,52 @@ export default function Dashboard({ user, profile }) {
         profile={profile}
       />
 
-      {/* Machine Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {machines.map(machine => (
-          <MachineCard 
-            key={machine.id} 
-            machine={machine} 
-            jobs={getJobsForMachine(machine.id)}
-            getPriorityColor={getPriorityColor}
-          />
-        ))}
-      </div>
+      {/* Machine Grid - Grouped by Location */}
+      {Object.keys(machinesByLocation).length === 0 ? (
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
+          <p className="text-gray-500">No machines configured</p>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {Object.entries(machinesByLocation).map(([locationName, locationMachines]) => (
+            <div key={locationName} className="space-y-3">
+              {/* Location Header - Clickable */}
+              <button
+                onClick={() => toggleLocation(locationName)}
+                className="w-full flex items-center gap-3 pb-2 border-b border-gray-800 hover:border-gray-700 transition-colors cursor-pointer group"
+              >
+                <div className="w-2 h-2 bg-skynet-accent rounded-full"></div>
+                <h3 className="text-lg font-semibold text-white group-hover:text-skynet-accent transition-colors">
+                  {locationName}
+                </h3>
+                <span className="text-gray-500 text-sm">
+                  ({locationMachines.length} {locationMachines.length === 1 ? 'machine' : 'machines'})
+                </span>
+                <ChevronDown 
+                  size={20} 
+                  className={`ml-auto text-gray-500 group-hover:text-skynet-accent transition-all ${
+                    expandedLocations[locationName] ? 'rotate-0' : '-rotate-90'
+                  }`}
+                />
+              </button>
+
+              {/* Machine Cards Grid - Collapsible */}
+              {expandedLocations[locationName] && (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+                  {locationMachines.map(machine => (
+                    <MachineCard 
+                      key={machine.id} 
+                      machine={machine} 
+                      jobs={getJobsForMachine(machine.id)}
+                      getPriorityColor={getPriorityColor}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Unassigned Jobs */}
       {unassignedJobs.length > 0 && (

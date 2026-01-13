@@ -3,25 +3,57 @@ import { supabase } from './lib/supabase'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 
+/**
+ * ⚠️ CRITICAL TODO: RLS DISABLED ON PROFILES TABLE
+ * 
+ * For development, Row Level Security has been DISABLED on the profiles table
+ * due to 10+ second query timeouts. This MUST be fixed before production.
+ * 
+ * Current state: ALTER TABLE profiles DISABLE ROW LEVEL SECURITY;
+ * Required before production: Re-enable RLS and optimize performance
+ * 
+ * See: KNOWN_ISSUES.md for details and checklist
+ * Date: January 12, 2026
+ */
+
 function App() {
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check current session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
-      if (session?.user) {
-        fetchProfile(session.user.id)
-      } else {
+    // Check current session with timeout
+    const checkSession = async () => {
+      try {
+        console.log('🔐 Checking session...')
+        const { data: { session }, error } = await supabase.auth.getSession()
+        
+        if (error) {
+          console.error('❌ Session check error:', error)
+          setLoading(false)
+          return
+        }
+        
+        console.log('✅ Session check complete:', session ? 'Logged in' : 'Not logged in')
+        setUser(session?.user ?? null)
+        
+        if (session?.user) {
+          await fetchProfile(session.user.id)
+        } else {
+          setLoading(false)
+        }
+      } catch (error) {
+        console.error('💥 Session check failed:', error)
         setLoading(false)
       }
-    })
+    }
+
+    checkSession()
 
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.log('🔄 Auth state changed:', event)
         setUser(session?.user ?? null)
         if (session?.user) {
           await fetchProfile(session.user.id)
@@ -36,18 +68,58 @@ function App() {
   }, [])
 
   const fetchProfile = async (userId) => {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single()
+    try {
+      console.log('👤 Fetching profile for:', userId)
+      
+      // TODO: Remove this timeout once RLS performance is fixed (see KNOWN_ISSUES.md)
+      // This 10s timeout is a workaround for RLS performance issues
+      // Target: < 500ms query time in production
+      const timeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Profile fetch timeout after 10s')), 10000)
+      )
+      
+      // Create the actual query promise
+      const query = supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+      
+      // Race them
+      const { data, error } = await Promise.race([query, timeout])
 
-    if (error) {
-      console.error('Error fetching profile:', error)
-    } else {
-      setProfile(data)
+      if (error) {
+        console.error('❌ Error fetching profile:', error)
+        console.error('Profile error details:', JSON.stringify(error, null, 2))
+        
+        // Create a minimal profile if fetch fails
+        console.log('⚠️ Using minimal profile fallback')
+        setProfile({
+          id: userId,
+          role: 'machinist',
+          full_name: 'User',
+          email: ''
+        })
+      } else {
+        console.log('✅ Profile fetched:', data?.full_name || data?.email)
+        setProfile(data)
+      }
+    } catch (error) {
+      console.error('💥 Unexpected error fetching profile:', error)
+      console.error('Error message:', error.message)
+      
+      // Create a minimal profile on timeout/error
+      console.log('⚠️ Using minimal profile fallback after error')
+      setProfile({
+        id: userId,
+        role: 'machinist',
+        full_name: 'User',
+        email: ''
+      })
+    } finally {
+      console.log('🏁 Profile fetch complete, setting loading to false')
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const handleLogout = async () => {

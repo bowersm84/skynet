@@ -1,24 +1,43 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from './lib/supabase'
+import { Calendar, LayoutDashboard } from 'lucide-react'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
+import Schedule from './pages/Schedule'
 
 function App() {
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [currentPage, setCurrentPage] = useState('dashboard')
+  
+  // Track if we've already initialized to prevent duplicate fetches
+  const initializedRef = useRef(false)
+  const fetchingProfileRef = useRef(false)
 
   useEffect(() => {
+    // Prevent double initialization in React strict mode
+    if (initializedRef.current) return
+    initializedRef.current = true
+
     // Check for existing session on mount
     const initializeAuth = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      
-      if (session?.user) {
-        setUser(session.user)
-        await fetchProfile(session.user.id)
+      console.log('Initializing auth...')
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        
+        if (session?.user) {
+          console.log('Found existing session for:', session.user.email)
+          setUser(session.user)
+          await fetchProfile(session.user.id)
+        } else {
+          console.log('No existing session')
+        }
+      } catch (error) {
+        console.error('Error getting session:', error)
+      } finally {
+        setLoading(false)
       }
-      
-      setLoading(false)
     }
 
     initializeAuth()
@@ -28,15 +47,19 @@ function App() {
       async (event, session) => {
         console.log('Auth event:', event)
         
-        if (event === 'SIGNED_IN' && session?.user) {
+        // Only handle actual sign-in events (not initial session detection)
+        if (event === 'SIGNED_IN' && session?.user && !user) {
+          console.log('New sign in detected')
           setUser(session.user)
           await fetchProfile(session.user.id)
           setLoading(false)
         }
         
         if (event === 'SIGNED_OUT') {
+          console.log('Sign out detected')
           setUser(null)
           setProfile(null)
+          setCurrentPage('dashboard')
           setLoading(false)
         }
         
@@ -49,26 +72,51 @@ function App() {
   }, [])
 
   const fetchProfile = async (userId) => {
-    // Skip if we already have this user's profile
-    if (profile?.id === userId) return
+    // Prevent concurrent fetches
+    if (fetchingProfileRef.current) {
+      console.log('Already fetching profile, skipping...')
+      return
+    }
+    
+    fetchingProfileRef.current = true
+    console.log('Fetching profile for:', userId)
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single()
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
 
-    if (error) {
-      console.error('Error fetching profile:', error)
-      // Minimal fallback only for genuine failures
+      if (error) {
+        console.error('Error fetching profile:', error)
+        // Minimal fallback only for genuine failures
+        setProfile({ id: userId, role: 'machinist', full_name: 'User', email: '' })
+      } else {
+        console.log('Profile loaded:', data.full_name, data.role)
+        setProfile(data)
+      }
+    } catch (error) {
+      console.error('Unexpected error fetching profile:', error)
       setProfile({ id: userId, role: 'machinist', full_name: 'User', email: '' })
-    } else {
-      setProfile(data)
+    } finally {
+      fetchingProfileRef.current = false
     }
   }
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
+  }
+
+  // Check if user can access scheduling
+  const canAccessSchedule = profile?.role === 'admin' || profile?.role === 'scheduler'
+
+  // Get page title for header
+  const getPageTitle = () => {
+    switch (currentPage) {
+      case 'schedule': return 'Schedule'
+      default: return 'Dashboard'
+    }
   }
 
   if (loading) {
@@ -92,17 +140,50 @@ function App() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-white">SkyNet</h1>
+              <button 
+                onClick={() => setCurrentPage('dashboard')}
+                className="text-2xl font-bold text-white hover:text-skynet-accent transition-colors"
+              >
+                SkyNet
+              </button>
               <div className="w-2 h-2 bg-skynet-green rounded-full animate-pulse"></div>
               <span className="text-skynet-green font-mono text-xs">Online</span>
             </div>
             <span className="text-gray-600">|</span>
-            <span className="text-gray-400">Dashboard</span>
+            <span className="text-gray-400">{getPageTitle()}</span>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right">
+          
+          <div className="flex items-center gap-2">
+            {/* Navigation buttons for authorized roles */}
+            {canAccessSchedule && (
+              <>
+                {/* Dashboard button - shown when on Schedule page */}
+                {currentPage === 'schedule' && (
+                  <button
+                    onClick={() => setCurrentPage('dashboard')}
+                    className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+                  >
+                    <LayoutDashboard size={18} />
+                    <span className="text-sm font-medium">Dashboard</span>
+                  </button>
+                )}
+                
+                {/* Schedule button - shown when on Dashboard */}
+                {currentPage === 'dashboard' && (
+                  <button
+                    onClick={() => setCurrentPage('schedule')}
+                    className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+                  >
+                    <Calendar size={18} />
+                    <span className="text-sm font-medium">Schedule</span>
+                  </button>
+                )}
+              </>
+            )}
+            
+            <div className="text-right ml-2">
               <p className="text-white text-sm">{profile?.full_name || user.email}</p>
-              <p className="text-gray-500 text-xs capitalize">{profile?.role || 'User'}</p>
+              <p className="text-gray-500 text-xs capitalize">{profile?.role?.replace('_', ' ') || 'User'}</p>
             </div>
             <button
               onClick={handleLogout}
@@ -115,7 +196,12 @@ function App() {
       </header>
 
       <main className="p-6">
-        <Dashboard user={user} profile={profile} />
+        {currentPage === 'dashboard' && (
+          <Dashboard user={user} profile={profile} />
+        )}
+        {currentPage === 'schedule' && canAccessSchedule && (
+          <Schedule user={user} profile={profile} onNavigate={setCurrentPage} />
+        )}
       </main>
 
       <footer className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">

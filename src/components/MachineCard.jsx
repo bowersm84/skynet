@@ -1,6 +1,8 @@
+import { Monitor } from 'lucide-react'
+
 export default function MachineCard({ machine, jobs, getPriorityColor }) {
-  const activeJob = jobs.find(j => j.status === 'in_progress')
-  const queuedJobs = jobs.filter(j => j.status !== 'in_progress')
+  const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
+  const queuedJobs = jobs.filter(j => j.status !== 'in_progress' && j.status !== 'in_setup')
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -22,6 +24,13 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
     }
   }
 
+  const handleLaunchKiosk = () => {
+    // Use machine code if available, otherwise use name (URL encoded)
+    const identifier = machine.code || machine.name
+    const kioskUrl = `/kiosk/${encodeURIComponent(identifier)}`
+    window.open(kioskUrl, '_blank')
+  }
+
   return (
     <div className={`bg-gray-900 rounded-lg border ${getStatusBg(machine.status)} overflow-hidden`}>
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
@@ -41,11 +50,16 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
         {activeJob ? (
           <div className="bg-gray-800 rounded p-3">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-skynet-accent font-mono text-sm">NOW RUNNING</span>
+              <span className="text-skynet-accent font-mono text-sm">
+                {activeJob.status === 'in_setup' ? 'SETUP' : 'RUNNING'}
+              </span>
               <div className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)} animate-pulse`}></div>
             </div>
             <p className="text-white font-semibold">{activeJob.job_number}</p>
             <p className="text-gray-400 text-sm">{activeJob.work_order?.wo_number}</p>
+            {activeJob.component?.part_number && (
+              <p className="text-skynet-accent text-sm font-mono">{activeJob.component.part_number}</p>
+            )}
           </div>
         ) : (
           <div className="bg-gray-800/50 rounded p-3 border border-dashed border-gray-700">
@@ -73,6 +87,15 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
         {jobs.length === 0 && machine.status === 'available' && (
           <p className="text-gray-600 text-xs text-center mt-2">Ready for assignment</p>
         )}
+
+        {/* Launch Kiosk Button */}
+        <button
+          onClick={handleLaunchKiosk}
+          className="w-full mt-3 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-skynet-accent text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
+        >
+          <Monitor size={16} />
+          Launch Kiosk
+        </button>
       </div>
     </div>
   )

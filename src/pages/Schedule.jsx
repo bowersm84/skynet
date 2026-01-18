@@ -9,6 +9,7 @@ import {
   Calendar,
   Clock,
   AlertCircle,
+  AlertTriangle,
   GripVertical,
   User,
   X,
@@ -26,6 +27,7 @@ import {
 
 export default function Schedule({ user, profile, onNavigate }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
+  const [incompleteJobs, setIncompleteJobs] = useState([]) // Jobs sent back from kiosk
   const [scheduledJobs, setScheduledJobs] = useState([])
   const [machines, setMachines] = useState([])
   const [partMachineDurations, setPartMachineDurations] = useState([])
@@ -60,6 +62,7 @@ export default function Schedule({ user, profile, onNavigate }) {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [durationSource, setDurationSource] = useState(null)
+  const [noTimeAvailable, setNoTimeAvailable] = useState(false) // Warning when shift is full
   
   // Unschedule confirmation
   const [unscheduleConfirm, setUnscheduleConfirm] = useState(null)
@@ -123,6 +126,7 @@ export default function Schedule({ user, profile, onNavigate }) {
   const fetchData = async () => {
     setLoading(true)
     try {
+      // Fetch unassigned ready jobs
       const { data: unassignedData, error: unassignedError } = await supabase
         .from('jobs')
         .select(`
@@ -138,6 +142,23 @@ export default function Schedule({ user, profile, onNavigate }) {
         console.error('Error fetching unassigned jobs:', unassignedError)
       } else {
         setUnassignedJobs(unassignedData || [])
+      }
+
+      // Fetch incomplete jobs (sent back from kiosk)
+      const { data: incompleteData, error: incompleteError } = await supabase
+        .from('jobs')
+        .select(`
+          *,
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type),
+          component:parts!component_id(id, part_number, description)
+        `)
+        .eq('status', 'incomplete')
+        .order('incomplete_at', { ascending: false })
+
+      if (incompleteError) {
+        console.error('Error fetching incomplete jobs:', incompleteError)
+      } else {
+        setIncompleteJobs(incompleteData || [])
       }
 
       const { data: scheduledData, error: scheduledError } = await supabase
@@ -311,8 +332,118 @@ export default function Schedule({ user, profile, onNavigate }) {
     })
   }
 
+  // Calculate next available time slot for a machine on a given date
+  const getNextAvailableTime = (machineId, date, durationMinutes = 60, excludeJobId = null) => {
+    const SHIFT_START = 7 // 7:00 AM
+    const SHIFT_END = 16  // 4:00 PM
+    
+    const targetDate = new Date(date)
+    targetDate.setHours(0, 0, 0, 0)
+    
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const isToday = targetDate.getTime() === today.getTime()
+    
+    // Get all jobs for this machine on this date
+    const machineJobs = (scheduledJobsByMachine[machineId] || [])
+      .filter(job => {
+        if (excludeJobId && job.id === excludeJobId) return false
+        const jobDate = new Date(job.scheduled_start)
+        jobDate.setHours(0, 0, 0, 0)
+        return jobDate.getTime() === targetDate.getTime()
+      })
+      .map(job => ({
+        start: new Date(job.scheduled_start),
+        end: job.scheduled_end 
+          ? new Date(job.scheduled_end)
+          : new Date(new Date(job.scheduled_start).getTime() + (job.estimated_minutes || 60) * 60000)
+      }))
+      .sort((a, b) => a.start - b.start)
+    
+    // Determine earliest possible start time
+    let earliestStart = new Date(targetDate)
+    earliestStart.setHours(SHIFT_START, 0, 0, 0)
+    
+    // For today, check if we're past shift end using ACTUAL time (before rounding)
+    if (isToday) {
+      const now = new Date()
+      const actualHour = now.getHours()
+      const actualMinutes = now.getMinutes()
+      
+      // If actual current time is past shift end, no time available
+      if (actualHour >= SHIFT_END) {
+        return { hours: SHIFT_START, minutes: 0, noTimeAvailable: true }
+      }
+      
+      // Round up to next 15-minute interval for the suggested start time
+      const roundedMinutes = Math.ceil(actualMinutes / 15) * 15
+      now.setMinutes(roundedMinutes, 0, 0)
+      
+      // Cap at shift end - 15 min to allow at least a small job
+      const shiftEndTime = new Date(targetDate)
+      shiftEndTime.setHours(SHIFT_END - 1, 45, 0, 0) // 3:45 PM max
+      
+      if (now > shiftEndTime) {
+        earliestStart = shiftEndTime
+      } else if (now > earliestStart) {
+        earliestStart = now
+      }
+    }
+    
+    // If no jobs scheduled, return earliest available time
+    if (machineJobs.length === 0) {
+      return {
+        hours: earliestStart.getHours(),
+        minutes: earliestStart.getMinutes(),
+        noTimeAvailable: false
+      }
+    }
+    
+    // Find first available slot within shift hours
+    let candidateStart = earliestStart
+    
+    for (const job of machineJobs) {
+      // Skip jobs that end before our candidate start
+      if (job.end <= candidateStart) continue
+      
+      const candidateEnd = new Date(candidateStart.getTime() + durationMinutes * 60000)
+      
+      // If candidate fits before this job and within shift hours, use it
+      if (candidateEnd <= job.start && candidateStart.getHours() < SHIFT_END) {
+        return {
+          hours: candidateStart.getHours(),
+          minutes: candidateStart.getMinutes(),
+          noTimeAvailable: false
+        }
+      }
+      
+      // Move candidate to after this job ends
+      if (job.end > candidateStart) {
+        candidateStart = new Date(job.end)
+        // Round up to next 15-minute interval
+        const mins = candidateStart.getMinutes()
+        if (mins % 15 !== 0) {
+          candidateStart.setMinutes(Math.ceil(mins / 15) * 15, 0, 0)
+        }
+      }
+    }
+    
+    // Check if candidate is still within shift hours
+    if (candidateStart.getHours() >= SHIFT_END) {
+      // No room left on this day
+      return { hours: SHIFT_START, minutes: 0, noTimeAvailable: true }
+    }
+    
+    return {
+      hours: candidateStart.getHours(),
+      minutes: candidateStart.getMinutes(),
+      noTimeAvailable: false
+    }
+  }
+
   const getFilteredJobs = () => {
-    let filtered = [...unassignedJobs]
+    // Combine ready and incomplete jobs
+    let filtered = [...unassignedJobs, ...incompleteJobs]
 
     if (searchQuery) {
       const query = searchQuery.toLowerCase()
@@ -343,6 +474,13 @@ export default function Schedule({ user, profile, onNavigate }) {
         filtered.sort((a, b) => (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2))
         break
     }
+
+    // Always put incomplete jobs first (they need attention)
+    filtered.sort((a, b) => {
+      if (a.status === 'incomplete' && b.status !== 'incomplete') return -1
+      if (a.status !== 'incomplete' && b.status === 'incomplete') return 1
+      return 0
+    })
 
     return filtered
   }
@@ -401,11 +539,32 @@ export default function Schedule({ user, profile, onNavigate }) {
     const durationRecord = getDurationForPartMachine(partId, machineId)
     const isReschedule = !!draggedScheduledJob
     
-    // Set default start time based on hour clicked (in zoomed view) or 7am
-    let defaultStartTime = '07:00'
-    if (hour !== null) {
-      defaultStartTime = `${hour.toString().padStart(2, '0')}:00`
+    // Calculate duration for next available time check
+    let durationMinutes = 60 // default
+    if (durationRecord) {
+      durationMinutes = durationRecord.estimated_minutes
+    } else if (job.estimated_minutes) {
+      durationMinutes = job.estimated_minutes
     }
+    
+    // Get next available time for this machine/date (or use clicked hour in day view)
+    let defaultStartTime = '07:00'
+    let timeUnavailable = false
+    
+    if (hour !== null) {
+      // User clicked a specific hour in day view - use that
+      defaultStartTime = `${hour.toString().padStart(2, '0')}:00`
+      // Still check if there's time available during shift
+      const nextTime = getNextAvailableTime(machineId, date, durationMinutes, isReschedule ? job.id : null)
+      timeUnavailable = nextTime.noTimeAvailable
+    } else {
+      // Week view - calculate next available time
+      const nextTime = getNextAvailableTime(machineId, date, durationMinutes, isReschedule ? job.id : null)
+      defaultStartTime = `${String(nextTime.hours).padStart(2, '0')}:${String(nextTime.minutes).padStart(2, '0')}`
+      timeUnavailable = nextTime.noTimeAvailable
+    }
+    
+    setNoTimeAvailable(timeUnavailable)
     
     setScheduleModal({
       job: isReschedule ? { ...job, isReschedule: true } : job,
@@ -524,6 +683,7 @@ export default function Schedule({ user, profile, onNavigate }) {
         setSaveError('Failed to schedule job. Please try again.')
       } else {
         setScheduleModal(null)
+        setNoTimeAvailable(false)
         setScheduleForm({
           startTime: '07:00',
           durationHours: 1,
@@ -966,7 +1126,13 @@ export default function Schedule({ user, profile, onNavigate }) {
           <div className="p-4 border-b border-gray-700">
             <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
               <Clock size={18} className="text-yellow-500" />
-              Unassigned Jobs ({filteredJobs.length})
+              Job Pool ({filteredJobs.length})
+              {incompleteJobs.length > 0 && (
+                <span className="ml-auto flex items-center gap-1 text-xs text-red-400 bg-red-900/30 px-2 py-0.5 rounded">
+                  <AlertTriangle size={12} />
+                  {incompleteJobs.length} needs reschedule
+                </span>
+              )}
             </h3>
             
             <div className="relative mb-3">
@@ -1023,12 +1189,16 @@ export default function Schedule({ user, profile, onNavigate }) {
           <div className="flex-1 overflow-y-auto p-3 space-y-2">
             {filteredJobs.length === 0 ? (
               <div className="text-center py-8">
-                <p className="text-gray-500">No unassigned jobs</p>
+                <p className="text-gray-500">No jobs awaiting schedule</p>
               </div>
             ) : (
               filteredJobs.map(job => {
                 const machineOptions = getMachineOptionsForPart(job.component_id)
                 const hasPreferred = machineOptions.some(o => o.is_preferred)
+                const isIncomplete = job.status === 'incomplete'
+                const piecesRemaining = isIncomplete 
+                  ? job.quantity - (job.good_pieces || 0)
+                  : null
                 
                 return (
                   <div
@@ -1036,14 +1206,28 @@ export default function Schedule({ user, profile, onNavigate }) {
                     draggable
                     onDragStart={(e) => handleDragStart(e, job)}
                     onDragEnd={handleDragEnd}
-                    className={`bg-gray-800 rounded-lg p-3 border-l-4 ${getPriorityBorder(job.priority)} 
+                    className={`rounded-lg p-3 border-l-4 
                       cursor-grab active:cursor-grabbing hover:bg-gray-750 transition-all touch-manipulation
-                      ${draggedJob?.id === job.id ? 'opacity-50 scale-95' : ''}`}
+                      ${draggedJob?.id === job.id ? 'opacity-50 scale-95' : ''}
+                      ${isIncomplete 
+                        ? 'bg-red-900/20 border-red-600 ring-1 ring-red-800/50' 
+                        : `bg-gray-800 ${getPriorityBorder(job.priority)}`
+                      }`}
                   >
+                    {/* Incomplete job header */}
+                    {isIncomplete && (
+                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-red-800/50">
+                        <AlertTriangle size={14} className="text-red-400" />
+                        <span className="text-xs text-red-400 font-medium">Needs Rescheduling</span>
+                      </div>
+                    )}
+                    
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-white font-mono font-semibold">{job.job_number}</span>
+                          <span className={`font-mono font-semibold ${isIncomplete ? 'text-red-300' : 'text-white'}`}>
+                            {job.job_number}
+                          </span>
                           <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
                           {hasPreferred && (
                             <Star size={12} className="text-yellow-500" title="Has preferred machine" />
@@ -1054,6 +1238,26 @@ export default function Schedule({ user, profile, onNavigate }) {
                         {job.work_order?.customer && (
                           <p className="text-gray-500 text-xs truncate">{job.work_order.customer}</p>
                         )}
+                        
+                        {/* Incomplete job details */}
+                        {isIncomplete && (
+                          <div className="mt-2 pt-2 border-t border-red-800/30 space-y-1">
+                            {job.incomplete_reason && (
+                              <p className="text-xs text-red-300 truncate" title={job.incomplete_reason}>
+                                Reason: {job.incomplete_reason}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="text-gray-500">Progress:</span>
+                              <span className="text-green-400">{job.good_pieces || 0} good</span>
+                              <span className="text-gray-600">/</span>
+                              <span className="text-red-400">{job.bad_pieces || 0} bad</span>
+                            </div>
+                            <p className="text-xs text-yellow-400">
+                              {piecesRemaining} pieces remaining
+                            </p>
+                          </div>
+                        )}
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <GripVertical size={16} className="text-gray-600" />
@@ -1062,20 +1266,22 @@ export default function Schedule({ user, profile, onNavigate }) {
                             Due: {formatDate(job.work_order.due_date)}
                           </span>
                         )}
-                        {job.estimated_minutes ? (
-                          <span className="text-xs text-gray-400">
-                            ~{Math.round(job.estimated_minutes / 60)}h
-                          </span>
-                        ) : machineOptions.length > 0 ? (
-                          <span className="text-xs text-blue-400 flex items-center gap-1">
-                            <Database size={10} />
-                            Has estimates
-                          </span>
-                        ) : (
-                          <span className="text-xs text-orange-500 flex items-center gap-1">
-                            <AlertCircle size={10} />
-                            No estimate
-                          </span>
+                        {!isIncomplete && (
+                          job.estimated_minutes ? (
+                            <span className="text-xs text-gray-400">
+                              ~{Math.round(job.estimated_minutes / 60)}h
+                            </span>
+                          ) : machineOptions.length > 0 ? (
+                            <span className="text-xs text-blue-400 flex items-center gap-1">
+                              <Database size={10} />
+                              Has estimates
+                            </span>
+                          ) : (
+                            <span className="text-xs text-orange-500 flex items-center gap-1">
+                              <AlertCircle size={10} />
+                              No estimate
+                            </span>
+                          )
                         )}
                       </div>
                     </div>
@@ -1387,7 +1593,10 @@ export default function Schedule({ user, profile, onNavigate }) {
       {scheduleModal && (
         <div 
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setScheduleModal(null)}
+          onClick={() => {
+            setScheduleModal(null)
+            setNoTimeAvailable(false)
+          }}
         >
           <div 
             className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
@@ -1405,7 +1614,10 @@ export default function Schedule({ user, profile, onNavigate }) {
                 </p>
               </div>
               <button
-                onClick={() => setScheduleModal(null)}
+                onClick={() => {
+                  setScheduleModal(null)
+                  setNoTimeAvailable(false)
+                }}
                 className="text-gray-500 hover:text-white transition-colors"
               >
                 <X size={24} />
@@ -1416,11 +1628,36 @@ export default function Schedule({ user, profile, onNavigate }) {
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-white font-mono font-bold">{scheduleModal.job.job_number}</span>
                 <div className={`w-2 h-2 rounded-full ${getPriorityColor(scheduleModal.job.priority)}`}></div>
+                {scheduleModal.job.status === 'incomplete' && (
+                  <span className="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded flex items-center gap-1">
+                    <AlertTriangle size={10} />
+                    Incomplete
+                  </span>
+                )}
               </div>
               <p className="text-skynet-accent">{scheduleModal.job.component?.part_number}</p>
               <p className="text-gray-400 text-sm">{scheduleModal.job.work_order?.wo_number}</p>
               {scheduleModal.job.work_order?.due_date && (
                 <p className="text-gray-500 text-sm mt-1">Due: {formatDate(scheduleModal.job.work_order.due_date)}</p>
+              )}
+              
+              {/* Incomplete job details in modal */}
+              {scheduleModal.job.status === 'incomplete' && (
+                <div className="mt-3 pt-3 border-t border-red-800/30 space-y-1">
+                  {scheduleModal.job.incomplete_reason && (
+                    <p className="text-xs text-red-300">
+                      <span className="text-gray-500">Reason:</span> {scheduleModal.job.incomplete_reason}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-gray-500">Progress:</span>
+                    <span className="text-green-400">{scheduleModal.job.good_pieces || 0} good</span>
+                    <span className="text-red-400">{scheduleModal.job.bad_pieces || 0} bad</span>
+                  </div>
+                  <p className="text-xs text-yellow-400">
+                    {scheduleModal.job.quantity - (scheduleModal.job.good_pieces || 0)} pieces remaining of {scheduleModal.job.quantity}
+                  </p>
+                </div>
               )}
             </div>
 
@@ -1444,6 +1681,22 @@ export default function Schedule({ user, profile, onNavigate }) {
               </div>
             )}
 
+            {/* No time available warning */}
+            {noTimeAvailable && (
+              <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 mb-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={20} className="text-red-500 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-red-400 font-medium">No Shift Time Available</p>
+                    <p className="text-red-300/70 text-sm mt-1">
+                      There is no available time during shift hours (7am-4pm) on this day for this machine. 
+                      Consider scheduling for a different day, or override if scheduling outside shift hours is necessary.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-4">
               <div>
                 <label className="block text-gray-400 text-sm mb-1">Date</label>
@@ -1453,12 +1706,34 @@ export default function Schedule({ user, profile, onNavigate }) {
               </div>
 
               <div>
-                <label className="block text-gray-400 text-sm mb-1">Start Time</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-gray-400 text-sm">Start Time</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const durationMins = (scheduleForm.durationHours * 60) + scheduleForm.durationMinutes
+                      const nextTime = getNextAvailableTime(
+                        scheduleModal.machineId, 
+                        scheduleModal.date, 
+                        durationMins || 60,
+                        scheduleModal.isReschedule ? scheduleModal.job.id : null
+                      )
+                      const timeStr = `${String(nextTime.hours).padStart(2, '0')}:${String(nextTime.minutes).padStart(2, '0')}`
+                      setScheduleForm(prev => ({ ...prev, startTime: timeStr }))
+                      setNoTimeAvailable(nextTime.noTimeAvailable)
+                    }}
+                    className="flex items-center gap-1 text-xs text-skynet-accent hover:text-blue-400 transition-colors"
+                  >
+                    <Clock size={12} />
+                    Next Available
+                  </button>
+                </div>
                 <input
                   type="time"
                   value={scheduleForm.startTime}
                   onChange={(e) => setScheduleForm(prev => ({ ...prev, startTime: e.target.value }))}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
+                  style={{ colorScheme: 'dark' }}
                 />
               </div>
 
@@ -1525,7 +1800,10 @@ export default function Schedule({ user, profile, onNavigate }) {
 
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
-                  onClick={() => setScheduleModal(null)}
+                  onClick={() => {
+                    setScheduleModal(null)
+                    setNoTimeAvailable(false)
+                  }}
                   className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
                 >
                   Cancel

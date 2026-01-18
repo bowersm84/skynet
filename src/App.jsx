@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard } from 'lucide-react'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Schedule from './pages/Schedule'
+import Kiosk from './pages/Kiosk'
 
-function App() {
+// Main authenticated app component
+function MainApp() {
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -210,6 +213,21 @@ function App() {
         </p>
       </footer>
     </div>
+  )
+}
+
+// Root App component with routing
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Kiosk route - PIN-based auth, no Supabase login required */}
+        <Route path="/kiosk/:machineCode" element={<Kiosk />} />
+        
+        {/* Main app - requires Supabase authentication */}
+        <Route path="/*" element={<MainApp />} />
+      </Routes>
+    </BrowserRouter>
   )
 }
 

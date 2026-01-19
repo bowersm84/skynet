@@ -95,8 +95,17 @@ export default function Dashboard({ user, profile }) {
       )
       .subscribe()
 
+    // Subscribe to machine status changes
+    const machinesSubscription = supabase
+      .channel('machines-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'machines' }, 
+        () => fetchData()
+      )
+      .subscribe()
+
     return () => {
       supabase.removeChannel(jobsSubscription)
+      supabase.removeChannel(machinesSubscription)
     }
   }, [fetchData])
 

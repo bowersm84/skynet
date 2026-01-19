@@ -73,6 +73,13 @@ export default function Schedule({ user, profile, onNavigate }) {
   
   // Unschedule confirmation
   const [unscheduleConfirm, setUnscheduleConfirm] = useState(null)
+  
+  // Cancel/Complete maintenance modal
+  const [cancelMaintenanceConfirm, setCancelMaintenanceConfirm] = useState(null)
+  const [maintenanceCloseMode, setMaintenanceCloseMode] = useState('complete') // 'complete' or 'cancel'
+  const [maintenanceCancelReason, setMaintenanceCancelReason] = useState('')
+  const [maintenanceEndDate, setMaintenanceEndDate] = useState('')
+  const [maintenanceEndTime, setMaintenanceEndTime] = useState('')
   const [unscheduling, setUnscheduling] = useState(false)
   
   // Resize state for drag-to-resize in day view
@@ -132,8 +139,17 @@ export default function Schedule({ user, profile, onNavigate }) {
       )
       .subscribe()
 
+    // Subscribe to machine status changes
+    const machinesSubscription = supabase
+      .channel('schedule-machines-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'machines' }, 
+        () => fetchData()
+      )
+      .subscribe()
+
     return () => {
       supabase.removeChannel(jobsSubscription)
+      supabase.removeChannel(machinesSubscription)
     }
   }, [weekOffset])
 
@@ -300,8 +316,12 @@ export default function Schedule({ user, profile, onNavigate }) {
       if (!job.scheduled_start) return
       
       const jobStart = new Date(job.scheduled_start)
-      const jobEnd = job.scheduled_end 
-        ? new Date(job.scheduled_end)
+      // Use actual_end for completed jobs, otherwise scheduled_end
+      const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
+        ? job.actual_end
+        : job.scheduled_end
+      const jobEnd = endTime 
+        ? new Date(endTime)
         : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
       
       // Skip if job doesn't overlap with this day
@@ -341,7 +361,11 @@ export default function Schedule({ user, profile, onNavigate }) {
     if (!job.scheduled_start) return null
     
     const jobStart = new Date(job.scheduled_start)
-    const jobEnd = job.scheduled_end ? new Date(job.scheduled_end) : null
+    // Use actual_end for completed jobs, otherwise scheduled_end
+    const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
+      ? job.actual_end
+      : job.scheduled_end
+    const jobEnd = endTime ? new Date(endTime) : null
     
     const dayStart = new Date(dayDate)
     dayStart.setHours(0, 0, 0, 0)
@@ -379,8 +403,12 @@ export default function Schedule({ user, profile, onNavigate }) {
     if (!job.scheduled_start) return null
     
     const jobStart = new Date(job.scheduled_start)
-    const jobEnd = job.scheduled_end 
-      ? new Date(job.scheduled_end) 
+    // Use actual_end for completed jobs, otherwise scheduled_end
+    const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
+      ? job.actual_end
+      : job.scheduled_end
+    const jobEnd = endTime 
+      ? new Date(endTime) 
       : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
     
     const dayStart = new Date(dayDate)
@@ -838,6 +866,129 @@ export default function Schedule({ user, profile, onNavigate }) {
     }
   }
 
+  // Cancel or Complete Early a maintenance order
+  const handleCancelMaintenance = async () => {
+    if (!cancelMaintenanceConfirm) return
+    
+    // Validate based on mode
+    if (maintenanceCloseMode === 'cancel' && !maintenanceCancelReason.trim()) {
+      setSaveError('Please enter a cancellation reason')
+      return
+    }
+    
+    if (maintenanceCloseMode === 'complete' && (!maintenanceEndDate || !maintenanceEndTime)) {
+      setSaveError('Please enter an end date and time')
+      return
+    }
+    
+    setSaving(true)
+    setSaveError(null)
+    
+    try {
+      const job = cancelMaintenanceConfirm
+      const jobId = job.id
+      const workOrderId = job.work_order_id || job.work_order?.id
+      const machineId = job.assigned_machine_id
+      const wasUnplanned = job.work_order?.maintenance_type === 'unplanned'
+      
+      console.log('Closing maintenance:', { jobId, workOrderId, machineId, wasUnplanned, mode: maintenanceCloseMode })
+      
+      if (maintenanceCloseMode === 'cancel') {
+        // Cancel mode: set status to cancelled, clear schedule, add reason
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .update({
+            status: 'cancelled',
+            assigned_machine_id: null,
+            scheduled_start: null,
+            scheduled_end: null,
+            notes: job.notes 
+              ? `${job.notes}\n[Cancelled: ${maintenanceCancelReason}]`
+              : `[Cancelled: ${maintenanceCancelReason}]`,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', jobId)
+        
+        if (jobError) {
+          console.error('Error cancelling maintenance job:', jobError)
+          setSaveError(`Failed to cancel: ${jobError.message}`)
+          return
+        }
+        
+        // Update work order status
+        if (workOrderId) {
+          await supabase
+            .from('work_orders')
+            .update({
+              status: 'closed',
+              notes: job.work_order?.notes 
+                ? `${job.work_order.notes}\n[Cancelled: ${maintenanceCancelReason}]`
+                : `[Cancelled: ${maintenanceCancelReason}]`,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', workOrderId)
+        }
+        
+      } else {
+        // Complete Early mode: update end time, mark as complete
+        const newEndTime = new Date(`${maintenanceEndDate}T${maintenanceEndTime}:00`)
+        
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .update({
+            status: 'complete',
+            scheduled_end: newEndTime.toISOString(),
+            actual_end: newEndTime.toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', jobId)
+        
+        if (jobError) {
+          console.error('Error completing maintenance job:', jobError)
+          setSaveError(`Failed to complete: ${jobError.message}`)
+          return
+        }
+        
+        // Update work order status
+        if (workOrderId) {
+          await supabase
+            .from('work_orders')
+            .update({
+              status: 'complete',
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', workOrderId)
+        }
+      }
+      
+      // If it was unplanned maintenance, reset the machine status
+      if (wasUnplanned && machineId) {
+        await supabase
+          .from('machines')
+          .update({
+            status: 'available',
+            status_reason: null,
+            status_updated_at: new Date().toISOString()
+          })
+          .eq('id', machineId)
+      }
+      
+      console.log('Maintenance closed successfully')
+      setCancelMaintenanceConfirm(null)
+      setMaintenanceCloseMode('complete')
+      setMaintenanceCancelReason('')
+      setMaintenanceEndDate('')
+      setMaintenanceEndTime('')
+      setSelectedJob(null)
+      await fetchData()
+    } catch (error) {
+      console.error('Error closing maintenance:', error)
+      setSaveError(`Error: ${error.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // Resize handlers for day view
   const handleResizeStart = (e, job, edge) => {
     e.preventDefault()
@@ -1007,23 +1158,24 @@ export default function Schedule({ user, profile, onNavigate }) {
     const isUnplanned = job.work_order?.maintenance_type === 'unplanned'
     
     // Maintenance jobs - distinguish planned vs unplanned
+    // Planned = Blue, Unplanned = Purple
     if (job.is_maintenance || job.work_order?.order_type === 'maintenance') {
       // Completed maintenance
       if (job.status === 'complete' || job.status === 'manufacturing_complete') {
         return isUnplanned 
-          ? 'bg-red-900/50 border-red-500 opacity-60'
-          : 'bg-purple-900/50 border-purple-500 opacity-60'
+          ? 'bg-purple-900/50 border-purple-500 opacity-60'
+          : 'bg-blue-900/50 border-blue-500 opacity-60'
       }
       // In-progress maintenance
       if (job.status === 'in_progress' || job.status === 'in_setup') {
         return isUnplanned
-          ? 'bg-red-700 border-red-400 ring-2 ring-red-300 ring-offset-1 ring-offset-gray-900'
-          : 'bg-purple-600 border-purple-400 ring-2 ring-purple-300 ring-offset-1 ring-offset-gray-900'
+          ? 'bg-purple-600 border-purple-400 ring-2 ring-purple-300 ring-offset-1 ring-offset-gray-900'
+          : 'bg-blue-600 border-blue-400 ring-2 ring-blue-300 ring-offset-1 ring-offset-gray-900'
       }
       // Default maintenance (assigned)
       return isUnplanned
-        ? 'bg-red-700 border-red-400'
-        : 'bg-purple-600 border-purple-400'
+        ? 'bg-purple-600 border-purple-400'
+        : 'bg-blue-600 border-blue-400'
     }
     
     // Completed jobs are grayed out
@@ -2032,7 +2184,7 @@ export default function Schedule({ user, profile, onNavigate }) {
               <span className="text-gray-400">Attended</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-3 bg-purple-600 border border-purple-400 rounded-sm"></div>
+              <div className="w-4 h-3 bg-blue-600 border border-blue-400 rounded-sm"></div>
               <span className="text-gray-400">Planned Maint.</span>
             </div>
             <div className="flex items-center gap-2">
@@ -2321,8 +2473,8 @@ export default function Schedule({ user, profile, onNavigate }) {
             className={`bg-gray-900 rounded-lg border p-6 max-w-md w-full mx-4 shadow-xl ${
               selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance'
                 ? selectedJob.work_order?.maintenance_type === 'unplanned'
-                  ? 'border-red-600'
-                  : 'border-purple-600'
+                  ? 'border-purple-600'
+                  : 'border-blue-600'
                 : 'border-gray-700'
             }`}
             onClick={(e) => e.stopPropagation()}
@@ -2334,8 +2486,8 @@ export default function Schedule({ user, profile, onNavigate }) {
                   {(selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance') ? (
                     <span className={`text-xs px-2 py-0.5 rounded font-medium ${
                       selectedJob.work_order?.maintenance_type === 'unplanned'
-                        ? 'bg-red-600 text-white'
-                        : 'bg-purple-600 text-white'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-blue-600 text-white'
                     }`}>
                       {selectedJob.work_order?.maintenance_type === 'unplanned' ? 'UNPLANNED' : 'MAINTENANCE'}
                     </span>
@@ -2359,7 +2511,7 @@ export default function Schedule({ user, profile, onNavigate }) {
                 <div>
                   <span className="text-gray-500 text-sm">Description</span>
                   <p className={`font-medium ${
-                    selectedJob.work_order?.maintenance_type === 'unplanned' ? 'text-red-400' : 'text-purple-400'
+                    selectedJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-400' : 'text-blue-400'
                   }`}>
                     {selectedJob.maintenance_description || selectedJob.work_order?.notes || 'Maintenance'}
                   </p>
@@ -2461,7 +2613,7 @@ export default function Schedule({ user, profile, onNavigate }) {
                   </p>
                 </div>
               ) : (selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance') ? (
-                // Maintenance jobs - can edit times but cannot unschedule
+                // Maintenance jobs - can edit times and cancel if not started
                 <div className="pt-4 border-t border-gray-700">
                   <div className="flex items-center gap-3 mb-3">
                     <button
@@ -2497,17 +2649,38 @@ export default function Schedule({ user, profile, onNavigate }) {
                       }}
                       className={`flex items-center gap-2 px-4 py-2 font-medium rounded transition-colors ${
                         selectedJob.work_order?.maintenance_type === 'unplanned'
-                          ? 'bg-red-600 hover:bg-red-500 text-white'
-                          : 'bg-purple-600 hover:bg-purple-500 text-white'
+                          ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                          : 'bg-blue-600 hover:bg-blue-500 text-white'
                       }`}
                     >
                       <Edit3 size={16} />
                       Edit Schedule
                     </button>
+                    {/* Cancel/Complete button - only show if job hasn't started */}
+                    {selectedJob.status === 'assigned' && (
+                      <button
+                        onClick={() => {
+                          // Set defaults for end date/time to now
+                          const now = new Date()
+                          setMaintenanceEndDate(now.toISOString().split('T')[0])
+                          setMaintenanceEndTime(now.toTimeString().slice(0, 5))
+                          setMaintenanceCloseMode('complete')
+                          setMaintenanceCancelReason('')
+                          setSaveError(null)
+                          setCancelMaintenanceConfirm(selectedJob)
+                        }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white font-medium rounded transition-colors"
+                      >
+                        <X size={16} />
+                        Close
+                      </button>
+                    )}
                   </div>
                   <p className="text-sm text-gray-500 flex items-center gap-2">
                     <Info size={14} />
-                    Maintenance orders cannot be unscheduled or reassigned to another machine.
+                    {selectedJob.status === 'assigned' 
+                      ? 'Click Close to complete early or cancel this maintenance order.'
+                      : 'Maintenance in progress cannot be closed from here.'}
                   </p>
                 </div>
               ) : (
@@ -2607,6 +2780,184 @@ export default function Schedule({ user, profile, onNavigate }) {
                   <>
                     <Undo2 size={16} />
                     Yes, Unschedule
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Close Maintenance Modal */}
+      {cancelMaintenanceConfirm && (
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => {
+            setCancelMaintenanceConfirm(null)
+            setSaveError(null)
+          }}
+        >
+          <div 
+            className={`bg-gray-900 rounded-lg border p-6 max-w-md w-full mx-4 shadow-xl ${
+              cancelMaintenanceConfirm.work_order?.maintenance_type === 'unplanned'
+                ? 'border-purple-600'
+                : 'border-blue-600'
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                  cancelMaintenanceConfirm.work_order?.maintenance_type === 'unplanned'
+                    ? 'bg-purple-600/20'
+                    : 'bg-blue-600/20'
+                }`}>
+                  <Wrench size={20} className={
+                    cancelMaintenanceConfirm.work_order?.maintenance_type === 'unplanned'
+                      ? 'text-purple-500'
+                      : 'text-blue-500'
+                  } />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Close Maintenance Order</h3>
+                  <p className="text-gray-400 text-sm">{cancelMaintenanceConfirm.job_number}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setCancelMaintenanceConfirm(null)
+                  setSaveError(null)
+                }}
+                className="text-gray-500 hover:text-white transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Mode Selection */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <button
+                type="button"
+                onClick={() => setMaintenanceCloseMode('complete')}
+                className={`px-4 py-3 rounded font-medium transition-colors flex items-center justify-center gap-2 ${
+                  maintenanceCloseMode === 'complete'
+                    ? 'bg-green-600 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                }`}
+              >
+                <Clock size={18} />
+                Complete Early
+              </button>
+              <button
+                type="button"
+                onClick={() => setMaintenanceCloseMode('cancel')}
+                className={`px-4 py-3 rounded font-medium transition-colors flex items-center justify-center gap-2 ${
+                  maintenanceCloseMode === 'cancel'
+                    ? 'bg-red-600 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                }`}
+              >
+                <Trash2 size={18} />
+                Cancel
+              </button>
+            </div>
+
+            {/* Mode-specific content */}
+            {maintenanceCloseMode === 'complete' ? (
+              <div className="space-y-4">
+                <p className="text-gray-300 text-sm">
+                  Mark maintenance as complete at the specified time. The block will shrink to show actual duration.
+                </p>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">End Date</label>
+                    <input
+                      type="date"
+                      value={maintenanceEndDate}
+                      onChange={(e) => setMaintenanceEndDate(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-green-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">End Time</label>
+                    <input
+                      type="time"
+                      value={maintenanceEndTime}
+                      onChange={(e) => setMaintenanceEndTime(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-green-500 focus:outline-none"
+                      style={{ colorScheme: 'dark' }}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-gray-300 text-sm">
+                  Cancel this maintenance order entirely. It will be removed from the schedule.
+                </p>
+                
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">Cancellation Reason *</label>
+                  <textarea
+                    value={maintenanceCancelReason}
+                    onChange={(e) => setMaintenanceCancelReason(e.target.value)}
+                    placeholder="Why is this maintenance being cancelled?"
+                    rows={2}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-red-500 focus:outline-none resize-none"
+                  />
+                </div>
+              </div>
+            )}
+            
+            {/* Unplanned maintenance note */}
+            {cancelMaintenanceConfirm.work_order?.maintenance_type === 'unplanned' && (
+              <p className="text-purple-300 text-sm mt-4 flex items-center gap-2">
+                <Info size={14} />
+                The machine will be marked as available again.
+              </p>
+            )}
+
+            {/* Error message */}
+            {saveError && (
+              <div className="mt-4 p-3 bg-red-900/50 border border-red-700 rounded text-red-300 text-sm">
+                {saveError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setCancelMaintenanceConfirm(null)
+                  setSaveError(null)
+                }}
+                className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+              >
+                Keep Open
+              </button>
+              <button
+                onClick={handleCancelMaintenance}
+                disabled={saving}
+                className={`flex items-center gap-2 px-4 py-2 font-medium rounded transition-colors disabled:opacity-50 ${
+                  maintenanceCloseMode === 'complete'
+                    ? 'bg-green-600 hover:bg-green-500 text-white'
+                    : 'bg-red-600 hover:bg-red-500 text-white'
+                }`}
+              >
+                {saving ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    {maintenanceCloseMode === 'complete' ? 'Completing...' : 'Cancelling...'}
+                  </>
+                ) : maintenanceCloseMode === 'complete' ? (
+                  <>
+                    <Clock size={16} />
+                    Complete Now
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    Cancel Order
                   </>
                 )}
               </button>

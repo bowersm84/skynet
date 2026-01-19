@@ -310,14 +310,14 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
       onClick={onClose}
     >
       <div 
-        className="bg-gray-900 rounded-lg border border-purple-700 w-full max-w-lg max-h-[90vh] overflow-hidden"
+        className="bg-gray-900 rounded-lg border border-blue-700 w-full max-w-lg max-h-[90vh] overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700 bg-purple-900/30">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700 bg-blue-900/30">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-purple-600/30 flex items-center justify-center">
-              <Wrench className="w-5 h-5 text-purple-400" />
+            <div className="w-10 h-10 rounded-full bg-blue-600/30 flex items-center justify-center">
+              <Wrench className="w-5 h-5 text-blue-400" />
             </div>
             <div>
               <h2 className="text-xl font-semibold text-white">Schedule Maintenance</h2>
@@ -339,7 +339,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
           {/* MO Number */}
           <div className="mb-4">
             <label className="block text-gray-400 text-sm mb-1">Maintenance Order Number</label>
-            <div className="px-3 py-2 bg-purple-900/50 border border-purple-600 rounded text-purple-300 font-mono">
+            <div className="px-3 py-2 bg-blue-900/50 border border-blue-600 rounded text-blue-300 font-mono">
               {generatingMO ? 'Generating...' : moNumber}
             </div>
             <p className="text-xs text-gray-500 mt-1">Auto-generated: MO-YYMM-NNNN</p>
@@ -354,7 +354,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 onClick={() => setMaintenanceType('planned')}
                 className={`px-4 py-3 rounded font-medium transition-colors flex items-center justify-center gap-2 ${
                   maintenanceType === 'planned'
-                    ? 'bg-purple-600 text-white'
+                    ? 'bg-blue-600 text-white'
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
               >
@@ -366,7 +366,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 onClick={() => setMaintenanceType('unplanned')}
                 className={`px-4 py-3 rounded font-medium transition-colors flex items-center justify-center gap-2 ${
                   maintenanceType === 'unplanned'
-                    ? 'bg-red-600 text-white'
+                    ? 'bg-purple-600 text-white'
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
               >
@@ -375,7 +375,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
               </button>
             </div>
             {maintenanceType === 'unplanned' && (
-              <p className="text-xs text-red-400 mt-2 flex items-center gap-1">
+              <p className="text-xs text-purple-400 mt-2 flex items-center gap-1">
                 <AlertTriangle size={12} />
                 Unplanned maintenance will flag the machine as DOWN and may affect scheduled jobs
               </p>
@@ -388,7 +388,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
             <select
               value={selectedMachine}
               onChange={(e) => setSelectedMachine(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-purple-500 focus:outline-none"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-blue-500 focus:outline-none"
             >
               <option value="">-- Select Machine --</option>
               {machines?.map(machine => (
@@ -407,7 +407,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 type="date"
                 value={maintenanceDate}
                 onChange={(e) => setMaintenanceDate(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-purple-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-blue-500 focus:outline-none"
               />
             </div>
             <div>
@@ -416,7 +416,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 type="time"
                 value={maintenanceStartTime}
                 onChange={(e) => setMaintenanceStartTime(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-purple-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-blue-500 focus:outline-none"
               />
             </div>
             <div>
@@ -427,7 +427,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 onChange={(e) => setMaintenanceDuration(parseFloat(e.target.value) || 0)}
                 min="0.25"
                 step="0.25"
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-purple-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-blue-500 focus:outline-none"
               />
             </div>
           </div>
@@ -436,12 +436,12 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
           {maintenanceDate && maintenanceStartTime && maintenanceDuration > 0 && endDateTime && (
             <div className={`mb-4 p-3 rounded border ${
               maintenanceType === 'unplanned' 
-                ? 'bg-red-900/30 border-red-700' 
-                : 'bg-purple-900/30 border-purple-700'
+                ? 'bg-purple-900/30 border-purple-700' 
+                : 'bg-blue-900/30 border-blue-700'
             }`}>
               <div className="flex items-center gap-2 text-sm">
-                <Clock size={14} className={maintenanceType === 'unplanned' ? 'text-red-400' : 'text-purple-400'} />
-                <span className={maintenanceType === 'unplanned' ? 'text-red-300' : 'text-purple-300'}>
+                <Clock size={14} className={maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'} />
+                <span className={maintenanceType === 'unplanned' ? 'text-purple-300' : 'text-blue-300'}>
                   Scheduled: {new Date(`${maintenanceDate}T${maintenanceStartTime}`).toLocaleString()} → {endDateTime.toLocaleString()}
                 </span>
               </div>
@@ -459,7 +459,7 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
               onChange={(e) => setMaintenanceDescription(e.target.value)}
               placeholder="Describe the maintenance work to be performed..."
               rows={3}
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-purple-500 focus:outline-none resize-none"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-blue-500 focus:outline-none resize-none"
             />
           </div>
         </div>
@@ -469,10 +469,10 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
           <div className="text-sm text-gray-400">
             {selectedMachine && maintenanceDate && maintenanceDescription ? (
               <span>
-                <span className={maintenanceType === 'unplanned' ? 'text-red-400 font-medium' : 'text-purple-400 font-medium'}>
+                <span className={maintenanceType === 'unplanned' ? 'text-purple-400 font-medium' : 'text-blue-400 font-medium'}>
                   {maintenanceType === 'unplanned' ? '⚠️ Unplanned' : 'Planned'}
                 </span> maintenance for{' '}
-                <span className={maintenanceType === 'unplanned' ? 'text-red-400' : 'text-purple-400'}>
+                <span className={maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'}>
                   {selectedMachineData?.name || 'selected machine'}
                 </span>
               </span>
@@ -494,8 +494,8 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
               disabled={loading || !selectedMachine || !maintenanceDate || !maintenanceDescription.trim()}
               className={`px-6 py-2 font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                 maintenanceType === 'unplanned'
-                  ? 'bg-red-600 hover:bg-red-500 text-white'
-                  : 'bg-purple-600 hover:bg-purple-500 text-white'
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white'
               }`}
             >
               {loading ? 'Creating...' : 'Schedule Maintenance'}

@@ -84,6 +84,11 @@ export default function Kiosk() {
   
   // Downtime modal state
   const [showDowntimeModal, setShowDowntimeModal] = useState(false)
+  
+  // Maintenance-specific state
+  const [showExtendModal, setShowExtendModal] = useState(false)
+  const [extendDuration, setExtendDuration] = useState({ hours: 0, minutes: 30 })
+  const [maintenanceCompletionNotes, setMaintenanceCompletionNotes] = useState('')
   const [downtimeForm, setDowntimeForm] = useState({
     reason: '',
     notes: '',
@@ -105,7 +110,9 @@ export default function Kiosk() {
     end_time: '',
     duration_hours: 0,
     duration_mins: 0,
-    use_duration: false
+    use_duration: false,
+    send_to_scheduling: false,
+    good_pieces: 0
   })
   
   // DOWN warning modal state (shown when logging ongoing downtime)
@@ -327,7 +334,7 @@ export default function Kiosk() {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date),
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
           component:parts!component_id(id, part_number, description)
         `)
         .eq('assigned_machine_id', machine.id)
@@ -353,7 +360,7 @@ export default function Kiosk() {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date),
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
           component:parts!component_id(id, part_number, description)
         `)
         .eq('assigned_machine_id', machine.id)
@@ -542,7 +549,9 @@ export default function Kiosk() {
       end_time: activity.endTime ? formatDateTimeLocal(new Date(activity.endTime)) : '',
       duration_hours: duration.hours,
       duration_mins: duration.mins,
-      use_duration: false
+      use_duration: false,
+      send_to_scheduling: false,
+      good_pieces: activeJob?.good_pieces || 0
     })
   }
 
@@ -585,12 +594,36 @@ export default function Kiosk() {
       
       if (error) throw error
       
+      // If sending to scheduling, update the job
+      if (editDowntimeForm.send_to_scheduling && activeJob) {
+        const goodPieces = parseInt(editDowntimeForm.good_pieces) || 0
+        const remainingQty = activeJob.quantity - goodPieces
+        
+        // Update job to incomplete and clear machine assignment
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .update({
+            status: 'incomplete',
+            good_pieces: goodPieces,
+            actual_end: endTime.toISOString(),
+            assigned_machine_id: null,
+            scheduled_start: null,
+            scheduled_end: null,
+            incomplete_reason: `Downtime: ${editingDowntime.reason}. ${remainingQty} pieces remaining.`,
+            incomplete_by: operator?.id,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', activeJob.id)
+        
+        if (jobError) throw jobError
+      }
+      
       // If machine is DOWN, clear the status since downtime is now resolved
-      if (machine?.status === 'down') {
+      if (machine?.status === 'down' || editDowntimeForm.send_to_scheduling) {
         const { error: machineError } = await supabase
           .from('machines')
           .update({
-            status: 'operational',
+            status: 'available',
             status_reason: null,
             status_updated_at: new Date().toISOString(),
             status_updated_by: operator?.id
@@ -601,17 +634,18 @@ export default function Kiosk() {
           // Update local machine state
           setMachine(prev => ({
             ...prev,
-            status: 'operational',
+            status: 'available',
             status_reason: null
           }))
         }
       }
       
       setEditingDowntime(null)
-      setEditDowntimeForm({ end_time: '', duration_hours: 0, duration_mins: 0, use_duration: false })
+      setEditDowntimeForm({ end_time: '', duration_hours: 0, duration_mins: 0, use_duration: false, send_to_scheduling: false, good_pieces: 0 })
       
-      // Refresh activity log
-      if (activeJob) {
+      // Refresh jobs and activity log
+      await loadJobs()
+      if (activeJob && !editDowntimeForm.send_to_scheduling) {
         await buildActivityLog(activeJob)
       }
     } catch (err) {
@@ -631,7 +665,7 @@ export default function Kiosk() {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date),
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
           component:parts!component_id(id, part_number, description)
         `)
         .eq('assigned_machine_id', machine.id)
@@ -887,22 +921,36 @@ export default function Kiosk() {
     if (!canOperate || !job) return
     setActionLoading(true)
     try {
+      // For maintenance orders, skip setup and go straight to in_progress
+      const jobIsMaintenance = isMaintenance(job)
+      const now = new Date().toISOString()
+      
+      const updateData = jobIsMaintenance 
+        ? {
+            status: 'in_progress',
+            setup_start: now,
+            production_start: now,
+            assigned_user_id: operator.id,
+            updated_at: now
+          }
+        : {
+            status: 'in_setup',
+            setup_start: now,
+            assigned_user_id: operator.id,
+            updated_at: now
+          }
+      
       const { error } = await supabase
         .from('jobs')
-        .update({
-          status: 'in_setup',
-          setup_start: new Date().toISOString(),
-          assigned_user_id: operator.id,
-          updated_at: new Date().toISOString()
-        })
+        .update(updateData)
         .eq('id', job.id)
 
       if (error) throw error
       await loadJobs()
       setSelectedJob(null)
     } catch (err) {
-      console.error('Error starting setup:', err)
-      alert('Failed to start setup: ' + err.message)
+      console.error('Error starting job:', err)
+      alert('Failed to start: ' + err.message)
     } finally {
       setActionLoading(false)
     }
@@ -1384,6 +1432,42 @@ export default function Kiosk() {
     }
   }
 
+  // Extend maintenance duration
+  const handleExtendDuration = async () => {
+    if (!activeJob) return
+    
+    const totalMinutes = (parseInt(extendDuration.hours) || 0) * 60 + (parseInt(extendDuration.minutes) || 0)
+    if (totalMinutes <= 0) {
+      alert('Please enter a valid duration to extend')
+      return
+    }
+    
+    setActionLoading(true)
+    try {
+      const currentEnd = new Date(activeJob.scheduled_end)
+      const newEnd = new Date(currentEnd.getTime() + totalMinutes * 60 * 1000)
+      
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          scheduled_end: newEnd.toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', activeJob.id)
+      
+      if (error) throw error
+      
+      await loadJobs()
+      setShowExtendModal(false)
+      setExtendDuration({ hours: 0, minutes: 30 })
+    } catch (err) {
+      console.error('Error extending duration:', err)
+      alert('Failed to extend duration: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleOpenComplete = () => {
     const now = new Date()
     setCompleteForm({
@@ -1395,6 +1479,7 @@ export default function Kiosk() {
     setOngoingDowntimes([])
     setDowntimeEdits({})
     setValidationErrors([])
+    setMaintenanceCompletionNotes('') // Reset maintenance notes
     // Initialize material remaining values (default to 0 - all consumed)
     const remaining = {}
     jobMaterials.forEach(m => {
@@ -2004,6 +2089,20 @@ export default function Kiosk() {
     return `${hrs}h ${remainMins}m`
   }
 
+  // Check if a job is a maintenance order
+  const isMaintenance = (job) => {
+    return job?.is_maintenance || job?.work_order?.order_type === 'maintenance'
+  }
+  
+  // Get maintenance type color
+  const getMaintenanceColor = (job) => {
+    const type = job?.work_order?.maintenance_type
+    if (type === 'unplanned') {
+      return { bg: 'bg-purple-600', border: 'border-purple-500', text: 'text-purple-400', bgLight: 'bg-purple-900/30' }
+    }
+    return { bg: 'bg-blue-600', border: 'border-blue-500', text: 'text-blue-400', bgLight: 'bg-blue-900/30' }
+  }
+
   const getPriorityColor = (priority) => {
     switch (priority) {
       case 'critical': return 'bg-red-500'
@@ -2235,16 +2334,173 @@ export default function Kiosk() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Active Job Panel */}
           <div className="lg:col-span-2">
-            <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <div className={`bg-gray-900 border rounded-lg overflow-hidden ${
+              activeJob && isMaintenance(activeJob)
+                ? activeJob.work_order?.maintenance_type === 'unplanned'
+                  ? 'border-purple-700'
+                  : 'border-blue-700'
+                : 'border-gray-800'
+            }`}>
+              <div className={`px-4 py-3 border-b flex items-center justify-between ${
+                activeJob && isMaintenance(activeJob)
+                  ? activeJob.work_order?.maintenance_type === 'unplanned'
+                    ? 'border-purple-700 bg-purple-900/20'
+                    : 'border-blue-700 bg-blue-900/20'
+                  : 'border-gray-800'
+              }`}>
                 <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                  {activeJob ? <><Play className="text-green-500" size={20} /> Active Job</> : <><Clock className="text-gray-500" size={20} /> No Active Job</>}
+                  {activeJob ? (
+                    isMaintenance(activeJob) ? (
+                      <>
+                        <Wrench className={activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-500' : 'text-blue-500'} size={20} />
+                        Active Downtime
+                      </>
+                    ) : (
+                      <><Play className="text-green-500" size={20} /> Active Job</>
+                    )
+                  ) : (
+                    <><Clock className="text-gray-500" size={20} /> No Active Job</>
+                  )}
                 </h2>
-                {activeJob && getStatusBadge(activeJob.status)}
+                {activeJob && (
+                  isMaintenance(activeJob) ? (
+                    <span className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${
+                      activeJob.work_order?.maintenance_type === 'unplanned'
+                        ? 'bg-purple-900/50 text-purple-400'
+                        : 'bg-blue-900/50 text-blue-400'
+                    }`}>
+                      {activeJob.work_order?.maintenance_type === 'unplanned' ? '⚠ Unplanned' : '🔧 Planned'}
+                    </span>
+                  ) : (
+                    getStatusBadge(activeJob.status)
+                  )
+                )}
               </div>
 
               {activeJob ? (
-                <div className="p-6">
+                isMaintenance(activeJob) ? (
+                  /* Maintenance Order Active Panel */
+                  <div className="p-6">
+                    <div className="flex items-start justify-between mb-6">
+                      <div>
+                        <div className="flex items-center gap-3 mb-1">
+                          <Wrench className={activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-400' : 'text-blue-400'} size={24} />
+                          <span className={`text-2xl font-bold font-mono ${
+                            activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-400' : 'text-blue-400'
+                          }`}>{activeJob.job_number}</span>
+                        </div>
+                        <p className="text-gray-400">{activeJob.work_order?.wo_number}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className={`text-sm ${activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-400' : 'text-blue-400'}`}>
+                          {activeJob.work_order?.maintenance_type === 'unplanned' ? 'Machine Down' : 'Scheduled Maintenance'}
+                        </p>
+                        <p className="text-white font-medium">{machine?.name}</p>
+                      </div>
+                    </div>
+
+                    {/* Maintenance Description */}
+                    <div className={`rounded-lg p-4 mb-6 ${
+                      activeJob.work_order?.maintenance_type === 'unplanned'
+                        ? 'bg-purple-900/20 border border-purple-800'
+                        : 'bg-blue-900/20 border border-blue-800'
+                    }`}>
+                      <h3 className="text-gray-400 text-sm font-medium mb-2">Description</h3>
+                      <p className="text-white">
+                        {activeJob.work_order?.notes || activeJob.notes || 'No description provided'}
+                      </p>
+                    </div>
+
+                    {/* Time Boxes for Maintenance */}
+                    <div className="grid grid-cols-2 gap-4 mb-6">
+                      <div className={`rounded-lg p-3 text-center ${
+                        activeJob.work_order?.maintenance_type === 'unplanned'
+                          ? 'bg-purple-900/30'
+                          : 'bg-blue-900/30'
+                      }`}>
+                        <p className="text-gray-500 text-xs mb-1">Downtime Started</p>
+                        <p className="text-white font-mono">{formatTime(activeJob.production_start || activeJob.setup_start)}</p>
+                      </div>
+                      <div className={`rounded-lg p-3 text-center ${
+                        activeJob.work_order?.maintenance_type === 'unplanned'
+                          ? 'bg-purple-900/30'
+                          : 'bg-blue-900/30'
+                      }`}>
+                        <p className="text-gray-500 text-xs mb-1">Estimated End</p>
+                        <p className="text-white font-mono">{formatTime(activeJob.scheduled_end)}</p>
+                      </div>
+                    </div>
+
+                    {/* Maintenance Action Buttons */}
+                    {canOperate && (
+                      <div className="flex gap-3">
+                        <button 
+                          onClick={handleOpenComplete} 
+                          disabled={actionLoading} 
+                          className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${
+                            activeJob.work_order?.maintenance_type === 'unplanned'
+                              ? 'bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white'
+                              : 'bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white'
+                          }`}
+                        >
+                          <CheckCircle size={20} />Complete Downtime
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setExtendDuration({ hours: 0, minutes: 30 })
+                            setShowExtendModal(true)
+                          }}
+                          className="px-4 py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                        >
+                          <Clock size={20} />Extend
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Activity Log for Maintenance */}
+                    {jobActivities.length > 0 && (
+                      <div className="mt-6 pt-6 border-t border-gray-700">
+                        <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                          <History size={16} />
+                          Activity Log
+                        </h3>
+                        <div className="space-y-3">
+                          {jobActivities.map((activity, index) => (
+                            <div key={index} className="flex items-start gap-3">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                                activeJob.work_order?.maintenance_type === 'unplanned'
+                                  ? 'bg-purple-900/50 text-purple-400'
+                                  : 'bg-blue-900/50 text-blue-400'
+                              }`}>
+                                {activity.icon === 'wrench' && <Wrench size={14} />}
+                                {activity.icon === 'play' && <Play size={14} />}
+                                {activity.icon === 'pause' && <PauseCircle size={14} />}
+                                {activity.icon === 'check' && <CheckCircle size={14} />}
+                                {activity.icon === 'send' && <SendHorizontal size={14} />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-white text-sm">{activity.label}</p>
+                                  {activity.duration && (
+                                    <span className="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-500">
+                                      {activity.duration}
+                                    </span>
+                                  )}
+                                </div>
+                                {activity.sublabel && (
+                                  <p className="text-gray-500 text-xs truncate">{activity.sublabel}</p>
+                                )}
+                                <p className="text-gray-600 text-xs mt-0.5">{formatDateTime(activity.timestamp)}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Regular Job Active Panel */
+                  <div className="p-6">
                   <div className="flex items-start justify-between mb-6">
                     <div>
                       <div className="flex items-center gap-3 mb-1">
@@ -2474,6 +2730,7 @@ export default function Kiosk() {
                     </div>
                   )}
                 </div>
+                )
               ) : (
                 <div className="p-12 text-center">
                   <Clock className="w-16 h-16 text-gray-700 mx-auto mb-4" />
@@ -2504,6 +2761,8 @@ export default function Kiosk() {
                     // Check if this is the first assigned (queued) job
                     const queuedJobs = jobs.filter(j => j.status === 'assigned')
                     const isFirstInQueue = queuedJobs.length > 0 && queuedJobs[0].id === job.id
+                    const jobIsMaintenance = isMaintenance(job)
+                    const maintColors = jobIsMaintenance ? getMaintenanceColor(job) : null
                     
                     return (
                     <button
@@ -2511,24 +2770,58 @@ export default function Kiosk() {
                       onClick={() => handleJobSelect(job)}
                       disabled={isViewOnly || (activeJob && job.id !== activeJob.id)}
                       className={`w-full p-4 text-left transition-colors ${
-                        activeJob?.id === job.id ? 'bg-skynet-accent/10 border-l-4 border-skynet-accent' 
-                        : selectedJob?.id === job.id ? 'bg-gray-800 border-l-4 border-yellow-500'
+                        activeJob?.id === job.id 
+                          ? jobIsMaintenance 
+                            ? `${maintColors.bgLight} border-l-4 ${maintColors.border}`
+                            : 'bg-skynet-accent/10 border-l-4 border-skynet-accent' 
+                        : selectedJob?.id === job.id 
+                          ? jobIsMaintenance
+                            ? `${maintColors.bgLight} border-l-4 ${maintColors.border}`
+                            : 'bg-gray-800 border-l-4 border-yellow-500'
                         : (activeJob || isViewOnly) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-800 cursor-pointer'
                       }`}
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
-                          <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
-                          <span className="text-white font-mono text-sm">{job.job_number}</span>
-                          {job.status === 'assigned' && isFirstInQueue && (
+                          {jobIsMaintenance ? (
+                            <Wrench size={14} className={maintColors.text} />
+                          ) : (
+                            <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
+                          )}
+                          <span className={`font-mono text-sm ${jobIsMaintenance ? maintColors.text : 'text-white'}`}>
+                            {job.job_number}
+                          </span>
+                          {job.status === 'assigned' && isFirstInQueue && !jobIsMaintenance && (
                             <span className="text-xs bg-green-900/50 text-green-400 px-1.5 py-0.5 rounded">Next</span>
+                          )}
+                          {jobIsMaintenance && (
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              job.work_order?.maintenance_type === 'unplanned' 
+                                ? 'bg-purple-900/50 text-purple-400' 
+                                : 'bg-blue-900/50 text-blue-400'
+                            }`}>
+                              {job.work_order?.maintenance_type === 'unplanned' ? 'Unplanned' : 'Planned'}
+                            </span>
                           )}
                         </div>
                         {getStatusBadge(job.status)}
                       </div>
-                      <p className="text-skynet-accent text-sm font-mono mb-1">{job.component?.part_number}</p>
+                      {jobIsMaintenance ? (
+                        <>
+                          <p className={`text-sm mb-1 ${maintColors.text}`}>
+                            {job.work_order?.maintenance_type === 'unplanned' ? '⚠ Machine Down' : '🔧 Scheduled Maintenance'}
+                          </p>
+                          <p className="text-gray-400 text-xs mb-1">{job.work_order?.notes || job.notes || 'No description'}</p>
+                        </>
+                      ) : (
+                        <p className="text-skynet-accent text-sm font-mono mb-1">{job.component?.part_number}</p>
+                      )}
                       <div className="flex items-center justify-between text-xs text-gray-500">
-                        <span>Qty: {job.quantity}</span>
+                        {jobIsMaintenance ? (
+                          <span>{job.work_order?.wo_number}</span>
+                        ) : (
+                          <span>Qty: {job.quantity}</span>
+                        )}
                         <span>{formatTime(job.scheduled_start)}</span>
                       </div>
                     </button>
@@ -2538,10 +2831,29 @@ export default function Kiosk() {
 
               {selectedJob && !activeJob && canOperate && (
                 <div className="p-4 border-t border-gray-800">
-                  <button onClick={() => handleStartSetup(selectedJob)} disabled={actionLoading} className="w-full py-3 bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                    {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Play size={20} />}
-                    Start Setup - {selectedJob.job_number}
-                  </button>
+                  {isMaintenance(selectedJob) ? (
+                    <button 
+                      onClick={() => handleStartSetup(selectedJob)} 
+                      disabled={actionLoading} 
+                      className={`w-full py-3 ${
+                        selectedJob.work_order?.maintenance_type === 'unplanned'
+                          ? 'bg-purple-600 hover:bg-purple-500'
+                          : 'bg-blue-600 hover:bg-blue-500'
+                      } disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2`}
+                    >
+                      {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Wrench size={20} />}
+                      Start Downtime - {selectedJob.job_number}
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={() => handleStartSetup(selectedJob)} 
+                      disabled={actionLoading} 
+                      className="w-full py-3 bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Play size={20} />}
+                      Start Setup - {selectedJob.job_number}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -2971,10 +3283,27 @@ export default function Kiosk() {
       {/* Complete Job Modal */}
       {showCompleteModal && activeJob && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md">
-            <div className="px-6 py-4 border-b border-gray-800">
+          <div className={`bg-gray-900 border rounded-lg w-full max-w-md ${
+            isMaintenance(activeJob) 
+              ? activeJob.work_order?.maintenance_type === 'unplanned'
+                ? 'border-purple-700'
+                : 'border-blue-700'
+              : 'border-gray-700'
+          }`}>
+            <div className={`px-6 py-4 border-b ${
+              isMaintenance(activeJob)
+                ? activeJob.work_order?.maintenance_type === 'unplanned'
+                  ? 'border-purple-700 bg-purple-900/20'
+                  : 'border-blue-700 bg-blue-900/20'
+                : 'border-gray-800'
+            }`}>
               <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-                {completionStep === 'review_downtimes' ? (
+                {isMaintenance(activeJob) ? (
+                  <>
+                    <Wrench className={activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-500' : 'text-blue-500'} size={24} />
+                    Complete Downtime
+                  </>
+                ) : completionStep === 'review_downtimes' ? (
                   <><AlertTriangle className="text-yellow-500" size={24} />Review Downtimes</>
                 ) : completionStep === 'materials' ? (
                   <><Layers className="text-blue-400" size={24} />Material Checkout</>
@@ -2982,9 +3311,152 @@ export default function Kiosk() {
                   <><CheckCircle className="text-green-500" size={24} />Complete Job</>
                 )}
               </h2>
-              <p className="text-gray-500 text-sm">{activeJob.job_number} • {activeJob.component?.part_number}</p>
+              <p className="text-gray-500 text-sm">
+                {activeJob.job_number} • {isMaintenance(activeJob) ? (activeJob.work_order?.notes || 'Maintenance') : activeJob.component?.part_number}
+              </p>
             </div>
 
+            {/* Maintenance Completion Form */}
+            {isMaintenance(activeJob) ? (
+              <>
+                <div className="p-6 space-y-4">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-2">End Time *</label>
+                    <input 
+                      type="datetime-local" 
+                      value={completeForm.actual_end} 
+                      onChange={(e) => setCompleteForm({...completeForm, actual_end: e.target.value})} 
+                      className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white focus:outline-none ${
+                        activeJob.work_order?.maintenance_type === 'unplanned'
+                          ? 'border-purple-700 focus:border-purple-500'
+                          : 'border-blue-700 focus:border-blue-500'
+                      }`}
+                      style={{ colorScheme: 'dark' }} 
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-2">Completion Notes * <span className="text-red-400">(Required)</span></label>
+                    <textarea
+                      value={maintenanceCompletionNotes}
+                      onChange={(e) => setMaintenanceCompletionNotes(e.target.value)}
+                      placeholder="Describe what was done, parts replaced, issues found, etc."
+                      rows={4}
+                      className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white focus:outline-none resize-none ${
+                        activeJob.work_order?.maintenance_type === 'unplanned'
+                          ? 'border-purple-700 focus:border-purple-500'
+                          : 'border-blue-700 focus:border-blue-500'
+                      }`}
+                    />
+                  </div>
+
+                  {/* Duration Summary */}
+                  <div className={`rounded-lg p-3 ${
+                    activeJob.work_order?.maintenance_type === 'unplanned'
+                      ? 'bg-purple-900/30'
+                      : 'bg-blue-900/30'
+                  }`}>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-gray-400">Started:</span>
+                      <span className="text-white">{formatDateTime(activeJob.production_start || activeJob.setup_start)}</span>
+                    </div>
+                    {completeForm.actual_end && (
+                      <div className="flex items-center justify-between text-sm mt-1">
+                        <span className="text-gray-400">Duration:</span>
+                        <span className="text-white font-medium">
+                          {(() => {
+                            const start = new Date(activeJob.production_start || activeJob.setup_start)
+                            const end = new Date(completeForm.actual_end)
+                            const mins = Math.round((end - start) / 60000)
+                            if (mins < 60) return `${mins} min`
+                            const hrs = Math.floor(mins / 60)
+                            const remMins = mins % 60
+                            return `${hrs}h ${remMins}m`
+                          })()}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+                  <button onClick={resetCompleteModal} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
+                  <button 
+                    onClick={async () => {
+                      if (!completeForm.actual_end) {
+                        alert('Please enter the end time')
+                        return
+                      }
+                      if (!maintenanceCompletionNotes.trim()) {
+                        alert('Please enter completion notes')
+                        return
+                      }
+                      
+                      setActionLoading(true)
+                      try {
+                        const { error } = await supabase
+                          .from('jobs')
+                          .update({
+                            status: 'complete',
+                            actual_end: new Date(completeForm.actual_end).toISOString(),
+                            notes: activeJob.notes 
+                              ? `${activeJob.notes}\n[Completion Notes: ${maintenanceCompletionNotes}]`
+                              : `[Completion Notes: ${maintenanceCompletionNotes}]`,
+                            updated_at: new Date().toISOString()
+                          })
+                          .eq('id', activeJob.id)
+                        
+                        if (error) throw error
+                        
+                        // Update work order
+                        if (activeJob.work_order_id) {
+                          await supabase
+                            .from('work_orders')
+                            .update({
+                              status: 'complete',
+                              notes: activeJob.work_order?.notes
+                                ? `${activeJob.work_order.notes}\n[Completion Notes: ${maintenanceCompletionNotes}]`
+                                : `[Completion Notes: ${maintenanceCompletionNotes}]`,
+                              updated_at: new Date().toISOString()
+                            })
+                            .eq('id', activeJob.work_order_id)
+                        }
+                        
+                        // Reset machine status if unplanned
+                        if (activeJob.work_order?.maintenance_type === 'unplanned' && machine?.id) {
+                          await supabase
+                            .from('machines')
+                            .update({
+                              status: 'available',
+                              status_reason: null,
+                              status_updated_at: new Date().toISOString()
+                            })
+                            .eq('id', machine.id)
+                        }
+                        
+                        resetCompleteModal()
+                        await loadJobs()
+                      } catch (err) {
+                        console.error('Error completing maintenance:', err)
+                        alert('Failed to complete: ' + err.message)
+                      } finally {
+                        setActionLoading(false)
+                      }
+                    }}
+                    disabled={actionLoading || !completeForm.actual_end || !maintenanceCompletionNotes.trim()} 
+                    className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 ${
+                      activeJob.work_order?.maintenance_type === 'unplanned'
+                        ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                        : 'bg-blue-600 hover:bg-blue-500 text-white'
+                    }`}
+                  >
+                    {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
+                    Complete Downtime
+                  </button>
+                </div>
+              </>
+            ) : (
+            <>
             {/* Step 1: Entry Form */}
             {completionStep === 'form' && (
               <>
@@ -3306,6 +3778,105 @@ export default function Kiosk() {
                 </button>
               </div>
             )}
+            </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Extend Duration Modal */}
+      {showExtendModal && activeJob && isMaintenance(activeJob) && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className={`bg-gray-900 border rounded-lg w-full max-w-sm ${
+            activeJob.work_order?.maintenance_type === 'unplanned'
+              ? 'border-purple-700'
+              : 'border-blue-700'
+          }`}>
+            <div className={`px-6 py-4 border-b ${
+              activeJob.work_order?.maintenance_type === 'unplanned'
+                ? 'border-purple-700 bg-purple-900/20'
+                : 'border-blue-700 bg-blue-900/20'
+            }`}>
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <Clock className={activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-500' : 'text-blue-500'} size={24} />
+                Extend Duration
+              </h2>
+              <p className="text-gray-500 text-sm">{activeJob.job_number}</p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-gray-300 text-sm">
+                Current end time: <span className="text-white font-medium">{formatDateTime(activeJob.scheduled_end)}</span>
+              </p>
+
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">Extend by:</label>
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        value={extendDuration.hours}
+                        onChange={(e) => setExtendDuration({ ...extendDuration, hours: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:border-blue-500 focus:outline-none"
+                      />
+                      <span className="text-gray-400 text-sm">hrs</span>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        max="59"
+                        step="15"
+                        value={extendDuration.minutes}
+                        onChange={(e) => setExtendDuration({ ...extendDuration, minutes: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:border-blue-500 focus:outline-none"
+                      />
+                      <span className="text-gray-400 text-sm">min</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {(extendDuration.hours > 0 || extendDuration.minutes > 0) && (
+                <div className={`rounded-lg p-3 ${
+                  activeJob.work_order?.maintenance_type === 'unplanned'
+                    ? 'bg-purple-900/30'
+                    : 'bg-blue-900/30'
+                }`}>
+                  <p className="text-gray-400 text-sm">
+                    New end time: <span className="text-white font-medium">
+                      {formatDateTime(new Date(new Date(activeJob.scheduled_end).getTime() + 
+                        ((extendDuration.hours || 0) * 60 + (extendDuration.minutes || 0)) * 60000))}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+              <button 
+                onClick={() => setShowExtendModal(false)} 
+                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExtendDuration}
+                disabled={actionLoading || (extendDuration.hours === 0 && extendDuration.minutes === 0)}
+                className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 ${
+                  activeJob.work_order?.maintenance_type === 'unplanned'
+                    ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+              >
+                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Clock size={20} />}
+                Extend
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -3395,6 +3966,43 @@ export default function Kiosk() {
                   </div>
                 </div>
               )}
+
+              {/* Send to Scheduling Option */}
+              {activeJob && (
+                <div className="border-t border-gray-700 pt-4">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editDowntimeForm.send_to_scheduling}
+                      onChange={(e) => setEditDowntimeForm({...editDowntimeForm, send_to_scheduling: e.target.checked})}
+                      className="w-5 h-5 rounded bg-gray-800 border-gray-600 text-yellow-500 focus:ring-yellow-500"
+                    />
+                    <div>
+                      <span className="text-white font-medium">Send job back to scheduling</span>
+                      <p className="text-gray-500 text-xs">End this downtime and reschedule the job for later</p>
+                    </div>
+                  </label>
+
+                  {editDowntimeForm.send_to_scheduling && (
+                    <div className="mt-4 bg-yellow-900/20 border border-yellow-600/50 rounded-lg p-4">
+                      <div className="mb-3">
+                        <label className="block text-gray-400 text-sm mb-2">Good Pieces Completed</label>
+                        <input
+                          type="number"
+                          min="0"
+                          max={activeJob.quantity}
+                          value={editDowntimeForm.good_pieces}
+                          onChange={(e) => setEditDowntimeForm({...editDowntimeForm, good_pieces: parseInt(e.target.value) || 0})}
+                          className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-yellow-500 focus:outline-none"
+                        />
+                      </div>
+                      <p className="text-yellow-400 text-sm">
+                        {activeJob.quantity - (parseInt(editDowntimeForm.good_pieces) || 0)} pieces remaining to be rescheduled
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
@@ -3404,10 +4012,14 @@ export default function Kiosk() {
               <button 
                 onClick={handleSaveDowntimeEdit} 
                 disabled={actionLoading} 
-                className="flex-1 py-3 bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 ${
+                  editDowntimeForm.send_to_scheduling 
+                    ? 'bg-yellow-600 hover:bg-yellow-500 text-white' 
+                    : 'bg-skynet-accent hover:bg-blue-600 text-white'
+                }`}
               >
-                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Save size={20} />}
-                Save
+                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : editDowntimeForm.send_to_scheduling ? <SendHorizontal size={20} /> : <Save size={20} />}
+                {editDowntimeForm.send_to_scheduling ? 'Send to Scheduling' : 'Save'}
               </button>
             </div>
           </div>

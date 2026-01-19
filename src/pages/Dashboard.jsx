@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2 } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench } from 'lucide-react'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
+import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ComplianceReview from '../components/ComplianceReview'
 
 export default function Dashboard({ user, profile }) {
@@ -10,8 +11,15 @@ export default function Dashboard({ user, profile }) {
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)
   const [expandedLocations, setExpandedLocations] = useState({})
   const [selectedView, setSelectedView] = useState('lineup')
+  
+  // Auto-refresh state
+  const [autoRefresh, setAutoRefresh] = useState(true) // Enabled by default
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const refreshIntervalRef = useRef(null)
   
   // Edit job modal state
   const [editingJob, setEditingJob] = useState(null)
@@ -21,23 +29,12 @@ export default function Dashboard({ user, profile }) {
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
 
-  useEffect(() => {
-    fetchData()
-    
-    const jobsSubscription = supabase
-      .channel('jobs-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, 
-        () => fetchData()
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(jobsSubscription)
-    }
-  }, [])
-
-  const fetchData = async () => {
+  // Memoized fetch function
+  const fetchData = useCallback(async (isAutoRefresh = false) => {
     try {
+      if (isAutoRefresh) {
+        setIsRefreshing(true)
+      }
       console.log('🔄 Starting fetchData...')
       
       const { data: machinesData, error: machinesError } = await supabase
@@ -77,13 +74,46 @@ export default function Dashboard({ user, profile }) {
         setJobs(jobsData || [])
       }
 
+      setLastUpdated(new Date())
       console.log('✅ fetchData complete!')
     } catch (error) {
       console.error('💥 Unexpected error in fetchData:', error)
     } finally {
       setLoading(false)
+      setIsRefreshing(false)
     }
-  }
+  }, [])
+
+  // Initial fetch and real-time subscription
+  useEffect(() => {
+    fetchData()
+    
+    const jobsSubscription = supabase
+      .channel('jobs-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, 
+        () => fetchData()
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(jobsSubscription)
+    }
+  }, [fetchData])
+
+  // Auto-refresh interval (30 seconds)
+  useEffect(() => {
+    if (autoRefresh) {
+      refreshIntervalRef.current = setInterval(() => {
+        fetchData(true) // Pass true to indicate auto-refresh
+      }, 30000) // 30 seconds
+    }
+    
+    return () => {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current)
+      }
+    }
+  }, [autoRefresh, fetchData])
 
   const getJobsForMachine = (machineId) => {
     // Only show active jobs in the queue (not completed, cancelled, or pending compliance)
@@ -269,29 +299,64 @@ export default function Dashboard({ user, profile }) {
     <div className="space-y-6">
       {/* Action Bar */}
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-white">Machine Status</h2>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
-        >
-          <Plus size={20} />
-          New Work Order
-        </button>
+        <div className="flex items-center gap-4">
+          <h2 className="text-xl font-semibold text-white">Machine Status</h2>
+          
+          {/* Auto-refresh indicator */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors ${
+                autoRefresh 
+                  ? 'bg-green-900/30 text-green-400 border border-green-800 hover:bg-green-900/50' 
+                  : 'bg-gray-800 text-gray-500 border border-gray-700 hover:bg-gray-700'
+              }`}
+              title={autoRefresh ? 'Auto-refresh enabled (30s)' : 'Auto-refresh disabled'}
+            >
+              <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+              <span>{autoRefresh ? 'Auto' : 'Manual'}</span>
+            </button>
+            {lastUpdated && (
+              <span className="text-xs text-gray-500">
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
+            {!autoRefresh && (
+              <button
+                onClick={() => fetchData(true)}
+                disabled={isRefreshing}
+                className="flex items-center gap-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded text-xs transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
+                Refresh
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowMaintenanceModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded transition-colors"
+          >
+            <Wrench size={20} />
+            <span className="hidden sm:inline">Maintenance Order</span>
+          </button>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
+          >
+            <Plus size={20} />
+            New Work Order
+          </button>
+        </div>
       </div>
 
-      {/* Stats Bar */}
+      {/* Stats Bar - ordered to follow process flow */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard
           id="lineup"
           label="Machine Lineup"
           value={machines.length}
-          onClick={setSelectedView}
-        />
-        <StatCard
-          id="active"
-          label="Active Jobs"
-          value={activeJobs.length}
-          colorClass="text-skynet-accent"
           onClick={setSelectedView}
         />
         <StatCard
@@ -310,6 +375,13 @@ export default function Dashboard({ user, profile }) {
           borderClass={incompleteJobs.length > 0 ? 'border-red-800' : (unassignedJobs.length > 0 ? 'border-yellow-800' : 'border-gray-800')}
           onClick={setSelectedView}
           alert={incompleteJobs.length > 0}
+        />
+        <StatCard
+          id="active"
+          label="Active Jobs"
+          value={activeJobs.length}
+          colorClass="text-skynet-accent"
+          onClick={setSelectedView}
         />
       </div>
 
@@ -703,6 +775,14 @@ export default function Dashboard({ user, profile }) {
       <CreateWorkOrderModal
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
+        onSuccess={fetchData}
+        machines={machines}
+      />
+
+      {/* Create Maintenance Modal */}
+      <CreateMaintenanceModal
+        isOpen={showMaintenanceModal}
+        onClose={() => setShowMaintenanceModal(false)}
         onSuccess={fetchData}
         machines={machines}
       />

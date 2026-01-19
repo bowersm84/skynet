@@ -108,6 +108,10 @@ export default function Kiosk() {
     use_duration: false
   })
   
+  // DOWN warning modal state (shown when logging ongoing downtime)
+  const [showDownWarning, setShowDownWarning] = useState(false)
+  const [pendingDowntimeData, setPendingDowntimeData] = useState(null)
+  
   // Material tracking state
   const [showMaterialModal, setShowMaterialModal] = useState(false)
   const [showMaterialOverrideModal, setShowMaterialOverrideModal] = useState(false)
@@ -163,6 +167,13 @@ export default function Kiosk() {
     duration_hours: 0,
     duration_mins: 5  // Default 5 minutes for tool change
   })
+
+  // Out-of-order job selection warning
+  const [showOutOfOrderWarning, setShowOutOfOrderWarning] = useState(false)
+  const [pendingJobSelection, setPendingJobSelection] = useState(null)
+
+  // Tool serial conflict state
+  const [toolSerialConflict, setToolSerialConflict] = useState(null) // {machineName, jobNumber, serialNumber}
 
   // Determine user capabilities based on role
   const isViewOnly = operator?.role === 'display'
@@ -574,6 +585,28 @@ export default function Kiosk() {
       
       if (error) throw error
       
+      // If machine is DOWN, clear the status since downtime is now resolved
+      if (machine?.status === 'down') {
+        const { error: machineError } = await supabase
+          .from('machines')
+          .update({
+            status: 'operational',
+            status_reason: null,
+            status_updated_at: new Date().toISOString(),
+            status_updated_by: operator?.id
+          })
+          .eq('id', machine.id)
+        
+        if (!machineError) {
+          // Update local machine state
+          setMachine(prev => ({
+            ...prev,
+            status: 'operational',
+            status_reason: null
+          }))
+        }
+      }
+      
       setEditingDowntime(null)
       setEditDowntimeForm({ end_time: '', duration_hours: 0, duration_mins: 0, use_duration: false })
       
@@ -810,6 +843,46 @@ export default function Kiosk() {
   }
 
   // ========== JOB ACTIONS ==========
+  
+  // Handle job selection from queue - warn if out of order
+  const handleJobSelect = (job) => {
+    if (isViewOnly || activeJob) return
+    
+    // If clicking the same job, deselect it
+    if (selectedJob?.id === job.id) {
+      setSelectedJob(null)
+      return
+    }
+    
+    // Get only assigned (queued) jobs, sorted by scheduled_start
+    const queuedJobs = jobs.filter(j => j.status === 'assigned')
+    
+    // Find the first job in queue
+    const firstJobInQueue = queuedJobs[0]
+    
+    // If selecting a job that's not first in queue, show warning
+    if (firstJobInQueue && job.id !== firstJobInQueue.id) {
+      setPendingJobSelection(job)
+      setShowOutOfOrderWarning(true)
+    } else {
+      // First in queue or no queue - select directly
+      setSelectedJob(job)
+    }
+  }
+  
+  // Confirm out-of-order selection
+  const handleConfirmOutOfOrder = () => {
+    setSelectedJob(pendingJobSelection)
+    setPendingJobSelection(null)
+    setShowOutOfOrderWarning(false)
+  }
+  
+  // Cancel out-of-order selection
+  const handleCancelOutOfOrder = () => {
+    setPendingJobSelection(null)
+    setShowOutOfOrderWarning(false)
+  }
+
   const handleStartSetup = async (job) => {
     if (!canOperate || !job) return
     setActionLoading(true)
@@ -841,11 +914,66 @@ export default function Kiosk() {
     await loadToolHistory(activeJob.id, activeJob.component?.id)
   }
 
+  // Check if a serial number is currently checked out on another active job
+  const checkSerialConflict = async (serialNumber) => {
+    if (!serialNumber) return null
+    
+    try {
+      // Find any active jobs (in_setup or in_progress) that have this serial number
+      const { data, error } = await supabase
+        .from('job_tools')
+        .select(`
+          id,
+          serial_number,
+          job:jobs!inner(
+            id,
+            job_number,
+            status,
+            assigned_machine:machines(name, code)
+          )
+        `)
+        .ilike('serial_number', serialNumber)
+        .in('job.status', ['in_setup', 'in_progress'])
+      
+      if (error) {
+        console.error('Error checking serial conflict:', error)
+        return null
+      }
+      
+      // Filter out current job and find conflicts
+      const conflicts = data?.filter(t => t.job?.id !== activeJob?.id) || []
+      
+      if (conflicts.length > 0) {
+        const conflict = conflicts[0]
+        return {
+          machineName: conflict.job?.assigned_machine?.name || 'Unknown Machine',
+          machineCode: conflict.job?.assigned_machine?.code || '',
+          jobNumber: conflict.job?.job_number || 'Unknown Job'
+        }
+      }
+      
+      return null
+    } catch (err) {
+      console.error('Error checking serial conflict:', err)
+      return null
+    }
+  }
+
   const handleAddTool = async () => {
     if (!newTool.tool_name.trim()) {
       alert('Tool name is required')
       return
     }
+    
+    // Check for serial number conflict if serial is provided
+    if (newTool.serial_number.trim()) {
+      const conflict = await checkSerialConflict(newTool.serial_number.trim())
+      if (conflict) {
+        setToolSerialConflict({ ...conflict, serialNumber: newTool.serial_number.trim() })
+        return
+      }
+    }
+    
     try {
       const { error } = await supabase
         .from('job_tools')
@@ -884,7 +1012,17 @@ export default function Kiosk() {
     
     // Check if serial matches
     if (enteredSerial.toLowerCase() === expectedSerial.toLowerCase()) {
-      // Serial matches - add the tool
+      // Check for serial number conflict before adding
+      if (enteredSerial) {
+        const conflict = await checkSerialConflict(enteredSerial)
+        if (conflict) {
+          setShowToolVerifyModal(false)
+          setToolSerialConflict({ ...conflict, serialNumber: enteredSerial })
+          return
+        }
+      }
+      
+      // Serial matches and no conflict - add the tool
       try {
         const { error } = await supabase
           .from('job_tools')
@@ -918,6 +1056,16 @@ export default function Kiosk() {
     if (!toolToVerify) return
     
     const newSerial = verifySerialInput.trim()
+    
+    // Check for serial number conflict before adding
+    if (newSerial) {
+      const conflict = await checkSerialConflict(newSerial)
+      if (conflict) {
+        setShowToolVerifyModal(false)
+        setToolSerialConflict({ ...conflict, serialNumber: newSerial })
+        return
+      }
+    }
     
     try {
       const { error } = await supabase
@@ -1626,35 +1774,86 @@ export default function Kiosk() {
       return
     }
 
+    // Calculate end time from duration if using duration mode
+    let endTimeIso = null
+    if (downtimeForm.use_duration) {
+      const durationMs = ((parseInt(downtimeForm.duration_hours) || 0) * 60 + (parseInt(downtimeForm.duration_mins) || 0)) * 60 * 1000
+      if (durationMs > 0) {
+        endTimeIso = new Date(new Date(downtimeForm.start_time).getTime() + durationMs).toISOString()
+      }
+    } else if (downtimeForm.end_time) {
+      endTimeIso = new Date(downtimeForm.end_time).toISOString()
+    }
+
+    // If no end time (ongoing downtime), show warning about flagging machine DOWN
+    if (!endTimeIso && !downtimeForm.send_to_scheduling) {
+      setPendingDowntimeData({
+        machine_id: machine.id,
+        job_id: activeJob?.id || null,
+        start_time: new Date(downtimeForm.start_time).toISOString(),
+        end_time: null,
+        reason: downtimeForm.reason,
+        notes: downtimeForm.notes || null,
+        sent_to_scheduling: false,
+        sent_to_scheduling_at: null,
+        logged_by: operator.id
+      })
+      setShowDownWarning(true)
+      return
+    }
+
+    // Proceed with normal downtime logging
+    await submitDowntime(endTimeIso)
+  }
+
+  // Actually submit downtime (called directly or after DOWN warning confirmation)
+  const submitDowntime = async (endTimeIso, flagDown = false) => {
     setActionLoading(true)
     try {
-      // Calculate end time from duration if using duration mode
-      let endTimeIso = null
-      if (downtimeForm.use_duration) {
-        const durationMs = ((parseInt(downtimeForm.duration_hours) || 0) * 60 + (parseInt(downtimeForm.duration_mins) || 0)) * 60 * 1000
-        if (durationMs > 0) {
-          endTimeIso = new Date(new Date(downtimeForm.start_time).getTime() + durationMs).toISOString()
-        }
-      } else if (downtimeForm.end_time) {
-        endTimeIso = new Date(downtimeForm.end_time).toISOString()
+      // Create downtime log
+      const downtimeData = pendingDowntimeData || {
+        machine_id: machine.id,
+        job_id: activeJob?.id || null,
+        start_time: new Date(downtimeForm.start_time).toISOString(),
+        end_time: endTimeIso,
+        reason: downtimeForm.reason,
+        notes: downtimeForm.notes || null,
+        sent_to_scheduling: downtimeForm.send_to_scheduling,
+        sent_to_scheduling_at: downtimeForm.send_to_scheduling ? new Date().toISOString() : null,
+        logged_by: operator.id
       }
 
-      // Create downtime log
-      const { error: downtimeError } = await supabase
+      const { data: downtimeRecord, error: downtimeError } = await supabase
         .from('machine_downtime_logs')
-        .insert({
-          machine_id: machine.id,
-          job_id: activeJob?.id || null,
-          start_time: new Date(downtimeForm.start_time).toISOString(),
-          end_time: endTimeIso,
-          reason: downtimeForm.reason,
-          notes: downtimeForm.notes || null,
-          sent_to_scheduling: downtimeForm.send_to_scheduling,
-          sent_to_scheduling_at: downtimeForm.send_to_scheduling ? new Date().toISOString() : null,
-          logged_by: operator.id
-        })
+        .insert(downtimeData)
+        .select()
+        .single()
 
       if (downtimeError) throw downtimeError
+
+      // If flagging machine as DOWN (ongoing downtime confirmed)
+      if (flagDown && downtimeRecord) {
+        const { error: machineError } = await supabase
+          .from('machines')
+          .update({
+            status: 'down',
+            status_reason: downtimeForm.reason + (downtimeForm.notes ? `: ${downtimeForm.notes}` : ''),
+            status_updated_at: new Date().toISOString(),
+            status_updated_by: operator.id
+          })
+          .eq('id', machine.id)
+
+        if (machineError) {
+          console.error('Error updating machine status:', machineError)
+        } else {
+          // Update local machine state
+          setMachine(prev => ({
+            ...prev,
+            status: 'down',
+            status_reason: downtimeForm.reason + (downtimeForm.notes ? `: ${downtimeForm.notes}` : '')
+          }))
+        }
+      }
 
       // If sending to scheduling, mark job as incomplete
       if (downtimeForm.send_to_scheduling && activeJob) {
@@ -1701,7 +1900,20 @@ export default function Kiosk() {
       alert('Failed to log downtime: ' + err.message)
     } finally {
       setActionLoading(false)
+      setPendingDowntimeData(null)
+      setShowDownWarning(false)
     }
+  }
+
+  // Handle DOWN warning confirmation
+  const handleConfirmDown = async () => {
+    await submitDowntime(null, true) // null end time, flag as DOWN
+  }
+
+  // Handle DOWN warning cancellation (just log without flagging)
+  const handleCancelDown = () => {
+    setShowDownWarning(false)
+    setPendingDowntimeData(null)
   }
 
   // ========== ADMIN EDIT ==========
@@ -1919,7 +2131,14 @@ export default function Kiosk() {
             </div>
             <span className="text-gray-600">|</span>
             <div>
-              <p className="text-white font-semibold">{machine.name}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-white font-semibold">{machine.name}</p>
+                {machine.status === 'down' && (
+                  <span className="px-2 py-0.5 bg-red-600 text-white text-xs font-bold rounded animate-pulse">
+                    DOWN
+                  </span>
+                )}
+              </div>
               <p className="text-gray-500 text-xs">{machine.location?.name}</p>
             </div>
           </div>
@@ -2052,15 +2271,23 @@ export default function Kiosk() {
                     </div>
                   </div>
 
-                  {/* Tooling Display */}
-                  {currentTools.length > 0 && (
-                    <div className="bg-gray-800/50 rounded-lg p-4 mb-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-gray-400 text-sm font-medium flex items-center gap-2">
-                          <Wrench size={16} />
-                          Tooling ({currentTools.length})
-                        </h3>
-                        {canOperate && activeJob.status === 'in_progress' && (
+                  {/* Tooling Display - Always show */}
+                  <div className="bg-gray-800/50 rounded-lg p-4 mb-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-gray-400 text-sm font-medium flex items-center gap-2">
+                        <Wrench size={16} />
+                        Tooling {currentTools.length > 0 ? `(${currentTools.length})` : ''}
+                      </h3>
+                      <div className="flex items-center gap-2">
+                        {canOperate && activeJob.status === 'in_setup' && (
+                          <button 
+                            onClick={handleOpenTooling}
+                            className="text-xs text-skynet-accent hover:text-blue-400 flex items-center gap-1"
+                          >
+                            <Plus size={12} />{currentTools.length > 0 ? 'Add More' : 'Add Tooling'}
+                          </button>
+                        )}
+                        {canOperate && activeJob.status === 'in_progress' && currentTools.length > 0 && (
                           <button 
                             onClick={() => {
                               setToolChangeForm({ 
@@ -2078,6 +2305,8 @@ export default function Kiosk() {
                           </button>
                         )}
                       </div>
+                    </div>
+                    {currentTools.length > 0 ? (
                       <div className="space-y-1.5">
                         {currentTools.map(tool => (
                           <div key={tool.id} className="flex items-center justify-between text-sm">
@@ -2101,8 +2330,10 @@ export default function Kiosk() {
                           </div>
                         ))}
                       </div>
-                    </div>
-                  )}
+                    ) : (
+                      <p className="text-gray-500 text-sm italic">No tooling recorded</p>
+                    )}
+                  </div>
 
                   {/* Materials Loaded Display - Always show */}
                   <div className="bg-gray-800/50 rounded-lg p-4 mb-6">
@@ -2269,10 +2500,15 @@ export default function Kiosk() {
                 ) : jobs.length === 0 ? (
                   <div className="p-8 text-center"><p className="text-gray-500">No jobs scheduled</p></div>
                 ) : (
-                  jobs.map((job) => (
+                  jobs.map((job, index) => {
+                    // Check if this is the first assigned (queued) job
+                    const queuedJobs = jobs.filter(j => j.status === 'assigned')
+                    const isFirstInQueue = queuedJobs.length > 0 && queuedJobs[0].id === job.id
+                    
+                    return (
                     <button
                       key={job.id}
-                      onClick={() => !isViewOnly && !activeJob && setSelectedJob(selectedJob?.id === job.id ? null : job)}
+                      onClick={() => handleJobSelect(job)}
                       disabled={isViewOnly || (activeJob && job.id !== activeJob.id)}
                       className={`w-full p-4 text-left transition-colors ${
                         activeJob?.id === job.id ? 'bg-skynet-accent/10 border-l-4 border-skynet-accent' 
@@ -2284,6 +2520,9 @@ export default function Kiosk() {
                         <div className="flex items-center gap-2">
                           <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
                           <span className="text-white font-mono text-sm">{job.job_number}</span>
+                          {job.status === 'assigned' && isFirstInQueue && (
+                            <span className="text-xs bg-green-900/50 text-green-400 px-1.5 py-0.5 rounded">Next</span>
+                          )}
                         </div>
                         {getStatusBadge(job.status)}
                       </div>
@@ -2293,7 +2532,7 @@ export default function Kiosk() {
                         <span>{formatTime(job.scheduled_start)}</span>
                       </div>
                     </button>
-                  ))
+                  )})
                 )}
               </div>
 
@@ -3619,6 +3858,143 @@ export default function Kiosk() {
               <button onClick={handleLogDowntime} disabled={actionLoading || !downtimeForm.reason || !downtimeForm.start_time} className="flex-1 py-3 bg-red-600 hover:bg-red-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <PauseCircle size={20} />}
                 {downtimeForm.send_to_scheduling ? 'Log & Send to Scheduling' : 'Log Downtime'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Out of Order Job Selection Warning Modal */}
+      {showOutOfOrderWarning && pendingJobSelection && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-yellow-600 rounded-xl p-6 max-w-md w-full">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-yellow-600/20 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-yellow-500" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-white">Out of Queue Order</h3>
+                <p className="text-sm text-gray-400">This job is not next in line</p>
+              </div>
+            </div>
+            
+            <div className="bg-gray-800 rounded-lg p-4 mb-4">
+              <p className="text-gray-300 text-sm mb-3">
+                You've selected <span className="text-white font-mono font-semibold">{pendingJobSelection.job_number}</span>, 
+                but there {jobs.filter(j => j.status === 'assigned').length === 1 ? 'is' : 'are'} other job{jobs.filter(j => j.status === 'assigned').length === 1 ? '' : 's'} scheduled before it.
+              </p>
+              <p className="text-yellow-400 text-sm">
+                Are you sure you want to start this job out of order?
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button 
+                onClick={handleCancelOutOfOrder}
+                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleConfirmOutOfOrder}
+                className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                <SkipForward size={18} />
+                Yes, Select This Job
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tool Serial Conflict Warning Modal */}
+      {toolSerialConflict && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-red-600 rounded-xl p-6 max-w-md w-full">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-600/20 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-red-500" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-white">Tool Already Checked Out</h3>
+                <p className="text-sm text-gray-400">Serial number conflict detected</p>
+              </div>
+            </div>
+            
+            <div className="bg-gray-800 rounded-lg p-4 mb-4">
+              <p className="text-gray-300 text-sm mb-3">
+                The tool with serial number <span className="text-white font-mono font-semibold">{toolSerialConflict.serialNumber}</span> is 
+                currently checked out on:
+              </p>
+              <div className="bg-red-900/30 border border-red-800 rounded-lg p-3">
+                <p className="text-white font-medium">{toolSerialConflict.machineName}</p>
+                <p className="text-red-400 text-sm">Job: {toolSerialConflict.jobNumber}</p>
+              </div>
+              <p className="text-gray-400 text-sm mt-3">
+                Please verify the tool is available or use a different serial number.
+              </p>
+            </div>
+
+            <button 
+              onClick={() => setToolSerialConflict(null)}
+              className="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+            >
+              OK, Got It
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* DOWN Warning Modal - shown when logging ongoing downtime */}
+      {showDownWarning && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-red-600 rounded-xl p-6 max-w-md w-full">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-600/20 flex items-center justify-center animate-pulse">
+                <AlertTriangle className="w-6 h-6 text-red-500" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-white">Flag Machine as DOWN?</h3>
+                <p className="text-sm text-gray-400">This will alert the facility</p>
+              </div>
+            </div>
+            
+            <div className="bg-red-900/30 border border-red-800 rounded-lg p-4 mb-4">
+              <p className="text-gray-300 text-sm mb-3">
+                You are logging downtime for <span className="text-white font-semibold">{machine?.name}</span> without 
+                specifying an end time.
+              </p>
+              <p className="text-red-300 text-sm font-medium">
+                This will flag the machine as <span className="font-bold text-red-400">🔴 DOWN</span> facility-wide until 
+                the downtime is resolved.
+              </p>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg p-3 mb-4">
+              <p className="text-gray-400 text-xs">
+                <span className="text-white font-medium">To clear the DOWN flag:</span> Edit the downtime entry in the 
+                Activity Log and add an end time.
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button 
+                onClick={handleCancelDown}
+                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleConfirmDown}
+                disabled={actionLoading}
+                className="flex-1 py-3 bg-red-600 hover:bg-red-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {actionLoading ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <AlertTriangle size={18} />
+                )}
+                Yes, Flag as DOWN
               </button>
             </div>
           </div>

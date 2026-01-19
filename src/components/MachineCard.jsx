@@ -1,14 +1,18 @@
-import { Monitor } from 'lucide-react'
+import { Monitor, AlertTriangle } from 'lucide-react'
 
 export default function MachineCard({ machine, jobs, getPriorityColor }) {
   const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
   const queuedJobs = jobs.filter(j => j.status !== 'in_progress' && j.status !== 'in_setup')
 
+  // Check if machine is DOWN
+  const isDown = machine.status === 'down'
+
   const getStatusColor = (status) => {
     switch (status) {
       case 'available': return 'text-green-500'
       case 'in_use': return 'text-skynet-accent'
-      case 'maintenance': return 'text-yellow-500'
+      case 'maintenance': return 'text-purple-500'
+      case 'down': return 'text-red-500'
       case 'offline': return 'text-red-500'
       default: return 'text-gray-500'
     }
@@ -18,9 +22,21 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
     switch (status) {
       case 'available': return 'border-green-800'
       case 'in_use': return 'border-blue-800'
-      case 'maintenance': return 'border-yellow-800'
+      case 'maintenance': return 'border-purple-800'
+      case 'down': return 'border-red-600 bg-red-950/30'
       case 'offline': return 'border-red-800'
       default: return 'border-gray-800'
+    }
+  }
+
+  const getStatusDisplay = (status) => {
+    switch (status) {
+      case 'available': return 'Available'
+      case 'in_use': return 'In Use'
+      case 'maintenance': return 'Maintenance'
+      case 'down': return 'DOWN'
+      case 'offline': return 'Offline'
+      default: return status.charAt(0).toUpperCase() + status.slice(1)
     }
   }
 
@@ -32,21 +48,34 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
   }
 
   return (
-    <div className={`bg-gray-900 rounded-lg border ${getStatusBg(machine.status)} overflow-hidden`}>
+    <div className={`bg-gray-900 rounded-lg border ${getStatusBg(machine.status)} overflow-hidden ${isDown ? 'ring-2 ring-red-500/50' : ''}`}>
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div>
           <h3 className="text-white font-semibold">{machine.name}</h3>
           <p className="text-gray-500 text-sm font-mono">{machine.code}</p>
         </div>
         <div className="text-right">
-          <span className={`text-sm font-medium ${getStatusColor(machine.status)}`}>
-            {machine.status === 'in_use' ? 'In Use' : 
-             machine.status.charAt(0).toUpperCase() + machine.status.slice(1)}
-          </span>
+          {isDown ? (
+            <span className="inline-flex items-center gap-1 px-2 py-1 bg-red-600 text-white text-xs font-bold rounded animate-pulse">
+              <AlertTriangle size={12} />
+              DOWN
+            </span>
+          ) : (
+            <span className={`text-sm font-medium ${getStatusColor(machine.status)}`}>
+              {getStatusDisplay(machine.status)}
+            </span>
+          )}
         </div>
       </div>
 
       <div className="p-4">
+        {/* DOWN status reason display */}
+        {isDown && machine.status_reason && (
+          <div className="mb-3 p-2 bg-red-900/30 border border-red-700 rounded text-red-300 text-xs">
+            <span className="font-semibold">Reason:</span> {machine.status_reason}
+          </div>
+        )}
+
         {activeJob ? (
           <div className="bg-gray-800 rounded p-3">
             <div className="flex items-center justify-between mb-2">
@@ -62,8 +91,10 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
             )}
           </div>
         ) : (
-          <div className="bg-gray-800/50 rounded p-3 border border-dashed border-gray-700">
-            <p className="text-gray-600 text-sm text-center">No active job</p>
+          <div className={`rounded p-3 border border-dashed ${isDown ? 'bg-red-900/20 border-red-700' : 'bg-gray-800/50 border-gray-700'}`}>
+            <p className={`text-sm text-center ${isDown ? 'text-red-400' : 'text-gray-600'}`}>
+              {isDown ? 'Machine is DOWN' : 'No active job'}
+            </p>
           </div>
         )}
 

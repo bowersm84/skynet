@@ -192,20 +192,24 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
 
     if (woError) throw woError
 
+    // Generate job number with DTP (Planned) or DTU (Unplanned) prefix
+    const jobPrefix = maintenanceType === 'planned' ? 'DTP-' : 'DTU-'
+    
+    // Get the last job number with this prefix
     const { data: lastJob } = await supabase
       .from('jobs')
       .select('job_number')
-      .like('job_number', 'J-%')
+      .like('job_number', `${jobPrefix}%`)
       .order('job_number', { ascending: false })
       .limit(1)
     
     let nextJobNum = 1
     if (lastJob && lastJob.length > 0) {
-      const lastNum = parseInt(lastJob[0].job_number.replace('J-', '')) || 0
+      const lastNum = parseInt(lastJob[0].job_number.replace(jobPrefix, '')) || 0
       nextJobNum = lastNum + 1
     }
 
-    const jobNumber = `J-${String(nextJobNum).padStart(6, '0')}`
+    const jobNumber = `${jobPrefix}${String(nextJobNum).padStart(6, '0')}`
 
     const { error: jobError } = await supabase
       .from('jobs')
@@ -380,6 +384,10 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
                 Unplanned maintenance will flag the machine as DOWN and may affect scheduled jobs
               </p>
             )}
+            {/* Show job number format hint */}
+            <p className="text-xs text-gray-500 mt-2">
+              Job number format: {maintenanceType === 'planned' ? 'DTP-######' : 'DTU-######'}
+            </p>
           </div>
 
           {/* Machine Selection */}

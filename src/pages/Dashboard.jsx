@@ -15,6 +15,10 @@ export default function Dashboard({ user, profile }) {
   const [expandedLocations, setExpandedLocations] = useState({})
   const [selectedView, setSelectedView] = useState('lineup')
   
+  // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
+  const [ongoingDowntimes, setOngoingDowntimes] = useState([])
+  const [activeMaintenanceJobs, setActiveMaintenanceJobs] = useState([])
+  
   // Auto-refresh state
   const [autoRefresh, setAutoRefresh] = useState(true) // Enabled by default
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -57,7 +61,7 @@ export default function Dashboard({ user, profile }) {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date, order_type),
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
           component:parts!component_id(id, part_number, description),
           assigned_machine:machines(id, name, code)
         `)
@@ -72,6 +76,42 @@ export default function Dashboard({ user, profile }) {
       } else {
         console.log('✅ Jobs fetched:', jobsData?.length || 0, 'jobs')
         setJobs(jobsData || [])
+      }
+
+      // NEW: Fetch ongoing downtimes (end_time IS NULL)
+      const { data: ongoingDowntimesData, error: downtimeError } = await supabase
+        .from('machine_downtime_logs')
+        .select('*')
+        .is('end_time', null)
+        .order('start_time', { ascending: false })
+
+      if (downtimeError) {
+        console.error('❌ Error fetching ongoing downtimes:', downtimeError)
+      } else {
+        console.log('✅ Ongoing downtimes fetched:', ongoingDowntimesData?.length || 0)
+        setOngoingDowntimes(ongoingDowntimesData || [])
+      }
+
+      // NEW: Fetch active unplanned maintenance jobs (status = in_progress or assigned, maintenance_type = unplanned)
+      // that are currently scheduled (scheduled_start <= now <= scheduled_end)
+      const now = new Date().toISOString()
+      const { data: activeMaintenanceData, error: maintenanceError } = await supabase
+        .from('jobs')
+        .select(`
+          *,
+          work_order:work_orders!inner(wo_number, order_type, maintenance_type, notes)
+        `)
+        .eq('is_maintenance', true)
+        .eq('work_order.maintenance_type', 'unplanned')
+        .in('status', ['assigned', 'in_setup', 'in_progress'])
+        .lte('scheduled_start', now)
+        .or(`scheduled_end.gte.${now},scheduled_end.is.null`)
+
+      if (maintenanceError) {
+        console.error('❌ Error fetching active maintenance jobs:', maintenanceError)
+      } else {
+        console.log('✅ Active unplanned maintenance jobs fetched:', activeMaintenanceData?.length || 0)
+        setActiveMaintenanceJobs(activeMaintenanceData || [])
       }
 
       setLastUpdated(new Date())
@@ -103,9 +143,18 @@ export default function Dashboard({ user, profile }) {
       )
       .subscribe()
 
+    // NEW: Subscribe to downtime log changes
+    const downtimeSubscription = supabase
+      .channel('downtime-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_downtime_logs' }, 
+        () => fetchData()
+      )
+      .subscribe()
+
     return () => {
       supabase.removeChannel(jobsSubscription)
       supabase.removeChannel(machinesSubscription)
+      supabase.removeChannel(downtimeSubscription)
     }
   }, [fetchData])
 
@@ -131,6 +180,16 @@ export default function Dashboard({ user, profile }) {
       job.assigned_machine_id === machineId && 
       activeStatuses.includes(job.status)
     )
+  }
+
+  // NEW: Get ongoing downtime for a specific machine
+  const getOngoingDowntimeForMachine = (machineId) => {
+    return ongoingDowntimes.find(d => d.machine_id === machineId)
+  }
+
+  // NEW: Get active unplanned maintenance job for a specific machine
+  const getActiveMaintenanceForMachine = (machineId) => {
+    return activeMaintenanceJobs.find(j => j.assigned_machine_id === machineId)
   }
 
   // Group machines by location
@@ -293,6 +352,13 @@ export default function Dashboard({ user, profile }) {
     )
   }
 
+  // NEW: Count machines that are effectively DOWN
+  const machinesDownCount = machines.filter(m => 
+    m.status === 'down' || 
+    getOngoingDowntimeForMachine(m.id) || 
+    getActiveMaintenanceForMachine(m.id)
+  ).length
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -310,6 +376,14 @@ export default function Dashboard({ user, profile }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <h2 className="text-xl font-semibold text-white">Machine Status</h2>
+          
+          {/* DOWN machines indicator */}
+          {machinesDownCount > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 text-red-400 border border-red-800 rounded text-xs font-medium animate-pulse">
+              <AlertTriangle size={12} />
+              {machinesDownCount} DOWN
+            </span>
+          )}
           
           {/* Auto-refresh indicator */}
           <div className="flex items-center gap-2">
@@ -395,7 +469,7 @@ export default function Dashboard({ user, profile }) {
       </div>
 
       {/* Priority Legend */}
-      <div className="flex items-center gap-6 text-sm">
+      <div className="flex items-center gap-6 text-sm flex-wrap">
         <span className="text-gray-500">Priority:</span>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-red-500"></div>
@@ -412,6 +486,16 @@ export default function Dashboard({ user, profile }) {
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-gray-500"></div>
           <span className="text-gray-400">Low</span>
+        </div>
+        <span className="text-gray-600">|</span>
+        <span className="text-gray-500">Maintenance:</span>
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-purple-500"></div>
+          <span className="text-gray-400">Unplanned</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-blue-500"></div>
+          <span className="text-gray-400">Planned</span>
         </div>
       </div>
 
@@ -453,6 +537,8 @@ export default function Dashboard({ user, profile }) {
                           machine={machine} 
                           jobs={getJobsForMachine(machine.id)}
                           getPriorityColor={getPriorityColor}
+                          ongoingDowntime={getOngoingDowntimeForMachine(machine.id)}
+                          activeMaintenanceJob={getActiveMaintenanceForMachine(machine.id)}
                         />
                       ))}
                     </div>
@@ -477,23 +563,52 @@ export default function Dashboard({ user, profile }) {
             <div className="space-y-2">
               {activeJobs.map(job => {
                 const statusDisplay = getStatusDisplay(job.status)
+                const isMaintenance = job.is_maintenance || job.work_order?.order_type === 'maintenance'
+                const maintenanceType = job.work_order?.maintenance_type
                 return (
                   <div 
                     key={job.id} 
-                    className={`flex items-center justify-between bg-gray-800 rounded p-3 border-l-4 ${getPriorityBorder(job.priority)}`}
+                    className={`flex items-center justify-between rounded p-3 border-l-4 ${
+                      isMaintenance 
+                        ? maintenanceType === 'unplanned' 
+                          ? 'bg-purple-900/20 border-purple-600' 
+                          : 'bg-blue-900/20 border-blue-600'
+                        : `bg-gray-800 ${getPriorityBorder(job.priority)}`
+                    }`}
                   >
                     <div className="flex items-center gap-4">
-                      <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                      {isMaintenance ? (
+                        <Wrench size={16} className={maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'} />
+                      ) : (
+                        <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                      )}
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-white font-mono">{job.job_number}</span>
                           <span className="text-gray-500">•</span>
                           <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                          {isMaintenance && (
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              maintenanceType === 'unplanned' 
+                                ? 'bg-purple-600 text-white' 
+                                : 'bg-blue-600 text-white'
+                            }`}>
+                              {maintenanceType === 'unplanned' ? 'UNPLANNED' : 'PLANNED'}
+                            </span>
+                          )}
                         </div>
                         <div className="text-sm text-gray-500">
-                          <span className="text-skynet-accent">{job.component?.part_number}</span>
-                          <span className="mx-2">•</span>
-                          <span>Qty: {job.quantity}</span>
+                          {isMaintenance ? (
+                            <span className={maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'}>
+                              {job.maintenance_description || job.work_order?.notes || 'Maintenance'}
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-skynet-accent">{job.component?.part_number}</span>
+                              <span className="mx-2">•</span>
+                              <span>Qty: {job.quantity}</span>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>

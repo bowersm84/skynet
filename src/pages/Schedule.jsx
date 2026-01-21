@@ -41,6 +41,10 @@ export default function Schedule({ user, profile, onNavigate }) {
   const [loading, setLoading] = useState(true)
   const [weekOffset, setWeekOffset] = useState(0)
   
+  // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
+  const [ongoingDowntimes, setOngoingDowntimes] = useState([])
+  const [activeMaintenanceJobs, setActiveMaintenanceJobs] = useState([])
+  
   // Zoom state
   const [zoomedDay, setZoomedDay] = useState(null) // Date object when zoomed into a day
   
@@ -147,9 +151,18 @@ export default function Schedule({ user, profile, onNavigate }) {
       )
       .subscribe()
 
+    // NEW: Subscribe to downtime log changes for real-time DOWN status
+    const downtimeSubscription = supabase
+      .channel('schedule-downtime-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_downtime_logs' }, 
+        () => fetchData()
+      )
+      .subscribe()
+
     return () => {
       supabase.removeChannel(jobsSubscription)
       supabase.removeChannel(machinesSubscription)
+      supabase.removeChannel(downtimeSubscription)
     }
   }, [weekOffset])
 
@@ -238,11 +251,81 @@ export default function Schedule({ user, profile, onNavigate }) {
         setPartMachineDurations(durationsData || [])
       }
 
+      // NEW: Fetch ongoing downtimes (end_time IS NULL) for DOWN status
+      const { data: ongoingDowntimesData, error: downtimeError } = await supabase
+        .from('machine_downtime_logs')
+        .select('*')
+        .is('end_time', null)
+        .order('start_time', { ascending: false })
+
+      if (downtimeError) {
+        console.error('Error fetching ongoing downtimes:', downtimeError)
+      } else {
+        setOngoingDowntimes(ongoingDowntimesData || [])
+      }
+
+      // NEW: Fetch active unplanned maintenance jobs for DOWN status
+      // (status = assigned, in_setup, in_progress AND maintenance_type = unplanned AND currently scheduled)
+      const now = new Date().toISOString()
+      const { data: activeMaintenanceData, error: maintenanceError } = await supabase
+        .from('jobs')
+        .select(`
+          *,
+          work_order:work_orders!inner(wo_number, order_type, maintenance_type, notes)
+        `)
+        .eq('is_maintenance', true)
+        .eq('work_order.maintenance_type', 'unplanned')
+        .in('status', ['assigned', 'in_setup', 'in_progress'])
+        .lte('scheduled_start', now)
+        .or(`scheduled_end.gte.${now},scheduled_end.is.null`)
+
+      if (maintenanceError) {
+        console.error('Error fetching active maintenance jobs:', maintenanceError)
+      } else {
+        setActiveMaintenanceJobs(activeMaintenanceData || [])
+      }
+
     } catch (error) {
       console.error('Unexpected error:', error)
     } finally {
       setLoading(false)
     }
+  }
+
+  // NEW: Get ongoing downtime for a specific machine
+  const getOngoingDowntimeForMachine = (machineId) => {
+    return ongoingDowntimes.find(d => d.machine_id === machineId)
+  }
+
+  // NEW: Get active unplanned maintenance job for a specific machine
+  const getActiveMaintenanceForMachine = (machineId) => {
+    return activeMaintenanceJobs.find(j => j.assigned_machine_id === machineId)
+  }
+
+  // NEW: Check if machine is DOWN (from any source)
+  const isMachineDown = (machine) => {
+    // Check database status
+    if (machine.status === 'down') return true
+    // Check ongoing downtime from machinist
+    if (getOngoingDowntimeForMachine(machine.id)) return true
+    // Check active unplanned maintenance
+    if (getActiveMaintenanceForMachine(machine.id)) return true
+    return false
+  }
+
+  // NEW: Get DOWN reason for a machine
+  const getMachineDownReason = (machine) => {
+    const ongoingDowntime = getOngoingDowntimeForMachine(machine.id)
+    const activeMaintenance = getActiveMaintenanceForMachine(machine.id)
+    
+    // Priority: 1. Ongoing machinist-logged downtime, 2. Active unplanned maintenance, 3. Database status_reason
+    if (ongoingDowntime) {
+      return `Ongoing: ${ongoingDowntime.reason}${ongoingDowntime.notes ? ` - ${ongoingDowntime.notes}` : ''}`
+    }
+    if (activeMaintenance) {
+      return `Unplanned Maintenance: ${activeMaintenance.maintenance_description || activeMaintenance.work_order?.notes || 'In progress'}`
+    }
+    return machine.status_reason
   }
 
   const getDurationForPartMachine = (partId, machineId) => {
@@ -1414,6 +1497,11 @@ export default function Schedule({ user, profile, onNavigate }) {
     return `${hours}h ${minutes}m`
   }
 
+  // Count machines that are DOWN
+  const downMachineCount = useMemo(() => {
+    return machines.filter(m => isMachineDown(m)).length
+  }, [machines, ongoingDowntimes, activeMaintenanceJobs])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1447,6 +1535,13 @@ export default function Schedule({ user, profile, onNavigate }) {
           {scheduledJobs.length > 0 && (
             <span className="text-sm text-gray-400">
               ({scheduledJobs.length} scheduled this week)
+            </span>
+          )}
+          {/* DOWN machines indicator */}
+          {downMachineCount > 0 && (
+            <span className="flex items-center gap-1 text-sm text-red-400 bg-red-900/30 px-2 py-1 rounded">
+              <AlertTriangle size={14} />
+              {downMachineCount} DOWN
             </span>
           )}
         </div>
@@ -1838,6 +1933,10 @@ export default function Schedule({ user, profile, onNavigate }) {
                       const isResizingOnThisMachine = resizing?.job?.assigned_machine_id === machine.id
                       const weeklyUtil = getWeeklyUtilization(machine.id)
                       
+                      // NEW: Check if this machine is DOWN
+                      const isDown = isMachineDown(machine)
+                      const downReason = isDown ? getMachineDownReason(machine) : null
+                      
                       return (
                         <div key={machine.id} className={`flex border-b border-gray-800 last:border-b-0 min-h-[60px] ${
                           (draggedJob || draggedScheduledJob) && isPreferred ? 'bg-yellow-900/10' : ''
@@ -1847,12 +1946,14 @@ export default function Schedule({ user, profile, onNavigate }) {
                           } ${
                             (draggedJob || draggedScheduledJob) && isPreferred ? 'bg-yellow-900/20' : ''
                           } ${
-                            machine.status === 'down' ? 'bg-red-950/30' : ''
+                            isDown ? 'bg-red-950/30' : ''
                           }`}>
                             <div className="flex items-center gap-1">
                               <span className="text-white font-medium text-sm">{machine.name}</span>
-                              {machine.status === 'down' && (
-                                <span className="px-1.5 py-0.5 bg-red-600 text-white text-[9px] font-bold rounded animate-pulse">
+                              {/* DOWN indicator - shows for any DOWN source */}
+                              {isDown && (
+                                <span className="px-1.5 py-0.5 bg-red-600 text-white text-[9px] font-bold rounded animate-pulse flex items-center gap-0.5">
+                                  <AlertTriangle size={8} />
                                   DOWN
                                 </span>
                               )}
@@ -1866,8 +1967,14 @@ export default function Schedule({ user, profile, onNavigate }) {
                                 <Database size={10} className="text-blue-400" title="Has duration estimate" />
                               )}
                             </div>
-                            {/* Weekly utilization bar */}
-                            {!zoomedDay && weeklyUtil > 0 && (
+                            {/* DOWN reason tooltip */}
+                            {isDown && downReason && (
+                              <p className="text-red-400 text-[9px] truncate mt-0.5" title={downReason}>
+                                {downReason.length > 30 ? `${downReason.slice(0, 30)}...` : downReason}
+                              </p>
+                            )}
+                            {/* Weekly utilization bar - only show when not DOWN */}
+                            {!zoomedDay && weeklyUtil > 0 && !isDown && (
                               <div className="mt-1 flex items-center gap-1" title={`${weeklyUtil}% of shift hours scheduled this week`}>
                                 <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
                                   <div 
@@ -1907,7 +2014,8 @@ export default function Schedule({ user, profile, onNavigate }) {
                                     onDrop={(e) => handleDrop(e, machine.id, date)}
                                     className={`flex-1 min-w-[150px] border-r border-gray-800 last:border-r-0 relative transition-colors ${
                                       isToday(date) ? 'bg-skynet-accent/5' : ''
-                                    } ${isTarget ? 'bg-skynet-accent/20 ring-2 ring-inset ring-skynet-accent' : ''}`}
+                                    } ${isTarget ? 'bg-skynet-accent/20 ring-2 ring-inset ring-skynet-accent' : ''}
+                                    ${isDown ? 'bg-red-950/20' : ''}`}
                                   >
                                     {/* Shift capacity indicator bar at bottom */}
                                     {dayUtil > 0 && (
@@ -2008,7 +2116,7 @@ export default function Schedule({ user, profile, onNavigate }) {
                     {/* Day View Timeline (Zoomed) */}
                     {zoomedDay && (
                       <div className="flex-1">
-                        <div className={`relative ${resizing?.job?.assigned_machine_id === machine.id ? 'overflow-visible' : ''}`} style={{ width: `${24 * 60}px`, height: '58px' }}>
+                        <div className={`relative ${resizing?.job?.assigned_machine_id === machine.id ? 'overflow-visible' : ''} ${isDown ? 'bg-red-950/10' : ''}`} style={{ width: `${24 * 60}px`, height: '58px' }}>
                           {/* Hour cells */}
                           <div className="absolute inset-0 flex">
                             {dayHours.map(hour => {
@@ -2188,8 +2296,12 @@ export default function Schedule({ user, profile, onNavigate }) {
               <span className="text-gray-400">Planned Maint.</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-3 bg-red-700 border border-red-400 rounded-sm"></div>
+              <div className="w-4 h-3 bg-purple-600 border border-purple-400 rounded-sm"></div>
               <span className="text-gray-400">Unplanned Maint.</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-1 py-0.5 bg-red-600 text-white text-[8px] font-bold rounded">DOWN</span>
+              <span className="text-gray-400">Machine Down</span>
             </div>
             {!zoomedDay && (
               <>

@@ -1,13 +1,28 @@
-import { Monitor, AlertTriangle } from 'lucide-react'
+import { Monitor, AlertTriangle, Wrench } from 'lucide-react'
 
-export default function MachineCard({ machine, jobs, getPriorityColor }) {
+export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDowntime, activeMaintenanceJob }) {
   const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
   const queuedJobs = jobs.filter(j => j.status !== 'in_progress' && j.status !== 'in_setup')
 
-  // Check if machine is DOWN
-  const isDown = machine.status === 'down'
+  // Check if machine is DOWN - either from database status, ongoing downtime, or active unplanned maintenance
+  const isDown = machine.status === 'down' || !!ongoingDowntime || !!activeMaintenanceJob
+
+  // Determine the DOWN reason to display
+  const getDownReason = () => {
+    // Priority: 1. Ongoing machinist-logged downtime, 2. Active unplanned maintenance, 3. Database status_reason
+    if (ongoingDowntime) {
+      return `Ongoing: ${ongoingDowntime.reason}${ongoingDowntime.notes ? ` - ${ongoingDowntime.notes}` : ''}`
+    }
+    if (activeMaintenanceJob) {
+      return `Unplanned Maintenance: ${activeMaintenanceJob.maintenance_description || activeMaintenanceJob.work_order?.notes || 'In progress'}`
+    }
+    return machine.status_reason
+  }
+
+  const downReason = isDown ? getDownReason() : null
 
   const getStatusColor = (status) => {
+    if (isDown) return 'text-red-500'
     switch (status) {
       case 'available': return 'text-green-500'
       case 'in_use': return 'text-skynet-accent'
@@ -19,6 +34,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
   }
 
   const getStatusBg = (status) => {
+    if (isDown) return 'border-red-600 bg-red-950/30'
     switch (status) {
       case 'available': return 'border-green-800'
       case 'in_use': return 'border-blue-800'
@@ -30,6 +46,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
   }
 
   const getStatusDisplay = (status) => {
+    if (isDown) return 'DOWN'
     switch (status) {
       case 'available': return 'Available'
       case 'in_use': return 'In Use'
@@ -46,6 +63,10 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
     const kioskUrl = `/kiosk/${encodeURIComponent(identifier)}`
     window.open(kioskUrl, '_blank')
   }
+
+  // Check if active job is a maintenance job
+  const isMaintenanceActive = activeJob?.is_maintenance || activeJob?.work_order?.order_type === 'maintenance'
+  const maintenanceType = activeJob?.work_order?.maintenance_type
 
   return (
     <div className={`bg-gray-900 rounded-lg border ${getStatusBg(machine.status)} overflow-hidden ${isDown ? 'ring-2 ring-red-500/50' : ''}`}>
@@ -70,24 +91,72 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
 
       <div className="p-4">
         {/* DOWN status reason display */}
-        {isDown && machine.status_reason && (
+        {isDown && downReason && (
           <div className="mb-3 p-2 bg-red-900/30 border border-red-700 rounded text-red-300 text-xs">
-            <span className="font-semibold">Reason:</span> {machine.status_reason}
+            <span className="font-semibold">Reason:</span> {downReason}
+          </div>
+        )}
+
+        {/* Show ongoing downtime info if present */}
+        {ongoingDowntime && (
+          <div className="mb-3 p-2 bg-red-900/20 border border-red-800 rounded">
+            <div className="flex items-center gap-2 text-red-400 text-xs">
+              <AlertTriangle size={12} />
+              <span className="font-semibold">Ongoing Downtime</span>
+            </div>
+            <p className="text-red-300 text-xs mt-1">
+              Started: {new Date(ongoingDowntime.start_time).toLocaleString()}
+            </p>
+          </div>
+        )}
+
+        {/* Show active unplanned maintenance if present (and different from active job) */}
+        {activeMaintenanceJob && !activeJob && (
+          <div className="mb-3 p-2 bg-purple-900/20 border border-purple-800 rounded">
+            <div className="flex items-center gap-2 text-purple-400 text-xs">
+              <Wrench size={12} />
+              <span className="font-semibold">Unplanned Maintenance</span>
+            </div>
+            <p className="text-purple-300 text-xs mt-1 font-mono">
+              {activeMaintenanceJob.job_number}
+            </p>
           </div>
         )}
 
         {activeJob ? (
-          <div className="bg-gray-800 rounded p-3">
+          <div className={`rounded p-3 ${
+            isMaintenanceActive 
+              ? maintenanceType === 'unplanned' 
+                ? 'bg-purple-900/30 border border-purple-700' 
+                : 'bg-blue-900/30 border border-blue-700'
+              : 'bg-gray-800'
+          }`}>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-skynet-accent font-mono text-sm">
-                {activeJob.status === 'in_setup' ? 'SETUP' : 'RUNNING'}
+              <span className={`font-mono text-sm ${
+                isMaintenanceActive 
+                  ? maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'
+                  : 'text-skynet-accent'
+              }`}>
+                {isMaintenanceActive ? (
+                  <span className="flex items-center gap-1">
+                    <Wrench size={12} />
+                    {maintenanceType === 'unplanned' ? 'UNPLANNED' : 'MAINTENANCE'}
+                  </span>
+                ) : (
+                  activeJob.status === 'in_setup' ? 'SETUP' : 'RUNNING'
+                )}
               </span>
-              <div className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)} animate-pulse`}></div>
+              {!isMaintenanceActive && (
+                <div className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)} animate-pulse`}></div>
+              )}
             </div>
             <p className="text-white font-semibold">{activeJob.job_number}</p>
             <p className="text-gray-400 text-sm">{activeJob.work_order?.wo_number}</p>
             {activeJob.component?.part_number && (
               <p className="text-skynet-accent text-sm font-mono">{activeJob.component.part_number}</p>
+            )}
+            {isMaintenanceActive && activeJob.maintenance_description && (
+              <p className="text-gray-400 text-xs mt-1 line-clamp-2">{activeJob.maintenance_description}</p>
             )}
           </div>
         ) : (
@@ -115,7 +184,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor }) {
           </div>
         )}
 
-        {jobs.length === 0 && machine.status === 'available' && (
+        {jobs.length === 0 && !isDown && machine.status === 'available' && (
           <p className="text-gray-600 text-xs text-center mt-2">Ready for assignment</p>
         )}
 

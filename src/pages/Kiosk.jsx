@@ -149,6 +149,12 @@ export default function Kiosk() {
   
   // Job activity log for active job
   const [jobActivities, setJobActivities] = useState([])
+  
+  // Machine DOWN/Ready state (for orphaned downtimes)
+  const [orphanedDowntimes, setOrphanedDowntimes] = useState([])
+  const [showMachineReadyModal, setShowMachineReadyModal] = useState(false)
+  const [machineReadyNotes, setMachineReadyNotes] = useState('')
+  const [clearingDowntime, setClearingDowntime] = useState(false)
 
   // Common downtime reasons
   const DOWNTIME_REASONS = [
@@ -250,6 +256,26 @@ export default function Kiosk() {
       return () => supabase.removeChannel(subscription)
     }
   }, [operator, machine])
+  
+  // Load orphaned downtimes when operator logs in
+  useEffect(() => {
+    if (operator && machine) {
+      loadOrphanedDowntimes()
+    
+      // Subscribe to downtime changes
+      const downtimeSubscription = supabase
+        .channel(`kiosk-downtimes-${machine.id}`)
+        .on('postgres_changes', 
+          { event: '*', schema: 'public', table: 'machine_downtime_logs', filter: `machine_id=eq.${machine.id}` },
+          () => {
+            loadOrphanedDowntimes()
+          }
+        )
+        .subscribe()
+
+      return () => supabase.removeChannel(downtimeSubscription)
+    }
+  }, [operator, machine])
 
   // Build activity log when active job changes
   useEffect(() => {
@@ -268,6 +294,74 @@ export default function Kiosk() {
       setJobMaterials([])
     }
   }, [activeJob?.id])
+
+  // Load orphaned downtimes (downtimes with no end_time for this machine)
+  const loadOrphanedDowntimes = async () => {
+    if (!machine) return
+    try {
+      const { data, error } = await supabase
+        .from('machine_downtime_logs')
+        .select('*')
+        .eq('machine_id', machine.id)
+        .is('end_time', null)
+        .order('start_time', { ascending: false })
+
+      if (error) throw error
+      setOrphanedDowntimes(data || [])
+    } catch (err) {
+      console.error('Error loading orphaned downtimes:', err)
+    }
+  }
+
+  // Clear machine DOWN status by closing all orphaned downtimes
+  const handleClearMachineDown = async () => {
+    if (!machine || !operator) return
+    setClearingDowntime(true)
+    
+    try {
+      const now = new Date().toISOString()
+      
+      // Close all orphaned downtimes for this machine
+      const { error } = await supabase
+        .from('machine_downtime_logs')
+        .update({ 
+          end_time: now,
+          notes: machineReadyNotes 
+            ? `${orphanedDowntimes[0]?.notes || ''} | Cleared by ${operator.full_name}: ${machineReadyNotes}`.trim()
+            : `${orphanedDowntimes[0]?.notes || ''} | Cleared by ${operator.full_name}`.trim(),
+          updated_at: now
+        })
+        .eq('machine_id', machine.id)
+        .is('end_time', null)
+
+      if (error) throw error
+      
+      // Also reset machine status if it was set to 'down'
+      if (machine.status === 'down') {
+        await supabase
+          .from('machines')
+          .update({ 
+            status: 'available',
+            status_reason: null,
+            updated_at: now
+          })
+          .eq('id', machine.id)
+      }
+      
+      // Refresh data
+      await loadOrphanedDowntimes()
+      await loadMachine()
+      
+      // Close modal and reset
+      setShowMachineReadyModal(false)
+      setMachineReadyNotes('')
+    } catch (err) {
+      console.error('Error clearing machine down status:', err)
+      alert('Failed to clear machine status. Please try again.')
+    } finally {
+      setClearingDowntime(false)
+    }
+  }
 
   // Load current tools when active job changes
   useEffect(() => {
@@ -2731,6 +2825,50 @@ export default function Kiosk() {
                   )}
                 </div>
                 )
+              ) : orphanedDowntimes.length > 0 ? (
+                /* Machine DOWN due to orphaned downtime */
+                <div className="p-8">
+                  <div className="bg-red-900/30 border border-red-700 rounded-lg p-6 text-center">
+                    <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-4 animate-pulse" />
+                    <h3 className="text-red-400 text-xl font-bold mb-2">Machine is DOWN</h3>
+                    <p className="text-gray-400 mb-4">
+                      {orphanedDowntimes.length === 1 
+                        ? 'There is an unresolved downtime event preventing new jobs from starting.'
+                        : `There are ${orphanedDowntimes.length} unresolved downtime events.`}
+                    </p>
+                    
+                    {/* Show downtime details */}
+                    <div className="bg-gray-900/50 rounded-lg p-4 mb-4 text-left">
+                      {orphanedDowntimes.slice(0, 3).map((dt, idx) => (
+                        <div key={dt.id} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-gray-700' : ''}`}>
+                          <div className="flex items-center justify-between">
+                            <span className="text-red-400 font-medium">{dt.reason}</span>
+                            <span className="text-gray-500 text-sm">{formatDateTime(dt.start_time)}</span>
+                          </div>
+                          {dt.notes && <p className="text-gray-500 text-sm mt-1">{dt.notes}</p>}
+                        </div>
+                      ))}
+                      {orphanedDowntimes.length > 3 && (
+                        <p className="text-gray-500 text-sm mt-3 pt-3 border-t border-gray-700">
+                          ...and {orphanedDowntimes.length - 3} more
+                        </p>
+                      )}
+                    </div>
+
+                    {canOperate && (
+                      <button
+                        onClick={() => setShowMachineReadyModal(true)}
+                        className="px-6 py-3 bg-green-600 hover:bg-green-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 mx-auto"
+                      >
+                        <CheckCircle size={20} />
+                        Machine Ready
+                      </button>
+                    )}
+                    {isViewOnly && (
+                      <p className="text-gray-500 text-sm mt-4">Waiting for operator to clear downtime status</p>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <div className="p-12 text-center">
                   <Clock className="w-16 h-16 text-gray-700 mx-auto mb-4" />
@@ -3876,6 +4014,72 @@ export default function Kiosk() {
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Clock size={20} />}
                 Extend
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Machine Ready Modal */}
+      {showMachineReadyModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <CheckCircle className="text-green-500" size={20} />
+                Clear Machine Down Status
+              </h3>
+              <button 
+                onClick={() => { setShowMachineReadyModal(false); setMachineReadyNotes('') }}
+                className="text-gray-400 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <p className="text-gray-400 mb-4">
+                This will close {orphanedDowntimes.length} open downtime record{orphanedDowntimes.length > 1 ? 's' : ''} and mark the machine as available.
+              </p>
+              
+              <div className="mb-4">
+                <label className="block text-gray-400 text-sm mb-2">Resolution Notes (Optional)</label>
+                <textarea
+                  value={machineReadyNotes}
+                  onChange={(e) => setMachineReadyNotes(e.target.value)}
+                  placeholder="e.g., Replaced broken tool, issue resolved..."
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-green-500 focus:outline-none resize-none"
+                  rows={3}
+                />
+              </div>
+
+              <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 mb-6">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="text-yellow-500 flex-shrink-0 mt-0.5" size={16} />
+                  <p className="text-yellow-400 text-sm">
+                    Make sure the machine is actually ready for production before clearing this status.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setShowMachineReadyModal(false); setMachineReadyNotes('') }}
+                  className="flex-1 px-4 py-3 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleClearMachineDown}
+                  disabled={clearingDowntime}
+                  className="flex-1 px-4 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {clearingDowntime ? (
+                    <><Loader2 size={18} className="animate-spin" /> Clearing...</>
+                  ) : (
+                    <><CheckCircle size={18} /> Confirm Ready</>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

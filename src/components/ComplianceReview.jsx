@@ -15,7 +15,8 @@ import {
   Loader2,
   Plus,
   RefreshCw,
-  Undo2
+  Undo2,
+  Beaker
 } from 'lucide-react'
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
@@ -596,6 +597,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                             </div>
                           )
                         })}
+                      </div>
+                    )}
+
+                    {/* Show passivation info if applicable */}
+                    {job.passivation_end && (
+                      <div className="mt-2 text-xs text-cyan-400 flex items-center gap-1">
+                        <Beaker size={12} />
+                        Passivated: {new Date(job.passivation_end).toLocaleString()}
                       </div>
                     )}
 

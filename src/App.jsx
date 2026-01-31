@@ -6,6 +6,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
+import Secondary from './pages/Secondary'
 
 // Main authenticated app component
 function MainApp() {
@@ -223,7 +224,10 @@ function App() {
       <Routes>
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />
-        
+
+        {/* NEW: Secondary operations route (passivation, paint, etc.) */}
+        <Route path="/secondary/:operationType" element={<Secondary />} />
+
         {/* Main app - requires Supabase authentication */}
         <Route path="/*" element={<MainApp />} />
       </Routes>

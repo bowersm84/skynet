@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker } from 'lucide-react'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ComplianceReview from '../components/ComplianceReview'
+import Assembly from '../components/Assembly'
 
 export default function Dashboard({ user, profile }) {
   const [machines, setMachines] = useState([])
@@ -14,6 +15,7 @@ export default function Dashboard({ user, profile }) {
   const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)
   const [expandedLocations, setExpandedLocations] = useState({})
   const [selectedView, setSelectedView] = useState('lineup')
+  const [assemblyWOs, setAssemblyWOs] = useState([])
   
   // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
@@ -32,6 +34,13 @@ export default function Dashboard({ user, profile }) {
   const [showEditWarning, setShowEditWarning] = useState(true)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  
+  // Work Order Lookup state
+  const [showWOLookup, setShowWOLookup] = useState(false)
+  const [woLookupData, setWOLookupData] = useState([])
+  const [woLookupLoading, setWOLookupLoading] = useState(false)
+  const [woLookupSearch, setWOLookupSearch] = useState('')
+  const [expandedWOs, setExpandedWOs] = useState({})
 
   // Memoized fetch function
   const fetchData = useCallback(async (isAutoRefresh = false) => {
@@ -91,6 +100,31 @@ export default function Dashboard({ user, profile }) {
         console.log('✅ Ongoing downtimes fetched:', ongoingDowntimesData?.length || 0)
         setOngoingDowntimes(ongoingDowntimesData || [])
       }
+
+      // Fetch for assembly-ready work orders
+      // A WO is ready for assembly when ALL its jobs have status ready_for_assembly
+      const { data: woWithJobs } = await supabase
+        .from('work_orders')
+        .select(`
+          id,
+          wo_number,
+          order_type,
+          jobs (id, status)
+        `)
+        .not('order_type', 'eq', 'maintenance')
+
+      // Filter to WOs where ALL jobs are ready_for_assembly (or in_assembly)
+      const assemblyReadyWOs = (woWithJobs || []).filter(wo => {
+        if (!wo.jobs || wo.jobs.length === 0) return false
+        // All jobs must be in assembly-related statuses
+        return wo.jobs.every(job => 
+          ['ready_for_assembly', 'in_assembly', 'complete'].includes(job.status)
+        ) && wo.jobs.some(job => 
+          ['ready_for_assembly', 'in_assembly'].includes(job.status)
+        )
+      })
+
+      setAssemblyWOs(assemblyReadyWOs)
 
       // NEW: Fetch active unplanned maintenance jobs (status = in_progress or assigned, maintenance_type = unplanned)
       // that are currently scheduled (scheduled_start <= now <= scheduled_end)
@@ -173,8 +207,48 @@ export default function Dashboard({ user, profile }) {
     }
   }, [autoRefresh, fetchData])
 
+  // Helper to detect secondary operation stations
+  const isSecondaryStation = (machine) => {
+    if (!machine) return false
+    const code = machine.code?.toLowerCase() || ''
+    const name = machine.name?.toLowerCase() || ''
+    return code.startsWith('pass') || name.includes('passivation') ||
+           code.startsWith('paint') || name.includes('paint')
+  }
+
+  // Get secondary config for a machine
+  const getSecondaryConfig = (machine) => {
+    if (!machine) return null
+    const code = machine.code?.toLowerCase() || ''
+    const name = machine.name?.toLowerCase() || ''
+    
+    if (code.startsWith('pass') || name.includes('passivation')) {
+      return {
+        type: 'passivation',
+        statuses: ['pending_passivation', 'in_passivation']
+      }
+    }
+    if (code.startsWith('paint') || name.includes('paint')) {
+      return {
+        type: 'paint',
+        statuses: ['pending_paint', 'in_paint']
+      }
+    }
+    return null
+  }
+
   const getJobsForMachine = (machineId) => {
-    // Only show active jobs in the queue (not completed, cancelled, or pending compliance)
+    // Find the machine to check if it's a secondary operation station
+    const machine = machines.find(m => m.id === machineId)
+    const secondaryConfig = getSecondaryConfig(machine)
+    
+    if (secondaryConfig) {
+      // For secondary operations (Passivation, Paint), show ALL jobs with matching status
+      // These jobs are not assigned to a specific machine
+      return jobs.filter(job => secondaryConfig.statuses.includes(job.status))
+    }
+    
+    // Normal machines: show jobs assigned to this machine with active statuses
     const activeStatuses = ['assigned', 'in_setup', 'in_progress']
     return jobs.filter(job => 
       job.assigned_machine_id === machineId && 
@@ -191,6 +265,114 @@ export default function Dashboard({ user, profile }) {
   const getActiveMaintenanceForMachine = (machineId) => {
     return activeMaintenanceJobs.find(j => j.assigned_machine_id === machineId)
   }
+
+  // Fetch all active work orders with their jobs for lookup
+  const fetchWOLookup = async () => {
+    setWOLookupLoading(true)
+    try {
+      // Get all work orders that have at least one non-complete job
+      const { data: workOrders, error: woError } = await supabase
+        .from('work_orders')
+        .select(`
+          id,
+          wo_number,
+          customer,
+          priority,
+          due_date,
+          order_type,
+          maintenance_type,
+          status,
+          created_at,
+          jobs (
+            id,
+            job_number,
+            status,
+            quantity,
+            good_pieces,
+            bad_pieces,
+            assigned_machine_id,
+            scheduled_start,
+            component:parts!component_id(part_number, description)
+          )
+        `)
+        .order('created_at', { ascending: false })
+
+      if (woError) throw woError
+
+      // Filter to only WOs that have jobs not in 'complete' or 'cancelled' status
+      // OR include WOs where all jobs are complete (to show finished WOs)
+      const activeWOs = workOrders?.filter(wo => {
+        if (!wo.jobs || wo.jobs.length === 0) return false
+        // Show WO if any job is not complete/cancelled
+        return wo.jobs.some(j => !['complete', 'cancelled'].includes(j.status))
+      }) || []
+
+      // Also get recently completed WOs (last 7 days)
+      const sevenDaysAgo = new Date()
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+      
+      const completedWOs = workOrders?.filter(wo => {
+        if (!wo.jobs || wo.jobs.length === 0) return false
+        const allComplete = wo.jobs.every(j => ['complete', 'cancelled'].includes(j.status))
+        if (!allComplete) return false
+        // Check if completed recently
+        const latestJob = wo.jobs.reduce((latest, j) => {
+          return !latest || new Date(j.updated_at) > new Date(latest.updated_at) ? j : latest
+        }, null)
+        return latestJob && new Date(wo.created_at) > sevenDaysAgo
+      }) || []
+
+      setWOLookupData([...activeWOs, ...completedWOs])
+    } catch (err) {
+      console.error('Error fetching WO lookup data:', err)
+    } finally {
+      setWOLookupLoading(false)
+    }
+  }
+
+  // Open WO Lookup modal
+  const handleOpenWOLookup = () => {
+    setShowWOLookup(true)
+    setWOLookupSearch('')
+    setExpandedWOs({})
+    fetchWOLookup()
+  }
+
+  // Get status badge for a job
+  const getStatusBadge = (status) => {
+    const statusConfig = {
+      pending_compliance: { label: 'Pending Compliance', color: 'bg-purple-900/50 text-purple-300 border-purple-700' },
+      ready: { label: 'Ready', color: 'bg-blue-900/50 text-blue-300 border-blue-700' },
+      assigned: { label: 'Assigned', color: 'bg-indigo-900/50 text-indigo-300 border-indigo-700' },
+      in_setup: { label: 'In Setup', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
+      in_progress: { label: 'In Progress', color: 'bg-green-900/50 text-green-300 border-green-700' },
+      manufacturing_complete: { label: 'Mfg Complete', color: 'bg-teal-900/50 text-teal-300 border-teal-700' },
+      pending_passivation: { label: 'Pending Passivation', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
+      in_passivation: { label: 'In Passivation', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
+      pending_post_manufacturing: { label: 'Post-Mfg Review', color: 'bg-orange-900/50 text-orange-300 border-orange-700' },
+      ready_for_assembly: { label: 'Ready for Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
+      complete: { label: 'Complete', color: 'bg-gray-800 text-gray-400 border-gray-700' },
+      incomplete: { label: 'Incomplete', color: 'bg-red-900/50 text-red-300 border-red-700' },
+      cancelled: { label: 'Cancelled', color: 'bg-gray-800 text-gray-500 border-gray-700' }
+    }
+    return statusConfig[status] || { label: status, color: 'bg-gray-800 text-gray-400 border-gray-700' }
+  }
+
+  // Filter WOs based on search
+  const filteredWOLookup = woLookupData.filter(wo => {
+    if (!woLookupSearch.trim()) return true
+    const search = woLookupSearch.toLowerCase()
+    
+    // Search WO number, customer
+    if (wo.wo_number?.toLowerCase().includes(search)) return true
+    if (wo.customer?.toLowerCase().includes(search)) return true
+    
+    // Search job numbers and part numbers
+    return wo.jobs?.some(job => 
+      job.job_number?.toLowerCase().includes(search) ||
+      job.component?.part_number?.toLowerCase().includes(search)
+    )
+  })
 
   // Group machines by location
   const machinesByLocation = machines.reduce((acc, machine) => {
@@ -246,6 +428,17 @@ export default function Dashboard({ user, profile }) {
       case 'normal': return 'border-green-700'
       case 'low': return 'border-gray-700'
       default: return 'border-gray-700'
+    }
+  }
+
+  // Get priority dot color (for WO Lookup)
+  const getPriorityDot = (priority) => {
+    switch (priority) {
+      case 'critical': return 'bg-red-500'
+      case 'high': return 'bg-yellow-500'
+      case 'normal': return 'bg-green-500'
+      case 'low': return 'bg-gray-500'
+      default: return 'bg-gray-500'
     }
   }
 
@@ -418,6 +611,13 @@ export default function Dashboard({ user, profile }) {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={handleOpenWOLookup}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded transition-colors"
+          >
+            <ClipboardList size={20} />
+            <span className="hidden sm:inline">Work Orders</span>
+          </button>
+          <button
             onClick={() => setShowMaintenanceModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded transition-colors"
           >
@@ -464,6 +664,14 @@ export default function Dashboard({ user, profile }) {
           label="Active Jobs"
           value={activeJobs.length}
           colorClass="text-skynet-accent"
+          onClick={setSelectedView}
+        />
+        <StatCard
+          id="assembly"
+          label="Assembly"
+          value={assemblyWOs.length}
+          colorClass="text-green-400"
+          borderClass={assemblyWOs.length > 0 ? 'border-green-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
       </div>
@@ -910,6 +1118,226 @@ export default function Dashboard({ user, profile }) {
         onSuccess={fetchData}
         machines={machines}
       />
+
+      {/* Assembly View */}
+      {selectedView === 'assembly' && (
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <Assembly profile={profile} onUpdate={fetchData} />
+        </div>
+      )}
+
+      {/* Work Order Lookup Modal */}
+      {showWOLookup && (
+        <div className="fixed inset-0 bg-black/70 flex items-start justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-4xl my-8 max-h-[85vh] flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <ClipboardList className="text-skynet-accent" size={24} />
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Work Order Lookup</h2>
+                  <p className="text-gray-500 text-sm">View all active work orders and job statuses</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowWOLookup(false)} 
+                className="text-gray-400 hover:text-white p-2"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {/* Search Bar */}
+            <div className="px-6 py-4 border-b border-gray-800 flex-shrink-0">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={20} />
+                <input
+                  type="text"
+                  placeholder="Search by WO#, Job#, Customer, or Part#..."
+                  value={woLookupSearch}
+                  onChange={(e) => setWOLookupSearch(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                  autoFocus
+                />
+                {woLookupSearch && (
+                  <button
+                    onClick={() => setWOLookupSearch('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              {woLookupLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 size={32} className="animate-spin text-skynet-accent" />
+                </div>
+              ) : filteredWOLookup.length === 0 ? (
+                <div className="text-center py-12">
+                  <ClipboardList size={48} className="mx-auto text-gray-600 mb-4" />
+                  <p className="text-gray-500">
+                    {woLookupSearch ? 'No matching work orders found' : 'No active work orders'}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {filteredWOLookup.map(wo => {
+                    const isExpanded = expandedWOs[wo.id]
+                    const allJobsComplete = wo.jobs?.every(j => ['complete', 'cancelled'].includes(j.status))
+                    const readyForAssemblyCount = wo.jobs?.filter(j => j.status === 'ready_for_assembly').length || 0
+                    const totalJobs = wo.jobs?.length || 0
+                    
+                    return (
+                      <div key={wo.id} className={`border rounded-lg overflow-hidden ${
+                        allJobsComplete 
+                          ? 'border-gray-700 bg-gray-800/30' 
+                          : readyForAssemblyCount === totalJobs 
+                            ? 'border-emerald-700 bg-emerald-900/20'
+                            : 'border-gray-700 bg-gray-800/50'
+                      }`}>
+                        {/* WO Header Row */}
+                        <button
+                          onClick={() => setExpandedWOs(prev => ({ ...prev, [wo.id]: !prev[wo.id] }))}
+                          className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+                        >
+                          <div className="flex items-center gap-4">
+                            <ChevronRight 
+                              size={20} 
+                              className={`text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} 
+                            />
+                            <div className={`w-2.5 h-2.5 rounded-full ${getPriorityDot(wo.priority)}`} />
+                            <div className="text-left">
+                              <div className="flex items-center gap-2">
+                                <span className="text-white font-mono font-medium">{wo.wo_number}</span>
+                                {wo.order_type === 'maintenance' && (
+                                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                    wo.maintenance_type === 'unplanned' 
+                                      ? 'bg-purple-900/50 text-purple-300' 
+                                      : 'bg-blue-900/50 text-blue-300'
+                                  }`}>
+                                    {wo.maintenance_type === 'unplanned' ? 'UNPLANNED' : 'PLANNED'}
+                                  </span>
+                                )}
+                                {allJobsComplete && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
+                                    COMPLETE
+                                  </span>
+                                )}
+                                {readyForAssemblyCount === totalJobs && !allJobsComplete && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-300">
+                                    READY FOR ASSEMBLY
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 text-sm text-gray-400">
+                                <span className="flex items-center gap-1">
+                                  <User size={12} />
+                                  {wo.customer}
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <Calendar size={12} />
+                                  Due: {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : 'N/A'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <span className="text-sm text-gray-400">
+                                {wo.jobs?.filter(j => j.status === 'complete').length || 0}/{totalJobs} complete
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+
+                        {/* Expanded Jobs List */}
+                        {isExpanded && wo.jobs && wo.jobs.length > 0 && (
+                          <div className="border-t border-gray-700 bg-gray-900/50">
+                            <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-700">
+                              <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
+                                <div className="col-span-2">Job #</div>
+                                <div className="col-span-3">Part</div>
+                                <div className="col-span-1 text-center">Qty</div>
+                                <div className="col-span-3">Status</div>
+                                <div className="col-span-3">Progress</div>
+                              </div>
+                            </div>
+                            {wo.jobs.map(job => {
+                              const statusBadge = getStatusBadge(job.status)
+                              return (
+                                <div 
+                                  key={job.id} 
+                                  className="px-4 py-3 border-b border-gray-800 last:border-b-0 hover:bg-gray-800/30"
+                                >
+                                  <div className="grid grid-cols-12 gap-2 items-center">
+                                    <div className="col-span-2">
+                                      <span className="text-white font-mono text-sm">{job.job_number}</span>
+                                    </div>
+                                    <div className="col-span-3">
+                                      <div className="flex items-center gap-2">
+                                        <Package size={14} className="text-gray-500" />
+                                        <div>
+                                          <span className="text-skynet-accent text-sm font-mono">{job.component?.part_number}</span>
+                                          <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div className="col-span-1 text-center">
+                                      <span className="text-white text-sm">{job.quantity}</span>
+                                    </div>
+                                    <div className="col-span-3">
+                                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
+                                        {job.status === 'in_progress' && <Clock size={10} className="animate-pulse" />}
+                                        {job.status === 'complete' && <CheckCircle size={10} />}
+                                        {(job.status === 'pending_passivation' || job.status === 'in_passivation') && <Beaker size={10} />}
+                                        {statusBadge.label}
+                                      </span>
+                                    </div>
+                                    <div className="col-span-3 text-sm text-gray-400">
+                                      {job.status === 'complete' && job.good_pieces !== null && (
+                                        <span>{job.good_pieces}/{job.quantity} good</span>
+                                      )}
+                                      {job.status === 'assigned' && job.scheduled_start && (
+                                        <span>Scheduled: {new Date(job.scheduled_start).toLocaleString()}</span>
+                                      )}
+                                      {['in_setup', 'in_progress'].includes(job.status) && (
+                                        <span className="text-green-400">• Active</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between flex-shrink-0 bg-gray-900">
+              <span className="text-sm text-gray-500">
+                {filteredWOLookup.length} work order{filteredWOLookup.length !== 1 ? 's' : ''} found
+              </span>
+              <button
+                onClick={fetchWOLookup}
+                disabled={woLookupLoading}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-sm transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={16} className={woLookupLoading ? 'animate-spin' : ''} />
+                Refresh
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

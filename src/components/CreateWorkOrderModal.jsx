@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2 } from 'lucide-react'
+import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench } from 'lucide-react'
 
 export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machines }) {
   const [loading, setLoading] = useState(false)
@@ -481,7 +481,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                             {/* Available Components from BOM */}
                             <div className="space-y-1 mb-3">
                               {getAssemblyById(selected.assemblyId)?.assembly_bom
-                                ?.filter(bom => bom.component?.part_type === 'component')
+                                ?.filter(bom => bom.component?.part_type !== 'assembly')
                                 .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
                                 .map(bom => {
                                   const isAdded = selected.jobs.some(j => j.componentId === bom.component.id)

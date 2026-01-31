@@ -27,7 +27,8 @@ import {
   SendHorizontal,
   Layers,
   Edit3,
-  Timer
+  Timer,
+  Beaker
 } from 'lucide-react'
 
 export default function Kiosk() {
@@ -89,6 +90,12 @@ export default function Kiosk() {
   const [showExtendModal, setShowExtendModal] = useState(false)
   const [extendDuration, setExtendDuration] = useState({ hours: 0, minutes: 30 })
   const [maintenanceCompletionNotes, setMaintenanceCompletionNotes] = useState('')
+  const [secondaryCompletionForm, setSecondaryCompletionForm] = useState({
+    end_time: '',
+    good_pieces: 0,
+    bad_pieces: 0,
+    notes: ''
+  })
   const [downtimeForm, setDowntimeForm] = useState({
     reason: '',
     notes: '',
@@ -155,6 +162,51 @@ export default function Kiosk() {
   const [showMachineReadyModal, setShowMachineReadyModal] = useState(false)
   const [machineReadyNotes, setMachineReadyNotes] = useState('')
   const [clearingDowntime, setClearingDowntime] = useState(false)
+
+  // ========== SECONDARY OPERATION DETECTION ==========
+  // Detect if this is a secondary operation station (passivation, paint, etc.)
+  const isSecondaryStation = machine?.code?.toLowerCase().startsWith('pass') || 
+                             machine?.name?.toLowerCase().includes('passivation') ||
+                             machine?.code?.toLowerCase().startsWith('paint') ||
+                             machine?.name?.toLowerCase().includes('paint')
+  
+  const getSecondaryConfig = () => {
+    if (!machine) return null
+    const code = machine.code?.toLowerCase() || ''
+    const name = machine.name?.toLowerCase() || ''
+    
+    if (code.startsWith('pass') || name.includes('passivation')) {
+      return {
+        type: 'passivation',
+        title: 'Passivation',
+        pendingStatus: 'pending_passivation',
+        inProgressStatus: 'in_passivation',
+        nextStatus: 'pending_post_manufacturing',
+        startField: 'passivation_start',
+        endField: 'passivation_end',
+        operatorField: 'passivation_operator_id',
+        notesField: 'passivation_notes',
+        color: 'cyan'
+      }
+    }
+    if (code.startsWith('paint') || name.includes('paint')) {
+      return {
+        type: 'paint',
+        title: 'Paint',
+        pendingStatus: 'pending_paint',
+        inProgressStatus: 'in_paint',
+        nextStatus: 'pending_post_manufacturing',
+        startField: 'paint_start',
+        endField: 'paint_end',
+        operatorField: 'paint_operator_id',
+        notesField: 'paint_notes',
+        color: 'orange'
+      }
+    }
+    return null
+  }
+  
+  const secondaryConfig = machine ? getSecondaryConfig() : null
 
   // Common downtime reasons
   const DOWNTIME_REASONS = [
@@ -424,20 +476,44 @@ export default function Kiosk() {
     if (!machine) return
     setJobsLoading(true)
     try {
-      const { data, error } = await supabase
+      // Determine which statuses to query based on station type
+      let statusFilter
+      if (secondaryConfig) {
+        // Secondary operation stations (Passivation, Paint)
+        statusFilter = [secondaryConfig.pendingStatus, secondaryConfig.inProgressStatus]
+      } else {
+        // Normal production machines
+        statusFilter = ['assigned', 'in_setup', 'in_progress']
+      }
+      
+      let query = supabase
         .from('jobs')
         .select(`
           *,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
-          component:parts!component_id(id, part_number, description)
+          component:parts!component_id(id, part_number, description, requires_passivation)
         `)
-        .eq('assigned_machine_id', machine.id)
-        .in('status', ['assigned', 'in_setup', 'in_progress'])
+        .in('status', statusFilter)
         .order('scheduled_start', { ascending: true })
+      
+      // For secondary stations, show ALL jobs with that status (not filtered by machine)
+      // For production machines, filter by assigned machine
+      if (!secondaryConfig) {
+        query = query.eq('assigned_machine_id', machine.id)
+      }
+
+      const { data, error } = await query
 
       if (error) throw error
       setJobs(data || [])
-      const active = data?.find(j => j.status === 'in_setup' || j.status === 'in_progress')
+      
+      // Find active job
+      const activeStatus = secondaryConfig ? secondaryConfig.inProgressStatus : ['in_setup', 'in_progress']
+      const active = data?.find(j => 
+        Array.isArray(activeStatus) 
+          ? activeStatus.includes(j.status) 
+          : j.status === activeStatus
+      )
       setActiveJob(active || null)
     } catch (err) {
       console.error('Error loading jobs:', err)
@@ -1015,24 +1091,39 @@ export default function Kiosk() {
     if (!canOperate || !job) return
     setActionLoading(true)
     try {
-      // For maintenance orders, skip setup and go straight to in_progress
-      const jobIsMaintenance = isMaintenance(job)
       const now = new Date().toISOString()
       
-      const updateData = jobIsMaintenance 
-        ? {
-            status: 'in_progress',
-            setup_start: now,
-            production_start: now,
-            assigned_user_id: operator.id,
-            updated_at: now
-          }
-        : {
-            status: 'in_setup',
-            setup_start: now,
-            assigned_user_id: operator.id,
-            updated_at: now
-          }
+      // For maintenance orders, skip setup and go straight to in_progress
+      const jobIsMaintenance = isMaintenance(job)
+      
+      let updateData
+      
+      if (secondaryConfig) {
+        // Secondary operation (passivation, paint) - go directly to in_progress
+        updateData = {
+          status: secondaryConfig.inProgressStatus,
+          [secondaryConfig.startField]: now,
+          [secondaryConfig.operatorField]: operator.id,
+          updated_at: now
+        }
+      } else if (jobIsMaintenance) {
+        // Maintenance order - skip setup
+        updateData = {
+          status: 'in_progress',
+          setup_start: now,
+          production_start: now,
+          assigned_user_id: operator.id,
+          updated_at: now
+        }
+      } else {
+        // Normal production job - start setup
+        updateData = {
+          status: 'in_setup',
+          setup_start: now,
+          assigned_user_id: operator.id,
+          updated_at: now
+        }
+      }
       
       const { error } = await supabase
         .from('jobs')
@@ -1045,6 +1136,41 @@ export default function Kiosk() {
     } catch (err) {
       console.error('Error starting job:', err)
       alert('Failed to start: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  // Complete secondary operation (passivation, paint)
+  const handleCompleteSecondaryOperation = async () => {
+    if (!activeJob || !secondaryConfig) return
+    
+    setActionLoading(true)
+    try {
+      // Use form end_time or current time
+      const endTime = secondaryCompletionForm.end_time 
+        ? new Date(secondaryCompletionForm.end_time).toISOString()
+        : new Date().toISOString()
+      
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: secondaryConfig.nextStatus,
+          [secondaryConfig.endField]: endTime,
+          [secondaryConfig.notesField]: secondaryCompletionForm.notes || null,
+          good_pieces: secondaryCompletionForm.good_pieces || activeJob.quantity,
+          bad_pieces: secondaryCompletionForm.bad_pieces || 0,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', activeJob.id)
+
+      if (error) throw error
+      
+      resetCompleteModal()
+      await loadJobs()
+    } catch (err) {
+      console.error('Error completing secondary operation:', err)
+      alert('Failed to complete: ' + err.message)
     } finally {
       setActionLoading(false)
     }
@@ -1131,6 +1257,14 @@ export default function Kiosk() {
       if (error) throw error
       setNewTool({ tool_name: '', tool_type: '', serial_number: '' })
       await loadToolHistory(activeJob.id, activeJob.component?.id)
+
+      // Also refresh currentTools for active job display
+      const { data: updatedTools } = await supabase
+        .from('job_tools')
+        .select('*')
+        .eq('job_id', activeJob.id)
+        .order('added_at')
+      setCurrentTools(updatedTools || [])
     } catch (err) {
       console.error('Error adding tool:', err)
       alert('Failed to add tool: ' + err.message)
@@ -1183,6 +1317,14 @@ export default function Kiosk() {
         setToolToVerify(null)
         setVerifySerialInput('')
         await loadToolHistory(activeJob.id, activeJob.component?.id)
+        
+        // Also refresh currentTools for active job display
+        const { data: updatedTools } = await supabase
+          .from('job_tools')
+          .select('*')
+          .eq('job_id', activeJob.id)
+          .order('added_at')
+        setCurrentTools(updatedTools || [])
       } catch (err) {
         console.error('Error adding tool:', err)
         alert('Failed to add tool: ' + err.message)
@@ -1229,6 +1371,14 @@ export default function Kiosk() {
       setVerifySerialInput('')
       setVerifyStep('enter')
       await loadToolHistory(activeJob.id, activeJob.component?.id)
+      
+      // Also refresh currentTools for active job display
+      const { data: updatedTools } = await supabase
+        .from('job_tools')
+        .select('*')
+        .eq('job_id', activeJob.id)
+        .order('added_at')
+      setCurrentTools(updatedTools || [])
     } catch (err) {
       console.error('Error adding tool:', err)
       alert('Failed to add tool: ' + err.message)
@@ -1240,6 +1390,14 @@ export default function Kiosk() {
       const { error } = await supabase.from('job_tools').delete().eq('id', toolId)
       if (error) throw error
       await loadToolHistory(activeJob.id, activeJob.component?.id)
+      
+      // Also refresh currentTools for active job display
+      const { data: updatedTools } = await supabase
+        .from('job_tools')
+        .select('*')
+        .eq('job_id', activeJob.id)
+        .order('added_at')
+      setCurrentTools(updatedTools || [])
     } catch (err) {
       console.error('Error removing tool:', err)
       alert('Failed to remove tool: ' + err.message)
@@ -1901,10 +2059,15 @@ export default function Kiosk() {
         }
       }
 
+      // Determine next status based on part's passivation requirement
+      const nextStatus = activeJob.component?.requires_passivation 
+        ? 'pending_passivation' 
+        : 'pending_post_manufacturing'
+
       const { error } = await supabase
         .from('jobs')
         .update({
-          status: 'manufacturing_complete',
+          status: nextStatus,
           actual_end: new Date(completeForm.actual_end).toISOString(),
           good_pieces: goodPieces,
           bad_pieces: badPieces,
@@ -2429,22 +2592,31 @@ export default function Kiosk() {
           {/* Active Job Panel */}
           <div className="lg:col-span-2">
             <div className={`bg-gray-900 border rounded-lg overflow-hidden ${
-              activeJob && isMaintenance(activeJob)
-                ? activeJob.work_order?.maintenance_type === 'unplanned'
-                  ? 'border-purple-700'
-                  : 'border-blue-700'
-                : 'border-gray-800'
+              secondaryConfig
+                ? 'border-cyan-700'
+                : activeJob && isMaintenance(activeJob)
+                  ? activeJob.work_order?.maintenance_type === 'unplanned'
+                    ? 'border-purple-700'
+                    : 'border-blue-700'
+                  : 'border-gray-800'
             }`}>
               <div className={`px-4 py-3 border-b flex items-center justify-between ${
-                activeJob && isMaintenance(activeJob)
-                  ? activeJob.work_order?.maintenance_type === 'unplanned'
-                    ? 'border-purple-700 bg-purple-900/20'
-                    : 'border-blue-700 bg-blue-900/20'
-                  : 'border-gray-800'
+                secondaryConfig
+                  ? 'border-cyan-700 bg-cyan-900/20'
+                  : activeJob && isMaintenance(activeJob)
+                    ? activeJob.work_order?.maintenance_type === 'unplanned'
+                      ? 'border-purple-700 bg-purple-900/20'
+                      : 'border-blue-700 bg-blue-900/20'
+                    : 'border-gray-800'
               }`}>
                 <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                   {activeJob ? (
-                    isMaintenance(activeJob) ? (
+                    secondaryConfig ? (
+                      <>
+                        <Beaker className="text-cyan-500" size={20} />
+                        Active {secondaryConfig.title}
+                      </>
+                    ) : isMaintenance(activeJob) ? (
                       <>
                         <Wrench className={activeJob.work_order?.maintenance_type === 'unplanned' ? 'text-purple-500' : 'text-blue-500'} size={20} />
                         Active Downtime
@@ -2453,11 +2625,19 @@ export default function Kiosk() {
                       <><Play className="text-green-500" size={20} /> Active Job</>
                     )
                   ) : (
-                    <><Clock className="text-gray-500" size={20} /> No Active Job</>
+                    secondaryConfig ? (
+                      <><Beaker className="text-gray-500" size={20} /> {secondaryConfig.title} Station</>
+                    ) : (
+                      <><Clock className="text-gray-500" size={20} /> No Active Job</>
+                    )
                   )}
                 </h2>
                 {activeJob && (
-                  isMaintenance(activeJob) ? (
+                  secondaryConfig ? (
+                    <span className="text-xs px-2 py-1 rounded flex items-center gap-1 bg-cyan-900/50 text-cyan-400">
+                      Processing
+                    </span>
+                  ) : isMaintenance(activeJob) ? (
                     <span className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${
                       activeJob.work_order?.maintenance_type === 'unplanned'
                         ? 'bg-purple-900/50 text-purple-400'
@@ -2472,7 +2652,91 @@ export default function Kiosk() {
               </div>
 
               {activeJob ? (
-                isMaintenance(activeJob) ? (
+                secondaryConfig ? (
+                  /* Secondary Operation Active Panel (Passivation/Paint) */
+                  <div className="p-6">
+                    <div className="flex items-start justify-between mb-6">
+                      <div>
+                        <div className="flex items-center gap-3 mb-1">
+                          <Beaker className="text-cyan-400" size={24} />
+                          <span className="text-2xl font-bold font-mono text-cyan-400">
+                            {activeJob.job_number}
+                          </span>
+                        </div>
+                        <p className="text-gray-400">{activeJob.work_order?.wo_number} • {activeJob.work_order?.customer}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-cyan-400 text-sm font-medium">
+                          {secondaryConfig.title}
+                        </p>
+                        <p className="text-gray-500 text-xs">Secondary Operation</p>
+                      </div>
+                    </div>
+
+                    {/* Part Info */}
+                    <div className="bg-cyan-900/20 border border-cyan-800 rounded-lg p-4 mb-6">
+                      <div className="flex items-center gap-3 mb-2">
+                        <Package className="text-cyan-400" size={20} />
+                        <span className="text-cyan-400 font-mono text-lg">
+                          {activeJob.component?.part_number}
+                        </span>
+                      </div>
+                      <p className="text-gray-400 text-sm ml-8">{activeJob.component?.description}</p>
+                      <div className="flex items-center gap-6 mt-3 ml-8">
+                        <span className="text-gray-500 text-sm">
+                          Quantity: <span className="text-white">{activeJob.quantity}</span>
+                        </span>
+                        <span className="text-gray-500 text-sm">
+                          Good: <span className="text-green-400">{activeJob.good_pieces || 0}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Time Tracking */}
+                    <div className="grid grid-cols-2 gap-4 mb-6">
+                      <div className="bg-cyan-900/30 rounded-lg p-3 text-center">
+                        <p className="text-gray-500 text-xs mb-1">{secondaryConfig.title} Started</p>
+                        <p className="text-white font-mono">{formatTime(activeJob[secondaryConfig.startField])}</p>
+                      </div>
+                      <div className="bg-cyan-900/30 rounded-lg p-3 text-center">
+                        <p className="text-gray-500 text-xs mb-1">Duration</p>
+                        <p className="text-white font-mono flex items-center justify-center gap-2">
+                          <Timer size={16} className="text-cyan-400" />
+                          {(() => {
+                            const start = activeJob[secondaryConfig.startField]
+                            if (!start) return '-'
+                            const mins = Math.round((new Date() - new Date(start)) / 60000)
+                            return mins < 60 ? `${mins}m` : `${Math.floor(mins/60)}h ${mins%60}m`
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Complete Button */}
+                    {canOperate && (
+                      <button 
+                        onClick={() => {
+                          // Initialize form with current time and job quantity
+                          const now = new Date()
+                          const localDateTime = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+                            .toISOString().slice(0, 16)
+                          setSecondaryCompletionForm({
+                            end_time: localDateTime,
+                            good_pieces: activeJob.good_pieces || activeJob.quantity,
+                            bad_pieces: activeJob.bad_pieces || 0,
+                            notes: ''
+                          })
+                          setShowCompleteModal(true)
+                        }}
+                        disabled={actionLoading} 
+                        className="w-full py-4 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                      >
+                        {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
+                        Complete {secondaryConfig.title}
+                      </button>
+                    )}
+                  </div>
+                ) : isMaintenance(activeJob) ? (
                   /* Maintenance Order Active Panel */
                   <div className="p-6">
                     <div className="flex items-start justify-between mb-6">
@@ -2637,22 +2901,34 @@ export default function Kiosk() {
                             <Plus size={12} />{currentTools.length > 0 ? 'Add More' : 'Add Tooling'}
                           </button>
                         )}
-                        {canOperate && activeJob.status === 'in_progress' && currentTools.length > 0 && (
-                          <button 
-                            onClick={() => {
-                              setToolChangeForm({ 
-                                tool_id: '', 
-                                new_serial_number: '',
-                                start_time: formatDateTimeLocal(new Date()),
-                                duration_hours: 0,
-                                duration_mins: 5
-                              })
-                              setShowToolChangeModal(true)
-                            }}
-                            className="text-xs text-yellow-400 hover:text-yellow-300 flex items-center gap-1"
-                          >
-                            <Edit3 size={12} />Change Tool
-                          </button>
+                        {canOperate && activeJob.status === 'in_progress' && (
+                          <>
+                            {currentTools.length === 0 && (
+                              <button 
+                                onClick={handleOpenTooling}
+                                className="text-xs text-skynet-accent hover:text-blue-400 flex items-center gap-1"
+                              >
+                                <Plus size={12} />Add Tooling
+                              </button>
+                            )}
+                            {currentTools.length > 0 && (
+                              <button 
+                                onClick={() => {
+                                  setToolChangeForm({ 
+                                    tool_id: '', 
+                                    new_serial_number: '',
+                                    start_time: formatDateTimeLocal(new Date()),
+                                    duration_hours: 0,
+                                    duration_mins: 5
+                                  })
+                                  setShowToolChangeModal(true)
+                                }}
+                                className="text-xs text-yellow-400 hover:text-yellow-300 flex items-center gap-1"
+                              >
+                                <Edit3 size={12} />Change Tool
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -2871,9 +3147,24 @@ export default function Kiosk() {
                 </div>
               ) : (
                 <div className="p-12 text-center">
-                  <Clock className="w-16 h-16 text-gray-700 mx-auto mb-4" />
-                  <p className="text-gray-500 text-lg">No job currently in progress</p>
-                  <p className="text-gray-600 text-sm mt-2">{isViewOnly ? 'Waiting for operator to start a job' : 'Select a job from the queue to start setup'}</p>
+                  {secondaryConfig ? (
+                    <>
+                      <Beaker className="w-16 h-16 text-cyan-700 mx-auto mb-4" />
+                      <p className="text-gray-500 text-lg">No active {secondaryConfig.title.toLowerCase()} job</p>
+                      <p className="text-gray-600 text-sm mt-2">
+                        {jobs.length > 0 
+                          ? 'Select a job from the queue to begin processing'
+                          : `No jobs currently require ${secondaryConfig.title.toLowerCase()}`
+                        }
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-16 h-16 text-gray-700 mx-auto mb-4" />
+                      <p className="text-gray-500 text-lg">No job currently in progress</p>
+                      <p className="text-gray-600 text-sm mt-2">{isViewOnly ? 'Waiting for operator to start a job' : 'Select a job from the queue to start setup'}</p>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -2969,7 +3260,16 @@ export default function Kiosk() {
 
               {selectedJob && !activeJob && canOperate && (
                 <div className="p-4 border-t border-gray-800">
-                  {isMaintenance(selectedJob) ? (
+                  {secondaryConfig ? (
+                    <button 
+                      onClick={() => handleStartSetup(selectedJob)} 
+                      disabled={actionLoading} 
+                      className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Beaker size={20} />}
+                      Start {secondaryConfig.title} - {selectedJob.job_number}
+                    </button>
+                  ) : isMaintenance(selectedJob) ? (
                     <button 
                       onClick={() => handleStartSetup(selectedJob)} 
                       disabled={actionLoading} 
@@ -3421,6 +3721,111 @@ export default function Kiosk() {
       {/* Complete Job Modal */}
       {showCompleteModal && activeJob && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          {secondaryConfig ? (
+            /* Secondary Operation Completion Modal */
+            <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md">
+              <div className="px-6 py-4 border-b border-cyan-700 bg-cyan-900/20">
+                <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                  <CheckCircle className="text-green-500" size={24} />
+                  Complete {secondaryConfig.title}
+                </h2>
+                <p className="text-gray-500 text-sm">
+                  {activeJob.job_number} • {activeJob.component?.part_number}
+                </p>
+              </div>
+
+              <div className="p-6 space-y-4">
+                {/* Info summary */}
+                <div className="bg-cyan-900/30 rounded-lg p-4">
+                  <div className="flex items-center justify-between text-sm mb-2">
+                    <span className="text-gray-400">Part:</span>
+                    <span className="text-white font-mono">{activeJob.component?.part_number}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400">Started:</span>
+                    <span className="text-white">{formatDateTime(activeJob[secondaryConfig.startField])}</span>
+                  </div>
+                </div>
+
+                {/* End Time */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">End Time *</label>
+                  <input 
+                    type="datetime-local" 
+                    value={secondaryCompletionForm.end_time} 
+                    onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, end_time: e.target.value})} 
+                    className="w-full px-4 py-3 bg-gray-800 border border-cyan-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
+                    style={{ colorScheme: 'dark' }} 
+                  />
+                </div>
+
+                {/* Quantity Row */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-2">Good Pieces</label>
+                    <input 
+                      type="number" 
+                      min="0"
+                      value={secondaryCompletionForm.good_pieces} 
+                      onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, good_pieces: parseInt(e.target.value) || 0})} 
+                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-2">Bad Pieces</label>
+                    <input 
+                      type="number" 
+                      min="0"
+                      value={secondaryCompletionForm.bad_pieces} 
+                      onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, bad_pieces: parseInt(e.target.value) || 0})} 
+                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Quantity validation warning */}
+                {(secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces) !== activeJob.quantity && (
+                  <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 flex items-start gap-2">
+                    <AlertTriangle size={18} className="text-yellow-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-yellow-400 text-sm">
+                      Total ({secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces}) doesn't match job quantity ({activeJob.quantity})
+                    </p>
+                  </div>
+                )}
+
+                {/* Notes */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">
+                    Completion Notes (Optional)
+                  </label>
+                  <textarea
+                    value={secondaryCompletionForm.notes}
+                    onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, notes: e.target.value})}
+                    placeholder={`Any observations during ${secondaryConfig.title.toLowerCase()}...`}
+                    rows={3}
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-cyan-500 focus:outline-none resize-none"
+                  />
+                </div>
+              </div>
+
+              <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+                <button 
+                  onClick={resetCompleteModal} 
+                  className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleCompleteSecondaryOperation}
+                  disabled={actionLoading || !secondaryCompletionForm.end_time} 
+                  className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
+                  Complete
+                </button>
+              </div>
+            </div>
+          ) : (
           <div className={`bg-gray-900 border rounded-lg w-full max-w-md ${
             isMaintenance(activeJob) 
               ? activeJob.work_order?.maintenance_type === 'unplanned'
@@ -3919,6 +4324,7 @@ export default function Kiosk() {
             </>
             )}
           </div>
+          )}
         </div>
       )}
 

@@ -21,6 +21,8 @@ function MainApp() {
   // Track if we've already initialized to prevent duplicate fetches
   const initializedRef = useRef(false)
   const fetchingProfileRef = useRef(false)
+  // Track sign-in status via ref to avoid stale closure in auth listener
+  const hasSignedInRef = useRef(false)
 
   useEffect(() => {
     // Prevent double initialization in React strict mode
@@ -36,6 +38,7 @@ function MainApp() {
         if (session?.user) {
           console.log('Found existing session for:', session.user.email)
           setUser(session.user)
+          hasSignedInRef.current = true
           await fetchProfile(session.user.id)
         } else {
           console.log('No existing session')
@@ -54,9 +57,10 @@ function MainApp() {
       async (event, session) => {
         console.log('Auth event:', event)
         
-        // Only handle actual sign-in events (not initial session detection)
-        if (event === 'SIGNED_IN' && session?.user && !user) {
+        // Only handle actual new sign-in events (not token refreshes or existing sessions)
+        if (event === 'SIGNED_IN' && session?.user && !hasSignedInRef.current) {
           console.log('New sign in detected')
+          hasSignedInRef.current = true
           setUser(session.user)
           setShowLoadingScreen(true)
           await fetchProfile(session.user.id)
@@ -65,6 +69,7 @@ function MainApp() {
         
         if (event === 'SIGNED_OUT') {
           console.log('Sign out detected')
+          hasSignedInRef.current = false
           setUser(null)
           setProfile(null)
           setCurrentPage('dashboard')

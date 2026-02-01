@@ -6,6 +6,8 @@ import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ComplianceReview from '../components/ComplianceReview'
 import Assembly from '../components/Assembly'
+import TCOReview from '../components/TCOReview'
+import EditWorkOrderModal from '../components/EditWorkOrderModal'
 
 export default function Dashboard({ user, profile }) {
   const [machines, setMachines] = useState([])
@@ -16,6 +18,8 @@ export default function Dashboard({ user, profile }) {
   const [expandedLocations, setExpandedLocations] = useState({})
   const [selectedView, setSelectedView] = useState('lineup')
   const [assemblyWOs, setAssemblyWOs] = useState([])
+  const [assemblyCount, setAssemblyCount] = useState(0)
+  const [tcoWOs, setTcoWOs] = useState([])
   
   // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
@@ -41,6 +45,14 @@ export default function Dashboard({ user, profile }) {
   const [woLookupLoading, setWOLookupLoading] = useState(false)
   const [woLookupSearch, setWOLookupSearch] = useState('')
   const [expandedWOs, setExpandedWOs] = useState({})
+  
+  // WO Edit modal state
+  const [editingWO, setEditingWO] = useState(null)
+  
+  // Cancel job state (two-step confirmation in WO Lookup)
+  const [cancellingJobId, setCancellingJobId] = useState(null)
+  const [cancelStep, setCancelStep] = useState(0) // 0=none, 1=first warning, 2=final confirmation
+  const [cancelSaving, setCancelSaving] = useState(false)
 
   // Memoized fetch function
   const fetchData = useCallback(async (isAutoRefresh = false) => {
@@ -71,7 +83,7 @@ export default function Dashboard({ user, profile }) {
         .select(`
           *,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
-          component:parts!component_id(id, part_number, description),
+          component:parts!component_id(id, part_number, description, part_type),
           assigned_machine:machines(id, name, code)
         `)
         .not('status', 'eq', 'complete')
@@ -102,29 +114,58 @@ export default function Dashboard({ user, profile }) {
       }
 
       // Fetch for assembly-ready work orders
-      // A WO is ready for assembly when ALL its jobs have status ready_for_assembly
+      // An assembly is ready when ALL its linked jobs have status ready_for_assembly
       const { data: woWithJobs } = await supabase
         .from('work_orders')
         .select(`
           id,
           wo_number,
           order_type,
-          jobs (id, status)
+          work_order_assemblies (id, assembly_id, status),
+          jobs (id, status, work_order_assembly_id)
         `)
         .not('order_type', 'eq', 'maintenance')
 
-      // Filter to WOs where ALL jobs are ready_for_assembly (or in_assembly)
-      const assemblyReadyWOs = (woWithJobs || []).filter(wo => {
-        if (!wo.jobs || wo.jobs.length === 0) return false
-        // All jobs must be in assembly-related statuses
-        return wo.jobs.every(job => 
-          ['ready_for_assembly', 'in_assembly', 'complete'].includes(job.status)
-        ) && wo.jobs.some(job => 
-          ['ready_for_assembly', 'in_assembly'].includes(job.status)
-        )
-      })
+      // Count per-assembly readiness (each WOA is independent)
+      let assemblyReadyCount = 0
+      const assemblyReadyWOSet = new Set()
+      for (const wo of (woWithJobs || [])) {
+        if (wo.work_order_assemblies && wo.work_order_assemblies.length > 0) {
+          for (const woa of wo.work_order_assemblies) {
+            const woaJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
+            const allReady = woaJobs.length > 0 && woaJobs.every(j =>
+              ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
+            )
+            const hasWork = woaJobs.some(j =>
+              ['ready_for_assembly', 'in_assembly'].includes(j.status)
+            )
+            if (allReady && hasWork && woa.status !== 'complete') {
+              assemblyReadyCount++
+              assemblyReadyWOSet.add(wo.id)
+            }
+          }
+        } else {
+          // Fallback: WO-level check for WOs without work_order_assemblies
+          if (wo.jobs?.length > 0 && 
+              wo.jobs.every(j => ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)) &&
+              wo.jobs.some(j => ['ready_for_assembly', 'in_assembly'].includes(j.status))) {
+            assemblyReadyCount++
+            assemblyReadyWOSet.add(wo.id)
+          }
+        }
+      }
 
+      // Store WOs for navigation (any WO that has at least one ready assembly)
+      const assemblyReadyWOs = (woWithJobs || []).filter(wo => assemblyReadyWOSet.has(wo.id))
       setAssemblyWOs(assemblyReadyWOs)
+      setAssemblyCount(assemblyReadyCount)
+
+      // Count WOs pending TCO (at least one job in pending_tco)
+      const tcoReadyWOs = (woWithJobs || []).filter(wo => {
+        if (!wo.jobs || wo.jobs.length === 0) return false
+        return wo.jobs.some(job => job.status === 'pending_tco')
+      })
+      setTcoWOs(tcoReadyWOs)
 
       // NEW: Fetch active unplanned maintenance jobs (status = in_progress or assigned, maintenance_type = unplanned)
       // that are currently scheduled (scheduled_start <= now <= scheduled_end)
@@ -207,15 +248,6 @@ export default function Dashboard({ user, profile }) {
     }
   }, [autoRefresh, fetchData])
 
-  // Helper to detect secondary operation stations
-  const isSecondaryStation = (machine) => {
-    if (!machine) return false
-    const code = machine.code?.toLowerCase() || ''
-    const name = machine.name?.toLowerCase() || ''
-    return code.startsWith('pass') || name.includes('passivation') ||
-           code.startsWith('paint') || name.includes('paint')
-  }
-
   // Get secondary config for a machine
   const getSecondaryConfig = (machine) => {
     if (!machine) return null
@@ -270,7 +302,7 @@ export default function Dashboard({ user, profile }) {
   const fetchWOLookup = async () => {
     setWOLookupLoading(true)
     try {
-      // Get all work orders that have at least one non-complete job
+      // Get all work orders with their assemblies and jobs
       const { data: workOrders, error: woError } = await supabase
         .from('work_orders')
         .select(`
@@ -283,6 +315,14 @@ export default function Dashboard({ user, profile }) {
           maintenance_type,
           status,
           created_at,
+          work_order_assemblies (
+            id,
+            quantity,
+            status,
+            good_quantity,
+            bad_quantity,
+            assembly:parts!assembly_id(id, part_number, description)
+          ),
           jobs (
             id,
             job_number,
@@ -292,6 +332,7 @@ export default function Dashboard({ user, profile }) {
             bad_pieces,
             assigned_machine_id,
             scheduled_start,
+            work_order_assembly_id,
             component:parts!component_id(part_number, description)
           )
         `)
@@ -351,6 +392,8 @@ export default function Dashboard({ user, profile }) {
       in_passivation: { label: 'In Passivation', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
       pending_post_manufacturing: { label: 'Post-Mfg Review', color: 'bg-orange-900/50 text-orange-300 border-orange-700' },
       ready_for_assembly: { label: 'Ready for Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
+      in_assembly: { label: 'In Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
+      pending_tco: { label: 'Pending TCO', color: 'bg-amber-900/50 text-amber-300 border-amber-700' },
       complete: { label: 'Complete', color: 'bg-gray-800 text-gray-400 border-gray-700' },
       incomplete: { label: 'Incomplete', color: 'bg-red-900/50 text-red-300 border-red-700' },
       cancelled: { label: 'Cancelled', color: 'bg-gray-800 text-gray-500 border-gray-700' }
@@ -367,7 +410,12 @@ export default function Dashboard({ user, profile }) {
     if (wo.wo_number?.toLowerCase().includes(search)) return true
     if (wo.customer?.toLowerCase().includes(search)) return true
     
-    // Search job numbers and part numbers
+    // Search assembly part numbers
+    if (wo.work_order_assemblies?.some(woa => 
+      woa.assembly?.part_number?.toLowerCase().includes(search)
+    )) return true
+    
+    // Search job numbers and component part numbers
     return wo.jobs?.some(job => 
       job.job_number?.toLowerCase().includes(search) ||
       job.component?.part_number?.toLowerCase().includes(search)
@@ -522,6 +570,46 @@ export default function Dashboard({ user, profile }) {
     }
   }
 
+  // WO Lookup cancel job - two-step confirmation
+  const handleWOLookupCancelStart = (jobId) => {
+    setCancellingJobId(jobId)
+    setCancelStep(1)
+  }
+
+  const handleWOLookupCancelConfirm = async () => {
+    if (!cancellingJobId) return
+    
+    setCancelSaving(true)
+    try {
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: 'cancelled',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', cancellingJobId)
+      
+      if (error) {
+        console.error('Error cancelling job:', error)
+        alert('Failed to cancel job')
+      } else {
+        setCancellingJobId(null)
+        setCancelStep(0)
+        fetchWOLookup()
+        fetchData()
+      }
+    } catch (err) {
+      console.error('Unexpected error:', err)
+    } finally {
+      setCancelSaving(false)
+    }
+  }
+
+  const handleWOLookupCancelDismiss = () => {
+    setCancellingJobId(null)
+    setCancelStep(0)
+  }
+
   const StatCard = ({ id, label, value, colorClass = 'text-white', borderClass = 'border-gray-800', onClick, alert = false }) => {
     const isSelected = selectedView === id
     return (
@@ -564,7 +652,7 @@ export default function Dashboard({ user, profile }) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-12">
       {/* Action Bar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -635,7 +723,7 @@ export default function Dashboard({ user, profile }) {
       </div>
 
       {/* Stats Bar - ordered to follow process flow */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <StatCard
           id="lineup"
           label="Machine Lineup"
@@ -669,9 +757,17 @@ export default function Dashboard({ user, profile }) {
         <StatCard
           id="assembly"
           label="Assembly"
-          value={assemblyWOs.length}
+          value={assemblyCount}
           colorClass="text-green-400"
-          borderClass={assemblyWOs.length > 0 ? 'border-green-800' : 'border-gray-800'}
+          borderClass={assemblyCount > 0 ? 'border-green-800' : 'border-gray-800'}
+          onClick={setSelectedView}
+        />
+        <StatCard
+          id="tco"
+          label="TCO Review"
+          value={tcoWOs.length}
+          colorClass="text-amber-400"
+          borderClass={tcoWOs.length > 0 ? 'border-amber-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
       </div>
@@ -1126,6 +1222,11 @@ export default function Dashboard({ user, profile }) {
         </div>
       )}
 
+      {/* TCO Review View */}
+      {selectedView === 'tco' && (
+        <TCOReview profile={profile} onUpdate={fetchData} />
+      )}
+
       {/* Work Order Lookup Modal */}
       {showWOLookup && (
         <div className="fixed inset-0 bg-black/70 flex items-start justify-center z-50 p-4 overflow-y-auto">
@@ -1200,9 +1301,9 @@ export default function Dashboard({ user, profile }) {
                             : 'border-gray-700 bg-gray-800/50'
                       }`}>
                         {/* WO Header Row */}
-                        <button
+                        <div
                           onClick={() => setExpandedWOs(prev => ({ ...prev, [wo.id]: !prev[wo.id] }))}
-                          className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+                          className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors cursor-pointer"
                         >
                           <div className="flex items-center gap-4">
                             <ChevronRight 
@@ -1246,72 +1347,219 @@ export default function Dashboard({ user, profile }) {
                             </div>
                           </div>
                           <div className="flex items-center gap-3">
+                            {/* Edit WO button - only for non-maintenance orders */}
+                            {wo.order_type !== 'maintenance' && !allJobsComplete && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setEditingWO(wo)
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs border border-skynet-accent/50 text-skynet-accent hover:bg-skynet-accent/10 transition-colors"
+                                title="Edit work order"
+                              >
+                                <Edit3 size={12} />
+                                Edit
+                              </button>
+                            )}
                             <div className="text-right">
                               <span className="text-sm text-gray-400">
                                 {wo.jobs?.filter(j => j.status === 'complete').length || 0}/{totalJobs} complete
                               </span>
                             </div>
                           </div>
-                        </button>
+                        </div>
 
-                        {/* Expanded Jobs List */}
-                        {isExpanded && wo.jobs && wo.jobs.length > 0 && (
+                        {/* Expanded Assembly & Jobs Hierarchy */}
+                        {isExpanded && (
                           <div className="border-t border-gray-700 bg-gray-900/50">
-                            <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-700">
-                              <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
-                                <div className="col-span-2">Job #</div>
-                                <div className="col-span-3">Part</div>
-                                <div className="col-span-1 text-center">Qty</div>
-                                <div className="col-span-3">Status</div>
-                                <div className="col-span-3">Progress</div>
-                              </div>
-                            </div>
-                            {wo.jobs.map(job => {
-                              const statusBadge = getStatusBadge(job.status)
-                              return (
-                                <div 
-                                  key={job.id} 
-                                  className="px-4 py-3 border-b border-gray-800 last:border-b-0 hover:bg-gray-800/30"
-                                >
-                                  <div className="grid grid-cols-12 gap-2 items-center">
-                                    <div className="col-span-2">
-                                      <span className="text-white font-mono text-sm">{job.job_number}</span>
-                                    </div>
-                                    <div className="col-span-3">
-                                      <div className="flex items-center gap-2">
-                                        <Package size={14} className="text-gray-500" />
-                                        <div>
-                                          <span className="text-skynet-accent text-sm font-mono">{job.component?.part_number}</span>
-                                          <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                            {/* Show assemblies with their jobs */}
+                            {wo.work_order_assemblies && wo.work_order_assemblies.length > 0 ? (
+                              wo.work_order_assemblies.map(woa => {
+                                // Only show jobs actually linked to THIS assembly
+                                const assemblyJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
+                                
+                                return (
+                                  <div key={woa.id}>
+                                    {/* Assembly Header */}
+                                    <div className="px-4 py-3 bg-gray-800/50 border-b border-gray-700">
+                                      <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                          <Package size={18} className="text-skynet-accent" />
+                                          <div>
+                                            <span className="text-skynet-accent font-mono font-medium">
+                                              {woa.assembly?.part_number || 'Unknown Assembly'}
+                                            </span>
+                                            <p className="text-xs text-gray-400">{woa.assembly?.description}</p>
+                                          </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 text-sm">
+                                          <span className="text-gray-500">Qty: {woa.quantity}</span>
+                                          {woa.status === 'complete' && (
+                                            <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-400 rounded">
+                                              {woa.good_quantity}/{woa.quantity} good
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
-                                    <div className="col-span-1 text-center">
-                                      <span className="text-white text-sm">{job.quantity}</span>
-                                    </div>
-                                    <div className="col-span-3">
-                                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
-                                        {job.status === 'in_progress' && <Clock size={10} className="animate-pulse" />}
-                                        {job.status === 'complete' && <CheckCircle size={10} />}
-                                        {(job.status === 'pending_passivation' || job.status === 'in_passivation') && <Beaker size={10} />}
-                                        {statusBadge.label}
-                                      </span>
-                                    </div>
-                                    <div className="col-span-3 text-sm text-gray-400">
-                                      {job.status === 'complete' && job.good_pieces !== null && (
-                                        <span>{job.good_pieces}/{job.quantity} good</span>
-                                      )}
-                                      {job.status === 'assigned' && job.scheduled_start && (
-                                        <span>Scheduled: {new Date(job.scheduled_start).toLocaleString()}</span>
-                                      )}
-                                      {['in_setup', 'in_progress'].includes(job.status) && (
-                                        <span className="text-green-400">• Active</span>
-                                      )}
-                                    </div>
+
+                                    {/* Jobs under this assembly */}
+                                    {assemblyJobs.length > 0 ? (
+                                      <>
+                                        <div className="px-4 py-2 pl-10 bg-gray-800/20 border-b border-gray-700">
+                                          <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
+                                            <div className="col-span-2">Job #</div>
+                                            <div className="col-span-3">Component</div>
+                                            <div className="col-span-1 text-center">Qty</div>
+                                            <div className="col-span-2">Status</div>
+                                            <div className="col-span-2">Progress</div>
+                                            <div className="col-span-2 text-right">Actions</div>
+                                          </div>
+                                        </div>
+                                        {assemblyJobs.map(job => {
+                                          const statusBadge = getStatusBadge(job.status)
+                                          const canCancel = !['complete', 'cancelled'].includes(job.status)
+                                          return (
+                                            <div 
+                                              key={job.id} 
+                                              className="px-4 py-3 pl-10 border-b border-gray-800 last:border-b-0 hover:bg-gray-800/30"
+                                            >
+                                              <div className="grid grid-cols-12 gap-2 items-center">
+                                                <div className="col-span-2">
+                                                  <span className="text-white font-mono text-sm">{job.job_number}</span>
+                                                </div>
+                                                <div className="col-span-3">
+                                                  <div className="flex items-center gap-2">
+                                                    <Wrench size={12} className="text-gray-500" />
+                                                    <div>
+                                                      <span className="text-gray-300 text-sm font-mono">{job.component?.part_number}</span>
+                                                      <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                                <div className="col-span-1 text-center">
+                                                  <span className="text-white text-sm">{job.quantity}</span>
+                                                </div>
+                                                <div className="col-span-2">
+                                                  <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
+                                                    {job.status === 'in_progress' && <Clock size={10} className="animate-pulse" />}
+                                                    {job.status === 'complete' && <CheckCircle size={10} />}
+                                                    {(job.status === 'pending_passivation' || job.status === 'in_passivation') && <Beaker size={10} />}
+                                                    {statusBadge.label}
+                                                  </span>
+                                                </div>
+                                                <div className="col-span-2 text-sm text-gray-400">
+                                                  {job.status === 'complete' && job.good_pieces !== null && (
+                                                    <span>{job.good_pieces}/{job.quantity} good</span>
+                                                  )}
+                                                  {job.status === 'assigned' && job.scheduled_start && (
+                                                    <span>Sched: {new Date(job.scheduled_start).toLocaleDateString()}</span>
+                                                  )}
+                                                  {['in_setup', 'in_progress'].includes(job.status) && (
+                                                    <span className="text-green-400">• Active</span>
+                                                  )}
+                                                </div>
+                                                <div className="col-span-2 text-right">
+                                                  {canCancel && (
+                                                    <button
+                                                      onClick={() => handleWOLookupCancelStart(job.id)}
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-900/30 border border-red-800/50 hover:border-red-700 rounded transition-colors"
+                                                    >
+                                                      <X size={12} />
+                                                      Cancel
+                                                    </button>
+                                                  )}
+                                                </div>
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </>
+                                    ) : (
+                                      <div className="px-4 py-3 pl-10 text-sm text-gray-500 italic border-b border-gray-700">
+                                        No jobs linked to this assembly
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })
+                            ) : wo.jobs && wo.jobs.length > 0 ? (
+                              // Fallback: No assemblies, just show jobs directly (maintenance orders, etc.)
+                              <>
+                                <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-700">
+                                  <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
+                                    <div className="col-span-2">Job #</div>
+                                    <div className="col-span-3">Part</div>
+                                    <div className="col-span-1 text-center">Qty</div>
+                                    <div className="col-span-2">Status</div>
+                                    <div className="col-span-2">Progress</div>
+                                    <div className="col-span-2 text-right">Actions</div>
                                   </div>
                                 </div>
-                              )
-                            })}
+                                {wo.jobs.map(job => {
+                                  const statusBadge = getStatusBadge(job.status)
+                                  const canCancel = !['complete', 'cancelled'].includes(job.status)
+                                  return (
+                                    <div 
+                                      key={job.id} 
+                                      className="px-4 py-3 border-b border-gray-800 last:border-b-0 hover:bg-gray-800/30"
+                                    >
+                                      <div className="grid grid-cols-12 gap-2 items-center">
+                                        <div className="col-span-2">
+                                          <span className="text-white font-mono text-sm">{job.job_number}</span>
+                                        </div>
+                                        <div className="col-span-3">
+                                          <div className="flex items-center gap-2">
+                                            <Package size={14} className="text-gray-500" />
+                                            <div>
+                                              <span className="text-skynet-accent text-sm font-mono">{job.component?.part_number}</span>
+                                              <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                                            </div>
+                                          </div>
+                                        </div>
+                                        <div className="col-span-1 text-center">
+                                          <span className="text-white text-sm">{job.quantity}</span>
+                                        </div>
+                                        <div className="col-span-2">
+                                          <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
+                                            {job.status === 'in_progress' && <Clock size={10} className="animate-pulse" />}
+                                            {job.status === 'complete' && <CheckCircle size={10} />}
+                                            {(job.status === 'pending_passivation' || job.status === 'in_passivation') && <Beaker size={10} />}
+                                            {statusBadge.label}
+                                          </span>
+                                        </div>
+                                        <div className="col-span-2 text-sm text-gray-400">
+                                          {job.status === 'complete' && job.good_pieces !== null && (
+                                            <span>{job.good_pieces}/{job.quantity} good</span>
+                                          )}
+                                          {job.status === 'assigned' && job.scheduled_start && (
+                                            <span>Sched: {new Date(job.scheduled_start).toLocaleDateString()}</span>
+                                          )}
+                                          {['in_setup', 'in_progress'].includes(job.status) && (
+                                            <span className="text-green-400">• Active</span>
+                                          )}
+                                        </div>
+                                        <div className="col-span-2 text-right">
+                                          {canCancel && (
+                                            <button
+                                              onClick={() => handleWOLookupCancelStart(job.id)}
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-900/30 border border-red-800/50 hover:border-red-700 rounded transition-colors"
+                                            >
+                                              <X size={12} />
+                                              Cancel
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </>
+                            ) : (
+                              <div className="px-4 py-6 text-center text-gray-500">
+                                No jobs found for this work order
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1335,6 +1583,108 @@ export default function Dashboard({ user, profile }) {
                 Refresh
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Work Order Modal */}
+      {editingWO && (
+        <EditWorkOrderModal
+          isOpen={!!editingWO}
+          onClose={() => setEditingWO(null)}
+          workOrder={editingWO}
+          onSuccess={() => {
+            fetchWOLookup()
+            fetchData()
+          }}
+        />
+      )}
+
+      {/* Cancel Job Confirmation Modal (Two-Step) */}
+      {cancellingJobId && cancelStep > 0 && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]" onClick={handleWOLookupCancelDismiss}>
+          <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl" onClick={e => e.stopPropagation()}>
+            {cancelStep === 1 ? (
+              <>
+                {/* Step 1: First Warning */}
+                <div className="flex items-start gap-3 mb-4">
+                  <div className="p-2 bg-yellow-900/30 rounded-lg">
+                    <AlertTriangle size={24} className="text-yellow-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Cancel This Job?</h3>
+                    <p className="text-gray-400 text-sm mt-1">
+                      This action will remove the job from all queues. Are you sure you want to proceed?
+                    </p>
+                  </div>
+                </div>
+                <div className="bg-yellow-900/20 border border-yellow-800 rounded-lg p-3 mb-6">
+                  <p className="text-yellow-300 text-sm">
+                    ⚠ Cancelled jobs cannot be restarted. You would need to create a new work order to replace this job.
+                  </p>
+                </div>
+                <div className="flex items-center justify-end gap-3">
+                  <button
+                    onClick={handleWOLookupCancelDismiss}
+                    className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                  >
+                    Never Mind
+                  </button>
+                  <button
+                    onClick={() => setCancelStep(2)}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-600 text-white font-medium rounded transition-colors"
+                  >
+                    <AlertTriangle size={16} />
+                    Yes, I Want to Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Step 2: Final Confirmation */}
+                <div className="flex items-start gap-3 mb-4">
+                  <div className="p-2 bg-red-900/30 rounded-lg">
+                    <Trash2 size={24} className="text-red-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-red-400">Final Confirmation</h3>
+                    <p className="text-gray-400 text-sm mt-1">
+                      This is permanent. The job will be marked as cancelled and removed from all workflows.
+                    </p>
+                  </div>
+                </div>
+                <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 mb-6">
+                  <p className="text-red-300 text-sm font-medium">
+                    🚫 This cannot be undone. The job will be permanently cancelled.
+                  </p>
+                </div>
+                <div className="flex items-center justify-end gap-3">
+                  <button
+                    onClick={handleWOLookupCancelDismiss}
+                    className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                  >
+                    Go Back
+                  </button>
+                  <button
+                    onClick={handleWOLookupCancelConfirm}
+                    disabled={cancelSaving}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded transition-colors disabled:opacity-50"
+                  >
+                    {cancelSaving ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Cancelling...
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 size={16} />
+                        Permanently Cancel Job
+                      </>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -1,18 +1,21 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database } from 'lucide-react'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import Secondary from './pages/Secondary'
+import MasterData from './pages/MasterData'
+import LoadingScreen from './components/LoadingScreen'
 
 // Main authenticated app component
 function MainApp() {
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [showLoadingScreen, setShowLoadingScreen] = useState(false)
   const [currentPage, setCurrentPage] = useState('dashboard')
   
   // Track if we've already initialized to prevent duplicate fetches
@@ -55,6 +58,7 @@ function MainApp() {
         if (event === 'SIGNED_IN' && session?.user && !user) {
           console.log('New sign in detected')
           setUser(session.user)
+          setShowLoadingScreen(true)
           await fetchProfile(session.user.id)
           setLoading(false)
         }
@@ -114,11 +118,15 @@ function MainApp() {
 
   // Check if user can access scheduling
   const canAccessSchedule = profile?.role === 'admin' || profile?.role === 'scheduler'
+  
+  // Check if user can access master data (admin only)
+  const canAccessMasterData = profile?.role === 'admin'
 
   // Get page title for header
   const getPageTitle = () => {
     switch (currentPage) {
       case 'schedule': return 'Schedule'
+      case 'masterdata': return 'Master Data'
       default: return 'Dashboard'
     }
   }
@@ -135,7 +143,14 @@ function MainApp() {
   }
 
   if (!user) {
-    return <Login onLogin={setUser} />
+    return <Login onLogin={(u) => {
+      setUser(u)
+      setShowLoadingScreen(true)
+    }} />
+  }
+
+  if (showLoadingScreen) {
+    return <LoadingScreen onComplete={() => setShowLoadingScreen(false)} />
   }
 
   return (
@@ -144,6 +159,11 @@ function MainApp() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-3">
+              {/* Skybolt logo badge */}
+              <div className="flex items-center">
+                <img src="/skybolt-logo-white.png" alt="Skybolt" className="h-7 w-auto opacity-80" />
+              </div>
+              <span className="text-gray-700">|</span>
               <button 
                 onClick={() => setCurrentPage('dashboard')}
                 className="text-2xl font-bold text-white hover:text-skynet-accent transition-colors"
@@ -159,30 +179,38 @@ function MainApp() {
           
           <div className="flex items-center gap-2">
             {/* Navigation buttons for authorized roles */}
-            {canAccessSchedule && (
-              <>
-                {/* Dashboard button - shown when on Schedule page */}
-                {currentPage === 'schedule' && (
-                  <button
-                    onClick={() => setCurrentPage('dashboard')}
-                    className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
-                  >
-                    <LayoutDashboard size={18} />
-                    <span className="text-sm font-medium">Dashboard</span>
-                  </button>
-                )}
-                
-                {/* Schedule button - shown when on Dashboard */}
-                {currentPage === 'dashboard' && (
-                  <button
-                    onClick={() => setCurrentPage('schedule')}
-                    className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
-                  >
-                    <Calendar size={18} />
-                    <span className="text-sm font-medium">Schedule</span>
-                  </button>
-                )}
-              </>
+            
+            {/* Dashboard button - shown when not on Dashboard */}
+            {currentPage !== 'dashboard' && (
+              <button
+                onClick={() => setCurrentPage('dashboard')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <LayoutDashboard size={18} />
+                <span className="text-sm font-medium">Dashboard</span>
+              </button>
+            )}
+            
+            {/* Schedule button - shown when on Dashboard and user has access */}
+            {currentPage === 'dashboard' && canAccessSchedule && (
+              <button
+                onClick={() => setCurrentPage('schedule')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <Calendar size={18} />
+                <span className="text-sm font-medium">Schedule</span>
+              </button>
+            )}
+            
+            {/* Master Data button - shown when on Dashboard and user is admin */}
+            {currentPage === 'dashboard' && canAccessMasterData && (
+              <button
+                onClick={() => setCurrentPage('masterdata')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <Database size={18} />
+                <span className="text-sm font-medium">Master Data</span>
+              </button>
             )}
             
             <div className="text-right ml-2">
@@ -199,20 +227,25 @@ function MainApp() {
         </div>
       </header>
 
-      <main className="p-6">
+      <main className={currentPage === 'masterdata' ? '' : 'p-6'}>
         {currentPage === 'dashboard' && (
           <Dashboard user={user} profile={profile} />
         )}
         {currentPage === 'schedule' && canAccessSchedule && (
           <Schedule user={user} profile={profile} onNavigate={setCurrentPage} />
         )}
+        {currentPage === 'masterdata' && canAccessMasterData && (
+          <MasterData profile={profile} />
+        )}
       </main>
 
-      <footer className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">
-        <p className="text-gray-600 text-xs text-center font-mono">
-          "Don't worry, this one just schedules fasteners." - SkyNet MES v0.1
-        </p>
-      </footer>
+      {currentPage !== 'masterdata' && (
+        <footer className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">
+          <p className="text-gray-600 text-xs text-center font-mono">
+            "Don't worry, this one just schedules fasteners." - SkyNet MES v0.1
+          </p>
+        </footer>
+      )}
     </div>
   )
 }
@@ -225,7 +258,7 @@ function App() {
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />
 
-        {/* NEW: Secondary operations route (passivation, paint, etc.) */}
+        {/* Secondary operations route (passivation, paint, etc.) */}
         <Route path="/secondary/:operationType" element={<Secondary />} />
 
         {/* Main app - requires Supabase authentication */}

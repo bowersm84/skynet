@@ -35,6 +35,8 @@ export default function Assembly({ profile, onUpdate }) {
   const [showCompleteModal, setShowCompleteModal] = useState(false)
   const [completeItem, setCompleteItem] = useState(null)
   const [completeForm, setCompleteForm] = useState({
+    end_date: '',
+    end_time: '',
     good_quantity: 0,
     bad_quantity: 0,
     notes: ''
@@ -68,12 +70,14 @@ export default function Assembly({ profile, onUpdate }) {
             assembly:parts!work_order_assemblies_assembly_id_fkey (
               id,
               part_number,
-              description
+              description,
+              part_type
             )
           ),
           jobs (
             id,
-            status
+            status,
+            work_order_assembly_id
           )
         `)
         .not('order_type', 'eq', 'maintenance')
@@ -93,28 +97,37 @@ export default function Assembly({ profile, onUpdate }) {
       startOfWeek.setHours(0, 0, 0, 0)
 
       for (const wo of (wos || [])) {
-        // Check if all jobs are ready for assembly
-        const allJobsReady = wo.jobs?.length > 0 && wo.jobs.every(j => 
-          ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
-        )
-        
-        // Must have at least one job still needing assembly
-        const hasAssemblyWork = wo.jobs?.some(j => 
-          ['ready_for_assembly', 'in_assembly'].includes(j.status)
-        )
+        // Check per-assembly readiness (not per-WO)
+        // Each assembly within a WO is independent — one can be ready while another is still in progress
 
-        if (!allJobsReady || !hasAssemblyWork) continue
-
-        console.log('Assembly: Processing WO', wo.wo_number, {
-          allJobsReady,
-          hasAssemblyWork,
-          jobStatuses: wo.jobs?.map(j => j.status),
-          hasWOAssemblies: wo.work_order_assemblies?.length > 0
-        })
-
-        // If work_order_assemblies has records, use them
+        // If work_order_assemblies has records, check each one independently
         if (wo.work_order_assemblies && wo.work_order_assemblies.length > 0) {
           for (const woa of wo.work_order_assemblies) {
+            // Skip finished goods — they don't need assembly
+            if (woa.assembly?.part_type === 'finished_good') continue
+
+            // Get jobs linked to THIS specific assembly
+            const woaJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
+            
+            // Check if all jobs for this assembly are ready
+            const allJobsReady = woaJobs.length > 0 && woaJobs.every(j => 
+              ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
+            )
+            
+            // Must have at least one job still needing assembly
+            const hasAssemblyWork = woaJobs.some(j => 
+              ['ready_for_assembly', 'in_assembly'].includes(j.status)
+            )
+
+            // Skip if this assembly's jobs aren't ready yet
+            if (!allJobsReady || !hasAssemblyWork) continue
+
+            console.log('Assembly: Processing WOA', wo.wo_number, woa.assembly?.part_number, {
+              allJobsReady,
+              hasAssemblyWork,
+              jobStatuses: woaJobs.map(j => j.status)
+            })
+
             // Assembly part info comes from the nested query
             const assemblyItem = {
               ...woa,
@@ -140,6 +153,16 @@ export default function Assembly({ profile, onUpdate }) {
           }
         } else {
           // No work_order_assemblies record exists
+          // Check if all WO jobs are ready (fallback uses WO-level check)
+          const allJobsReady = wo.jobs?.length > 0 && wo.jobs.every(j => 
+            ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
+          )
+          const hasAssemblyWork = wo.jobs?.some(j => 
+            ['ready_for_assembly', 'in_assembly'].includes(j.status)
+          )
+
+          if (!allJobsReady || !hasAssemblyWork) continue
+
           // This is a data integrity issue - WO should have been created with assembly info
           // Show in queue with missing assembly warning so user knows to fix it
           console.warn(`Assembly: WO ${wo.wo_number} has no work_order_assemblies record`)
@@ -201,7 +224,7 @@ export default function Assembly({ profile, onUpdate }) {
     setActionLoading('start')
 
     try {
-      let assemblyId = startItem.id
+      console.log('Starting assembly for:', startItem.id, 'isVirtual:', startItem.isVirtual)
 
       // If this is a virtual entry (no work_order_assemblies record exists), create one first
       if (startItem.isVirtual) {
@@ -214,30 +237,59 @@ export default function Assembly({ profile, onUpdate }) {
             station_number: parseInt(startForm.station),
             assembler_number: parseInt(startForm.assembler),
             assembly_started_at: new Date().toISOString(),
-            assembly_notes: startForm.notes || null,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            assembly_started_by: profile?.id || null,
+            assembly_notes: startForm.notes || null
           })
           .select()
           .single()
 
         if (createError) throw createError
-        assemblyId = newAssembly.id
+        console.log('Created new work_order_assemblies record:', newAssembly.id)
       } else {
-        // Update existing record
-        const { error } = await supabase
+        // Update existing record - use .select() to verify the update worked
+        console.log('Updating work_order_assemblies id:', startItem.id)
+        
+        const { data: updatedData, error } = await supabase
           .from('work_order_assemblies')
           .update({
             status: 'in_progress',
             station_number: parseInt(startForm.station),
             assembler_number: parseInt(startForm.assembler),
             assembly_started_at: new Date().toISOString(),
-            assembly_notes: startForm.notes || null,
-            updated_at: new Date().toISOString()
+            assembly_started_by: profile?.id || null,
+            assembly_notes: startForm.notes || null
           })
           .eq('id', startItem.id)
+          .select()
 
-        if (error) throw error
+        if (error) {
+          console.error('Update error:', error)
+          throw error
+        }
+        
+        if (!updatedData || updatedData.length === 0) {
+          console.error('Update returned no data - ID may not exist or RLS blocking')
+          throw new Error('Failed to update assembly record. Please check permissions.')
+        }
+        
+        console.log('Successfully updated work_order_assemblies:', updatedData)
+      }
+
+      // Update all jobs on this work order to 'in_assembly' status
+      const { data: jobsData, error: jobsError } = await supabase
+        .from('jobs')
+        .update({ 
+          status: 'in_assembly',
+          updated_at: new Date().toISOString()
+        })
+        .eq('work_order_id', startItem.work_order_id)
+        .eq('status', 'ready_for_assembly')
+        .select()
+
+      if (jobsError) {
+        console.error('Error updating jobs to in_assembly:', jobsError)
+      } else {
+        console.log('Updated jobs to in_assembly:', jobsData?.length || 0)
       }
 
       setShowStartModal(false)
@@ -259,25 +311,35 @@ export default function Assembly({ profile, onUpdate }) {
     setActionLoading('complete')
 
     try {
+      // Combine date and time from form
+      const completedAt = new Date(`${completeForm.end_date}T${completeForm.end_time}:00`).toISOString()
+
+      // Append completion notes to existing notes
+      let finalNotes = completeItem.assembly_notes || ''
+      if (completeForm.notes) {
+        if (finalNotes) finalNotes += '\n---\n'
+        finalNotes += `Completion: ${completeForm.notes}`
+      }
+
       const { error } = await supabase
         .from('work_order_assemblies')
         .update({
           status: 'complete',
-          assembly_completed_at: new Date().toISOString(),
+          assembly_completed_at: completedAt,
+          assembly_completed_by: profile?.id || null, // Track who completed
           good_quantity: completeForm.good_quantity,
           bad_quantity: completeForm.bad_quantity,
-          assembly_notes: completeForm.notes || completeItem.assembly_notes,
-          updated_at: new Date().toISOString()
+          assembly_notes: finalNotes || null
         })
         .eq('id', completeItem.id)
 
       if (error) throw error
 
-      // Also update all jobs on this work order to 'complete'
+      // Update all jobs on this work order to 'pending_tco' (awaiting TCO close-out)
       const { error: jobsError } = await supabase
         .from('jobs')
         .update({ 
-          status: 'complete',
+          status: 'pending_tco',
           updated_at: new Date().toISOString()
         })
         .eq('work_order_id', completeItem.work_order_id)
@@ -285,9 +347,12 @@ export default function Assembly({ profile, onUpdate }) {
 
       if (jobsError) console.error('Error updating jobs:', jobsError)
 
+      // Work order stays open until TCO is approved
+      // (Do NOT set WO to complete here — that happens in TCO)
+
       setShowCompleteModal(false)
       setCompleteItem(null)
-      setCompleteForm({ good_quantity: 0, bad_quantity: 0, notes: '' })
+      setCompleteForm({ end_date: '', end_time: '', good_quantity: 0, bad_quantity: 0, notes: '' })
       await loadAssemblies()
       if (onUpdate) onUpdate()
     } catch (err) {
@@ -308,7 +373,13 @@ export default function Assembly({ profile, onUpdate }) {
   // Open Complete Modal
   const openCompleteModal = (item) => {
     setCompleteItem(item)
+    // Initialize with current date/time
+    const now = new Date()
+    const dateStr = now.toISOString().split('T')[0]
+    const timeStr = now.toTimeString().slice(0, 5) // HH:MM format
     setCompleteForm({ 
+      end_date: dateStr,
+      end_time: timeStr,
       good_quantity: item.quantity, 
       bad_quantity: 0, 
       notes: '' 
@@ -694,6 +765,28 @@ export default function Assembly({ profile, onUpdate }) {
                 <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
                   <span>Started: {formatTime(completeItem.assembly_started_at)}</span>
                   <span className="text-blue-400">Duration: {formatDuration(completeItem.assembly_started_at)}</span>
+                </div>
+              </div>
+
+              {/* End Date/Time */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">End Date</label>
+                  <input
+                    type="date"
+                    value={completeForm.end_date}
+                    onChange={(e) => setCompleteForm({...completeForm, end_date: e.target.value})}
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">End Time</label>
+                  <input
+                    type="time"
+                    value={completeForm.end_time}
+                    onChange={(e) => setCompleteForm({...completeForm, end_time: e.target.value})}
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none"
+                  />
                 </div>
               </div>
 

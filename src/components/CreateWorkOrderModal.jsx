@@ -87,6 +87,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         part_number,
         description,
         specification,
+        part_type,
         assembly_bom!assembly_bom_assembly_id_fkey(
           id,
           quantity,
@@ -100,7 +101,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
           )
         )
       `)
-      .eq('part_type', 'assembly')
+      .in('part_type', ['assembly', 'finished_good'])
       .eq('is_active', true)
       .order('part_number')
 
@@ -124,6 +125,20 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
     const updated = [...selectedAssemblies]
     updated[index].assemblyId = assemblyId
     updated[index].jobs = [] // Reset jobs when assembly changes
+
+    // If this is a finished good, auto-add a single job for the part itself
+    const selectedPart = assemblies.find(a => a.id === assemblyId)
+    if (selectedPart && selectedPart.part_type === 'finished_good') {
+      updated[index].jobs = [{
+        componentId: selectedPart.id,
+        partNumber: selectedPart.part_number,
+        description: selectedPart.description,
+        quantity: updated[index].quantity,
+        quantityCustomized: false,
+        isFinishedGood: true
+      }]
+    }
+
     setSelectedAssemblies(updated)
   }
 
@@ -226,28 +241,49 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
       nextJobNum = lastNum + 1
     }
 
-    // Flatten all jobs from all assemblies
-    const allJobs = []
-    selectedAssemblies.forEach(assembly => {
+    // Create work_order_assemblies records and jobs for each selected assembly/FG
+    for (const assembly of selectedAssemblies) {
+      if (!assembly.assemblyId) continue
       const assemblyPart = assemblies.find(a => a.id === assembly.assemblyId)
-      assembly.jobs.forEach(job => {
-        allJobs.push({
-          job_number: `J-${String(nextJobNum++).padStart(6, '0')}`,
+      if (!assemblyPart) continue
+
+      // Create work_order_assemblies record
+      const { data: woaData, error: woaError } = await supabase
+        .from('work_order_assemblies')
+        .insert({
           work_order_id: workOrder.id,
-          component_id: job.componentId,
-          quantity: job.quantity,
-          status: 'pending_compliance',
-          is_maintenance: false
+          assembly_id: assemblyPart.id,
+          quantity: assembly.quantity,
+          status: 'pending'
         })
-      })
-    })
+        .select('id')
+        .single()
 
-    // Insert all jobs
-    const { error: jobsError } = await supabase
-      .from('jobs')
-      .insert(allJobs)
+      if (woaError) {
+        console.error('Error creating work_order_assemblies:', woaError)
+      }
 
-    if (jobsError) throw jobsError
+      const woaId = woaData?.id || null
+
+      // Create jobs
+      for (const job of assembly.jobs) {
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .insert({
+            job_number: `J-${String(nextJobNum++).padStart(6, '0')}`,
+            work_order_id: workOrder.id,
+            work_order_assembly_id: woaId,
+            component_id: job.componentId,
+            quantity: job.quantity,
+            status: 'pending_compliance',
+            is_maintenance: false
+          })
+
+        if (jobError) {
+          console.error('Error creating job:', jobError)
+        }
+      }
+    }
 
     onSuccess?.()
     onClose()
@@ -397,12 +433,12 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                 </div>
               </div>
 
-              {/* Assemblies Section */}
+              {/* Products Section (Assemblies + Finished Goods) */}
               <div className="border-t border-gray-700 pt-4">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-white font-medium flex items-center gap-2">
                     <Package size={18} />
-                    Assemblies
+                    Products
                   </h3>
                   <button
                     type="button"
@@ -411,19 +447,19 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                     className="flex items-center gap-1 px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-skynet-accent rounded transition-colors disabled:opacity-50"
                   >
                     <Plus size={16} />
-                    Add Assembly
+                    Add Product
                   </button>
                 </div>
 
                 {loadingAssemblies ? (
-                  <div className="text-center py-4 text-gray-500">Loading assemblies...</div>
+                  <div className="text-center py-4 text-gray-500">Loading products...</div>
                 ) : assemblies.length === 0 ? (
                   <div className="text-center py-4 text-yellow-500 bg-yellow-900/20 rounded border border-yellow-800">
-                    No assemblies found. Add assemblies in Parts management first.
+                    No assemblies or finished goods found. Add them in Master Data first.
                   </div>
                 ) : selectedAssemblies.length === 0 ? (
                   <div className="text-center py-8 text-gray-500 bg-gray-800/50 rounded border border-dashed border-gray-700">
-                    Click "Add Assembly" to select an assembly for this work order
+                    Click "Add Product" to select an assembly or finished good for this work order
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -432,18 +468,27 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                         <div className="flex items-start justify-between gap-4 mb-4">
                           <div className="flex-1 grid grid-cols-2 gap-3">
                             <div>
-                              <label className="block text-gray-500 text-xs mb-1">Assembly Part</label>
+                              <label className="block text-gray-500 text-xs mb-1">Product</label>
                               <select
                                 value={selected.assemblyId}
                                 onChange={(e) => updateAssemblySelection(assemblyIndex, e.target.value)}
                                 className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
                               >
-                                <option value="">-- Select Assembly --</option>
-                                {assemblies.map(a => (
-                                  <option key={a.id} value={a.id}>
-                                    {a.part_number} - {a.description}
-                                  </option>
-                                ))}
+                                <option value="">-- Select Product --</option>
+                                <optgroup label="Assemblies">
+                                  {assemblies.filter(a => a.part_type === 'assembly').map(a => (
+                                    <option key={a.id} value={a.id}>
+                                      {a.part_number} - {a.description}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                                <optgroup label="Finished Goods">
+                                  {assemblies.filter(a => a.part_type === 'finished_good').map(a => (
+                                    <option key={a.id} value={a.id}>
+                                      {a.part_number} - {a.description}
+                                    </option>
+                                  ))}
+                                </optgroup>
                               </select>
                             </div>
                             <div>
@@ -466,11 +511,41 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                           </button>
                         </div>
 
-                        {/* BOM Components */}
-                        {selected.assemblyId && (
+                        {/* BOM Components (assemblies) or Finished Good indicator */}
+                        {selected.assemblyId && (() => {
+                          const selectedPart = getAssemblyById(selected.assemblyId)
+                          const isFinishedGood = selectedPart?.part_type === 'finished_good'
+
+                          if (isFinishedGood) {
+                            return (
+                              <div className="border-t border-gray-700 pt-3">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="text-xs px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Finished Good</span>
+                                  <span className="text-gray-400 text-sm">No assembly required</span>
+                                </div>
+                                <div className="bg-gray-900 rounded p-3">
+                                  <div className="text-gray-400 text-xs mb-2">Job to Create:</div>
+                                  <div className="flex items-center justify-between py-2">
+                                    <div className="flex-1">
+                                      <span className="text-white text-sm">{selectedPart.part_number}</span>
+                                      <span className="text-gray-500 text-sm ml-2">- {selectedPart.description}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-green-400 text-sm">{selected.quantity} pcs</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          }
+
+                          return (
                           <div className="border-t border-gray-700 pt-3">
                             <div className="flex items-center justify-between mb-2">
-                              <span className="text-gray-400 text-sm">Components (select to add jobs)</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Assembly</span>
+                                <span className="text-gray-400 text-sm">Select components to add jobs</span>
+                              </div>
                               {selected.jobs.length > 0 && (
                                 <span className="text-green-400 text-xs font-medium">
                                   {selected.jobs.length} job(s) selected
@@ -484,7 +559,27 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                                 ?.filter(bom => bom.component?.part_type !== 'assembly')
                                 .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
                                 .map(bom => {
+                                  const isPurchased = bom.component?.part_type === 'purchased'
                                   const isAdded = selected.jobs.some(j => j.componentId === bom.component.id)
+
+                                  if (isPurchased) {
+                                    return (
+                                      <div
+                                        key={bom.id}
+                                        className="w-full flex items-center justify-between px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 opacity-60"
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          <ShoppingCart size={14} className="text-orange-400" />
+                                          <span className="text-gray-400">{bom.component.part_number}</span>
+                                          <span className="text-gray-600">- {bom.component.description}</span>
+                                        </div>
+                                        <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
+                                          📦 Purchased
+                                        </span>
+                                      </div>
+                                    )
+                                  }
+
                                   return (
                                     <button
                                       key={bom.id}
@@ -550,7 +645,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                               </div>
                             )}
                           </div>
-                        )}
+                          )
+                        })()}
                       </div>
                     ))}
                   </div>

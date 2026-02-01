@@ -220,7 +220,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       // Determine next status based on current status
       let nextStatus = 'ready'
       if (currentStatus === 'pending_post_manufacturing') {
-        nextStatus = 'ready_for_assembly'
+        // Check if this job's part is a finished good — skip assembly, go to TCO
+        const job = jobs.find(j => j.id === jobId)
+        const partType = job?.component?.part_type
+        if (partType === 'finished_good') {
+          nextStatus = 'pending_tco'
+        } else {
+          nextStatus = 'ready_for_assembly'
+        }
       }
 
       const { error } = await supabase
@@ -240,24 +247,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
     
     setApproving(null)
-  }
-
-  const handleCancelJob = async (jobId) => {
-    if (!confirm('Are you sure you want to cancel this job?')) return
-
-    try {
-      const { error } = await supabase
-        .from('jobs')
-        .update({ status: 'cancelled' })
-        .eq('id', jobId)
-
-      if (error) throw error
-      onUpdate()
-      
-    } catch (err) {
-      console.error('Cancel job error:', err)
-      alert('Failed to cancel job: ' + err.message)
-    }
   }
 
   const handleRecallJob = async (jobId) => {
@@ -447,15 +436,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                     </div>
                   </div>
                   
-                  {!isExpanded && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleCancelJob(job.id); }}
-                      className="flex items-center gap-1 px-3 py-1 text-sm bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
-                    >
-                      <X size={14} />
-                      Cancel
-                    </button>
-                  )}
                 </div>
 
                 {isExpanded && (
@@ -658,13 +638,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleCancelJob(job.id)}
-                          className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
-                        >
-                          <X size={16} />
-                          Cancel Job
-                        </button>
                         <button
                           onClick={() => handleApproveJob(job.id, job.status)}
                           disabled={!jobCanApprove || approving === job.id}

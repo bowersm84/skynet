@@ -130,8 +130,7 @@ export default function MasterData({ profile }) {
       // Fetch machines
       const { data: machinesData, error: machinesError } = await supabase
         .from('machines')
-        .select('id, name, location:locations(name)')
-        .eq('is_active', true)
+        .select('id, name, locations(name)')
         .order('name')
       if (machinesError) console.error('Error fetching machines:', machinesError)
       setMachines(machinesData || [])
@@ -1019,7 +1018,7 @@ export default function MasterData({ profile }) {
                     >
                       <option value="">— None —</option>
                       {machines.map(m => (
-                        <option key={m.id} value={m.id}>{m.name} ({m.location?.name || ""})</option>
+                        <option key={m.id} value={m.id}>{m.name} ({m.locations?.name || ""})</option>
                       ))}
                     </select>
                   </div>
@@ -1044,7 +1043,7 @@ export default function MasterData({ profile }) {
                           {machines
                             .filter(m => m.id !== preferredMachineId && !secondaryMachineIds.some((sid, sidx) => sid === m.id && sidx !== idx))
                             .map(m => (
-                              <option key={m.id} value={m.id}>{m.name} ({m.location?.name || ""})</option>
+                              <option key={m.id} value={m.id}>{m.name} ({m.locations?.name || ""})</option>
                             ))}
                         </select>
                       </div>

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   Upload,
@@ -97,6 +97,9 @@ function parseBOMText(text) {
     let normalized = line.replace(/\bl\s*ea\b/gi, '1 ea')
     normalized = normalized.replace(/\bl\s*hr\b/gi, '1 hr')
     normalized = normalized.replace(/\bl\s*pc\b/gi, '1 pc')
+	normalized = normalized.replace(/\bT\s*ea\b/g, '1 ea')
+	normalized = normalized.replace(/\bT\s*hr\b/g, '1 hr')
+	normalized = normalized.replace(/\bT\s*pc\b/g, '1 pc')
     
     // Match quantity pattern: digit(s) + space? + unit
     const qtyMatch = normalized.match(/(\d+)\s*(ea|hr|pc|lb|ft|each|pcs)\b/i)
@@ -135,6 +138,8 @@ function parseBOMText(text) {
       unit: qtyUnit || 'ea',
       part_type: 'manufactured',  // default, user can toggle to 'purchased'
       requires_passivation: false, // default, user can toggle
+      preferred_machine_id: null,
+      secondary_machine_id: null,
       isNew: true,
       isDuplicate: false,
       existingId: null
@@ -164,8 +169,21 @@ export default function BOMUpload({ onComplete, onCancel }) {
   const [editingComponent, setEditingComponent] = useState(null)
   const [editForm, setEditForm] = useState({ part_number: '', description: '' })
   const [saveResults, setSaveResults] = useState(null)
+  const [machines, setMachines] = useState([])
   const fileInputRef = useRef(null)
   const canvasRef = useRef(null)
+
+  // Fetch machines on mount
+  useEffect(() => {
+    const fetchMachines = async () => {
+      const { data } = await supabase
+        .from('machines')
+        .select('id, name, locations(name)')
+        .order('name')
+      if (data) setMachines(data)
+    }
+    fetchMachines()
+  }, [])
 
   // Handle file selection
   const handleFileSelect = (e) => {
@@ -461,6 +479,59 @@ export default function BOMUpload({ onComplete, onCancel }) {
           }
         } else {
           results.linked.push(`BOM link already exists: ${comp.part_number}`)
+        }
+
+        // Create machine preference records
+        if (componentId && comp.preferred_machine_id) {
+          const { data: existingPref } = await supabase
+            .from('part_machine_durations')
+            .select('id')
+            .eq('part_id', componentId)
+            .eq('machine_id', comp.preferred_machine_id)
+            .maybeSingle()
+
+          if (!existingPref) {
+            const { error: prefErr } = await supabase
+              .from('part_machine_durations')
+              .insert({
+                part_id: componentId,
+                machine_id: comp.preferred_machine_id,
+                is_preferred: true,
+                preference_order: 0,
+                estimated_minutes: 0
+              })
+            if (prefErr) {
+              results.errors.push(`Preferred machine for ${comp.part_number}: ${prefErr.message}`)
+            } else {
+              results.linked.push(`Preferred machine: ${comp.part_number} → ${machines.find(m => m.id === comp.preferred_machine_id)?.name || 'Unknown'}`)
+            }
+          }
+        }
+
+        if (componentId && comp.secondary_machine_id) {
+          const { data: existingSec } = await supabase
+            .from('part_machine_durations')
+            .select('id')
+            .eq('part_id', componentId)
+            .eq('machine_id', comp.secondary_machine_id)
+            .maybeSingle()
+
+          if (!existingSec) {
+            const { error: secErr } = await supabase
+              .from('part_machine_durations')
+              .insert({
+                part_id: componentId,
+                machine_id: comp.secondary_machine_id,
+                is_preferred: true,
+                preference_order: 1,
+                estimated_minutes: 0
+              })
+            if (secErr) {
+              results.errors.push(`Secondary machine for ${comp.part_number}: ${secErr.message}`)
+            } else {
+              results.linked.push(`Secondary machine: ${comp.part_number} → ${machines.find(m => m.id === comp.secondary_machine_id)?.name || 'Unknown'}`)
+            }
+          }
         }
       }
 
@@ -791,45 +862,106 @@ export default function BOMUpload({ onComplete, onCancel }) {
                     </div>
                   )}
                   
-                  {/* Part Type + Passivation row - always visible */}
+                  {/* Part Type + Passivation + Machines - always visible */}
                   {editingComponent !== idx && (
-                    <div className="flex items-center gap-4 mt-2 pt-2 border-t border-gray-700/50 pl-9">
-                      {/* Manufactured / Purchased toggle */}
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-gray-500 text-xs">Type:</span>
-                        <button
-                          onClick={() => {
-                            const updated = { ...bomData }
-                            updated.components[idx].part_type = 
-                              updated.components[idx].part_type === 'manufactured' ? 'purchased' : 'manufactured'
-                            setBomData({ ...updated })
-                          }}
-                          className={`text-xs px-2 py-0.5 rounded-full font-medium transition-colors ${
-                            comp.part_type === 'manufactured'
-                              ? 'bg-blue-900/50 text-blue-400 border border-blue-700'
-                              : 'bg-orange-900/50 text-orange-400 border border-orange-700'
-                          }`}
-                        >
-                          {comp.part_type === 'manufactured' ? '⚙ Manufactured' : '📦 Purchased'}
-                        </button>
+                    <div className="mt-2 pt-2 border-t border-gray-700/50 pl-9 space-y-2">
+                      {/* Row 1: Type + Passivation */}
+                      <div className="flex items-center gap-4">
+                        {/* Manufactured / Purchased toggle */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-gray-500 text-xs">Type:</span>
+                          <button
+                            onClick={() => {
+                              const updated = { ...bomData }
+                              updated.components[idx].part_type = 
+                                updated.components[idx].part_type === 'manufactured' ? 'purchased' : 'manufactured'
+                              // Clear machine selections if switched to purchased
+                              if (updated.components[idx].part_type === 'purchased') {
+                                updated.components[idx].preferred_machine_id = null
+                                updated.components[idx].secondary_machine_id = null
+                              }
+                              setBomData({ ...updated })
+                            }}
+                            className={`text-xs px-2 py-0.5 rounded-full font-medium transition-colors ${
+                              comp.part_type === 'manufactured'
+                                ? 'bg-blue-900/50 text-blue-400 border border-blue-700'
+                                : 'bg-orange-900/50 text-orange-400 border border-orange-700'
+                            }`}
+                          >
+                            {comp.part_type === 'manufactured' ? '⚙ Manufactured' : '📦 Purchased'}
+                          </button>
+                        </div>
+
+                        {/* Requires Passivation checkbox */}
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={comp.requires_passivation || false}
+                            onChange={(e) => {
+                              const updated = { ...bomData }
+                              updated.components[idx].requires_passivation = e.target.checked
+                              setBomData({ ...updated })
+                            }}
+                            className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
+                          />
+                          <span className={`text-xs ${comp.requires_passivation ? 'text-cyan-400' : 'text-gray-500'}`}>
+                            Requires Passivation
+                          </span>
+                        </label>
                       </div>
 
-                      {/* Requires Passivation checkbox */}
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={comp.requires_passivation || false}
-                          onChange={(e) => {
-                            const updated = { ...bomData }
-                            updated.components[idx].requires_passivation = e.target.checked
-                            setBomData({ ...updated })
-                          }}
-                          className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
-                        />
-                        <span className={`text-xs ${comp.requires_passivation ? 'text-cyan-400' : 'text-gray-500'}`}>
-                          Requires Passivation
-                        </span>
-                      </label>
+                      {/* Row 2: Machine Preferences (only for manufactured parts) */}
+                      {comp.part_type === 'manufactured' && machines.length > 0 && (
+                        <div className="flex items-center gap-4">
+                          {/* Preferred Machine */}
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-500 text-xs">Preferred:</span>
+                            <select
+                              value={comp.preferred_machine_id || ''}
+                              onChange={(e) => {
+                                const updated = { ...bomData }
+                                updated.components[idx].preferred_machine_id = e.target.value || null
+                                // Clear secondary if same as preferred
+                                if (e.target.value && e.target.value === updated.components[idx].secondary_machine_id) {
+                                  updated.components[idx].secondary_machine_id = null
+                                }
+                                setBomData({ ...updated })
+                              }}
+                              className="text-xs bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-gray-300 focus:outline-none focus:border-skynet-accent min-w-[140px]"
+                            >
+                              <option value="">— None —</option>
+                              {machines.map(m => (
+                                <option key={m.id} value={m.id}>
+                                  {m.name} ({m.locations?.name || ''})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Secondary Machine */}
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-500 text-xs">Secondary:</span>
+                            <select
+                              value={comp.secondary_machine_id || ''}
+                              onChange={(e) => {
+                                const updated = { ...bomData }
+                                updated.components[idx].secondary_machine_id = e.target.value || null
+                                setBomData({ ...updated })
+                              }}
+                              className="text-xs bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-gray-300 focus:outline-none focus:border-skynet-accent min-w-[140px]"
+                            >
+                              <option value="">— None —</option>
+                              {machines
+                                .filter(m => m.id !== comp.preferred_machine_id)
+                                .map(m => (
+                                  <option key={m.id} value={m.id}>
+                                    {m.name} ({m.location})
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

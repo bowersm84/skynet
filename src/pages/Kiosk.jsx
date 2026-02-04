@@ -3,7 +3,8 @@ import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { 
   Lock, 
-  Unlock, 
+  Unlock,
+  ArrowLeft,
   AlertCircle, 
   Loader2, 
   LogOut,
@@ -1403,7 +1404,61 @@ export default function Kiosk() {
       alert('Failed to remove tool: ' + err.message)
     }
   }
+  
+  // Cancel setup and return job to queue
+  const handleCancelSetup = async () => {
+    if (!activeJob || activeJob.status !== 'in_setup') return
+    
+    if (!confirm('Cancel setup and return this job to the queue? Any tooling or materials added will be removed.')) {
+      return
+    }
+    
+    setActionLoading(true)
+    try {
+      // Delete any tools added during this setup
+      await supabase
+        .from('job_tools')
+        .delete()
+        .eq('job_id', activeJob.id)
+      
+      // Delete any materials added during this setup
+      await supabase
+        .from('job_materials')
+        .delete()
+        .eq('job_id', activeJob.id)
+      
+      // Reset job back to assigned status
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: 'assigned',
+          setup_start: null,
+          assigned_user_id: null,
+          tooling_confirmed: false,
+          tooling_override: false,
+          tooling_override_by: null,
+          material_confirmed: false,
+          material_override: false,
+          material_override_by: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', activeJob.id)
 
+      if (error) throw error
+      
+      // Close any open modals
+      setShowToolingModal(false)
+      setShowMaterialModal(false)
+      
+      await loadJobs()
+    } catch (err) {
+      console.error('Error canceling setup:', err)
+      alert('Failed to cancel setup: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+  
   const handleConfirmTooling = async () => {
     setActionLoading(true)
     try {
@@ -2790,29 +2845,13 @@ export default function Kiosk() {
                     </div>
 
                     {/* Maintenance Action Buttons */}
-                    {canOperate && (
-                      <div className="flex gap-3">
-                        <button 
-                          onClick={handleOpenComplete} 
-                          disabled={actionLoading} 
-                          className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${
-                            activeJob.work_order?.maintenance_type === 'unplanned'
-                              ? 'bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white'
-                              : 'bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white'
-                          }`}
-                        >
-                          <CheckCircle size={20} />Complete Downtime
-                        </button>
-                        <button 
-                          onClick={() => {
-                            setExtendDuration({ hours: 0, minutes: 30 })
-                            setShowExtendModal(true)
-                          }}
-                          className="px-4 py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
-                        >
-                          <Clock size={20} />Extend
-                        </button>
-                      </div>
+                    {canOperate && activeJob.status === 'in_progress' && (
+						<button 
+						  onClick={handleOpenMaterials}
+						  className="text-xs text-skynet-accent hover:text-blue-400 flex items-center gap-1"
+						>
+						  <Plus size={12} />{jobMaterials.length > 0 ? 'Add More' : 'Add Material'}
+						</button>
                     )}
 
                     {/* Activity Log for Maintenance */}
@@ -3024,9 +3063,14 @@ export default function Kiosk() {
                   {canOperate && (
                     <div className="flex gap-3">
                       {activeJob.status === 'in_setup' && (
-                        <button onClick={handleOpenTooling} disabled={actionLoading} className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                          <Wrench size={20} />Confirm Tooling
-                        </button>
+                        <>
+                          <button onClick={handleOpenTooling} disabled={actionLoading} className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                            <Wrench size={20} />Confirm Tooling
+                          </button>
+                          <button onClick={handleCancelSetup} disabled={actionLoading} className="px-4 py-3 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-gray-300 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-gray-600">
+                            <X size={20} />Cancel Setup
+                          </button>
+                        </>
                       )}
                       {activeJob.status === 'in_progress' && (
                         <button onClick={handleOpenComplete} disabled={actionLoading} className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
@@ -3478,7 +3522,10 @@ export default function Kiosk() {
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
-              <button onClick={handleOverrideTooling} disabled={actionLoading} className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"><SkipForward size={16} />Skip Tooling</button>
+              <div className="flex items-center gap-3">
+                <button onClick={() => setShowToolingModal(false)} className="px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"><ArrowLeft size={16} />Back</button>
+                <button onClick={handleOverrideTooling} disabled={actionLoading} className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"><SkipForward size={16} />Skip Tooling</button>
+              </div>
               <button onClick={handleConfirmTooling} disabled={actionLoading} className="px-6 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg flex items-center gap-2">
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}Confirm Tooling
               </button>
@@ -3629,13 +3676,24 @@ export default function Kiosk() {
             {/* Footer - Different for setup vs production */}
             {activeJob.status === 'in_setup' ? (
               <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
-                <button 
-                  onClick={handleSkipMaterials} 
-                  disabled={actionLoading} 
-                  className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"
-                >
-                  <SkipForward size={16} />Skip Materials
-                </button>
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={() => {
+                      setShowMaterialModal(false)
+                      setShowToolingModal(true)
+                    }} 
+                    className="px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"
+                  >
+                    <ArrowLeft size={16} />Back
+                  </button>
+                  <button 
+                    onClick={handleSkipMaterials} 
+                    disabled={actionLoading} 
+                    className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"
+                  >
+                    <SkipForward size={16} />Skip Materials
+                  </button>
+                </div>
                 <button 
                   onClick={handleConfirmMaterials} 
                   disabled={actionLoading} 

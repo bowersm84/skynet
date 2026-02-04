@@ -227,20 +227,26 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
 
     if (woError) throw woError
 
-    // Get next job number (J-######)
-    const { data: lastJob } = await supabase
-      .from('jobs')
-      .select('job_number')
-      .like('job_number', 'J-%')
-      .order('job_number', { ascending: false })
-      .limit(1)
-    
-    let nextJobNum = 1
-    if (lastJob && lastJob.length > 0) {
-      const lastNum = parseInt(lastJob[0].job_number.replace('J-', '')) || 0
-      nextJobNum = lastNum + 1
-    }
+	// Get next job number - find the highest existing J-###### number
+	const { data: productionJobs } = await supabase
+	  .from('jobs')
+	  .select('job_number')
+	  .like('job_number', 'J-%')
 
+	let nextJobNum = 1
+	if (productionJobs && productionJobs.length > 0) {
+	  const jobNumbers = productionJobs
+		.map(j => {
+		  const match = j.job_number.match(/^J-(\d+)$/)
+		  return match ? parseInt(match[1], 10) : 0
+		})
+		.filter(n => !isNaN(n) && n > 0)
+	  
+	  if (jobNumbers.length > 0) {
+		nextJobNum = Math.max(...jobNumbers) + 1
+	  }
+	}
+	
     // Create work_order_assemblies records and jobs for each selected assembly/FG
     for (const assembly of selectedAssemblies) {
       if (!assembly.assemblyId) continue

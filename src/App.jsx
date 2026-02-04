@@ -148,9 +148,11 @@ function MainApp() {
   }
 
   if (!user) {
-    return <Login onLogin={(u) => {
+    return <Login onLogin={async (u) => {
       setUser(u)
       setShowLoadingScreen(true)
+      hasSignedInRef.current = true
+      await fetchProfile(u.id)
     }} />
   }
 

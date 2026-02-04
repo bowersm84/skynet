@@ -849,34 +849,7 @@ export default function Schedule({ user, profile, onNavigate }) {
         setSaving(false)
         return
       }
-      
-      // Save duration if requested (not for reschedule)
-      // Also saves the quantity as base_quantity for future scaling
-      if (scheduleForm.saveDuration && job.component_id && !isReschedule) {
-        if (durationRecord) {
-          await supabase
-            .from('part_machine_durations')
-            .update({
-              estimated_minutes: durationMinutes,
-              base_quantity: job.quantity || 1,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', durationRecord.id)
-        } else {
-          await supabase
-            .from('part_machine_durations')
-            .insert({
-              part_id: job.component_id,
-              machine_id: machineId,
-              estimated_minutes: durationMinutes,
-              base_quantity: job.quantity || 1,
-              is_preferred: false,
-              preference_order: 0,
-              created_by: profile?.id
-            })
-        }
-      }
-      
+           
       // Update the job
       const { error } = await supabase
         .from('jobs')
@@ -885,7 +858,6 @@ export default function Schedule({ user, profile, onNavigate }) {
           scheduled_start: scheduledStart.toISOString(),
           scheduled_end: scheduledEnd.toISOString(),
           estimated_minutes: durationMinutes,
-          requires_attendance: scheduleForm.requiresAttendance,
           status: 'assigned',
           scheduled_by: profile?.id,
           scheduled_at: new Date().toISOString()
@@ -2504,36 +2476,6 @@ export default function Schedule({ user, profile, onNavigate }) {
                   />
                   <span className="text-gray-400">min</span>
                 </div>
-              </div>
-
-              {durationSource !== 'database' && !scheduleModal.isReschedule && (
-                <div className="flex items-center gap-3 p-3 bg-gray-800/50 rounded border border-gray-700">
-                  <input
-                    type="checkbox"
-                    id="saveDuration"
-                    checked={scheduleForm.saveDuration}
-                    onChange={(e) => setScheduleForm(prev => ({ ...prev, saveDuration: e.target.checked }))}
-                    className="w-5 h-5 rounded border-gray-600 bg-gray-800 text-skynet-accent focus:ring-skynet-accent"
-                  />
-                  <label htmlFor="saveDuration" className="text-white flex items-center gap-2">
-                    <Database size={16} className="text-blue-400" />
-                    Save duration for future {scheduleModal.job.component?.part_number} on {scheduleModal.machineCode}
-                  </label>
-                </div>
-              )}
-
-              <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  id="requiresAttendance"
-                  checked={scheduleForm.requiresAttendance}
-                  onChange={(e) => setScheduleForm(prev => ({ ...prev, requiresAttendance: e.target.checked }))}
-                  className="w-5 h-5 rounded border-gray-600 bg-gray-800 text-skynet-accent focus:ring-skynet-accent"
-                />
-                <label htmlFor="requiresAttendance" className="text-white flex items-center gap-2">
-                  <User size={16} className="text-gray-400" />
-                  Requires Operator Attendance
-                </label>
               </div>
 
               {saveError && (

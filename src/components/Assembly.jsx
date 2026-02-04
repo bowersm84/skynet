@@ -11,7 +11,8 @@ import {
   Wrench,
   User,
   MapPin,
-  Calendar
+  Calendar,
+  PauseCircle
 } from 'lucide-react'
 
 export default function Assembly({ profile, onUpdate }) {
@@ -30,6 +31,15 @@ export default function Assembly({ profile, onUpdate }) {
     assembler: '1',
     notes: ''
   })
+  
+  // Pause Assembly Modal
+  const [showPauseModal, setShowPauseModal] = useState(false)
+  const [pauseItem, setPauseItem] = useState(null)
+  const [pauseForm, setPauseForm] = useState({
+    returnToQueue: false,
+    completedQuantity: 0,
+    notes: ''
+  })
 
   // Complete Assembly Modal
   const [showCompleteModal, setShowCompleteModal] = useState(false)
@@ -41,7 +51,7 @@ export default function Assembly({ profile, onUpdate }) {
     bad_quantity: 0,
     notes: ''
   })
-
+  
   // Load all assembly data
   const loadAssemblies = useCallback(async () => {
     try {
@@ -139,7 +149,7 @@ export default function Assembly({ profile, onUpdate }) {
               // woa.assembly already contains { id, part_number, description } from nested query
             }
 
-            if (woa.status === 'in_progress') {
+            if (woa.status === 'in_progress' || woa.status === 'paused') {
               inProgress.push(assemblyItem)
             } else if (woa.status === 'complete') {
               // Check if completed this week
@@ -363,11 +373,112 @@ export default function Assembly({ profile, onUpdate }) {
     }
   }
 
+  // Pause Assembly
+  const handlePauseAssembly = async () => {
+    if (!pauseItem) return
+    setActionLoading('pause')
+
+    try {
+      // Append pause notes to existing notes
+      let finalNotes = pauseItem.assembly_notes || ''
+      if (pauseForm.notes) {
+        if (finalNotes) finalNotes += '\n---\n'
+        finalNotes += `Paused: ${pauseForm.notes}`
+      }
+
+      if (pauseForm.returnToQueue) {
+        // Return to queue - reset station/assembler but keep progress
+        const { error } = await supabase
+          .from('work_order_assemblies')
+          .update({
+            status: 'pending',
+            station_number: null,
+            assembler_number: null,
+            good_quantity: pauseForm.completedQuantity,
+            assembly_notes: finalNotes || null
+          })
+          .eq('id', pauseItem.id)
+
+        if (error) throw error
+
+        // Update jobs back to ready_for_assembly
+        await supabase
+          .from('jobs')
+          .update({ 
+            status: 'ready_for_assembly',
+            updated_at: new Date().toISOString()
+          })
+          .eq('work_order_id', pauseItem.work_order_id)
+          .eq('status', 'in_assembly')
+
+      } else {
+        // Pause at station - keep station/assembler assigned
+        const { error } = await supabase
+          .from('work_order_assemblies')
+          .update({
+            status: 'paused',
+            good_quantity: pauseForm.completedQuantity,
+            assembly_notes: finalNotes || null
+          })
+          .eq('id', pauseItem.id)
+
+        if (error) throw error
+      }
+
+      setShowPauseModal(false)
+      setPauseItem(null)
+      setPauseForm({ returnToQueue: false, completedQuantity: 0, notes: '' })
+      await loadAssemblies()
+      if (onUpdate) onUpdate()
+    } catch (err) {
+      console.error('Error pausing assembly:', err)
+      alert('Failed to pause assembly: ' + err.message)
+    } finally {
+      setActionLoading(null)
+    }
+  }
+  
+  // Resume Assembly (unpause)
+  const handleResumeAssembly = async (item) => {
+    if (!confirm('Resume this assembly?')) return
+    setActionLoading(`resume-${item.id}`)
+
+    try {
+      const { error } = await supabase
+        .from('work_order_assemblies')
+        .update({
+          status: 'in_progress'
+        })
+        .eq('id', item.id)
+
+      if (error) throw error
+
+      await loadAssemblies()
+      if (onUpdate) onUpdate()
+    } catch (err) {
+      console.error('Error resuming assembly:', err)
+      alert('Failed to resume assembly: ' + err.message)
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
   // Open Start Modal
   const openStartModal = (item) => {
     setStartItem(item)
     setStartForm({ station: '1', assembler: '1', notes: '' })
     setShowStartModal(true)
+  }
+
+  // Open Pause Modal
+  const openPauseModal = (item) => {
+    setPauseItem(item)
+    setPauseForm({
+      returnToQueue: false,
+      completedQuantity: item.good_quantity || 0,
+      notes: ''
+    })
+    setShowPauseModal(true)
   }
 
   // Open Complete Modal
@@ -502,7 +613,16 @@ export default function Assembly({ profile, onUpdate }) {
                       <p className="text-xs text-gray-500 ml-5">{item.assembly?.description}</p>
                     </div>
                     <div className="text-right text-xs text-gray-500">
+                      {item.status === 'paused' && (
+                        <div className="text-yellow-400 font-medium mb-1 flex items-center gap-1 justify-end">
+                          <PauseCircle size={12} />
+                          PAUSED
+                        </div>
+                      )}
                       <div>Qty: <span className="text-white">{item.quantity}</span></div>
+                      {item.good_quantity > 0 && (
+                        <div className="text-green-400">Done: {item.good_quantity}</div>
+                      )}
                     </div>
                   </div>
 
@@ -524,13 +644,37 @@ export default function Assembly({ profile, onUpdate }) {
                       Started: {formatTime(item.assembly_started_at)}
                       <span className="text-blue-400 ml-2">({formatDuration(item.assembly_started_at)})</span>
                     </div>
-                    <button
-                      onClick={() => openCompleteModal(item)}
-                      className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded transition-colors"
-                    >
-                      <CheckCircle size={14} />
-                      Complete
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {item.status === 'paused' ? (
+                        <button
+                          onClick={() => handleResumeAssembly(item)}
+                          disabled={actionLoading === `resume-${item.id}`}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded transition-colors"
+                        >
+                          {actionLoading === `resume-${item.id}` ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Play size={14} />
+                          )}
+                          Resume
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => openPauseModal(item)}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded transition-colors border border-gray-600"
+                        >
+                          <PauseCircle size={14} />
+                          Pause
+                        </button>
+                      )}
+                      <button
+                        onClick={() => openCompleteModal(item)}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded transition-colors"
+                      >
+                        <CheckCircle size={14} />
+                        Complete
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -582,6 +726,9 @@ export default function Assembly({ profile, onUpdate }) {
                             Due: {formatDate(item.due_date)}
                           </span>
                           <span>Qty: {item.quantity}</span>
+                          {item.good_quantity > 0 && (
+                            <span className="text-green-400">Done: {item.good_quantity}</span>
+                          )}
                         </div>
                         {item.missingAssembly && (
                           <p className="text-xs text-yellow-500/80 mt-1">
@@ -776,7 +923,7 @@ export default function Assembly({ profile, onUpdate }) {
                     type="date"
                     value={completeForm.end_date}
                     onChange={(e) => setCompleteForm({...completeForm, end_date: e.target.value})}
-                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none"
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none [&::-webkit-calendar-picker-indicator]:filter [&::-webkit-calendar-picker-indicator]:invert [&::-webkit-calendar-picker-indicator]:opacity-50 [&::-webkit-calendar-picker-indicator]:hover:opacity-75"
                   />
                 </div>
                 <div>
@@ -785,7 +932,7 @@ export default function Assembly({ profile, onUpdate }) {
                     type="time"
                     value={completeForm.end_time}
                     onChange={(e) => setCompleteForm({...completeForm, end_time: e.target.value})}
-                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none"
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-green-500 focus:outline-none [&::-webkit-calendar-picker-indicator]:filter [&::-webkit-calendar-picker-indicator]:invert [&::-webkit-calendar-picker-indicator]:opacity-50 [&::-webkit-calendar-picker-indicator]:hover:opacity-75"
                   />
                 </div>
               </div>
@@ -854,6 +1001,105 @@ export default function Assembly({ profile, onUpdate }) {
           </div>
         </div>
       )}
+	  
+	  {/* Pause Assembly Modal */}
+      {showPauseModal && pauseItem && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                  <PauseCircle className="text-yellow-500" size={24} />
+                  Pause Assembly
+                </h2>
+                <p className="text-gray-500 text-sm mt-1">{pauseItem.wo_number} • {pauseItem.assembly?.part_number}</p>
+              </div>
+              <button onClick={() => setShowPauseModal(false)} className="text-gray-400 hover:text-white">
+                <X size={24} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Return to Queue Toggle */}
+              <div className="bg-gray-800 rounded-lg p-4">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={pauseForm.returnToQueue}
+                    onChange={(e) => setPauseForm({ ...pauseForm, returnToQueue: e.target.checked })}
+                    className="w-5 h-5 rounded border-gray-600 bg-gray-700 text-skynet-accent focus:ring-skynet-accent"
+                  />
+                  <div>
+                    <span className="text-white font-medium">Return to Queue</span>
+                    <p className="text-gray-500 text-xs">Release station and assembler assignment</p>
+                  </div>
+                </label>
+              </div>
+
+              {/* Completed Quantity - Always visible but highlighted when returning to queue */}
+              <div className={`rounded-lg p-4 ${pauseForm.returnToQueue ? 'bg-yellow-900/30 border border-yellow-600/50' : 'bg-gray-800'}`}>
+                <label className="block text-sm text-gray-400 mb-2">
+                  Pieces Completed So Far {pauseForm.returnToQueue && <span className="text-yellow-400">*</span>}
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    min="0"
+                    max={pauseItem.quantity}
+                    value={pauseForm.completedQuantity}
+                    onChange={(e) => setPauseForm({ ...pauseForm, completedQuantity: parseInt(e.target.value) || 0 })}
+                    className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center focus:border-skynet-accent focus:outline-none"
+                  />
+                  <span className="text-gray-400">of {pauseItem.quantity} total</span>
+                </div>
+                {pauseForm.returnToQueue && (
+                  <p className="text-yellow-400/80 text-xs mt-2">
+                    This will be saved so the next assembler knows where to continue.
+                  </p>
+                )}
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">Notes (optional)</label>
+                <textarea
+                  value={pauseForm.notes}
+                  onChange={(e) => setPauseForm({ ...pauseForm, notes: e.target.value })}
+                  placeholder="Reason for pausing..."
+                  rows={2}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:border-skynet-accent focus:outline-none resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowPauseModal(false)}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePauseAssembly}
+                disabled={actionLoading === 'pause'}
+                className={`flex items-center gap-2 px-4 py-2 font-medium rounded transition-colors ${
+                  pauseForm.returnToQueue 
+                    ? 'bg-yellow-600 hover:bg-yellow-500 text-white' 
+                    : 'bg-gray-700 hover:bg-gray-600 text-white'
+                }`}
+              >
+                {actionLoading === 'pause' ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <PauseCircle size={16} />
+                )}
+                {pauseForm.returnToQueue ? 'Pause & Return to Queue' : 'Pause at Station'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+	  
     </div>
   )
 }

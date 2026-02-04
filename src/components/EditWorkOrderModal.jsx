@@ -208,18 +208,26 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
 
       // 3. Create new assemblies + jobs
       if (newAssemblies.length > 0) {
-        // Get next job number
-        const { data: lastJob } = await supabase
-          .from('jobs')
-          .select('job_number')
-          .order('job_number', { ascending: false })
-          .limit(1)
+		// Get next job number - find the highest existing J-###### number
+		const { data: productionJobs } = await supabase
+		  .from('jobs')
+		  .select('job_number')
+		  .like('job_number', 'J-%')
 
-        let nextJobNum = 1
-        if (lastJob && lastJob.length > 0) {
-          nextJobNum = parseInt(lastJob[0].job_number.replace('J-', '')) + 1
-        }
-
+		let nextJobNum = 1
+		if (productionJobs && productionJobs.length > 0) {
+		  const jobNumbers = productionJobs
+			.map(j => {
+			  const match = j.job_number.match(/^J-(\d+)$/)
+			  return match ? parseInt(match[1], 10) : 0
+			})
+			.filter(n => !isNaN(n) && n > 0)
+		  
+		  if (jobNumbers.length > 0) {
+			nextJobNum = Math.max(...jobNumbers) + 1
+		  }
+		}
+		
         for (const assembly of newAssemblies) {
           // Create WOA record
           const { data: woaData, error: woaErr } = await supabase

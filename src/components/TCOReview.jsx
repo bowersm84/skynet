@@ -23,7 +23,7 @@ export default function TCOReview({ profile, onUpdate }) {
   const [approving, setApproving] = useState(null)
   const [showCompleted, setShowCompleted] = useState(false)
 
-  const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin'
+  const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
   const loadTCOItems = useCallback(async () => {
     try {

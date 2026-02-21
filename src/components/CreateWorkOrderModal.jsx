@@ -1,68 +1,50 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench } from 'lucide-react'
 
-export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machines }) {
+export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [assemblies, setAssemblies] = useState([])
   const [loadingAssemblies, setLoadingAssemblies] = useState(true)
-  
+
   // Auto-generated WO number
   const [woNumber, setWoNumber] = useState('')
   const [generatingWO, setGeneratingWO] = useState(false)
-  
+
   // Order type: make_to_order or make_to_stock
   const [orderType, setOrderType] = useState('make_to_order')
   const [customer, setCustomer] = useState('')
   const [poNumber, setPoNumber] = useState('')
-  
+
   // Production order fields
   const [priority, setPriority] = useState('normal')
   const [dueDate, setDueDate] = useState('')
   const [notes, setNotes] = useState('')
   const [selectedAssemblies, setSelectedAssemblies] = useState([])
 
-  useEffect(() => {
-    fetchAssemblies()
-  }, [])
-
-  useEffect(() => {
-    if (isOpen) {
-      generateOrderNumber()
-      setOrderType('make_to_order')
-      setCustomer('')
-      setPoNumber('')
-      setPriority('normal')
-      setDueDate('')
-      setNotes('')
-      setSelectedAssemblies([])
-      setError(null)
-    }
-  }, [isOpen])
-
   // Generate next WO number
-  const generateOrderNumber = async () => {
+  const generateOrderNumber = useCallback(async () => {
     setGeneratingWO(true)
     try {
       const now = new Date()
       const year = String(now.getFullYear()).slice(-2)
       const month = String(now.getMonth() + 1).padStart(2, '0')
       const prefix = `WO-${year}${month}-`
-      
-      const { data, error } = await supabase
+
+      const { data, error: _error } = await supabase
         .from('work_orders')
         .select('wo_number')
         .like('wo_number', `${prefix}%`)
         .order('wo_number', { ascending: false })
         .limit(1)
-      
+
       let nextNum = 1
       if (data && data.length > 0) {
         const lastNum = parseInt(data[0].wo_number.split('-')[2]) || 0
         nextNum = lastNum + 1
       }
-      
+
       setWoNumber(`${prefix}${String(nextNum).padStart(4, '0')}`)
     } catch (err) {
       console.error('Error generating order number:', err)
@@ -71,14 +53,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
       setWoNumber(fallback)
     }
     setGeneratingWO(false)
-  }
+  }, [])
 
-  // Handle order type change
-  const handleOrderTypeChange = (newType) => {
-    setOrderType(newType)
-  }
-
-  const fetchAssemblies = async () => {
+  const fetchAssemblies = useCallback(async () => {
     setLoadingAssemblies(true)
     const { data, error } = await supabase
       .from('parts')
@@ -111,10 +88,35 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
       setAssemblies(data || [])
     }
     setLoadingAssemblies(false)
+  }, [])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchAssemblies()
+  }, [fetchAssemblies])
+
+  useEffect(() => {
+    if (isOpen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      generateOrderNumber()
+      setOrderType('make_to_order')
+      setCustomer('')
+      setPoNumber('')
+      setPriority('normal')
+      setDueDate('')
+      setNotes('')
+      setSelectedAssemblies([])
+      setError(null)
+    }
+  }, [isOpen, generateOrderNumber])
+
+  // Handle order type change
+  const handleOrderTypeChange = (newType) => {
+    setOrderType(newType)
   }
 
   const addAssembly = () => {
-    setSelectedAssemblies([...selectedAssemblies, { assemblyId: '', quantity: 1, jobs: [] }])
+    setSelectedAssemblies([...selectedAssemblies, { assemblyId: '', orderQuantity: 1, additionalForStock: 0, jobs: [] }])
   }
 
   const removeAssembly = (index) => {
@@ -133,7 +135,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         componentId: selectedPart.id,
         partNumber: selectedPart.part_number,
         description: selectedPart.description,
-        quantity: updated[index].quantity,
+        quantity: updated[index].orderQuantity + updated[index].additionalForStock,
         quantityCustomized: false,
         isFinishedGood: true
       }]
@@ -142,13 +144,15 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
     setSelectedAssemblies(updated)
   }
 
-  const updateAssemblyQuantity = (index, quantity) => {
+  const updateAssemblyQtyField = (index, field, value) => {
     const updated = [...selectedAssemblies]
-    updated[index].quantity = parseInt(quantity) || 1
+    const min = field === 'orderQuantity' ? 1 : 0
+    updated[index][field] = Math.max(min, parseInt(value) || 0)
+    const total = updated[index].orderQuantity + updated[index].additionalForStock
     // Update job quantities that haven't been customized
     updated[index].jobs = updated[index].jobs.map(job => ({
       ...job,
-      quantity: job.quantityCustomized ? job.quantity : updated[index].quantity
+      quantity: job.quantityCustomized ? job.quantity : total
     }))
     setSelectedAssemblies(updated)
   }
@@ -165,7 +169,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         componentId: bom.component.id,
         partNumber: bom.component.part_number,
         description: bom.component.description,
-        quantity: updated[assemblyIndex].quantity,
+        quantity: updated[assemblyIndex].orderQuantity + updated[assemblyIndex].additionalForStock,
         quantityCustomized: false
       })
       setSelectedAssemblies(updated)
@@ -220,6 +224,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         priority: priority,
         due_date: dueDate || null,
         notes: notes || null,
+        stock_quantity: selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0) || null,
         status: 'pending'
       })
       .select()
@@ -259,7 +264,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
         .insert({
           work_order_id: workOrder.id,
           assembly_id: assemblyPart.id,
-          quantity: assembly.quantity,
+          quantity: assembly.orderQuantity + assembly.additionalForStock,
           status: 'pending'
         })
         .select('id')
@@ -472,7 +477,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                     {selectedAssemblies.map((selected, assemblyIndex) => (
                       <div key={assemblyIndex} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
                         <div className="flex items-start justify-between gap-4 mb-4">
-                          <div className="flex-1 grid grid-cols-2 gap-3">
+                          <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
                             <div>
                               <label className="block text-gray-500 text-xs mb-1">Product</label>
                               <select
@@ -498,14 +503,30 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                               </select>
                             </div>
                             <div>
-                              <label className="block text-gray-500 text-xs mb-1">Quantity</label>
+                              <label className="block text-gray-500 text-xs mb-1">Order Qty</label>
                               <input
                                 type="number"
                                 min="1"
-                                value={selected.quantity}
-                                onChange={(e) => updateAssemblyQuantity(assemblyIndex, e.target.value)}
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                                value={selected.orderQuantity}
+                                onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
+                                className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
                               />
+                            </div>
+                            <div>
+                              <label className="block text-gray-500 text-xs mb-1">+ Stock</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={selected.additionalForStock}
+                                onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'additionalForStock', e.target.value)}
+                                className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-500 text-xs mb-1">= Total</label>
+                              <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
+                                {selected.orderQuantity + selected.additionalForStock}
+                              </div>
                             </div>
                           </div>
                           <button
@@ -537,7 +558,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                                       <span className="text-gray-500 text-sm ml-2">- {selectedPart.description}</span>
                                     </div>
                                     <div className="flex items-center gap-2">
-                                      <span className="text-green-400 text-sm">{selected.quantity} pcs</span>
+                                      <span className="text-green-400 text-sm">
+                                        {selected.orderQuantity + selected.additionalForStock} pcs
+                                        {selected.additionalForStock > 0 && ` (${selected.orderQuantity} order + ${selected.additionalForStock} stock)`}
+                                      </span>
                                     </div>
                                   </div>
                                 </div>
@@ -638,6 +662,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, machi
                                         className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm text-center"
                                       />
                                       <span className="text-gray-500 text-sm">pcs</span>
+                                      {!job.quantityCustomized && selected.additionalForStock > 0 && (
+                                        <span className="text-gray-500 text-xs">({selected.orderQuantity} order + {selected.additionalForStock} stock)</span>
+                                      )}
                                       <button
                                         type="button"
                                         onClick={() => removeJob(assemblyIndex, job.componentId)}

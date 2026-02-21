@@ -10,15 +10,18 @@ import {
   X,
   Loader2,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   Check,
   AlertTriangle,
   Beaker,
   Layers,
   Database,
-  Upload
+  Upload,
+  Route
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
+import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 
 export default function MasterData({ profile }) {
   const [activeTab, setActiveTab] = useState('assemblies')
@@ -29,6 +32,7 @@ export default function MasterData({ profile }) {
   const [parts, setParts] = useState([])
   const [materialTypes, setMaterialTypes] = useState([])
   const [barSizes, setBarSizes] = useState([])
+  const [routingTemplates, setRoutingTemplates] = useState([])
   
   // Modals
   const [showPartModal, setShowPartModal] = useState(false)
@@ -51,7 +55,9 @@ export default function MasterData({ profile }) {
     customer: '',
     specification: '',
     requires_passivation: false,
-    unit_cost: 0
+    unit_cost: 0,
+    material_type_id: null,
+    drawing_revision: ''
   })
   
   const [materialForm, setMaterialForm] = useState({
@@ -74,7 +80,15 @@ export default function MasterData({ profile }) {
   const [machines, setMachines] = useState([])
   const [preferredMachineId, setPreferredMachineId] = useState(null)
   const [secondaryMachineIds, setSecondaryMachineIds] = useState([]) // up to 5
-  
+
+  // Routing steps for part modal
+  const [routingSteps, setRoutingSteps] = useState([])
+
+  // Document requirements for part modal
+  const [documentTypes, setDocumentTypes] = useState([])
+  const [docRequirements, setDocRequirements] = useState([])
+  const [showDocRequirements, setShowDocRequirements] = useState(false)
+
   // Loading states
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(null)
@@ -135,6 +149,25 @@ export default function MasterData({ profile }) {
       if (machinesError) console.error('Error fetching machines:', machinesError)
       setMachines(machinesData || [])
 
+      // Fetch document types
+      const { data: docTypesData } = await supabase
+        .from('document_types')
+        .select('*')
+        .eq('is_active', true)
+        .order('sort_order')
+      setDocumentTypes(docTypesData || [])
+
+      // Fetch routing templates with steps
+      const { data: rtData } = await supabase
+        .from('routing_templates')
+        .select('*, routing_template_steps(*)')
+        .eq('is_active', true)
+        .order('name')
+      setRoutingTemplates((rtData || []).map(t => ({
+        ...t,
+        routing_template_steps: (t.routing_template_steps || []).sort((a, b) => a.step_order - b.step_order)
+      })))
+
     } catch (err) {
       console.error('Error fetching data:', err)
     } finally {
@@ -171,9 +204,38 @@ export default function MasterData({ profile }) {
         customer: part.customer || '',
         specification: part.specification || '',
         requires_passivation: part.requires_passivation || false,
-        unit_cost: part.unit_cost || 0
+        unit_cost: part.unit_cost || 0,
+        material_type_id: part.material_type_id || null,
+        drawing_revision: part.drawing_revision || ''
       })
-      
+
+      // Load existing routing steps
+      const { data: existingSteps } = await supabase
+        .from('part_routing_steps')
+        .select('*')
+        .eq('part_id', part.id)
+        .eq('is_active', true)
+        .order('step_order')
+      setRoutingSteps((existingSteps || []).map(s => ({
+        step_name: s.step_name,
+        step_type: s.step_type || 'internal',
+        default_station: s.default_station || '',
+        notes: s.notes || ''
+      })))
+
+      // Load existing document requirements
+      const { data: existingDocReqs } = await supabase
+        .from('part_document_requirements')
+        .select('*')
+        .eq('part_id', part.id)
+      setDocRequirements((existingDocReqs || []).map(r => ({
+        document_type_id: r.document_type_id,
+        required_at: r.required_at || 'compliance_review',
+        is_required: r.is_required !== false,
+        notes: r.notes || ''
+      })))
+      setShowDocRequirements((existingDocReqs || []).length > 0)
+
       // Load existing machine preferences
       const { data: prefs } = await supabase
         .from('part_machine_durations')
@@ -200,18 +262,74 @@ export default function MasterData({ profile }) {
         customer: '',
         specification: '',
         requires_passivation: false,
-        unit_cost: 0
+        unit_cost: 0,
+        material_type_id: null,
+        drawing_revision: ''
       })
+      setRoutingSteps([])
+      setDocRequirements([])
+      setShowDocRequirements(false)
       setPreferredMachineId(null)
       setSecondaryMachineIds([])
     }
     setShowPartModal(true)
   }
 
+  // Routing step management for part modal
+  const addRoutingStep = () => {
+    setRoutingSteps([...routingSteps, { step_name: '', step_type: 'internal', default_station: '', notes: '' }])
+  }
+
+  const removeRoutingStep = (index) => {
+    setRoutingSteps(routingSteps.filter((_, i) => i !== index))
+  }
+
+  const moveRoutingStep = (index, direction) => {
+    const newIndex = index + direction
+    if (newIndex < 0 || newIndex >= routingSteps.length) return
+    const updated = [...routingSteps]
+    const [moved] = updated.splice(index, 1)
+    updated.splice(newIndex, 0, moved)
+    setRoutingSteps(updated)
+  }
+
+  const updateRoutingStep = (index, field, value) => {
+    const updated = [...routingSteps]
+    updated[index] = { ...updated[index], [field]: value }
+    setRoutingSteps(updated)
+  }
+
+  const loadRoutingFromTemplate = (templateId) => {
+    if (!templateId) return
+    const template = routingTemplates.find(t => t.id === templateId)
+    if (!template) return
+    setRoutingSteps(
+      (template.routing_template_steps || [])
+        .sort((a, b) => a.step_order - b.step_order)
+        .map(s => ({
+          step_name: s.step_name,
+          step_type: s.step_type || 'internal',
+          default_station: s.default_station || '',
+          notes: s.notes || ''
+        }))
+    )
+  }
+
   // Save part
   const handleSavePart = async () => {
     if (!partForm.part_number.trim()) {
       alert('Part number is required')
+      return
+    }
+
+    // Routing is mandatory for manufactured and finished_good parts
+    const needsRouting = partForm.part_type === 'manufactured' || partForm.part_type === 'finished_good'
+    if (needsRouting && routingSteps.length === 0) {
+      alert('Routing is required — add at least one step')
+      return
+    }
+    if (needsRouting && routingSteps.some(s => !s.step_name.trim())) {
+      alert('All routing steps must have a name')
       return
     }
 
@@ -231,6 +349,8 @@ export default function MasterData({ profile }) {
             specification: partForm.specification.trim() || null,
             requires_passivation: partForm.requires_passivation,
             unit_cost: parseFloat(partForm.unit_cost) || 0,
+            material_type_id: partForm.material_type_id || null,
+            drawing_revision: partForm.drawing_revision?.trim() || null,
             updated_at: new Date().toISOString()
           })
           .eq('id', editingPart.id)
@@ -247,7 +367,9 @@ export default function MasterData({ profile }) {
             customer: partForm.customer.trim() || null,
             specification: partForm.specification.trim() || null,
             requires_passivation: partForm.requires_passivation,
-            unit_cost: parseFloat(partForm.unit_cost) || 0
+            unit_cost: parseFloat(partForm.unit_cost) || 0,
+            material_type_id: partForm.material_type_id || null,
+            drawing_revision: partForm.drawing_revision?.trim() || null
           })
           .select()
           .single()
@@ -292,6 +414,41 @@ export default function MasterData({ profile }) {
               })
           }
         }
+      }
+
+      // Save routing steps (for manufactured/finished_good)
+      if (partId && needsRouting && routingSteps.length > 0) {
+        // Delete existing steps and re-insert (simplest for reorder support)
+        await supabase.from('part_routing_steps').delete().eq('part_id', partId)
+        for (let i = 0; i < routingSteps.length; i++) {
+          await supabase.from('part_routing_steps').insert({
+            part_id: partId,
+            step_order: i + 1,
+            step_name: routingSteps[i].step_name.trim(),
+            step_type: routingSteps[i].step_type,
+            default_station: routingSteps[i].default_station?.trim() || null,
+            notes: routingSteps[i].notes?.trim() || null
+          })
+        }
+      }
+
+      // Save document requirements
+      if (partId && docRequirements.length > 0) {
+        await supabase.from('part_document_requirements').delete().eq('part_id', partId)
+        for (const req of docRequirements) {
+          if (req.document_type_id) {
+            await supabase.from('part_document_requirements').insert({
+              part_id: partId,
+              document_type_id: req.document_type_id,
+              required_at: req.required_at || 'compliance_review',
+              is_required: req.is_required !== false,
+              notes: req.notes?.trim() || null
+            })
+          }
+        }
+      } else if (partId && docRequirements.length === 0 && editingPart) {
+        // If all requirements were removed, delete existing
+        await supabase.from('part_document_requirements').delete().eq('part_id', partId)
       }
 
       setShowPartModal(false)
@@ -600,7 +757,8 @@ export default function MasterData({ profile }) {
               { id: 'assemblies', label: 'Finished Products', icon: Package, count: parts.filter(p => p.part_type === 'assembly' || p.part_type === 'finished_good').length },
               { id: 'components', label: 'Components', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
               { id: 'materials', label: 'Materials', icon: Layers, count: materialTypes.length },
-              { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: barSizes.length }
+              { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: barSizes.length },
+              { id: 'routing', label: 'Routing Templates', icon: Route, count: routingTemplates.length }
             ].map(tab => (
               <button
                 key={tab.id}
@@ -890,16 +1048,21 @@ export default function MasterData({ profile }) {
             )}
           </div>
         )}
+
+        {/* Routing Templates Tab */}
+        {activeTab === 'routing' && (
+          <RoutingTemplatesTab onDataChange={fetchData} />
+        )}
       </div>
 
       {/* Part Modal */}
       {showPartModal && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-lg">
-            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
               <h2 className="text-lg font-semibold text-white">
                 {editingPart ? 'Edit Part' : `New ${
-                  partForm.part_type === 'assembly' ? 'Assembly' : 
+                  partForm.part_type === 'assembly' ? 'Assembly' :
                   partForm.part_type === 'finished_good' ? 'Finished Good' : 'Component'
                 }`}
               </h2>
@@ -908,7 +1071,7 @@ export default function MasterData({ profile }) {
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-gray-400 text-sm mb-1">Part Number *</label>
                 <input
@@ -981,6 +1144,35 @@ export default function MasterData({ profile }) {
                 </div>
               </div>
 
+              {/* Material Type & Drawing Revision — for manufactured/FG */}
+              {partForm.part_type !== 'assembly' && partForm.part_type !== 'purchased' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">Material Type</label>
+                    <select
+                      value={partForm.material_type_id || ''}
+                      onChange={(e) => setPartForm({ ...partForm, material_type_id: e.target.value || null })}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                    >
+                      <option value="">-- None --</option>
+                      {materialTypes.map(mt => (
+                        <option key={mt.id} value={mt.id}>{mt.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">Drawing Revision</label>
+                    <input
+                      type="text"
+                      value={partForm.drawing_revision}
+                      onChange={(e) => setPartForm({ ...partForm, drawing_revision: e.target.value })}
+                      placeholder="e.g., Rev C"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                    />
+                  </div>
+                </div>
+              )}
+
               {partForm.part_type !== 'assembly' && partForm.part_type !== 'purchased' && (
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input
@@ -994,6 +1186,215 @@ export default function MasterData({ profile }) {
                     <span className="text-white">Requires Passivation</span>
                   </div>
                 </label>
+              )}
+
+              {/* Routing Steps — for manufactured/finished_good */}
+              {partForm.part_type !== 'assembly' && partForm.part_type !== 'purchased' && (
+                <div className="border border-gray-700 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-gray-400 text-sm font-medium">
+                      Routing Steps *
+                      <span className="text-gray-600 font-normal ml-1">({routingSteps.length})</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {routingTemplates.length > 0 && (
+                        <select
+                          onChange={(e) => { loadRoutingFromTemplate(e.target.value); e.target.value = '' }}
+                          defaultValue=""
+                          className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-300 focus:outline-none focus:border-skynet-accent"
+                        >
+                          <option value="" disabled>Load from Template...</option>
+                          {routingTemplates.map(t => (
+                            <option key={t.id} value={t.id}>{t.name}</option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        type="button"
+                        onClick={addRoutingStep}
+                        className="flex items-center gap-1 text-xs text-skynet-accent hover:text-blue-400 transition-colors"
+                      >
+                        <Plus size={14} />
+                        Add Step
+                      </button>
+                    </div>
+                  </div>
+
+                  {routingSteps.length === 0 ? (
+                    <p className="text-gray-600 text-sm text-center py-4">
+                      No routing steps &mdash; load from a template or add manually
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {routingSteps.map((step, idx) => (
+                        <div key={idx} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+                          <div className="flex items-center gap-2">
+                            <span className="text-gray-500 text-xs font-mono w-5 text-center">{idx + 1}</span>
+                            <input
+                              type="text"
+                              value={step.step_name}
+                              onChange={(e) => updateRoutingStep(idx, 'step_name', e.target.value)}
+                              placeholder="Step name *"
+                              className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                            />
+                            <select
+                              value={step.step_type}
+                              onChange={(e) => updateRoutingStep(idx, 'step_type', e.target.value)}
+                              className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                            >
+                              <option value="internal">Internal</option>
+                              <option value="external">External</option>
+                            </select>
+                            <input
+                              type="text"
+                              value={step.default_station}
+                              onChange={(e) => updateRoutingStep(idx, 'default_station', e.target.value)}
+                              placeholder="Station"
+                              className="w-28 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                            />
+                            <div className="flex items-center gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => moveRoutingStep(idx, -1)}
+                                disabled={idx === 0}
+                                className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Move up"
+                              >
+                                <ChevronUp size={14} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveRoutingStep(idx, 1)}
+                                disabled={idx === routingSteps.length - 1}
+                                className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Move down"
+                              >
+                                <ChevronDown size={14} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeRoutingStep(idx)}
+                                className="p-1 text-red-400 hover:text-red-300"
+                                title="Remove step"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Document Requirements — collapsible section */}
+              {partForm.part_type !== 'assembly' && (
+                <div className="border border-gray-700 rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowDocRequirements(!showDocRequirements)}
+                    className="w-full px-4 py-3 flex items-center justify-between bg-gray-800/50 hover:bg-gray-800 transition-colors"
+                  >
+                    <p className="text-gray-400 text-sm font-medium">
+                      Document Requirements
+                      {docRequirements.length > 0 && (
+                        <span className="text-gray-600 font-normal ml-1">({docRequirements.length})</span>
+                      )}
+                    </p>
+                    <ChevronDown
+                      size={16}
+                      className={`text-gray-500 transition-transform ${showDocRequirements ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+
+                  {showDocRequirements && (
+                    <div className="p-4 space-y-3 border-t border-gray-700">
+                      {docRequirements.length === 0 ? (
+                        <p className="text-gray-600 text-sm text-center py-2">No document requirements configured</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {docRequirements.map((req, idx) => (
+                            <div key={idx} className="flex items-center gap-2 bg-gray-800 rounded p-2">
+                              <select
+                                value={req.document_type_id || ''}
+                                onChange={(e) => {
+                                  const updated = [...docRequirements]
+                                  updated[idx] = { ...updated[idx], document_type_id: e.target.value || null }
+                                  setDocRequirements(updated)
+                                }}
+                                className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                              >
+                                <option value="">-- Doc Type --</option>
+                                {documentTypes.map(dt => (
+                                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                                ))}
+                              </select>
+                              <select
+                                value={req.required_at}
+                                onChange={(e) => {
+                                  const updated = [...docRequirements]
+                                  updated[idx] = { ...updated[idx], required_at: e.target.value }
+                                  setDocRequirements(updated)
+                                }}
+                                className="w-40 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                              >
+                                <option value="compliance_review">Compliance Review</option>
+                                <option value="manufacturing_complete">After Manufacturing</option>
+                                <option value="tco">Before TCO</option>
+                              </select>
+                              <label className="flex items-center gap-1 text-xs text-gray-400 whitespace-nowrap cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={req.is_required}
+                                  onChange={(e) => {
+                                    const updated = [...docRequirements]
+                                    updated[idx] = { ...updated[idx], is_required: e.target.checked }
+                                    setDocRequirements(updated)
+                                  }}
+                                  className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-skynet-accent focus:ring-skynet-accent focus:ring-offset-gray-900"
+                                />
+                                Req
+                              </label>
+                              <input
+                                type="text"
+                                value={req.notes}
+                                onChange={(e) => {
+                                  const updated = [...docRequirements]
+                                  updated[idx] = { ...updated[idx], notes: e.target.value }
+                                  setDocRequirements(updated)
+                                }}
+                                placeholder="Notes"
+                                className="w-24 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setDocRequirements(docRequirements.filter((_, i) => i !== idx))}
+                                className="p-1 text-red-400 hover:text-red-300"
+                                title="Remove"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setDocRequirements([...docRequirements, {
+                          document_type_id: null,
+                          required_at: 'compliance_review',
+                          is_required: true,
+                          notes: ''
+                        }])}
+                        className="flex items-center gap-1 text-xs text-skynet-accent hover:text-blue-400 transition-colors"
+                      >
+                        <Plus size={14} />
+                        Add Requirement
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Machine Preferences - for manufactured, finished_good */}
@@ -1071,7 +1472,7 @@ export default function MasterData({ profile }) {
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
               <button
                 onClick={() => setShowPartModal(false)}
                 className="flex-1 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"

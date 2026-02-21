@@ -111,8 +111,6 @@ CREATE TABLE public.job_routing_steps (
   step_name text NOT NULL,
   step_type text DEFAULT 'internal'::text,
   station text,
-  is_removed boolean DEFAULT false,
-  removed_reason text,
   removal_requested_by uuid,
   removal_approved_by uuid,
   removal_approved_at timestamp with time zone,
@@ -123,11 +121,20 @@ CREATE TABLE public.job_routing_steps (
   operator_initials text,
   notes text,
   created_at timestamp with time zone DEFAULT now(),
+  status text DEFAULT 'pending'::text CHECK (status = ANY (ARRAY['pending'::text, 'in_progress'::text, 'complete'::text, 'skipped'::text, 'removal_pending'::text, 'removed'::text])),
+  removal_requested_at timestamp with time zone,
+  removal_reason text,
+  is_added_step boolean DEFAULT false,
+  added_by uuid,
+  added_at timestamp with time zone,
+  started_at timestamp with time zone,
+  updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT job_routing_steps_pkey PRIMARY KEY (id),
   CONSTRAINT job_routing_steps_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT job_routing_steps_removal_requested_by_fkey FOREIGN KEY (removal_requested_by) REFERENCES public.profiles(id),
   CONSTRAINT job_routing_steps_removal_approved_by_fkey FOREIGN KEY (removal_approved_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_routing_steps_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id)
+  CONSTRAINT job_routing_steps_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id),
+  CONSTRAINT job_routing_steps_added_by_fkey FOREIGN KEY (added_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.job_tools (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -334,7 +341,10 @@ CREATE TABLE public.parts (
   specification character varying,
   unit_cost numeric DEFAULT 0,
   requires_passivation boolean DEFAULT false,
-  CONSTRAINT parts_pkey PRIMARY KEY (id)
+  material_type_id uuid,
+  drawing_revision character varying,
+  CONSTRAINT parts_pkey PRIMARY KEY (id),
+  CONSTRAINT parts_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
 );
 CREATE TABLE public.profiles (
   id uuid NOT NULL,
@@ -347,6 +357,7 @@ CREATE TABLE public.profiles (
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
+  can_approve_compliance boolean DEFAULT false,
   CONSTRAINT profiles_pkey PRIMARY KEY (id),
   CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id),
   CONSTRAINT profiles_home_location_id_fkey FOREIGN KEY (home_location_id) REFERENCES public.locations(id)
@@ -368,6 +379,7 @@ CREATE TABLE public.routing_templates (
   material_category text,
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
+  description text,
   CONSTRAINT routing_templates_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.tool_instances (
@@ -434,6 +446,7 @@ CREATE TABLE public.work_orders (
   tco_notes text,
   maintenance_type text,
   machine_id uuid,
+  stock_quantity integer,
   CONSTRAINT work_orders_pkey PRIMARY KEY (id),
   CONSTRAINT work_orders_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
   CONSTRAINT work_orders_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES public.profiles(id),

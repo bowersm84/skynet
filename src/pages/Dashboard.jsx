@@ -83,7 +83,7 @@ export default function Dashboard({ user, profile }) {
         .select(`
           *,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
-          component:parts!component_id(id, part_number, description, part_type),
+          component:parts!component_id(id, part_number, description, part_type, requires_passivation),
           assigned_machine:machines(id, name, code)
         `)
         .not('status', 'eq', 'complete')
@@ -314,6 +314,7 @@ export default function Dashboard({ user, profile }) {
           order_type,
           maintenance_type,
           status,
+          stock_quantity,
           created_at,
           work_order_assemblies (
             id,
@@ -1204,7 +1205,6 @@ export default function Dashboard({ user, profile }) {
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         onSuccess={fetchData}
-        machines={machines}
       />
 
       {/* Create Maintenance Modal */}

@@ -30,7 +30,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [showRecentlyApproved, setShowRecentlyApproved] = useState(false)
 
   // Check if user has compliance permissions
-  const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin'
+  const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
   // Filter jobs by category
   const pendingMachiningJobs = jobs.filter(job => job.status === 'pending_compliance')
@@ -61,10 +61,19 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       }
     }
 
-    const { data: requirements } = await supabase
+    let { data: requirements } = await supabase
       .from('part_document_requirements')
       .select('*, document_type:document_types(*)')
       .eq('part_id', job.component.id)
+
+    // A3: Filter out passivation doc requirements if component doesn't require passivation
+    if (!job.component?.requires_passivation && requirements) {
+      requirements = requirements.filter(r => {
+        const code = (r.document_type?.code || '').toLowerCase()
+        const name = (r.document_type?.name || '').toLowerCase()
+        return !code.includes('passivation') && !name.includes('passivation')
+      })
+    }
 
     const { data: partDocs } = await supabase
       .from('part_documents')

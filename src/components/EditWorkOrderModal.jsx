@@ -10,7 +10,6 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
   const [customer, setCustomer] = useState('')
   const [dueDate, setDueDate] = useState('')
   const [priority, setPriority] = useState('normal')
-
   // Existing assemblies with their jobs (editable quantities)
   const [existingAssemblies, setExistingAssemblies] = useState([])
 
@@ -38,15 +37,26 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     setShowAddProduct(false)
 
     // Build existing assemblies with their jobs
-    const assemblies = (workOrder.work_order_assemblies || []).map(woa => {
+    const woStockQty = workOrder.stock_quantity || 0
+    const woAssemblies = workOrder.work_order_assemblies || []
+    const assemblies = woAssemblies.map((woa, idx) => {
       const jobs = (workOrder.jobs || []).filter(j => j.work_order_assembly_id === woa.id)
+      // Derive per-assembly stock split: for single-assembly WOs assign all stock_quantity;
+      // for multi-assembly WOs assign stock to first assembly (pragmatic default)
+      const stockForThis = idx === 0 ? woStockQty : 0
+      const orderQty = Math.max(1, woa.quantity - stockForThis)
+      const additionalStock = woa.quantity - orderQty
       return {
         woaId: woa.id,
         assemblyId: woa.assembly?.id,
         partNumber: woa.assembly?.part_number || 'Unknown',
         description: woa.assembly?.description || '',
         quantity: woa.quantity,
+        orderQuantity: orderQty,
+        additionalForStock: additionalStock,
         originalQuantity: woa.quantity,
+        originalOrderQuantity: orderQty,
+        originalAdditionalForStock: additionalStock,
         status: woa.status,
         jobs: jobs.map(j => ({
           id: j.id,
@@ -120,6 +130,8 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       description: part.description,
       partType: part.part_type,
       quantity: 1,
+      orderQuantity: 1,
+      additionalForStock: 0,
       jobs,
       expanded: true,
       bom: part.assembly_bom || []
@@ -144,7 +156,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         componentId,
         partNumber: component.part_number,
         description: component.description,
-        quantity: assembly.quantity
+        quantity: assembly.orderQuantity + assembly.additionalForStock
       })
     }
     setNewAssemblies(updated)
@@ -157,7 +169,8 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     if (priority !== (workOrder.priority || 'normal')) return true
     if (newAssemblies.length > 0) return true
     for (const a of existingAssemblies) {
-      if (a.quantity !== a.originalQuantity) return true
+      if (a.orderQuantity !== a.originalOrderQuantity) return true
+      if (a.additionalForStock !== a.originalAdditionalForStock) return true
       for (const j of a.jobs) {
         if (j.quantity !== j.originalQuantity) return true
       }
@@ -175,6 +188,11 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       if (customer !== workOrder.customer) woUpdates.customer = customer
       if (dueDate !== workOrder.due_date) woUpdates.due_date = dueDate || null
       if (priority !== workOrder.priority) woUpdates.priority = priority
+      const totalAdditionalForStock = [...existingAssemblies, ...newAssemblies].reduce(
+        (sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0
+      )
+      const newStockQty = totalAdditionalForStock || null
+      if (newStockQty !== workOrder.stock_quantity) woUpdates.stock_quantity = newStockQty
 
       if (Object.keys(woUpdates).length > 0) {
         const { error: woErr } = await supabase
@@ -186,10 +204,11 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
 
       // 2. Update existing assembly quantities
       for (const assembly of existingAssemblies) {
-        if (assembly.quantity !== assembly.originalQuantity) {
+        const currentTotal = assembly.orderQuantity + assembly.additionalForStock
+        if (currentTotal !== assembly.originalQuantity) {
           const { error: woaErr } = await supabase
             .from('work_order_assemblies')
-            .update({ quantity: assembly.quantity })
+            .update({ quantity: currentTotal })
             .eq('id', assembly.woaId)
           if (woaErr) throw woaErr
         }
@@ -235,7 +254,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
             .insert({
               work_order_id: workOrder.id,
               assembly_id: assembly.assemblyId,
-              quantity: assembly.quantity,
+              quantity: assembly.orderQuantity + assembly.additionalForStock,
               status: 'pending'
             })
             .select('id')
@@ -302,7 +321,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
           )}
 
           {/* WO Details */}
-          <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-3 gap-4 mb-4">
             <div>
               <label className="block text-gray-400 text-sm mb-1">Customer</label>
               <input
@@ -366,22 +385,49 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                       <p className="text-xs text-gray-500">{assembly.description}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
-                    <label className="text-xs text-gray-500">Qty:</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={assembly.quantity}
-                      onChange={e => {
-                        const updated = [...existingAssemblies]
-                        updated[aIdx].quantity = parseInt(e.target.value) || 1
-                        setExistingAssemblies(updated)
-                      }}
-                      disabled={!allEditable}
-                      className={`w-20 px-2 py-1 bg-gray-800 border rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none ${
-                        allEditable ? 'border-gray-600' : 'border-gray-700 text-gray-500 cursor-not-allowed'
-                      }`}
-                    />
+                  <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center gap-1">
+                      <label className="text-xs text-gray-500">Order:</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={assembly.orderQuantity}
+                        onChange={e => {
+                          const updated = [...existingAssemblies]
+                          updated[aIdx].orderQuantity = Math.max(1, parseInt(e.target.value) || 0)
+                          updated[aIdx].quantity = updated[aIdx].orderQuantity + updated[aIdx].additionalForStock
+                          setExistingAssemblies(updated)
+                        }}
+                        disabled={!allEditable}
+                        className={`w-16 px-2 py-1 bg-gray-800 border rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none ${
+                          allEditable ? 'border-gray-600' : 'border-gray-700 text-gray-500 cursor-not-allowed'
+                        }`}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <label className="text-xs text-gray-500">+ Stock:</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={assembly.additionalForStock}
+                        onChange={e => {
+                          const updated = [...existingAssemblies]
+                          updated[aIdx].additionalForStock = Math.max(0, parseInt(e.target.value) || 0)
+                          updated[aIdx].quantity = updated[aIdx].orderQuantity + updated[aIdx].additionalForStock
+                          setExistingAssemblies(updated)
+                        }}
+                        disabled={!allEditable}
+                        className={`w-16 px-2 py-1 bg-gray-800 border rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none ${
+                          allEditable ? 'border-gray-600' : 'border-gray-700 text-gray-500 cursor-not-allowed'
+                        }`}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <label className="text-xs text-gray-500">=</label>
+                      <div className="w-16 px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm text-center">
+                        {assembly.orderQuantity + assembly.additionalForStock}
+                      </div>
+                    </div>
                     {!allEditable && (
                       <span className="text-xs text-gray-600" title="Some jobs already scheduled">🔒</span>
                     )}
@@ -466,22 +512,47 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                     <p className="text-xs text-gray-500">{assembly.description}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
-                  <label className="text-xs text-gray-500">Qty:</label>
-                  <input
-                    type="number"
-                    min="1"
-                    value={assembly.quantity}
-                    onChange={e => {
-                      const updated = [...newAssemblies]
-                      const newQty = parseInt(e.target.value) || 1
-                      updated[aIdx].quantity = newQty
-                      // Update all selected job quantities to match
-                      updated[aIdx].jobs.forEach(j => j.quantity = newQty)
-                      setNewAssemblies(updated)
-                    }}
-                    className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none"
-                  />
+                <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center gap-1">
+                    <label className="text-xs text-gray-500">Order:</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={assembly.orderQuantity}
+                      onChange={e => {
+                        const updated = [...newAssemblies]
+                        updated[aIdx].orderQuantity = Math.max(1, parseInt(e.target.value) || 0)
+                        const total = updated[aIdx].orderQuantity + updated[aIdx].additionalForStock
+                        updated[aIdx].quantity = total
+                        updated[aIdx].jobs.forEach(j => j.quantity = total)
+                        setNewAssemblies(updated)
+                      }}
+                      className="w-16 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <label className="text-xs text-gray-500">+ Stock:</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={assembly.additionalForStock}
+                      onChange={e => {
+                        const updated = [...newAssemblies]
+                        updated[aIdx].additionalForStock = Math.max(0, parseInt(e.target.value) || 0)
+                        const total = updated[aIdx].orderQuantity + updated[aIdx].additionalForStock
+                        updated[aIdx].quantity = total
+                        updated[aIdx].jobs.forEach(j => j.quantity = total)
+                        setNewAssemblies(updated)
+                      }}
+                      className="w-16 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <label className="text-xs text-gray-500">=</label>
+                    <div className="w-16 px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm text-center">
+                      {assembly.orderQuantity + assembly.additionalForStock}
+                    </div>
+                  </div>
                   <button
                     onClick={(e) => { e.stopPropagation(); removeNewAssembly(aIdx) }}
                     className="text-red-400 hover:text-red-300 p-1"

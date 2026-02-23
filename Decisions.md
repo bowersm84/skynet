@@ -111,8 +111,10 @@ JOB ROUTING STEPS (per job instance)   → The live runtime copy, filled during 
 - Sprint 3 will expand `requires_passivation` to full finishing stage config
 
 ### New S1 Columns
-- `work_orders.stock_quantity` (integer) — available stock qty (April's 500/800 split)
-- `profiles.can_approve_compliance` (boolean) — backup compliance officers (Jody, Tom)
+- `work_orders.order_quantity` (integer) — customer committed quantity (urgent, ship ASAP)
+- `work_orders.stock_quantity` (integer) — additional units to produce for inventory (can be deprioritized)
+- Total production = order_quantity + stock_quantity. UI label: "Additional for Stock"
+- Floor workers see the split so they can pivot off stock work when something urgent comes in- `profiles.can_approve_compliance` (boolean) — backup compliance officers (Jody, Tom)
 
 ### Job Status Flow
 ```
@@ -201,3 +203,10 @@ src/
 - After ANY MB decision or scope change
 - After completing a sprint (update "Current Sprint" section)
 - When a convention is established (naming, patterns, etc.)
+
+### Stock Quantity Model
+- order_quantity = customer committed quantity (urgent, ship ASAP)
+- stock_quantity = additional units to produce for inventory (can be deprioritized)
+- Total production = order_quantity + stock_quantity
+- Floor workers can see the split so they can pivot off stock work if something urgent comes in
+- Label in UI: "Additional for Stock"

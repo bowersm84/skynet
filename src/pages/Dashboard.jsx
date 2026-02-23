@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer } from 'lucide-react'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
@@ -8,6 +8,7 @@ import ComplianceReview from '../components/ComplianceReview'
 import Assembly from '../components/Assembly'
 import TCOReview from '../components/TCOReview'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
+import PrintPackageModal from '../components/PrintPackageModal'
 
 export default function Dashboard({ user, profile }) {
   const [machines, setMachines] = useState([])
@@ -53,6 +54,7 @@ export default function Dashboard({ user, profile }) {
   const [cancellingJobId, setCancellingJobId] = useState(null)
   const [cancelStep, setCancelStep] = useState(0) // 0=none, 1=first warning, 2=final confirmation
   const [cancelSaving, setCancelSaving] = useState(false)
+  const [printPackageJob, setPrintPackageJob] = useState(null)
 
   // Memoized fetch function
   const fetchData = useCallback(async (isAutoRefresh = false) => {
@@ -82,7 +84,7 @@ export default function Dashboard({ user, profile }) {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes, order_quantity, stock_quantity),
           component:parts!component_id(id, part_number, description, part_type, requires_passivation),
           assigned_machine:machines(id, name, code)
         `)
@@ -314,6 +316,7 @@ export default function Dashboard({ user, profile }) {
           order_type,
           maintenance_type,
           status,
+          order_quantity,
           stock_quantity,
           created_at,
           work_order_assemblies (
@@ -1205,6 +1208,7 @@ export default function Dashboard({ user, profile }) {
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         onSuccess={fetchData}
+        profile={profile}
       />
 
       {/* Create Maintenance Modal */}
@@ -1314,10 +1318,19 @@ export default function Dashboard({ user, profile }) {
                             <div className="text-left">
                               <div className="flex items-center gap-2">
                                 <span className="text-white font-mono font-medium">{wo.wo_number}</span>
+                                {wo.order_type === 'make_to_order' && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-700/50">MTO</span>
+                                )}
+                                {wo.order_type === 'make_to_stock' && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-green-900/50 text-green-300 border border-green-700/50">MTS</span>
+                                )}
+                                {wo.order_type === 'maintenance' && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-orange-900/50 text-orange-300 border border-orange-700/50">MAINT</span>
+                                )}
                                 {wo.order_type === 'maintenance' && (
                                   <span className={`text-xs px-1.5 py-0.5 rounded ${
-                                    wo.maintenance_type === 'unplanned' 
-                                      ? 'bg-purple-900/50 text-purple-300' 
+                                    wo.maintenance_type === 'unplanned'
+                                      ? 'bg-purple-900/50 text-purple-300'
                                       : 'bg-blue-900/50 text-blue-300'
                                   }`}>
                                     {wo.maintenance_type === 'unplanned' ? 'UNPLANNED' : 'PLANNED'}
@@ -1343,6 +1356,21 @@ export default function Dashboard({ user, profile }) {
                                   <Calendar size={12} />
                                   Due: {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : 'N/A'}
                                 </span>
+                                {wo.order_type === 'make_to_order' && wo.order_quantity > 0 && (
+                                  <span className="flex items-center gap-1">
+                                    <Package size={12} />
+                                    Qty: {(wo.order_quantity || 0) + (wo.stock_quantity || 0)}
+                                    {wo.stock_quantity > 0 && (
+                                      <span className="text-gray-500">({wo.order_quantity} order + {wo.stock_quantity} stock)</span>
+                                    )}
+                                  </span>
+                                )}
+                                {wo.order_type === 'make_to_stock' && wo.stock_quantity > 0 && (
+                                  <span className="flex items-center gap-1">
+                                    <Package size={12} />
+                                    Qty: {wo.stock_quantity}
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -1459,7 +1487,16 @@ export default function Dashboard({ user, profile }) {
                                                     <span className="text-green-400">• Active</span>
                                                   )}
                                                 </div>
-                                                <div className="col-span-2 text-right">
+                                                <div className="col-span-2 text-right flex items-center justify-end gap-1">
+                                                  {!['pending_compliance', 'cancelled'].includes(job.status) && (
+                                                    <button
+                                                      onClick={() => setPrintPackageJob(job)}
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-white hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded transition-colors"
+                                                    >
+                                                      <Printer size={12} />
+                                                      Print
+                                                    </button>
+                                                  )}
                                                   {canCancel && (
                                                     <button
                                                       onClick={() => handleWOLookupCancelStart(job.id)}
@@ -1539,7 +1576,16 @@ export default function Dashboard({ user, profile }) {
                                             <span className="text-green-400">• Active</span>
                                           )}
                                         </div>
-                                        <div className="col-span-2 text-right">
+                                        <div className="col-span-2 text-right flex items-center justify-end gap-1">
+                                          {!['pending_compliance', 'cancelled'].includes(job.status) && (
+                                            <button
+                                              onClick={() => setPrintPackageJob(job)}
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-white hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded transition-colors"
+                                            >
+                                              <Printer size={12} />
+                                              Print
+                                            </button>
+                                          )}
                                           {canCancel && (
                                             <button
                                               onClick={() => handleWOLookupCancelStart(job.id)}
@@ -1688,6 +1734,13 @@ export default function Dashboard({ user, profile }) {
           </div>
         </div>
       )}
+
+      {/* Print Package Modal (WO Lookup) */}
+      <PrintPackageModal
+        isOpen={!!printPackageJob}
+        job={printPackageJob}
+        onClose={() => setPrintPackageJob(null)}
+      />
     </div>
   )
 }

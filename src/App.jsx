@@ -8,6 +8,7 @@ import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import Secondary from './pages/Secondary'
 import MasterData from './pages/MasterData'
+import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 
 // Main authenticated app component
@@ -267,6 +268,9 @@ function App() {
 
         {/* Secondary operations route (passivation, paint, etc.) */}
         <Route path="/secondary/:operationType" element={<Secondary />} />
+
+        {/* Print traveler route - opens in new tab */}
+        <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />
 
         {/* Main app - requires Supabase authentication */}
         <Route path="/*" element={<MainApp />} />

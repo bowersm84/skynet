@@ -22,6 +22,7 @@ export default function TCOReview({ profile, onUpdate }) {
   const [expandedWO, setExpandedWO] = useState(null)
   const [approving, setApproving] = useState(null)
   const [showCompleted, setShowCompleted] = useState(false)
+  const [tcoNotes, setTcoNotes] = useState({})
 
   const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
@@ -39,6 +40,11 @@ export default function TCOReview({ profile, onUpdate }) {
           notes,
           status,
           order_type,
+          tco_notes,
+          closed_at,
+          closed_by_profile:profiles!work_orders_closed_by_fkey (
+            full_name
+          ),
           work_order_assemblies (
             id,
             assembly_id,
@@ -76,22 +82,20 @@ export default function TCOReview({ profile, onUpdate }) {
       const pending = []
       const completed = []
 
-      // Get start of this week (Sunday)
-      const startOfWeek = new Date()
-      startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay())
-      startOfWeek.setHours(0, 0, 0, 0)
+      const fiveDaysAgo = new Date()
+      fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5)
+      fiveDaysAgo.setHours(0, 0, 0, 0)
 
       for (const wo of (wos || [])) {
         if (!wo.jobs || wo.jobs.length === 0) continue
 
         const hasTCOJobs = wo.jobs.some(j => j.status === 'pending_tco')
-        const allComplete = wo.jobs.every(j => j.status === 'complete' || j.status === 'cancelled')
 
         if (hasTCOJobs) {
           // Check if ALL non-cancelled jobs are pending_tco (ready for TCO approval)
           const activeJobs = wo.jobs.filter(j => j.status !== 'cancelled')
           const allPendingTCO = activeJobs.every(j => j.status === 'pending_tco')
-          
+
           pending.push({
             ...wo,
             allPendingTCO,
@@ -100,26 +104,17 @@ export default function TCOReview({ profile, onUpdate }) {
             productPart: wo.work_order_assemblies?.[0]?.assembly || null,
             isFinishedGood: wo.work_order_assemblies?.[0]?.assembly?.part_type === 'finished_good'
           })
-        } else if (allComplete && wo.status === 'complete') {
-          // Recently completed TCOs (this week)
-          const lastUpdate = wo.jobs.reduce((latest, j) => {
-            const d = new Date(j.updated_at || 0)
-            return d > latest ? d : latest
-          }, new Date(0))
-          
-          if (lastUpdate >= startOfWeek) {
-            completed.push({
-              ...wo,
-              completedAt: lastUpdate,
-              productPart: wo.work_order_assemblies?.[0]?.assembly || null,
-              isFinishedGood: wo.work_order_assemblies?.[0]?.assembly?.part_type === 'finished_good'
-            })
-          }
+        } else if (wo.status === 'complete' && wo.closed_at && new Date(wo.closed_at) >= fiveDaysAgo) {
+          completed.push({
+            ...wo,
+            productPart: wo.work_order_assemblies?.[0]?.assembly || null,
+            isFinishedGood: wo.work_order_assemblies?.[0]?.assembly?.part_type === 'finished_good'
+          })
         }
       }
 
-      // Sort completed by most recent first
-      completed.sort((a, b) => b.completedAt - a.completedAt)
+      // Sort completed by most recently closed first
+      completed.sort((a, b) => new Date(b.closed_at) - new Date(a.closed_at))
 
       setTcoItems(pending)
       setCompletedItems(completed)
@@ -161,11 +156,14 @@ export default function TCOReview({ profile, onUpdate }) {
 
       if (jobsError) throw jobsError
 
-      // Update work order to complete
+      // Update work order to complete with TCO data
       const { error: woError } = await supabase
         .from('work_orders')
         .update({
           status: 'complete',
+          tco_notes: tcoNotes[wo.id]?.trim() || null,
+          closed_by: profile.id,
+          closed_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         })
         .eq('id', wo.id)
@@ -374,6 +372,20 @@ export default function TCOReview({ profile, onUpdate }) {
                           <span className="text-gray-500 text-xs">Notes:</span> {wo.notes}
                         </div>
                       )}
+
+                      {/* TCO Notes */}
+                      {isComplianceUser && (
+                        <div className="mt-3">
+                          <label className="text-gray-500 text-xs font-medium block mb-1">TCO Notes</label>
+                          <textarea
+                            value={tcoNotes[wo.id] || ''}
+                            onChange={(e) => setTcoNotes(prev => ({ ...prev, [wo.id]: e.target.value }))}
+                            placeholder="Optional notes for TCO closeout..."
+                            rows={2}
+                            className="w-full bg-gray-900 text-gray-300 text-sm border border-gray-700 rounded px-3 py-2 placeholder-gray-600 focus:border-amber-600 focus:ring-0 focus:outline-none resize-none"
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -383,7 +395,7 @@ export default function TCOReview({ profile, onUpdate }) {
         </div>
       )}
 
-      {/* Completed TCO - This Week */}
+      {/* Recently Closed - Last 5 Days */}
       {completedItems.length > 0 && (
         <div className="bg-gray-900 rounded-lg border border-gray-700 p-4">
           <button
@@ -391,46 +403,59 @@ export default function TCOReview({ profile, onUpdate }) {
             className="w-full flex items-center justify-between text-left"
           >
             <h3 className="text-gray-400 font-semibold flex items-center gap-2">
-              <CheckCircle size={18} className="text-green-500" />
-              Completed This Week ({completedItems.length})
+              <FileText size={18} />
+              Recently Closed — Last 5 Days ({completedItems.length})
             </h3>
-            <ChevronDown 
-              size={20} 
+            <ChevronDown
+              size={20}
               className={`text-gray-500 transition-transform ${showCompleted ? 'rotate-0' : '-rotate-90'}`}
             />
           </button>
-          
+
           {showCompleted && (
             <div className="mt-4 space-y-2">
               {completedItems.map(wo => (
-                <div 
+                <div
                   key={wo.id}
-                  className="flex items-center justify-between bg-gray-800 rounded p-3"
+                  className="bg-gray-800 rounded p-3"
                 >
-                  <div className="flex items-center gap-3">
-                    <CheckCircle size={14} className="text-green-500" />
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-white font-mono text-sm">{wo.wo_number}</span>
-                        {wo.productPart && (
-                          <span className="text-skynet-accent text-sm">{wo.productPart.part_number}</span>
-                        )}
-                        {wo.isFinishedGood ? (
-                          <span className="text-xs text-emerald-400">FG</span>
-                        ) : (
-                          <span className="text-xs text-purple-400">Assy</span>
-                        )}
-                      </div>
-                      <div className="text-gray-500 text-xs">
-                        {wo.customer || 'Stock'}
-                        <span className="mx-2">•</span>
-                        Completed: {formatDate(wo.completedAt)}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle size={14} className="text-green-500" />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-white font-mono text-sm">{wo.wo_number}</span>
+                          {wo.productPart && (
+                            <span className="text-skynet-accent text-sm">{wo.productPart.part_number}</span>
+                          )}
+                          {wo.productPart?.description && (
+                            <span className="text-gray-500 text-sm">{wo.productPart.description}</span>
+                          )}
+                          {wo.isFinishedGood ? (
+                            <span className="text-xs text-emerald-400">FG</span>
+                          ) : (
+                            <span className="text-xs text-purple-400">Assy</span>
+                          )}
+                        </div>
+                        <div className="text-gray-500 text-xs">
+                          {wo.customer || 'Stock'}
+                          <span className="mx-2">•</span>
+                          {wo.closed_by_profile?.full_name
+                            ? `Closed by ${wo.closed_by_profile.full_name} on ${formatDate(wo.closed_at)}`
+                            : `Closed: ${formatDate(wo.closed_at)}`
+                          }
+                        </div>
                       </div>
                     </div>
+                    <span className="text-xs px-2 py-0.5 bg-green-900/30 text-green-400 rounded border border-green-800">
+                      Complete
+                    </span>
                   </div>
-                  <span className="text-xs px-2 py-0.5 bg-green-900/30 text-green-400 rounded border border-green-800">
-                    Complete
-                  </span>
+                  {wo.tco_notes && (
+                    <div className="mt-2 ml-8 text-xs text-gray-500 bg-gray-900/50 rounded px-2 py-1">
+                      <span className="text-gray-600">TCO Notes:</span> {wo.tco_notes}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

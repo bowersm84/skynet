@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
+import PrintPackageModal from './PrintPackageModal'
 import { 
   ChevronDown, 
   ChevronRight, 
@@ -16,7 +17,10 @@ import {
   Plus,
   RefreshCw,
   Undo2,
-  Beaker
+  Beaker,
+  ArrowUp,
+  ArrowDown,
+  Printer
 } from 'lucide-react'
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
@@ -28,6 +32,232 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [recalling, setRecalling] = useState(null)
   const [viewingDoc, setViewingDoc] = useState(null)
   const [showRecentlyApproved, setShowRecentlyApproved] = useState(false)
+  const [approvingRouting, setApprovingRouting] = useState(null)
+  const [routingReviewed, setRoutingReviewed] = useState({})
+  const [addingStepForJob, setAddingStepForJob] = useState(null)
+  const [newStepName, setNewStepName] = useState('')
+  const [newStepType, setNewStepType] = useState('internal')
+  const [newStepStation, setNewStepStation] = useState('')
+  const [printPackageJob, setPrintPackageJob] = useState(null)
+
+  const handleApproveRoutingRemoval = async (stepId, jobId) => {
+    setApprovingRouting(stepId)
+    try {
+      const { error } = await supabase
+        .from('job_routing_steps')
+        .update({
+          status: 'removed',
+          removal_approved_by: profile.id,
+          removal_approved_at: new Date().toISOString()
+        })
+        .eq('id', stepId)
+      if (error) throw error
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error approving routing removal:', err)
+      alert('Failed to approve routing change')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleRejectRoutingRemoval = async (stepId, jobId) => {
+    setApprovingRouting(stepId)
+    try {
+      const { error } = await supabase
+        .from('job_routing_steps')
+        .update({
+          status: 'pending',
+          removal_reason: null,
+          removal_requested_by: null,
+          removal_requested_at: null
+        })
+        .eq('id', stepId)
+      if (error) throw error
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error rejecting routing removal:', err)
+      alert('Failed to reject routing change')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleRestoreRoutingStep = async (stepId, jobId) => {
+    setApprovingRouting(stepId)
+    try {
+      const { error } = await supabase
+        .from('job_routing_steps')
+        .update({
+          status: 'pending',
+          removal_reason: null,
+          removal_requested_by: null,
+          removal_requested_at: null,
+          removal_approved_by: null,
+          removal_approved_at: null
+        })
+        .eq('id', stepId)
+      if (error) throw error
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error restoring routing step:', err)
+      alert('Failed to restore routing step')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleDirectRemoveStep = async (stepId, jobId) => {
+    setApprovingRouting(stepId)
+    try {
+      const { error } = await supabase
+        .from('job_routing_steps')
+        .update({
+          status: 'removed',
+          removal_approved_by: profile.id,
+          removal_approved_at: new Date().toISOString()
+        })
+        .eq('id', stepId)
+      if (error) throw error
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error removing routing step:', err)
+      alert('Failed to remove routing step')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleAddStepToJob = async (jobId) => {
+    if (!newStepName.trim()) return
+    setApprovingRouting('adding')
+    try {
+      const steps = jobDetails[jobId]?.routingSteps || []
+      const maxOrder = steps.length > 0 ? Math.max(...steps.map(s => s.step_order)) : 0
+
+      const { error } = await supabase
+        .from('job_routing_steps')
+        .insert({
+          job_id: jobId,
+          step_name: newStepName.trim(),
+          step_type: newStepType,
+          station: newStepStation.trim() || null,
+          step_order: maxOrder + 1,
+          status: 'pending',
+          is_added_step: true,
+          added_by: profile.id,
+          added_at: new Date().toISOString()
+        })
+      if (error) throw error
+
+      // Renumber all steps for this job
+      const { data: updatedSteps } = await supabase
+        .from('job_routing_steps')
+        .select('id')
+        .eq('job_id', jobId)
+        .order('step_order')
+
+      if (updatedSteps) {
+        await Promise.all(updatedSteps.map((s, i) =>
+          supabase.from('job_routing_steps').update({ step_order: i + 1 }).eq('id', s.id)
+        ))
+      }
+
+      setAddingStepForJob(null)
+      setNewStepName('')
+      setNewStepType('internal')
+      setNewStepStation('')
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error adding routing step:', err)
+      alert('Failed to add routing step')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleReorderStep = async (stepId, direction, jobId) => {
+    const steps = jobDetails[jobId]?.routingSteps || []
+    const idx = steps.findIndex(s => s.id === stepId)
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1
+    if (targetIdx < 0 || targetIdx >= steps.length) return
+
+    setApprovingRouting(stepId)
+    try {
+      const currentStep = steps[idx]
+      const targetStep = steps[targetIdx]
+
+      const { error: err1 } = await supabase
+        .from('job_routing_steps')
+        .update({ step_order: targetStep.step_order })
+        .eq('id', currentStep.id)
+      if (err1) throw err1
+
+      const { error: err2 } = await supabase
+        .from('job_routing_steps')
+        .update({ step_order: currentStep.step_order })
+        .eq('id', targetStep.id)
+      if (err2) throw err2
+
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error reordering routing step:', err)
+      alert('Failed to reorder routing step')
+    }
+    setApprovingRouting(null)
+  }
+
+  const handleResetRoutingToDefault = async (jobId) => {
+    if (!confirm('Reset routing to master data defaults? This will discard all changes made by Customer Service.')) return
+
+    const job = jobs.find(j => j.id === jobId)
+    if (!job?.component?.id) return
+
+    setApprovingRouting('resetting')
+    try {
+      // Delete all existing job_routing_steps for this job
+      const { error: deleteError } = await supabase
+        .from('job_routing_steps')
+        .delete()
+        .eq('job_id', jobId)
+      if (deleteError) throw deleteError
+
+      // Fetch master routing from part_routing_steps
+      const { data: partRouting } = await supabase
+        .from('part_routing_steps')
+        .select('*')
+        .eq('part_id', job.component.id)
+        .eq('is_active', true)
+        .order('step_order')
+
+      // Insert fresh copies
+      if (partRouting?.length > 0) {
+        const jobSteps = partRouting.map(step => ({
+          job_id: jobId,
+          step_order: step.step_order,
+          step_name: step.step_name,
+          step_type: step.step_type,
+          station: step.default_station,
+          status: 'pending'
+        }))
+        const { error: insertError } = await supabase
+          .from('job_routing_steps')
+          .insert(jobSteps)
+        if (insertError) throw insertError
+      }
+
+      // Uncheck routing reviewed
+      setRoutingReviewed(prev => ({ ...prev, [jobId]: false }))
+
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Error resetting routing:', err)
+      alert('Failed to reset routing to defaults')
+    }
+    setApprovingRouting(null)
+  }
 
   // Check if user has compliance permissions
   const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
@@ -57,6 +287,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         requirements: [],
         partDocs: [],
         jobDocs: [],
+        routingSteps: [],
         noComponent: true
       }
     }
@@ -87,10 +318,17 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       .eq('job_id', jobId)
       .order('created_at', { ascending: true })
 
+    const { data: routingSteps } = await supabase
+      .from('job_routing_steps')
+      .select('*')
+      .eq('job_id', jobId)
+      .order('step_order')
+
     return {
       requirements: requirements || [],
       partDocs: partDocs || [],
-      jobDocs: jobDocs || []
+      jobDocs: jobDocs || [],
+      routingSteps: routingSteps || []
     }
   }
 
@@ -224,7 +462,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
   const handleApproveJob = async (jobId, currentStatus) => {
     setApproving(jobId)
-    
+
     try {
       // Determine next status based on current status
       let nextStatus = 'ready'
@@ -241,7 +479,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       const { error } = await supabase
         .from('jobs')
-        .update({ 
+        .update({
           status: nextStatus,
           updated_at: new Date().toISOString()
         })
@@ -249,12 +487,47 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       if (error) throw error
       onUpdate()
-      
+
     } catch (err) {
       console.error('Approve job error:', err)
       alert('Failed to approve job')
     }
-    
+
+    setApproving(null)
+  }
+
+  const handleApproveAndPrint = async (job) => {
+    setApproving(job.id)
+
+    try {
+      let nextStatus = 'ready'
+      if (job.status === 'pending_post_manufacturing') {
+        const partType = job.component?.part_type
+        if (partType === 'finished_good') {
+          nextStatus = 'pending_tco'
+        } else {
+          nextStatus = 'ready_for_assembly'
+        }
+      }
+
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: nextStatus,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', job.id)
+
+      if (error) throw error
+      onUpdate()
+      // Open print package modal after successful approval
+      setPrintPackageJob(job)
+
+    } catch (err) {
+      console.error('Approve job error:', err)
+      alert('Failed to approve job')
+    }
+
     setApproving(null)
   }
 
@@ -437,7 +710,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       <div className="text-sm text-gray-500">
                         <span className="text-skynet-accent">{job.component?.part_number}</span>
                         <span className="mx-2">•</span>
-                        <span>Qty: {job.quantity}</span>
+                        <span>Qty: {job.quantity}
+                          {job.work_order?.order_type === 'make_to_order' && job.work_order?.order_quantity && job.work_order?.stock_quantity
+                            ? ` (${job.work_order.order_quantity} order + ${job.work_order.stock_quantity} stock)`
+                            : job.work_order?.order_type === 'make_to_stock'
+                              ? ' (stock)'
+                              : ''
+                          }
+                        </span>
                         {job.work_order?.customer && (
                           <span className="mx-2">• {job.work_order.customer}</span>
                         )}
@@ -447,10 +727,267 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                   
                 </div>
 
-                {isExpanded && (
+                {isExpanded && (() => {
+                  const allSteps = details?.routingSteps || []
+                  const hasRouting = allSteps.length > 0
+                  const hasPendingRemovals = allSteps.some(s => s.status === 'removal_pending')
+                  const isRoutingChecked = !!routingReviewed[job.id]
+                  const canApproveFull = jobCanApprove && (!hasRouting || isRoutingChecked) && !hasPendingRemovals
+                  const canEditRouting = isComplianceUser && job.status === 'pending_compliance'
+
+                  return (
                   <div className="border-t border-gray-700 p-4">
+                    {/* Full Routing Display */}
+                    {hasRouting && (
+                      <div className="mb-4 pb-4 border-b border-gray-700">
+                        <h4 className="text-gray-400 text-sm font-medium mb-2 flex items-center gap-2">
+                          Routing
+                          {hasPendingRemovals && (
+                            <span className="text-xs px-1.5 py-0.5 bg-amber-900/50 text-amber-400 rounded">Action Required</span>
+                          )}
+                          {canEditRouting && (
+                            <button
+                              onClick={() => handleResetRoutingToDefault(job.id)}
+                              disabled={approvingRouting === 'resetting'}
+                              className="flex items-center gap-1 ml-auto text-xs text-gray-500 hover:text-orange-400 disabled:opacity-50"
+                            >
+                              {approvingRouting === 'resetting' ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Undo2 size={12} />
+                              )}
+                              Reset to Default
+                            </button>
+                          )}
+                        </h4>
+                        <div className="space-y-1">
+                          {allSteps.map((step, stepIndex) => {
+                            const isRemovalPending = step.status === 'removal_pending'
+                            const isRemoved = step.status === 'removed'
+                            const isAdded = step.is_added_step
+
+                            return (
+                              <div key={step.id}>
+                                <div className={`flex items-center gap-2 text-sm py-1 px-2 rounded ${
+                                  isRemovalPending ? 'bg-amber-900/10 border border-amber-800/50' :
+                                  isRemoved ? 'bg-gray-800/50' : ''
+                                }`}>
+                                  <span className="text-gray-600 w-6 text-right">{step.step_order}.</span>
+                                  <span className={
+                                    isRemovalPending ? 'text-red-400 line-through' :
+                                    isRemoved ? 'text-gray-600 line-through' :
+                                    'text-gray-300'
+                                  }>{step.step_name}</span>
+                                  {step.station && (
+                                    <span className="text-gray-600">({step.station})</span>
+                                  )}
+                                  {step.step_type === 'external' && (
+                                    <span className="text-xs px-1 bg-orange-900/30 text-orange-400 rounded">External</span>
+                                  )}
+                                  {isAdded && (
+                                    <span className="text-xs px-1 bg-green-900/30 text-green-400 rounded">Added</span>
+                                  )}
+                                  {isRemoved && (
+                                    <>
+                                      <span className="text-xs px-1 bg-gray-700 text-gray-500 rounded">Removed</span>
+                                      {isComplianceUser && job.status === 'pending_compliance' && (
+                                        <button
+                                          onClick={() => handleRestoreRoutingStep(step.id, job.id)}
+                                          disabled={approvingRouting === step.id}
+                                          className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-gray-400 hover:text-white border border-gray-600 hover:border-gray-500 rounded disabled:opacity-50"
+                                        >
+                                          {approvingRouting === step.id ? (
+                                            <Loader2 size={10} className="animate-spin" />
+                                          ) : (
+                                            <Undo2 size={10} />
+                                          )}
+                                          Restore
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
+                                  {canEditRouting && !isRemoved && !isRemovalPending && (
+                                    <div className="flex items-center gap-1 ml-auto">
+                                      {stepIndex > 0 && (
+                                        <button
+                                          onClick={() => handleReorderStep(step.id, 'up', job.id)}
+                                          disabled={approvingRouting === step.id}
+                                          className="p-0.5 text-gray-500 hover:text-white rounded disabled:opacity-50"
+                                          title="Move up"
+                                        >
+                                          <ArrowUp size={12} />
+                                        </button>
+                                      )}
+                                      {stepIndex < allSteps.length - 1 && (
+                                        <button
+                                          onClick={() => handleReorderStep(step.id, 'down', job.id)}
+                                          disabled={approvingRouting === step.id}
+                                          className="p-0.5 text-gray-500 hover:text-white rounded disabled:opacity-50"
+                                          title="Move down"
+                                        >
+                                          <ArrowDown size={12} />
+                                        </button>
+                                      )}
+                                      <button
+                                        onClick={() => handleDirectRemoveStep(step.id, job.id)}
+                                        disabled={approvingRouting === step.id}
+                                        className="p-0.5 text-gray-500 hover:text-red-400 rounded disabled:opacity-50 ml-1"
+                                        title="Remove step"
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                    </div>
+                                  )}
+                                  {isRemovalPending && isComplianceUser && (
+                                    <div className="flex items-center gap-1 ml-auto">
+                                      {canEditRouting && (
+                                        <>
+                                          {stepIndex > 0 && (
+                                            <button
+                                              onClick={() => handleReorderStep(step.id, 'up', job.id)}
+                                              disabled={approvingRouting === step.id}
+                                              className="p-0.5 text-gray-500 hover:text-white rounded disabled:opacity-50"
+                                              title="Move up"
+                                            >
+                                              <ArrowUp size={12} />
+                                            </button>
+                                          )}
+                                          {stepIndex < allSteps.length - 1 && (
+                                            <button
+                                              onClick={() => handleReorderStep(step.id, 'down', job.id)}
+                                              disabled={approvingRouting === step.id}
+                                              className="p-0.5 text-gray-500 hover:text-white rounded disabled:opacity-50"
+                                              title="Move down"
+                                            >
+                                              <ArrowDown size={12} />
+                                            </button>
+                                          )}
+                                          <button
+                                            onClick={() => handleDirectRemoveStep(step.id, job.id)}
+                                            disabled={approvingRouting === step.id}
+                                            className="p-0.5 text-gray-500 hover:text-red-400 rounded disabled:opacity-50 ml-1"
+                                            title="Remove step"
+                                          >
+                                            <X size={12} />
+                                          </button>
+                                          <span className="w-px h-4 bg-gray-600 mx-1" />
+                                        </>
+                                      )}
+                                      <button
+                                        onClick={() => handleRejectRoutingRemoval(step.id, job.id)}
+                                        disabled={approvingRouting === step.id}
+                                        className="flex items-center gap-1 px-2 py-0.5 text-xs bg-gray-600 hover:bg-gray-500 text-white rounded disabled:opacity-50"
+                                      >
+                                        <X size={10} />
+                                        Reject
+                                      </button>
+                                      <button
+                                        onClick={() => handleApproveRoutingRemoval(step.id, job.id)}
+                                        disabled={approvingRouting === step.id}
+                                        className="flex items-center gap-1 px-2 py-0.5 text-xs bg-green-600 hover:bg-green-500 text-white rounded disabled:opacity-50"
+                                      >
+                                        {approvingRouting === step.id ? (
+                                          <Loader2 size={10} className="animate-spin" />
+                                        ) : (
+                                          <Check size={10} />
+                                        )}
+                                        Approve
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                                {isRemovalPending && (
+                                  <div className="text-xs text-amber-400/80 ml-8 mb-1">
+                                    Removal requested &mdash; {step.removal_reason}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {/* Add Step */}
+                        {canEditRouting && (
+                          <div className="mt-2">
+                            {addingStepForJob === job.id ? (
+                              <div className="flex items-center gap-2 text-sm py-1.5 px-2 bg-gray-800 rounded border border-gray-600">
+                                <input
+                                  type="text"
+                                  placeholder="Step name"
+                                  value={newStepName}
+                                  onChange={(e) => setNewStepName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleAddStepToJob(job.id)
+                                    if (e.key === 'Escape') { setAddingStepForJob(null); setNewStepName(''); setNewStepType('internal'); setNewStepStation('') }
+                                  }}
+                                  className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-40"
+                                  autoFocus
+                                />
+                                <select
+                                  value={newStepType}
+                                  onChange={(e) => setNewStepType(e.target.value)}
+                                  className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
+                                >
+                                  <option value="internal">Internal</option>
+                                  <option value="external">External</option>
+                                </select>
+                                <input
+                                  type="text"
+                                  placeholder="Station (optional)"
+                                  value={newStepStation}
+                                  onChange={(e) => setNewStepStation(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleAddStepToJob(job.id)
+                                    if (e.key === 'Escape') { setAddingStepForJob(null); setNewStepName(''); setNewStepType('internal'); setNewStepStation('') }
+                                  }}
+                                  className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-32"
+                                />
+                                <button
+                                  onClick={() => handleAddStepToJob(job.id)}
+                                  disabled={!newStepName.trim() || approvingRouting === 'adding'}
+                                  className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded disabled:opacity-50"
+                                >
+                                  {approvingRouting === 'adding' ? (
+                                    <Loader2 size={10} className="animate-spin" />
+                                  ) : (
+                                    <Plus size={10} />
+                                  )}
+                                  Add
+                                </button>
+                                <button
+                                  onClick={() => { setAddingStepForJob(null); setNewStepName(''); setNewStepType('internal'); setNewStepStation('') }}
+                                  className="px-2 py-1 text-xs text-gray-400 hover:text-white"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setAddingStepForJob(job.id)}
+                                className="flex items-center gap-1 text-xs text-gray-500 hover:text-green-400 px-2 py-1"
+                              >
+                                <Plus size={12} />
+                                Add Step
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {/* Routing reviewed checkbox */}
+                        {isComplianceUser && (
+                          <label className="flex items-center gap-2 mt-3 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={isRoutingChecked}
+                              onChange={(e) => setRoutingReviewed(prev => ({ ...prev, [job.id]: e.target.checked }))}
+                              className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-green-500 focus:ring-green-500 focus:ring-offset-0"
+                            />
+                            <span className="text-sm text-gray-400">Routing reviewed and approved</span>
+                          </label>
+                        )}
+                      </div>
+                    )}
+
                     <h4 className="text-gray-400 text-sm font-medium mb-3">Required Documents</h4>
-                    
+
                     {!details && (
                       <div className="text-gray-500 text-sm flex items-center gap-2">
                         <Loader2 size={16} className="animate-spin" />
@@ -463,13 +1000,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                         This job has no component linked.
                       </div>
                     )}
-                    
+
                     {details && !details.noComponent && stageReqs.length === 0 && (
                       <div className="text-green-500 text-sm bg-green-900/20 p-3 rounded">
                         No documents required at this stage.
                       </div>
                     )}
-                    
+
                     {details && !details.noComponent && stageReqs.length > 0 && (
                       <div className="space-y-4">
                         {stageReqs.map(req => {
@@ -488,7 +1025,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                     <CheckCircle size={14} className="text-green-500" />
                                   )}
                                 </div>
-                                
+
                                 <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
                                   {isUploading ? (
                                     <Loader2 size={12} className="animate-spin" />
@@ -530,7 +1067,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                     <div className="flex items-center gap-3">
                                       {isDocApproved && <CheckCircle size={18} className="text-green-500" />}
                                       {doc.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
-                                      
+
                                       <div>
                                         <div className="text-xs text-gray-500">{doc.file_name}</div>
                                         {docsForType.length > 1 && (
@@ -632,24 +1169,36 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                     )}
 
                     {/* Footer */}
-                    <div className="mt-4 pt-4 border-t border-gray-700 flex justify-between items-center">
-                      <div className="text-sm">
+                    <div className="mt-4 pt-4 border-t border-gray-700">
+                      <div className="space-y-2 mb-3">
                         {jobCanApprove ? (
-                          <span className="text-green-400 flex items-center gap-1">
+                          <span className="text-green-400 text-sm flex items-center gap-1">
                             <CheckCircle size={14} />
                             All required documents approved
                           </span>
                         ) : (
-                          <span className="text-yellow-400 flex items-center gap-1">
+                          <span className="text-yellow-400 text-sm flex items-center gap-1">
                             <AlertCircle size={14} />
                             Missing or pending documents
                           </span>
                         )}
+                        {hasRouting && !isRoutingChecked && (
+                          <span className="text-yellow-400 text-sm flex items-center gap-1">
+                            <AlertCircle size={14} />
+                            Routing review required
+                          </span>
+                        )}
+                        {hasPendingRemovals && (
+                          <span className="text-amber-400 text-sm flex items-center gap-1">
+                            <AlertCircle size={14} />
+                            Unresolved routing removal requests
+                          </span>
+                        )}
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex justify-end gap-2">
                         <button
                           onClick={() => handleApproveJob(job.id, job.status)}
-                          disabled={!jobCanApprove || approving === job.id}
+                          disabled={!canApproveFull || approving === job.id}
                           className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {approving === job.id ? (
@@ -659,10 +1208,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                           )}
                           {approving === job.id ? 'Approving...' : 'Approve Job'}
                         </button>
+                        <button
+                          onClick={() => handleApproveAndPrint(job)}
+                          disabled={!canApproveFull || approving === job.id}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {approving === job.id ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <>
+                              <CheckCircle size={16} />
+                              <Printer size={16} />
+                            </>
+                          )}
+                          {approving === job.id ? 'Approving...' : 'Approve & Print'}
+                        </button>
                       </div>
                     </div>
                   </div>
-                )}
+                  )
+                })()}
               </div>
             )
           })}
@@ -672,8 +1237,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   }
 
   // If no compliance-related jobs at all, don't render anything
-  const hasAnyContent = pendingMachiningJobs.length > 0 || 
-                        pendingPostMfgJobs.length > 0 || 
+  const hasAnyContent = pendingMachiningJobs.length > 0 ||
+                        pendingPostMfgJobs.length > 0 ||
                         approvedUnassignedJobs.length > 0 ||
                         recentlyApprovedJobs.length > 0
 
@@ -713,32 +1278,68 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                 <div className="flex items-center gap-4">
                   <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-white font-mono">{job.job_number}</span>
-                      <span className="text-gray-500">•</span>
+                      <span className="text-gray-500">·</span>
                       <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                      <span className="text-gray-500">·</span>
+                      {job.work_order?.order_type === 'make_to_order' && (
+                        <span className="px-1.5 py-0.5 text-xs font-bold rounded bg-blue-900 text-blue-300">MTO</span>
+                      )}
+                      {job.work_order?.order_type === 'make_to_stock' && (
+                        <span className="px-1.5 py-0.5 text-xs font-bold rounded bg-green-900 text-green-300">MTS</span>
+                      )}
+                      {job.work_order?.order_type === 'maintenance' && (
+                        <span className="px-1.5 py-0.5 text-xs font-bold rounded bg-orange-900 text-orange-300">MAINT</span>
+                      )}
+                      <span className="text-gray-500">·</span>
+                      <span className="text-skynet-accent">{job.component?.part_number}</span>
                     </div>
                     <div className="text-sm text-gray-500">
-                      <span className="text-skynet-accent">{job.component?.part_number}</span>
-                      <span className="mx-2">•</span>
                       <span>Qty: {job.quantity}</span>
+                      {job.work_order?.order_quantity && job.work_order?.stock_quantity ? (
+                        <span className="text-gray-600"> ({job.work_order.order_quantity} order + {job.work_order.stock_quantity} stock)</span>
+                      ) : job.work_order?.order_type === 'make_to_stock' ? (
+                        <span className="text-gray-600"> (stock)</span>
+                      ) : null}
+                      {job.work_order?.order_type === 'make_to_order' && job.work_order?.customer && (
+                        <>
+                          <span className="mx-2">·</span>
+                          <span className="text-gray-400">{job.work_order.customer}</span>
+                        </>
+                      )}
+                      {job.work_order?.order_type === 'make_to_stock' && (
+                        <>
+                          <span className="mx-2">·</span>
+                          <span className="text-gray-400">STOCK</span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
-                {isComplianceUser && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => handleRecallJob(job.id)}
-                    disabled={recalling === job.id}
-                    className="flex items-center gap-1 px-3 py-1 text-sm bg-orange-600 hover:bg-orange-500 text-white rounded transition-colors disabled:opacity-50"
+                    onClick={() => setPrintPackageJob(job)}
+                    className="flex items-center gap-1 px-3 py-1 text-sm bg-gray-600 hover:bg-gray-500 text-white rounded transition-colors"
                   >
-                    {recalling === job.id ? (
-                      <Loader2 size={14} className="animate-spin" />
-                    ) : (
-                      <Undo2 size={14} />
-                    )}
-                    {recalling === job.id ? 'Recalling...' : 'Recall'}
+                    <Printer size={14} />
+                    Print
                   </button>
-                )}
+                  {isComplianceUser && (
+                    <button
+                      onClick={() => handleRecallJob(job.id)}
+                      disabled={recalling === job.id}
+                      className="flex items-center gap-1 px-3 py-1 text-sm bg-orange-600 hover:bg-orange-500 text-white rounded transition-colors disabled:opacity-50"
+                    >
+                      {recalling === job.id ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <Undo2 size={14} />
+                      )}
+                      {recalling === job.id ? 'Recalling...' : 'Recall'}
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -791,6 +1392,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           )}
         </div>
       )}
+      {/* Print Package Modal */}
+      <PrintPackageModal
+        isOpen={!!printPackageJob}
+        job={printPackageJob}
+        onClose={() => setPrintPackageJob(null)}
+      />
     </div>
   )
 }

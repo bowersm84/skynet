@@ -326,6 +326,8 @@ CREATE TABLE public.part_routing_steps (
   default_station text,
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  notes text,
   CONSTRAINT part_routing_steps_pkey PRIMARY KEY (id),
   CONSTRAINT part_routing_steps_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id)
 );
@@ -370,6 +372,7 @@ CREATE TABLE public.routing_template_steps (
   step_type text DEFAULT 'internal'::text,
   default_station text,
   created_at timestamp with time zone DEFAULT now(),
+  notes text,
   CONSTRAINT routing_template_steps_pkey PRIMARY KEY (id),
   CONSTRAINT routing_template_steps_template_id_fkey FOREIGN KEY (template_id) REFERENCES public.routing_templates(id)
 );
@@ -380,6 +383,7 @@ CREATE TABLE public.routing_templates (
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
   description text,
+  updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT routing_templates_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.tool_instances (
@@ -447,6 +451,7 @@ CREATE TABLE public.work_orders (
   maintenance_type text,
   machine_id uuid,
   stock_quantity integer,
+  order_quantity integer,
   CONSTRAINT work_orders_pkey PRIMARY KEY (id),
   CONSTRAINT work_orders_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
   CONSTRAINT work_orders_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES public.profiles(id),

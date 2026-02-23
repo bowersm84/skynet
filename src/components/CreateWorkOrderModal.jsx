@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench } from 'lucide-react'
 
-export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
+export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [assemblies, setAssemblies] = useState([])
@@ -22,6 +22,33 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
   const [dueDate, setDueDate] = useState('')
   const [notes, setNotes] = useState('')
   const [selectedAssemblies, setSelectedAssemblies] = useState([])
+
+  // Routing cache: { [partId]: [steps] }
+  const [routingCache, setRoutingCache] = useState({})
+  // Routing modifications for C3
+  const [routingRemovals, setRoutingRemovals] = useState({})       // { [stepId]: reason }
+  const [removalInput, setRemovalInput] = useState(null)            // stepId being edited
+  const [removalReason, setRemovalReason] = useState('')
+  const [routingAdditions, setRoutingAdditions] = useState({})      // { [partId]: [{ stepName, stepType, station }] }
+  const [addingStepFor, setAddingStepFor] = useState(null)          // partId currently adding to
+  const [newStepName, setNewStepName] = useState('')
+  const [newStepType, setNewStepType] = useState('internal')
+
+  const fetchComponentRouting = useCallback(async (partId) => {
+    if (!partId) return
+    setRoutingCache(prev => {
+      if (prev[partId]) return prev
+      // Mark as loading with empty array, then fetch
+      return { ...prev, [partId]: [] }
+    })
+    const { data } = await supabase
+      .from('part_routing_steps')
+      .select('*')
+      .eq('part_id', partId)
+      .eq('is_active', true)
+      .order('step_order')
+    setRoutingCache(prev => ({ ...prev, [partId]: data || [] }))
+  }, [])
 
   // Generate next WO number
   const generateOrderNumber = useCallback(async () => {
@@ -78,7 +105,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
           )
         )
       `)
-      .in('part_type', ['assembly', 'finished_good'])
+      .in('part_type', ['assembly', 'finished_good', 'manufactured'])
       .eq('is_active', true)
       .order('part_number')
 
@@ -106,6 +133,14 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
       setDueDate('')
       setNotes('')
       setSelectedAssemblies([])
+      setRoutingCache({})
+      setRoutingRemovals({})
+      setRemovalInput(null)
+      setRemovalReason('')
+      setRoutingAdditions({})
+      setAddingStepFor(null)
+      setNewStepName('')
+      setNewStepType('internal')
       setError(null)
     }
   }, [isOpen, generateOrderNumber])
@@ -113,6 +148,27 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
   // Handle order type change
   const handleOrderTypeChange = (newType) => {
     setOrderType(newType)
+    if (newType === 'make_to_stock') {
+      // MTS uses a single quantity field — zero out additionalForStock and recalc job qtys
+      setSelectedAssemblies(prev =>
+        prev.map(sa => ({
+          ...sa,
+          additionalForStock: 0,
+          jobs: sa.jobs.map(job => ({
+            ...job,
+            quantity: job.quantityCustomized ? job.quantity : sa.orderQuantity
+          }))
+        }))
+      )
+    } else {
+      // Switching away from MTS — remove any manufactured part selections
+      setSelectedAssemblies(prev =>
+        prev.filter(sa => {
+          const part = assemblies.find(a => a.id === sa.assemblyId)
+          return !part || part.part_type !== 'manufactured'
+        })
+      )
+    }
   }
 
   const addAssembly = () => {
@@ -128,17 +184,19 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
     updated[index].assemblyId = assemblyId
     updated[index].jobs = [] // Reset jobs when assembly changes
 
-    // If this is a finished good, auto-add a single job for the part itself
+    // If this is a finished good or manufactured part, auto-add a single job for the part itself
     const selectedPart = assemblies.find(a => a.id === assemblyId)
-    if (selectedPart && selectedPart.part_type === 'finished_good') {
+    if (selectedPart && (selectedPart.part_type === 'finished_good' || selectedPart.part_type === 'manufactured')) {
       updated[index].jobs = [{
         componentId: selectedPart.id,
         partNumber: selectedPart.part_number,
         description: selectedPart.description,
         quantity: updated[index].orderQuantity + updated[index].additionalForStock,
         quantityCustomized: false,
-        isFinishedGood: true
+        isFinishedGood: selectedPart.part_type === 'finished_good',
+        isManufactured: selectedPart.part_type === 'manufactured'
       }]
+      fetchComponentRouting(selectedPart.id)
     }
 
     setSelectedAssemblies(updated)
@@ -173,6 +231,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
         quantityCustomized: false
       })
       setSelectedAssemblies(updated)
+      fetchComponentRouting(bom.component.id)
     }
   }
 
@@ -214,17 +273,24 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
     }
 
     // Create Work Order
+    const isMTS = orderType === 'make_to_stock'
+    const totalOrderQty = selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.orderQuantity) || 0), 0)
+    const totalStockQty = isMTS
+      ? totalOrderQty
+      : selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0) || null
+
     const { data: workOrder, error: woError } = await supabase
       .from('work_orders')
       .insert({
         wo_number: woNumber,
         order_type: orderType,
-        customer: orderType === 'make_to_order' ? (customer || null) : null,
-        po_number: orderType === 'make_to_order' ? (poNumber || null) : null,
+        customer: !isMTS ? (customer || null) : null,
+        po_number: !isMTS ? (poNumber || null) : null,
         priority: priority,
         due_date: dueDate || null,
         notes: notes || null,
-        stock_quantity: selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0) || null,
+        order_quantity: isMTS ? null : totalOrderQty || null,
+        stock_quantity: totalStockQty,
         status: 'pending'
       })
       .select()
@@ -258,27 +324,30 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
       const assemblyPart = assemblies.find(a => a.id === assembly.assemblyId)
       if (!assemblyPart) continue
 
-      // Create work_order_assemblies record
-      const { data: woaData, error: woaError } = await supabase
-        .from('work_order_assemblies')
-        .insert({
-          work_order_id: workOrder.id,
-          assembly_id: assemblyPart.id,
-          quantity: assembly.orderQuantity + assembly.additionalForStock,
-          status: 'pending'
-        })
-        .select('id')
-        .single()
+      // Skip work_order_assemblies for manufactured parts (only for assemblies/FGs)
+      let woaId = null
+      if (assemblyPart.part_type !== 'manufactured') {
+        const { data: woaData, error: woaError } = await supabase
+          .from('work_order_assemblies')
+          .insert({
+            work_order_id: workOrder.id,
+            assembly_id: assemblyPart.id,
+            quantity: assembly.orderQuantity + assembly.additionalForStock,
+            status: 'pending'
+          })
+          .select('id')
+          .single()
 
-      if (woaError) {
-        console.error('Error creating work_order_assemblies:', woaError)
+        if (woaError) {
+          console.error('Error creating work_order_assemblies:', woaError)
+        }
+
+        woaId = woaData?.id || null
       }
 
-      const woaId = woaData?.id || null
-
-      // Create jobs
+      // Create jobs and copy routing steps
       for (const job of assembly.jobs) {
-        const { error: jobError } = await supabase
+        const { data: newJob, error: jobError } = await supabase
           .from('jobs')
           .insert({
             job_number: `J-${String(nextJobNum++).padStart(6, '0')}`,
@@ -289,9 +358,65 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
             status: 'pending_compliance',
             is_maintenance: false
           })
+          .select('id')
+          .single()
 
         if (jobError) {
           console.error('Error creating job:', jobError)
+          continue
+        }
+
+        // Copy part_routing_steps → job_routing_steps (with removal/addition modifications)
+        const { data: partRouting } = await supabase
+          .from('part_routing_steps')
+          .select('*')
+          .eq('part_id', job.componentId)
+          .eq('is_active', true)
+          .order('step_order')
+
+        const additions = routingAdditions[job.componentId] || []
+        if (partRouting?.length > 0 || additions.length > 0) {
+          const jobSteps = (partRouting || []).map(step => {
+            const removalReason = routingRemovals[step.id]
+            return {
+              job_id: newJob.id,
+              step_order: step.step_order,
+              step_name: step.step_name,
+              step_type: step.step_type,
+              station: step.default_station,
+              status: removalReason !== undefined ? 'removal_pending' : 'pending',
+              ...(removalReason !== undefined && {
+                removal_reason: removalReason,
+                removal_requested_by: profile?.id || null,
+                removal_requested_at: new Date().toISOString()
+              })
+            }
+          })
+
+          // Append added steps
+          const maxOrder = partRouting?.length > 0 ? Math.max(...partRouting.map(s => s.step_order)) : 0
+          additions.forEach((added, i) => {
+            jobSteps.push({
+              job_id: newJob.id,
+              step_order: maxOrder + i + 1,
+              step_name: added.stepName,
+              step_type: added.stepType,
+              station: null,
+              status: 'pending',
+              is_added_step: true,
+              added_by: profile?.id || null,
+              added_at: new Date().toISOString()
+            })
+          })
+
+          if (jobSteps.length > 0) {
+            const { error: stepsError } = await supabase
+              .from('job_routing_steps')
+              .insert(jobSteps)
+            if (stepsError) {
+              console.error('Error copying routing steps:', stepsError)
+            }
+          }
         }
       }
     }
@@ -301,6 +426,198 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
   }
 
   const totalJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
+
+  // Shared routing step renderer with removal/addition UI
+  const renderRoutingSteps = (partId) => {
+    const steps = routingCache[partId]
+    const additions = routingAdditions[partId] || []
+    if (!steps?.length && !additions.length) return null
+
+    return (
+      <div className="mt-2 pl-4 border-l-2 border-gray-700">
+        <div className="text-xs text-gray-500 mb-1">Routing:</div>
+        {(steps || []).map((step) => {
+          const isMarkedForRemoval = routingRemovals[step.id] !== undefined
+          const isEditingRemoval = removalInput === step.id
+          return (
+            <div key={step.id} className="py-0.5">
+              <div className={`flex items-center gap-2 text-sm ${isMarkedForRemoval ? 'line-through text-red-400/60' : 'text-gray-400'}`}>
+                <span className="text-gray-600">{step.step_order}.</span>
+                <span>{step.step_name}</span>
+                {step.default_station && (
+                  <span className="text-gray-600">({step.default_station})</span>
+                )}
+                {step.step_type === 'external' && (
+                  <span className={`text-xs px-1 rounded ${isMarkedForRemoval ? 'bg-orange-900/20 text-orange-400/50' : 'bg-orange-900/30 text-orange-400'}`}>External</span>
+                )}
+                {isMarkedForRemoval ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRoutingRemovals(prev => {
+                        const next = { ...prev }
+                        delete next[step.id]
+                        return next
+                      })
+                    }}
+                    className="ml-auto text-xs px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
+                  >
+                    Undo
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRemovalInput(step.id)
+                      setRemovalReason('')
+                    }}
+                    className="ml-auto text-xs text-red-500/50 hover:text-red-400"
+                    title="Request step removal"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              {isMarkedForRemoval && (
+                <div className="text-xs text-red-400/70 ml-6">Removal reason: {routingRemovals[step.id]}</div>
+              )}
+              {isEditingRemoval && (
+                <div className="flex items-center gap-2 ml-6 mt-1">
+                  <input
+                    type="text"
+                    value={removalReason}
+                    onChange={(e) => setRemovalReason(e.target.value)}
+                    placeholder="Reason for removal (required)"
+                    className="flex-1 px-2 py-1 bg-gray-700 border border-red-700/50 rounded text-sm text-white focus:outline-none focus:border-red-600"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && removalReason.trim()) {
+                        setRoutingRemovals(prev => ({ ...prev, [step.id]: removalReason.trim() }))
+                        setRemovalInput(null)
+                        setRemovalReason('')
+                      } else if (e.key === 'Escape') {
+                        setRemovalInput(null)
+                        setRemovalReason('')
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={!removalReason.trim()}
+                    onClick={() => {
+                      setRoutingRemovals(prev => ({ ...prev, [step.id]: removalReason.trim() }))
+                      setRemovalInput(null)
+                      setRemovalReason('')
+                    }}
+                    className="px-2 py-1 bg-red-900/50 text-red-300 rounded text-xs hover:bg-red-900 disabled:opacity-50"
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setRemovalInput(null); setRemovalReason('') }}
+                    className="px-2 py-1 text-gray-400 text-xs hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {/* Added steps */}
+        {additions.map((added, i) => (
+          <div key={`added-${i}`} className="flex items-center gap-2 text-sm text-green-400 py-0.5">
+            <span className="text-gray-600">{(steps?.length || 0) + i + 1}.</span>
+            <span>{added.stepName}</span>
+            {added.stepType === 'external' && (
+              <span className="text-xs px-1 bg-orange-900/30 text-orange-400 rounded">External</span>
+            )}
+            <span className="text-xs px-1 bg-green-900/30 text-green-400 rounded">Added</span>
+            <button
+              type="button"
+              onClick={() => {
+                setRoutingAdditions(prev => ({
+                  ...prev,
+                  [partId]: prev[partId].filter((_, idx) => idx !== i)
+                }))
+              }}
+              className="ml-auto text-xs text-red-500/50 hover:text-red-400"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        {/* Add Step */}
+        {addingStepFor === partId ? (
+          <div className="flex items-center gap-2 mt-1">
+            <input
+              type="text"
+              value={newStepName}
+              onChange={(e) => setNewStepName(e.target.value)}
+              placeholder="Step name"
+              className="flex-1 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white focus:outline-none focus:border-green-600"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newStepName.trim()) {
+                  setRoutingAdditions(prev => ({
+                    ...prev,
+                    [partId]: [...(prev[partId] || []), { stepName: newStepName.trim(), stepType: newStepType }]
+                  }))
+                  setNewStepName('')
+                  setNewStepType('internal')
+                  setAddingStepFor(null)
+                } else if (e.key === 'Escape') {
+                  setAddingStepFor(null)
+                  setNewStepName('')
+                  setNewStepType('internal')
+                }
+              }}
+            />
+            <select
+              value={newStepType}
+              onChange={(e) => setNewStepType(e.target.value)}
+              className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white"
+            >
+              <option value="internal">Internal</option>
+              <option value="external">External</option>
+            </select>
+            <button
+              type="button"
+              disabled={!newStepName.trim()}
+              onClick={() => {
+                setRoutingAdditions(prev => ({
+                  ...prev,
+                  [partId]: [...(prev[partId] || []), { stepName: newStepName.trim(), stepType: newStepType }]
+                }))
+                setNewStepName('')
+                setNewStepType('internal')
+                setAddingStepFor(null)
+              }}
+              className="px-2 py-1 bg-green-900/50 text-green-300 rounded text-xs hover:bg-green-900 disabled:opacity-50"
+            >
+              Add
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAddingStepFor(null); setNewStepName(''); setNewStepType('internal') }}
+              className="px-2 py-1 text-gray-400 text-xs hover:text-white"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAddingStepFor(partId)}
+            className="flex items-center gap-1 text-xs text-green-500 hover:text-green-400 mt-1"
+          >
+            <Plus size={12} /> Add Step
+          </button>
+        )}
+      </div>
+    )
+  }
 
   if (!isOpen) return null
 
@@ -500,34 +817,58 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
                                     </option>
                                   ))}
                                 </optgroup>
+                                {orderType === 'make_to_stock' && (
+                                  <optgroup label="Components">
+                                    {assemblies.filter(a => a.part_type === 'manufactured').map(a => (
+                                      <option key={a.id} value={a.id}>
+                                        {a.part_number} - {a.description}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
                               </select>
                             </div>
-                            <div>
-                              <label className="block text-gray-500 text-xs mb-1">Order Qty</label>
-                              <input
-                                type="number"
-                                min="1"
-                                value={selected.orderQuantity}
-                                onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
-                                className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-gray-500 text-xs mb-1">+ Stock</label>
-                              <input
-                                type="number"
-                                min="0"
-                                value={selected.additionalForStock}
-                                onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'additionalForStock', e.target.value)}
-                                className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-gray-500 text-xs mb-1">= Total</label>
-                              <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
-                                {selected.orderQuantity + selected.additionalForStock}
+                            {orderType === 'make_to_stock' ? (
+                              <div>
+                                <label className="block text-gray-500 text-xs mb-1">Quantity</label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={selected.orderQuantity}
+                                  onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
+                                  className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                                />
                               </div>
-                            </div>
+                            ) : (
+                              <>
+                                <div>
+                                  <label className="block text-gray-500 text-xs mb-1">Order Qty</label>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={selected.orderQuantity}
+                                    onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
+                                    className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-gray-500 text-xs mb-1">+ Stock</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={selected.additionalForStock}
+                                    onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'additionalForStock', e.target.value)}
+                                    className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-gray-500 text-xs mb-1">= Total</label>
+                                  <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
+                                    {selected.orderQuantity + selected.additionalForStock}
+                                  </div>
+                                </div>
+                              </>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -542,13 +883,18 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
                         {selected.assemblyId && (() => {
                           const selectedPart = getAssemblyById(selected.assemblyId)
                           const isFinishedGood = selectedPart?.part_type === 'finished_good'
+                          const isManufactured = selectedPart?.part_type === 'manufactured'
 
-                          if (isFinishedGood) {
+                          if (isFinishedGood || isManufactured) {
                             return (
                               <div className="border-t border-gray-700 pt-3">
                                 <div className="flex items-center gap-2 mb-2">
-                                  <span className="text-xs px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Finished Good</span>
-                                  <span className="text-gray-400 text-sm">No assembly required</span>
+                                  {isFinishedGood ? (
+                                    <span className="text-xs px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Finished Good</span>
+                                  ) : (
+                                    <span className="text-xs px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded border border-blue-700/50">Component</span>
+                                  )}
+                                  <span className="text-gray-400 text-sm">{isFinishedGood ? 'No assembly required' : 'Single component for stock'}</span>
                                 </div>
                                 <div className="bg-gray-900 rounded p-3">
                                   <div className="text-gray-400 text-xs mb-2">Job to Create:</div>
@@ -560,10 +906,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
                                     <div className="flex items-center gap-2">
                                       <span className="text-green-400 text-sm">
                                         {selected.orderQuantity + selected.additionalForStock} pcs
-                                        {selected.additionalForStock > 0 && ` (${selected.orderQuantity} order + ${selected.additionalForStock} stock)`}
+                                        {orderType === 'make_to_order' && selected.additionalForStock > 0 && ` (${selected.orderQuantity} order + ${selected.additionalForStock} stock)`}
                                       </span>
                                     </div>
                                   </div>
+                                  {renderRoutingSteps(selectedPart.id)}
                                 </div>
                               </div>
                             )
@@ -645,34 +992,34 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess }) {
                               <div className="bg-gray-900 rounded p-3">
                                 <div className="text-gray-400 text-xs mb-2">Jobs to Create:</div>
                                 {selected.jobs.map(job => (
-                                  <div 
-                                    key={job.componentId}
-                                    className="flex items-center justify-between py-2 border-b border-gray-800 last:border-0"
-                                  >
-                                    <div className="flex-1">
-                                      <span className="text-white text-sm">{job.partNumber}</span>
-                                      <span className="text-gray-500 text-sm ml-2">- {job.description}</span>
+                                  <div key={job.componentId} className="py-2 border-b border-gray-800 last:border-0">
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex-1">
+                                        <span className="text-white text-sm">{job.partNumber}</span>
+                                        <span className="text-gray-500 text-sm ml-2">- {job.description}</span>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          value={job.quantity}
+                                          onChange={(e) => updateJobQuantity(assemblyIndex, job.componentId, parseInt(e.target.value) || 1)}
+                                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm text-center"
+                                        />
+                                        <span className="text-gray-500 text-sm">pcs</span>
+                                        {orderType === 'make_to_order' && !job.quantityCustomized && selected.additionalForStock > 0 && (
+                                          <span className="text-gray-500 text-xs">({selected.orderQuantity} order + {selected.additionalForStock} stock)</span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => removeJob(assemblyIndex, job.componentId)}
+                                          className="text-red-400 hover:text-red-300"
+                                        >
+                                          <Trash2 size={14} />
+                                        </button>
+                                      </div>
                                     </div>
-                                    <div className="flex items-center gap-2">
-                                      <input
-                                        type="number"
-                                        min="1"
-                                        value={job.quantity}
-                                        onChange={(e) => updateJobQuantity(assemblyIndex, job.componentId, parseInt(e.target.value) || 1)}
-                                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm text-center"
-                                      />
-                                      <span className="text-gray-500 text-sm">pcs</span>
-                                      {!job.quantityCustomized && selected.additionalForStock > 0 && (
-                                        <span className="text-gray-500 text-xs">({selected.orderQuantity} order + {selected.additionalForStock} stock)</span>
-                                      )}
-                                      <button
-                                        type="button"
-                                        onClick={() => removeJob(assemblyIndex, job.componentId)}
-                                        className="text-red-400 hover:text-red-300"
-                                      >
-                                        <Trash2 size={14} />
-                                      </button>
-                                    </div>
+                                    {renderRoutingSteps(job.componentId)}
                                   </div>
                                 ))}
                               </div>

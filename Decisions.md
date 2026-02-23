@@ -1,51 +1,6 @@
-# SkyNet MES — DECISIONS.md
-# This file is context for AI coding assistants (Claude Code, etc.)
-# Update after every design decision or schema change.
-# Last updated: 2026-02-20
-
----
-
-## Project Overview
-- **App**: SkyNet MES for Skybolt Aeromotive Corp
-- **Stack**: React 18 + Vite, Supabase (DB + Auth + Realtime), AWS S3 (file storage), AWS Amplify (deployment)
-- **URL**: skynet.skybolt.com
-- **Repo**: github.com/bowersm84/skynet
-
----
-
-## Current Sprint: S1 — Foundation & Work Orders (Weeks 1–2)
-**Goal**: Lock down WO form, compliance workflow fixes, master data. April and Roger can start creating real WOs.
-
-### S1 Action Items (updated with routing scope)
-| # | Item | Lead | Type | Effort |
-|---|------|------|------|--------|
-| 1 | WO form: display routing on job selection, copy to job_routing_steps, step removal request flow, step addition on in-progress jobs | April | Modify | XL |
-| 43 | Add Stock Quantity field to WO form | April | Modify | S |
-| 2 | Support make-to-stock for individual components (not just assemblies) | April | Modify | M |
-| 3 | Move supplier packing slip from pre-mfg to post-mfg compliance | Roger | Modify | S |
-| 4 | Print for Production — print traveler from job_routing_steps data | Roger | New | M |
-| 5 | Make passivation card conditional (requires_passivation flag) | Roger | Modify | S |
-| 34 | Configure required documents per component in Master Data | Roger | New | M |
-| 30 | Keep TCO as-is; ensure Roger or Tom can complete final review | Roger | Modify | M |
-| 31 | Fishbowl import script (small test set only for now) | Roger | Config | L |
-| 6 | Backup compliance officers — Jody and Tom can approve post-mfg | Roger | Modify | S |
-| NEW | Routing Templates UI in Master Data (create/edit templates + steps) | Roger | New | M |
-| NEW | Part Routing in component create/edit (mandatory, load from template) | Roger | New | L |
-
----
-
-## MB Decisions (Feb 13, 2026) — DO NOT OVERRIDE
-These are Matt's decisions. They take precedence over any earlier spec versions.
-
-1. **TCO Placement**: Keep TCO as-is. No separate Tom QC step. TCO = final gate.
-2. **Finishing Overhaul**: Phase 1. Rename Passivation → Finishing. Every component goes through finishing (some passivation, others just wash/dry). Stage config per component in master data.
-3. **Material Tracking**: ALL Phase 1. Base UOM = **inches**. System provides conversions to feet, bars, and weight.
-4. **Assembly**: Phase 2. Must support stock-to-assembly path when activated. Need Fishbowl confidence first.
-5. **Lot Change Handling**: Block lot changes on active job. Machinist completes partial, new job created for new lot.
-6. **Dark Run / Idle Time**: Don't log as downtime. DO track idle time as separate metric.
-7. **Jody QC**: NO separate QC software step. Visual inspection stays manual. TCO is only post-assembly gate.
-8. **Assembly Pause**: Assemblers can pause anytime. Auto-pause after set afternoon time. Starting new assembly auto-pauses previous.
-9. **Fishbowl Accuracy**: Needs improvement in ALL areas, not just legacy items.
+# SkyNet — DECISIONS.md
+## Architectural Decisions & Key Design Patterns
+### Updated: Feb 23, 2026 (Sprint 1 Complete)
 
 ---
 
@@ -73,12 +28,23 @@ JOB ROUTING STEPS (per job instance)   → The live runtime copy, filled during 
 ### Step Modification Rules
 - **Removing a step** = requires compliance officer approval (reason mandatory)
 - **Adding a step** = immediate, no approval needed (additive, not reducing controls)
+- **Compliance officers** can remove steps directly (no approval flow needed for compliance)
 - **Completed steps** cannot be removed
+- **Restore step** = compliance can undo a removal while job is in pending_compliance
+- **Reset to Default** = compliance can restore all steps to match part_routing_steps master
 - Routing is MANDATORY when creating a new component in Master Data
 
 ### Step Types
 - `internal` = performed in-house (Wash, Dry, Passivation, Machine Process)
 - `external` = sent to outside vendor (Plating, Heat Treatment)
+
+### Step Status Values
+- `pending` — awaiting execution
+- `in_progress` — currently being performed
+- `complete` — finished
+- `removal_pending` — removal requested, awaiting compliance approval
+- `removed` — step removed from routing
+- `skipped` — step bypassed
 
 ### Tables
 - `routing_templates` + `routing_template_steps` — reusable templates
@@ -87,53 +53,118 @@ JOB ROUTING STEPS (per job instance)   → The live runtime copy, filled during 
 
 ---
 
-## Key Database Facts
+## Stock Quantity Model
 
-### Schema Location
-- Live schema dump: `docs/schema.sql` (update after every migration)
-- Supabase project dashboard for SQL execution
+Work orders support two quantity fields:
+- `order_quantity` — units committed to customer order
+- `stock_quantity` — additional units for inventory replenishment
 
-### Important Tables & Relationships
-- `work_orders` → has many `jobs` (fan-out pattern)
-- `work_orders` → has many `work_order_assemblies` (assembly tracking)
-- `jobs` → belongs to `work_orders`, optionally to `work_order_assemblies`
-- `parts` table stores BOTH assemblies and components (distinguished by `part_type`: assembly, manufactured, purchased, finished_good)
-- `assembly_bom` links assemblies to components (both reference `parts.id`)
-- `part_document_requirements` controls which docs are required per part at which stage
-- `part_documents` stores master documents (drawings, specs) for parts
-- `job_documents` stores per-job compliance documents
-- `profiles` table links to `auth.users` — roles: admin, compliance, machinist, assembly, display, scheduler, customer_service
+Total manufactured = order_quantity + stock_quantity
 
-### Parts Table — Key Columns
-- `parts.requires_passivation` (boolean, default false) — controls passivation card in compliance
-- `parts.material_type_id` (FK to material_types) — what material this part is made from
-- `parts.drawing_revision` (varchar) — current drawing revision letter (e.g., "Q")
-- Sprint 3 will expand `requires_passivation` to full finishing stage config
+For MTS (Make-to-Stock) orders, order_quantity = 0 and only stock_quantity is used.
 
-### New S1 Columns
-- `work_orders.order_quantity` (integer) — customer committed quantity (urgent, ship ASAP)
-- `work_orders.stock_quantity` (integer) — additional units to produce for inventory (can be deprioritized)
-- Total production = order_quantity + stock_quantity. UI label: "Additional for Stock"
-- Floor workers see the split so they can pivot off stock work when something urgent comes in- `profiles.can_approve_compliance` (boolean) — backup compliance officers (Jody, Tom)
+Display format: "Qty: 700 (500 order + 200 stock)"
 
-### Job Status Flow
-```
-pending_compliance → ready → assigned → in_setup → in_progress → 
-manufacturing_complete → pending_passivation → in_passivation → 
-pending_post_manufacturing → ready_for_assembly → in_assembly → 
-pending_tco → complete
-```
-Also: incomplete, cancelled
+Floor workers can see the split to prioritize committed orders during urgent situations.
 
-### Work Order Status Flow
-```
-pending → in_progress → ready_for_assembly → in_assembly → complete → shipped → closed
-```
-Also: on_hold
+---
+
+## Make-to-Stock for Individual Components
+
+MTS orders support both assemblies AND individual manufactured components.
+When an MTS order selects a manufactured component (not an assembly):
+- A single job is auto-created
+- No `work_order_assemblies` record is created
+- The component flows through manufacturing → compliance → TCO like any other job
+
+---
+
+## Compliance Routing Review
+
+The compliance review includes a full routing section with:
+- Visual display of all job_routing_steps with status indicators
+- Approve/reject removal requests from CS
+- Add new steps directly (no approval needed)
+- Remove steps directly (compliance privilege)
+- Restore removed steps (undo removal)
+- Reset to Default (restore to part_routing_steps master)
+- Reorder steps (up/down arrows)
+- "Routing Reviewed" checkbox — required before job approval
+  - Disabled until: all docs approved AND no pending removal requests remain
+
+---
+
+## Print Package System
+
+### Print Hub Pattern
+Browser popup restrictions (Chrome allows only one window.open per user gesture) require
+a single-window approach:
+
+1. User clicks "Print Selected" → ONE new window opens
+2. Traveler renders as HTML at top → auto-triggers browser print dialog
+3. Below traveler: "Documents to Print" section with individual "Open & Print" buttons
+4. Each button is a separate user gesture → browser allows PDF tab to open
+5. PDFs open in native browser PDF viewer (correct orientation + pagination)
+
+### Print Package Modal Access Points
+- Compliance Review → "Approve & Print" button (approves job + opens print package)
+- Compliance Review → Print icon on approved/unassigned jobs
+- Work Order Lookup → Print button on each job row
+
+### Traveler Format
+- Landscape orientation via `@page { size: landscape }` CSS
+- Header: part info, customer, job/WO/PO numbers, dates, quantities
+- Body: routing steps table with blank columns for floor data entry
+- Three blank rows for floor-added steps
+- Footer: print timestamp
+
+### Document Sources
+- Part Documents: master docs from `part_documents` where `is_current=true`
+- Job Documents: per-job uploads from `job_documents`
+
+---
+
+## TCO (Total Close Out)
+
+- TCO notes: optional textarea saved to `work_orders.tco_notes`
+- Records `closed_by` (user ID) and `closed_at` (timestamp) on approval
+- Recently Closed section: last 5 closed WOs, collapsible, default collapsed
+- Any user with `can_approve_compliance = true` can complete TCO
+
+---
+
+## Backup Compliance Officers
+
+The `profiles.can_approve_compliance` boolean flag allows any user to approve:
+- Compliance reviews (pre-mfg and post-mfg)
+- TCO close-outs
+- Routing step removal requests
+
+Set to `true` by default for compliance and admin roles.
+Jody and Tom designated as backup approvers.
+
+---
+
+## Conditional Passivation
+
+Passivation document requirements in compliance review are only displayed when the
+component's routing includes passivation-related steps. This is checked against
+the `requires_passivation` flag on the parts table AND the routing step names.
+
+---
+
+## Document Requirements Configuration
+
+Configured per component in Master Data (component edit modal):
+- Collapsible "Document Requirements" section
+- Each row: Document Type (dropdown) | Required At (stage) | Required (flag)
+- Stored in `part_document_requirements` table
+- Drives compliance review checklist automatically
 
 ---
 
 ## Traveler Field Mapping
+
 The paper traveler is replaced by data from multiple SkyNet tables.
 No single "traveler" table — data is composed at print time.
 
@@ -156,57 +187,73 @@ No single "traveler" table — data is composed at print time.
 
 ---
 
-## Naming Conventions
-- **Components** = individual manufactured parts (UI should say "components" not "parts")
-- **Assemblies** = finished products made from components
-- **Finishing** = the post-machining process (replaces "Passivation" in Sprint 3)
-- Note: Action #12 (S4) will do a full UI terminology alignment
+## Key Database Facts
+
+### Sprint 1 Schema Additions
+
+**New Tables:**
+- `routing_templates` — reusable routing template definitions
+- `routing_template_steps` — ordered steps for each template
+- `part_routing_steps` — per-component master routing
+- `job_routing_steps` — per-job runtime routing with full tracking
+
+**New Columns:**
+- `work_orders.stock_quantity` (integer) — additional units for inventory
+- `work_orders.tco_notes` (text) — TCO review comments
+- `work_orders.closed_by` (uuid FK profiles) — who completed TCO
+- `work_orders.closed_at` (timestamptz) — when TCO was completed
+- `profiles.can_approve_compliance` (boolean) — backup compliance approver flag
+- `parts.material_type_id` (uuid FK material_types) — material type link
+- `parts.drawing_revision` (varchar 20) — current drawing revision
+
+### Naming Conventions
+- Production jobs: `J-######` (e.g., J-000241)
+- Planned maintenance: `DTP-######`
+- Unplanned maintenance: `DTU-######`
+- Work orders: `WO-YYMM-####` (e.g., WO-2602-0231)
+
+### Soft Deletes
+All deletions use soft delete pattern (is_active=false or status='cancelled').
+No hard deletes in production data.
+
+### Two-Step Job Cancellation
+Job cancellation requires explicit confirmation to prevent accidental data loss.
 
 ---
 
-## File Structure — Key Files
-```
-src/
-  components/
-    CreateWorkOrderModal.jsx  ← S1 primary target (#1, #43, #2)
-    ComplianceReview.jsx      ← S1 targets (#3, #5, #6, #30)
-    TCOReview.jsx             ← S1 target (#30)
-    EditWorkOrderModal.jsx
-    Assembly.jsx              ← Phase 2
-    BOMUpload.jsx
-  pages/
-    Dashboard.jsx
-    Kiosk.jsx                 ← S2 targets
-    MasterData.jsx            ← S1 target (#34, #31)
-    Schedule.jsx              ← S2 targets
-    Secondary.jsx             ← S3 target (Finishing overhaul)
-    Login.jsx
-  lib/
-    supabase.js               ← Supabase client config
-    s3.js                     ← AWS S3 file upload helpers
-```
+## Packing Slip Document Placement
+
+Supplier packing slip moved from pre-manufacturing compliance to post-manufacturing
+compliance stage. Updated in `part_document_requirements.required_at` from
+'compliance_review' to 'manufacturing_complete'.
 
 ---
 
-## Supabase Workflow for Schema Changes
-1. Design the change here (document new columns, tables, constraints)
-2. Write SQL migration in Claude Code
-3. Run SQL in Supabase Dashboard → SQL Editor
-4. Update `docs/schema.sql` with new dump
-5. Update this file if the change affects decisions or conventions
+## Sprint 1 Action Items Completed
+
+| # | Action Item | Status |
+|---|------------|--------|
+| 1 | WO form routing display + job creation + step modification | ✓ Complete |
+| 2 | MTS for individual components | ✓ Complete |
+| 3 | Move packing slip to post-mfg | ✓ Complete |
+| 4 | Print for Production (Print Package) | ✓ Complete |
+| 5 | Conditional passivation | ✓ Complete |
+| 6 | Backup compliance officers | ✓ Complete |
+| 30 | TCO cleanup with notes + closed_by | ✓ Complete |
+| 31 | Fishbowl import | Deferred to S2 |
+| 34 | Document requirements config in Master Data | ✓ Complete |
+| 43 | Stock Quantity field | ✓ Complete |
+| NEW | Routing Templates UI in Master Data | ✓ Complete |
+| NEW | Part Routing in component create/edit | ✓ Complete |
+| NEW | Compliance routing review (approve/reject/restore/reset/reorder) | ✓ Complete |
+| NEW | Print Package modal + Print Hub workflow | ✓ Complete |
 
 ---
 
-## When to Update This File
-- After ANY schema change (new table, column, constraint)
-- After ANY design decision that affects multiple files
-- After ANY MB decision or scope change
-- After completing a sprint (update "Current Sprint" section)
-- When a convention is established (naming, patterns, etc.)
+## Technology Stack
 
-### Stock Quantity Model
-- order_quantity = customer committed quantity (urgent, ship ASAP)
-- stock_quantity = additional units to produce for inventory (can be deprioritized)
-- Total production = order_quantity + stock_quantity
-- Floor workers can see the split so they can pivot off stock work if something urgent comes in
-- Label in UI: "Additional for Stock"
+- **Frontend:** React 18 + Vite + Tailwind CSS
+- **Backend:** Supabase (PostgreSQL, Auth, Realtime, RLS)
+- **Document Storage:** AWS S3 with signed URLs
+- **Deployment:** AWS Amplify (CI/CD from GitHub main branch)
+- **Domain:** skynet.skybolt.com (SSL via ACM wildcard *.skybolt.com)

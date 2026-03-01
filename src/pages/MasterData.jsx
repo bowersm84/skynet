@@ -236,17 +236,16 @@ export default function MasterData({ profile }) {
       })))
       setShowDocRequirements((existingDocReqs || []).length > 0)
 
-      // Load existing machine preferences
+      // Load existing machine preferences (both preferred and secondary)
       const { data: prefs } = await supabase
         .from('part_machine_durations')
         .select('machine_id, preference_order, is_preferred')
         .eq('part_id', part.id)
-        .eq('is_preferred', true)
         .order('preference_order')
-      
+
       if (prefs && prefs.length > 0) {
-        const primary = prefs.find(p => p.preference_order === 0)
-        const secondaries = prefs.filter(p => p.preference_order > 0).map(p => p.machine_id)
+        const primary = prefs.find(p => p.is_preferred === true && p.preference_order === 0)
+        const secondaries = prefs.filter(p => p.is_preferred === false).map(p => p.machine_id)
         setPreferredMachineId(primary?.machine_id || null)
         setSecondaryMachineIds(secondaries)
       } else {
@@ -380,12 +379,11 @@ export default function MasterData({ profile }) {
 
       // Save machine preferences (only for manufactured/finished_good parts)
       if (partId && partForm.part_type !== 'purchased') {
-        // Delete existing preferences for this part
+        // Delete ALL existing preferences for this part before re-insert
         await supabase
           .from('part_machine_durations')
           .delete()
           .eq('part_id', partId)
-          .eq('is_preferred', true)
 
         // Insert preferred machine
         if (preferredMachineId) {
@@ -396,7 +394,7 @@ export default function MasterData({ profile }) {
               machine_id: preferredMachineId,
               is_preferred: true,
               preference_order: 0,
-              estimated_minutes: 0
+              estimated_minutes: null
             })
         }
 
@@ -408,9 +406,9 @@ export default function MasterData({ profile }) {
               .insert({
                 part_id: partId,
                 machine_id: secondaryMachineIds[i],
-                is_preferred: true,
+                is_preferred: false,
                 preference_order: i + 1,
-                estimated_minutes: 0
+                estimated_minutes: null
               })
           }
         }

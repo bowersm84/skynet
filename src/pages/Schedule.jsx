@@ -14,7 +14,6 @@ import {
   GripVertical,
   User,
   X,
-  Save,
   Loader2,
   Database,
   Star,
@@ -31,6 +30,7 @@ import {
   Settings
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
+import ScheduleJobModal from '../components/ScheduleJobModal'
 
 export default function Schedule({ user, profile, onNavigate }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
@@ -61,19 +61,9 @@ export default function Schedule({ user, profile, onNavigate }) {
   const [draggedScheduledJob, setDraggedScheduledJob] = useState(null) // For rescheduling
   const [dropTarget, setDropTarget] = useState(null)
   
-  // Schedule modal state
-  const [scheduleModal, setScheduleModal] = useState(null)
-  const [scheduleForm, setScheduleForm] = useState({
-    startTime: '07:00',
-    durationHours: 1,
-    durationMinutes: 0,
-    requiresAttendance: false,
-    saveDuration: false
-  })
+  // Shared save state (used by maintenance modal)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
-  const [durationSource, setDurationSource] = useState(null)
-  const [noTimeAvailable, setNoTimeAvailable] = useState(false) // Warning when shift is full
   
   // Unschedule confirmation
   const [unscheduleConfirm, setUnscheduleConfirm] = useState(null)
@@ -98,7 +88,20 @@ export default function Schedule({ user, profile, onNavigate }) {
   
   // Maintenance modal state
   const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)
-  
+
+  // Click-to-schedule modal state (unified: button, drag-drop, edit)
+  const [scheduleClickJob, setScheduleClickJob] = useState(null)
+  const [scheduleClickEditMode, setScheduleClickEditMode] = useState(false)
+  const [scheduleClickDefaults, setScheduleClickDefaults] = useState(null)
+
+  // Global schedule search state
+  const [globalSearch, setGlobalSearch] = useState('')
+  const [globalSearchResults, setGlobalSearchResults] = useState([])
+  const [showGlobalResults, setShowGlobalResults] = useState(false)
+  const [highlightedJobId, setHighlightedJobId] = useState(null)
+  const globalSearchRef = useRef(null)
+  const globalSearchTimerRef = useRef(null)
+
   // Keep refs in sync with state
   useEffect(() => {
     resizingRef.current = resizing
@@ -439,45 +442,55 @@ export default function Schedule({ user, profile, onNavigate }) {
     return Math.round((totalScheduled / totalShiftMinutes) * 100)
   }
 
-  // Week view: position as percentage of day
+  // Week view: position as percentage of day column (can exceed 100% for multi-day jobs)
   const getJobBlockStyle = (job, dayDate) => {
     if (!job.scheduled_start) return null
-    
+
     const jobStart = new Date(job.scheduled_start)
     // Use actual_end for completed jobs, otherwise scheduled_end
     const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
       ? job.actual_end
       : job.scheduled_end
-    const jobEnd = endTime ? new Date(endTime) : null
-    
+    const jobEnd = endTime
+      ? new Date(endTime)
+      : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+
     const dayStart = new Date(dayDate)
     dayStart.setHours(0, 0, 0, 0)
     const dayEnd = new Date(dayDate)
     dayEnd.setHours(23, 59, 59, 999)
-    
+
+    // Anchor day = the day column this block renders from
+    // Job must touch this day to be visible
     if (jobStart > dayEnd) return null
-    if (jobEnd && jobEnd < dayStart) return null
-    
+    if (jobEnd < dayStart) return null
+
+    // Left edge: where the job starts relative to this day
     const visibleStart = jobStart < dayStart ? dayStart : jobStart
-    const visibleEnd = jobEnd 
-      ? (jobEnd > dayEnd ? dayEnd : jobEnd)
-      : new Date(visibleStart.getTime() + (job.estimated_minutes || 60) * 60000)
-    
-    const effectiveEnd = visibleEnd > dayEnd ? dayEnd : visibleEnd
-    
     const startHour = visibleStart.getHours() + visibleStart.getMinutes() / 60
-    const endHour = effectiveEnd.getHours() + effectiveEnd.getMinutes() / 60 || 24
-    
     const leftPercent = (startHour / 24) * 100
-    const widthPercent = ((endHour - startHour) / 24) * 100
-    
+
+    // Right edge: full extent from anchor day (not clipped at day boundary)
+    // Clip only at end of visible week to prevent infinite overflow
+    const weekEnd = new Date(weekDates[6])
+    weekEnd.setHours(23, 59, 59, 999)
+    const clippedEnd = jobEnd > weekEnd ? weekEnd : jobEnd
+
+    // Width in hours from visible start to clipped end
+    const durationMs = clippedEnd.getTime() - visibleStart.getTime()
+    const durationHours = durationMs / (1000 * 60 * 60)
+    const widthPercent = (durationHours / 24) * 100
+
     const minWidth = 3
-    
+    const isMultiDay = jobEnd.getTime() - jobStart.getTime() > 24 * 60 * 60 * 1000
+
     return {
       left: `${leftPercent}%`,
       width: `${Math.max(widthPercent, minWidth)}%`,
+      durationHours,
+      isMultiDay,
       continuesFromPrevious: jobStart < dayStart,
-      continuesToNext: jobEnd && jobEnd > dayEnd
+      continuesToNext: jobEnd > weekEnd
     }
   }
 
@@ -535,115 +548,6 @@ export default function Schedule({ user, profile, onNavigate }) {
       
       return (startTime < jobEnd && endTime > jobStart)
     })
-  }
-
-  // Calculate next available time slot for a machine on a given date
-  const getNextAvailableTime = (machineId, date, durationMinutes = 60, excludeJobId = null) => {
-    const SHIFT_START = 7 // 7:00 AM
-    const SHIFT_END = 16  // 4:00 PM
-    
-    const targetDate = new Date(date)
-    targetDate.setHours(0, 0, 0, 0)
-    
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const isToday = targetDate.getTime() === today.getTime()
-    
-    // Get all jobs for this machine on this date
-    const machineJobs = (scheduledJobsByMachine[machineId] || [])
-      .filter(job => {
-        if (excludeJobId && job.id === excludeJobId) return false
-        const jobDate = new Date(job.scheduled_start)
-        jobDate.setHours(0, 0, 0, 0)
-        return jobDate.getTime() === targetDate.getTime()
-      })
-      .map(job => ({
-        start: new Date(job.scheduled_start),
-        end: job.scheduled_end 
-          ? new Date(job.scheduled_end)
-          : new Date(new Date(job.scheduled_start).getTime() + (job.estimated_minutes || 60) * 60000)
-      }))
-      .sort((a, b) => a.start - b.start)
-    
-    // Determine earliest possible start time
-    let earliestStart = new Date(targetDate)
-    earliestStart.setHours(SHIFT_START, 0, 0, 0)
-    
-    // For today, check if we're past shift end using ACTUAL time (before rounding)
-    if (isToday) {
-      const now = new Date()
-      const actualHour = now.getHours()
-      const actualMinutes = now.getMinutes()
-      
-      // If actual current time is past shift end, no time available
-      if (actualHour >= SHIFT_END) {
-        return { hours: SHIFT_START, minutes: 0, noTimeAvailable: true }
-      }
-      
-      // Round up to next 15-minute interval for the suggested start time
-      const roundedMinutes = Math.ceil(actualMinutes / 15) * 15
-      now.setMinutes(roundedMinutes, 0, 0)
-      
-      // Cap at shift end - 15 min to allow at least a small job
-      const shiftEndTime = new Date(targetDate)
-      shiftEndTime.setHours(SHIFT_END - 1, 45, 0, 0) // 3:45 PM max
-      
-      if (now > shiftEndTime) {
-        earliestStart = shiftEndTime
-      } else if (now > earliestStart) {
-        earliestStart = now
-      }
-    }
-    
-    // If no jobs scheduled, return earliest available time
-    if (machineJobs.length === 0) {
-      return {
-        hours: earliestStart.getHours(),
-        minutes: earliestStart.getMinutes(),
-        noTimeAvailable: false
-      }
-    }
-    
-    // Find first available slot within shift hours
-    let candidateStart = earliestStart
-    
-    for (const job of machineJobs) {
-      // Skip jobs that end before our candidate start
-      if (job.end <= candidateStart) continue
-      
-      const candidateEnd = new Date(candidateStart.getTime() + durationMinutes * 60000)
-      
-      // If candidate fits before this job and within shift hours, use it
-      if (candidateEnd <= job.start && candidateStart.getHours() < SHIFT_END) {
-        return {
-          hours: candidateStart.getHours(),
-          minutes: candidateStart.getMinutes(),
-          noTimeAvailable: false
-        }
-      }
-      
-      // Move candidate to after this job ends
-      if (job.end > candidateStart) {
-        candidateStart = new Date(job.end)
-        // Round up to next 15-minute interval
-        const mins = candidateStart.getMinutes()
-        if (mins % 15 !== 0) {
-          candidateStart.setMinutes(Math.ceil(mins / 15) * 15, 0, 0)
-        }
-      }
-    }
-    
-    // Check if candidate is still within shift hours
-    if (candidateStart.getHours() >= SHIFT_END) {
-      // No room left on this day
-      return { hours: SHIFT_START, minutes: 0, noTimeAvailable: true }
-    }
-    
-    return {
-      hours: candidateStart.getHours(),
-      minutes: candidateStart.getMinutes(),
-      noTimeAvailable: false
-    }
   }
 
   const getFilteredJobs = () => {
@@ -735,157 +639,27 @@ export default function Schedule({ user, profile, onNavigate }) {
   const handleDrop = (e, machineId, date, hour = null) => {
     e.preventDefault()
     setDropTarget(null)
-    
+
     const job = draggedJob || draggedScheduledJob
     if (!job) return
-    
-    const machine = machines.find(m => m.id === machineId)
-    const partId = job.component_id
-    const durationRecord = getDurationForPartMachine(partId, machineId)
+
     const isReschedule = !!draggedScheduledJob
-    
-    // Calculate duration for next available time check (scaled by quantity)
-    let durationMinutes = 60 // default
-    if (durationRecord) {
-      // Scale duration based on job quantity vs base quantity
-      durationMinutes = getScaledDuration(durationRecord, job.quantity) || durationRecord.estimated_minutes
-    } else if (job.estimated_minutes) {
-      durationMinutes = job.estimated_minutes
-    }
-    
-    // Store scaled duration for form
-    const scaledDurationMinutes = durationMinutes
-    
-    // Get next available time for this machine/date (or use clicked hour in day view)
-    let defaultStartTime = '07:00'
-    let timeUnavailable = false
-    
-    if (hour !== null) {
-      // User clicked a specific hour in day view - use that
-      defaultStartTime = `${hour.toString().padStart(2, '0')}:00`
-      // Still check if there's time available during shift
-      const nextTime = getNextAvailableTime(machineId, date, durationMinutes, isReschedule ? job.id : null)
-      timeUnavailable = nextTime.noTimeAvailable
-    } else {
-      // Week view - calculate next available time
-      const nextTime = getNextAvailableTime(machineId, date, durationMinutes, isReschedule ? job.id : null)
-      defaultStartTime = `${String(nextTime.hours).padStart(2, '0')}:${String(nextTime.minutes).padStart(2, '0')}`
-      timeUnavailable = nextTime.noTimeAvailable
-    }
-    
-    setNoTimeAvailable(timeUnavailable)
-    
-    setScheduleModal({
-      job: isReschedule ? { ...job, isReschedule: true } : job,
-      machineId,
-      machineName: machine?.name || 'Unknown',
-      machineCode: machine?.code || '',
-      date,
-      durationRecord,
-      isReschedule
-    })
-    
-    // Set form values with scaled duration
-    if (durationRecord && !isReschedule) {
-      const hours = Math.floor(scaledDurationMinutes / 60)
-      const minutes = scaledDurationMinutes % 60
-      setScheduleForm({
-        startTime: defaultStartTime,
-        durationHours: hours,
-        durationMinutes: minutes,
-        requiresAttendance: job.requires_attendance || false,
-        saveDuration: false
-      })
-      // Track if duration was scaled
-      const wasScaled = durationRecord.base_quantity && durationRecord.base_quantity !== job.quantity
-      setDurationSource(wasScaled ? 'database-scaled' : 'database')
-    } else if (job.estimated_minutes) {
-      const hours = Math.floor(job.estimated_minutes / 60)
-      const minutes = job.estimated_minutes % 60
-      setScheduleForm({
-        startTime: isReschedule && job.scheduled_start 
-          ? new Date(job.scheduled_start).toTimeString().slice(0, 5)
-          : defaultStartTime,
-        durationHours: hours,
-        durationMinutes: minutes,
-        requiresAttendance: job.requires_attendance || false,
-        saveDuration: !isReschedule
-      })
-      setDurationSource(isReschedule ? 'job' : 'job')
-    } else {
-      setScheduleForm({
-        startTime: defaultStartTime,
-        durationHours: 1,
-        durationMinutes: 0,
-        requiresAttendance: job.requires_attendance || false,
-        saveDuration: !isReschedule
-      })
-      setDurationSource(null)
-    }
-    
+
+    // Format date as YYYY-MM-DD string for ScheduleJobModal
+    const dropDate = date instanceof Date
+      ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      : typeof date === 'string' ? date : new Date(date).toISOString().split('T')[0]
+
+    // Start time from day-view hour click, or null for auto-calc
+    const dropTime = hour !== null ? `${String(hour).padStart(2, '0')}:00` : null
+
+    // Open ScheduleJobModal with drop context as defaults
+    setScheduleClickJob(job)
+    setScheduleClickEditMode(isReschedule)
+    setScheduleClickDefaults({ date: dropDate, machineId, startTime: dropTime })
+
     setDraggedJob(null)
     setDraggedScheduledJob(null)
-  }
-
-  const handleSaveSchedule = async () => {
-    if (!scheduleModal) return
-    
-    setSaving(true)
-    setSaveError(null)
-    
-    try {
-      const { job, machineId, date, durationRecord, isReschedule } = scheduleModal
-      
-      const [hours, minutes] = scheduleForm.startTime.split(':').map(Number)
-      const scheduledStart = new Date(date)
-      scheduledStart.setHours(hours, minutes, 0, 0)
-      
-      const durationMinutes = (scheduleForm.durationHours * 60) + scheduleForm.durationMinutes
-      const scheduledEnd = new Date(scheduledStart.getTime() + durationMinutes * 60000)
-      
-      // Check conflicts, excluding current job if rescheduling
-      if (hasConflict(machineId, scheduledStart, scheduledEnd, isReschedule ? job.id : null)) {
-        setSaveError('This time slot conflicts with an existing scheduled job.')
-        setSaving(false)
-        return
-      }
-           
-      // Update the job
-      const { error } = await supabase
-        .from('jobs')
-        .update({
-          assigned_machine_id: machineId,
-          scheduled_start: scheduledStart.toISOString(),
-          scheduled_end: scheduledEnd.toISOString(),
-          estimated_minutes: durationMinutes,
-          status: 'assigned',
-          scheduled_by: profile?.id,
-          scheduled_at: new Date().toISOString()
-        })
-        .eq('id', job.id)
-      
-      if (error) {
-        console.error('Error scheduling job:', error)
-        setSaveError('Failed to schedule job. Please try again.')
-      } else {
-        setScheduleModal(null)
-        setNoTimeAvailable(false)
-        setScheduleForm({
-          startTime: '07:00',
-          durationHours: 1,
-          durationMinutes: 0,
-          requiresAttendance: false,
-          saveDuration: false
-        })
-        setDurationSource(null)
-        fetchData()
-      }
-    } catch (error) {
-      console.error('Unexpected error scheduling job:', error)
-      setSaveError('An unexpected error occurred.')
-    } finally {
-      setSaving(false)
-    }
   }
 
   // Unschedule a job - return it to the pool
@@ -1238,11 +1012,14 @@ export default function Schedule({ user, profile, onNavigate }) {
       return 'bg-gray-700/50 border-gray-500 opacity-60'
     }
     
-    // In-progress jobs get a green ring
-    if (job.status === 'in_progress' || job.status === 'in_setup') {
-      // Keep priority color but add pulsing ring
-      const baseColor = getPriorityBlockColor(priority)
-      return `${baseColor} ring-2 ring-green-400 ring-offset-1 ring-offset-gray-900`
+    // In-setup jobs get a blue treatment
+    if (job.status === 'in_setup') {
+      return 'bg-blue-500 border-blue-400 ring-2 ring-blue-300 ring-offset-1 ring-offset-gray-900'
+    }
+
+    // In-progress jobs get a teal treatment
+    if (job.status === 'in_progress') {
+      return 'bg-teal-600 border-teal-400 ring-2 ring-teal-300 ring-offset-1 ring-offset-gray-900'
     }
     
     // Default: use priority-based coloring
@@ -1266,6 +1043,26 @@ export default function Schedule({ user, profile, onNavigate }) {
       case 'normal': return 'border-green-600'
       case 'low': return 'border-gray-600'
       default: return 'border-gray-600'
+    }
+  }
+
+  const isMaintenanceJob = (job) => {
+    return job.is_maintenance || job.work_order?.order_type === 'maintenance'
+  }
+
+  const getBlockSizeTier = (durationHours) => {
+    if (durationHours >= 4) return 'large'
+    if (durationHours >= 2) return 'medium'
+    return 'small'
+  }
+
+  const getPriorityAccentBorder = (job) => {
+    if (isMaintenanceJob(job)) return 'border-l-2'
+    const priority = job.priority || job.work_order?.priority
+    switch (priority) {
+      case 'critical': return 'border-l-4 border-l-red-500'
+      case 'high': return 'border-l-4 border-l-yellow-500'
+      default: return 'border-l-2'
     }
   }
 
@@ -1348,11 +1145,42 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   const getJobsForMachineDay = (machineId, dayDate) => {
     const machineJobs = scheduledJobsByMachine[machineId] || []
+
+    // Day (zoomed) view: return all jobs that touch this day (clipped as before)
+    if (zoomedDay) {
+      return machineJobs.filter(job => {
+        const style = getJobBlockStyleZoomed(job, dayDate)
+        return style !== null
+      })
+    }
+
+    // Week view: each job renders only from its anchor day
+    // Anchor = job start day, or weekDates[0] if the job started before the visible week
+    const dayStart = new Date(dayDate)
+    dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(dayDate)
+    dayEnd.setHours(23, 59, 59, 999)
+    const weekStart = new Date(weekDates[0])
+    weekStart.setHours(0, 0, 0, 0)
+
     return machineJobs.filter(job => {
-      const style = zoomedDay 
-        ? getJobBlockStyleZoomed(job, dayDate)
-        : getJobBlockStyle(job, dayDate)
-      return style !== null
+      if (!job.scheduled_start) return false
+      const jobStart = new Date(job.scheduled_start)
+      const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
+        ? job.actual_end
+        : job.scheduled_end
+      const jobEnd = endTime
+        ? new Date(endTime)
+        : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+
+      // Job must touch this day
+      if (jobStart > dayEnd || jobEnd < dayStart) return false
+
+      // Anchor day: the day the job starts, or weekDates[0] if it started earlier
+      const anchorDate = jobStart < weekStart ? weekStart : new Date(jobStart)
+      anchorDate.setHours(0, 0, 0, 0)
+
+      return anchorDate.getTime() === dayStart.getTime()
     })
   }
 
@@ -1469,10 +1297,210 @@ export default function Schedule({ user, profile, onNavigate }) {
     return `${hours}h ${minutes}m`
   }
 
+  // Global search: search across ALL jobs (scheduled + unscheduled)
+  const handleGlobalSearch = useCallback((query) => {
+    setGlobalSearch(query)
+
+    if (globalSearchTimerRef.current) clearTimeout(globalSearchTimerRef.current)
+
+    if (!query.trim()) {
+      setGlobalSearchResults([])
+      setShowGlobalResults(false)
+      return
+    }
+
+    globalSearchTimerRef.current = setTimeout(async () => {
+      const q = query.toLowerCase()
+
+      // Search unassigned + incomplete jobs (already loaded)
+      const poolResults = [...unassignedJobs, ...incompleteJobs].filter(job =>
+        job.job_number?.toLowerCase().includes(q) ||
+        job.work_order?.wo_number?.toLowerCase().includes(q) ||
+        job.work_order?.customer?.toLowerCase().includes(q) ||
+        job.component?.part_number?.toLowerCase().includes(q)
+      ).map(job => ({ ...job, _searchType: 'pool' }))
+
+      // Search scheduled jobs on current week (already loaded)
+      const schedResults = scheduledJobs.filter(job =>
+        job.job_number?.toLowerCase().includes(q) ||
+        job.work_order?.wo_number?.toLowerCase().includes(q) ||
+        job.work_order?.customer?.toLowerCase().includes(q) ||
+        job.component?.part_number?.toLowerCase().includes(q)
+      ).map(job => ({ ...job, _searchType: 'scheduled' }))
+
+      // Also search scheduled jobs beyond current week
+      let remoteResults = []
+      try {
+        const { data } = await supabase
+          .from('jobs')
+          .select(`
+            *,
+            work_order:work_orders(id, wo_number, customer, priority, due_date),
+            component:parts!component_id(id, part_number, description),
+            assigned_machine:machines(id, name, code)
+          `)
+          .not('assigned_machine_id', 'is', null)
+          .not('scheduled_start', 'is', null)
+          .not('status', 'eq', 'cancelled')
+          .or(`job_number.ilike.%${q}%`)
+          .limit(20)
+
+        if (data) {
+          // Filter out jobs already in scheduledJobs
+          const existingIds = new Set(scheduledJobs.map(j => j.id))
+          remoteResults = data
+            .filter(j => !existingIds.has(j.id))
+            .map(j => ({ ...j, _searchType: 'scheduled-remote' }))
+        }
+      } catch (err) {
+        // Swallow - we still have local results
+      }
+
+      // Also search by customer/part via separate queries if no job_number match
+      if (remoteResults.length === 0) {
+        try {
+          const { data } = await supabase
+            .from('jobs')
+            .select(`
+              *,
+              work_order:work_orders!inner(id, wo_number, customer, priority, due_date),
+              component:parts!component_id(id, part_number, description),
+              assigned_machine:machines(id, name, code)
+            `)
+            .not('assigned_machine_id', 'is', null)
+            .not('scheduled_start', 'is', null)
+            .not('status', 'eq', 'cancelled')
+            .ilike('work_order.customer', `%${q}%`)
+            .limit(20)
+
+          if (data) {
+            const existingIds = new Set([...scheduledJobs, ...remoteResults].map(j => j.id))
+            const customerMatches = data
+              .filter(j => !existingIds.has(j.id))
+              .map(j => ({ ...j, _searchType: 'scheduled-remote' }))
+            remoteResults = [...remoteResults, ...customerMatches]
+          }
+        } catch (err) {}
+      }
+
+      const allResults = [...poolResults, ...schedResults, ...remoteResults].slice(0, 15)
+      setGlobalSearchResults(allResults)
+      setShowGlobalResults(allResults.length > 0)
+    }, 300) // 300ms debounce
+  }, [unassignedJobs, incompleteJobs, scheduledJobs])
+
+  const navigateToJob = (job) => {
+    setShowGlobalResults(false)
+    setGlobalSearch('')
+
+    if (job._searchType === 'pool') {
+      // Job is in the pool — set the pool search to highlight it
+      setSearchQuery(job.job_number)
+      setHighlightedJobId(job.id)
+      setTimeout(() => setHighlightedJobId(null), 3000)
+    } else {
+      // Scheduled job — navigate the timeline to its date
+      if (job.scheduled_start) {
+        const jobDate = new Date(job.scheduled_start)
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+
+        // Calculate the week offset needed
+        const dayDiff = Math.floor((jobDate - today) / (1000 * 60 * 60 * 24))
+        const neededWeekOffset = Math.floor(dayDiff / 7)
+        setWeekOffset(neededWeekOffset)
+
+        // Zoom into the day
+        const dayStart = new Date(jobDate)
+        dayStart.setHours(0, 0, 0, 0)
+        setZoomedDay(dayStart)
+
+        // Highlight the job block
+        setHighlightedJobId(job.id)
+        setTimeout(() => setHighlightedJobId(null), 3000)
+      }
+    }
+  }
+
+  // Close global search results when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (globalSearchRef.current && !globalSearchRef.current.contains(e.target)) {
+        setShowGlobalResults(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   // Count machines that are DOWN
   const downMachineCount = useMemo(() => {
     return machines.filter(m => isMachineDown(m)).length
   }, [machines, ongoingDowntimes, activeMaintenanceJobs])
+
+  // Block content component — adapts layout based on block size
+  const JobBlockContent = ({ job, sizeTier }) => {
+    const isMaint = isMaintenanceJob(job)
+    const isUnplanned = job.work_order?.maintenance_type === 'unplanned'
+    const isCompleted = job.status === 'complete' || job.status === 'manufacturing_complete'
+
+    // Line 1: Part number (or maintenance type) + warning icons
+    const line1 = isMaint
+      ? (isUnplanned ? 'UNPLANNED' : 'MAINTENANCE')
+      : (job.component?.part_number || job.job_number)
+
+    // Time range string
+    const timeRange = job.scheduled_start
+      ? `${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
+      : ''
+
+    return (
+      <div className="flex flex-col justify-center min-w-0 w-full leading-tight py-0.5">
+        {/* Line 1: Part number / maintenance label + icons */}
+        <div className="flex items-center gap-0.5 min-w-0">
+          {isUnplanned && (
+            <AlertTriangle size={10} className="text-white flex-shrink-0" />
+          )}
+          {isOverdue(job) && !isMaint && (
+            <AlertTriangle size={10} className="text-red-300 flex-shrink-0" />
+          )}
+          <span className="text-white text-xs font-bold truncate">{line1}</span>
+          {job.requires_attendance && (
+            <User size={10} className="text-white/70 flex-shrink-0 ml-0.5" />
+          )}
+          {isCompleted && (
+            <span className="text-[10px] text-gray-400 flex-shrink-0 ml-0.5">✓</span>
+          )}
+        </div>
+
+        {/* Line 2: Job number + quantity */}
+        <div className="truncate text-white/70 text-[10px]">
+          {isMaint ? (job.maintenance_description || job.job_number) : (
+            sizeTier === 'large'
+              ? `${job.job_number} · Qty: ${job.quantity}`
+              : `${job.job_number} (${job.quantity})`
+          )}
+        </div>
+
+        {/* Line 3: Customer + due date (large only) */}
+        {sizeTier === 'large' && (
+          <div className="truncate text-white/50 text-[10px]">
+            {[
+              job.work_order?.customer,
+              job.work_order?.due_date ? `Due: ${formatDate(job.work_order.due_date)}` : null
+            ].filter(Boolean).join(' · ') || '\u00A0'}
+          </div>
+        )}
+
+        {/* Line 4 (large) / Line 3 (medium): Time range */}
+        {sizeTier !== 'small' && timeRange && (
+          <div className="truncate text-white/50 text-[10px]">
+            {timeRange}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -1497,8 +1525,75 @@ export default function Schedule({ user, profile, onNavigate }) {
             <ArrowLeft size={20} />
             <span>Back to Dashboard</span>
           </button>
+
+          {/* Global Schedule Search */}
+          <div className="relative" ref={globalSearchRef}>
+            <div className="relative">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input
+                type="text"
+                placeholder="Search all jobs..."
+                value={globalSearch}
+                onChange={(e) => handleGlobalSearch(e.target.value)}
+                onFocus={() => {
+                  if (globalSearchResults.length > 0) setShowGlobalResults(true)
+                }}
+                className="w-64 pl-9 pr-8 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+              />
+              {globalSearch && (
+                <button
+                  onClick={() => {
+                    setGlobalSearch('')
+                    setGlobalSearchResults([])
+                    setShowGlobalResults(false)
+                  }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            {/* Search Results Dropdown */}
+            {showGlobalResults && globalSearchResults.length > 0 && (
+              <div className="absolute top-full left-0 mt-1 w-96 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 max-h-80 overflow-y-auto">
+                {globalSearchResults.map(result => (
+                  <button
+                    key={result.id}
+                    onClick={() => navigateToJob(result)}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-700 transition-colors border-b border-gray-700/50 last:border-b-0"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-white font-mono text-sm font-medium">{result.job_number}</span>
+                      {result.component?.part_number && (
+                        <span className="text-skynet-accent text-xs">{result.component.part_number}</span>
+                      )}
+                      <span className={`ml-auto text-xs px-1.5 py-0.5 rounded ${
+                        result._searchType === 'pool'
+                          ? 'bg-yellow-900/50 text-yellow-400'
+                          : 'bg-green-900/50 text-green-400'
+                      }`}>
+                        {result._searchType === 'pool' ? 'Unscheduled' : 'Scheduled'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {result.work_order?.customer && (
+                        <span className="text-gray-400 text-xs truncate">{result.work_order.customer}</span>
+                      )}
+                      {result._searchType !== 'pool' && result.scheduled_start && (
+                        <span className="text-gray-500 text-xs">
+                          {new Date(result.scheduled_start).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {result.assigned_machine?.name && ` · ${result.assigned_machine.name}`}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-        
+
         <div className="flex items-center gap-4">
           <h2 className="text-xl font-semibold text-white flex items-center gap-2">
             <Calendar size={24} className="text-skynet-accent" />
@@ -1712,11 +1807,12 @@ export default function Schedule({ user, profile, onNavigate }) {
                     draggable
                     onDragStart={(e) => handleDragStart(e, job)}
                     onDragEnd={handleDragEnd}
-                    className={`rounded-lg p-3 border-l-4 
+                    className={`rounded-lg p-3 border-l-4
                       cursor-grab active:cursor-grabbing hover:bg-gray-750 transition-all touch-manipulation
                       ${draggedJob?.id === job.id ? 'opacity-50 scale-95' : ''}
-                      ${isIncomplete 
-                        ? 'bg-red-900/20 border-red-600 ring-1 ring-red-800/50' 
+                      ${highlightedJobId === job.id ? 'ring-2 ring-skynet-accent animate-pulse' : ''}
+                      ${isIncomplete
+                        ? 'bg-red-900/20 border-red-600 ring-1 ring-red-800/50'
                         : `bg-gray-800 ${getPriorityBorder(job.priority)}`
                       }`}
                   >
@@ -1790,6 +1886,18 @@ export default function Schedule({ user, profile, onNavigate }) {
                             </span>
                           )
                         )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setScheduleClickJob(job)
+                            setScheduleClickEditMode(false)
+                          }}
+                          className="mt-1 flex items-center gap-1 px-2 py-1 bg-skynet-accent/20 hover:bg-skynet-accent text-skynet-accent hover:text-white text-xs font-medium rounded transition-colors"
+                          title="Schedule this job"
+                        >
+                          <Calendar size={10} />
+                          Schedule
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -2027,54 +2135,38 @@ export default function Schedule({ user, profile, onNavigate }) {
                                       </div>
                                     )}
                                     
-                                    <div className="absolute inset-0 p-1">
+                                    <div className="absolute inset-0 p-1 overflow-visible">
                                 {dayJobs.map(job => {
                                   const style = getJobBlockStyle(job, date)
                                   if (!style) return null
-                                  
+                                  const isCompleted = job.status === 'complete' || job.status === 'manufacturing_complete'
+
                                   return (
                                     <div
                                       key={job.id}
-                                      draggable={job.status !== 'complete' && job.status !== 'manufacturing_complete'}
+                                      draggable={!isCompleted}
                                       onDragStart={(e) => handleScheduledDragStart(e, job)}
                                       onDragEnd={handleDragEnd}
                                       onClick={(e) => {
                                         e.stopPropagation()
                                         setSelectedJob(job)
                                       }}
-                                      className={`absolute top-1 bottom-1 ${getJobBlockColor(job)} 
-                                        rounded ${job.status !== 'complete' && job.status !== 'manufacturing_complete' ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} border-l-2 hover:brightness-110 transition-all
-                                        flex items-center overflow-hidden px-1
+                                      className={`absolute top-1 bottom-1 ${getJobBlockColor(job)}
+                                        rounded ${!isCompleted ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${getPriorityAccentBorder(job)} hover:brightness-110 transition-all
+                                        flex items-center overflow-hidden px-1.5
                                         ${style.continuesFromPrevious ? 'rounded-l-none border-l-0' : ''}
                                         ${style.continuesToNext ? 'rounded-r-none' : ''}
-                                        ${draggedScheduledJob?.id === job.id ? 'opacity-50' : ''}`}
-                                      style={{ 
-                                        left: style.left, 
-                                        width: style.width 
+                                        ${draggedScheduledJob?.id === job.id ? 'opacity-50' : ''}
+                                        ${style.isMultiDay ? 'z-10' : 'z-[1]'}
+                                        ${highlightedJobId === job.id ? 'ring-2 ring-white animate-pulse !z-20' : ''}
+                                        ${style.isMultiDay && (draggedJob || (draggedScheduledJob && draggedScheduledJob.id !== job.id)) ? 'pointer-events-none' : ''}`}
+                                      style={{
+                                        left: style.left,
+                                        width: style.width
                                       }}
-                                      title={`${job.job_number} - ${job.is_maintenance || job.work_order?.order_type === 'maintenance' ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${job.status === 'complete' ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
+                                      title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
                                     >
-                                      {/* Unplanned maintenance warning indicator */}
-                                      {job.work_order?.maintenance_type === 'unplanned' && (
-                                        <AlertTriangle size={10} className="text-white flex-shrink-0 mr-0.5" />
-                                      )}
-                                      {/* Overdue warning indicator */}
-                                      {isOverdue(job) && !(job.is_maintenance || job.work_order?.order_type === 'maintenance') && (
-                                        <AlertTriangle size={10} className="text-red-300 flex-shrink-0 mr-0.5" />
-                                      )}
-                                      <span className="text-white text-xs font-medium truncate">
-                                        {job.job_number}
-                                      </span>
-                                      <span className="text-white/70 text-xs ml-1 truncate">
-                                        ({job.quantity})
-                                      </span>
-                                      {job.requires_attendance && (
-                                        <User size={10} className="ml-1 text-white/70 flex-shrink-0" />
-                                      )}
-                                      {/* Status indicator for completed jobs */}
-                                      {(job.status === 'complete' || job.status === 'manufacturing_complete') && (
-                                        <span className="ml-1 text-[10px] text-gray-400">✓</span>
-                                      )}
+                                      <JobBlockContent job={job} sizeTier={getBlockSizeTier(style.durationHours)} />
                                     </div>
                                   )
                                 })}
@@ -2130,19 +2222,20 @@ export default function Schedule({ user, profile, onNavigate }) {
                                     setSelectedJob(job)
                                   }
                                 }}
-                                className={`absolute top-1 bottom-1 ${getJobBlockColor(job)} 
-                                  rounded ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} border-l-2 hover:brightness-110 transition-all
+                                className={`absolute top-1 bottom-1 ${getJobBlockColor(job)}
+                                  rounded ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${getPriorityAccentBorder(job)} hover:brightness-110 transition-all
                                   flex items-center px-2 group
                                   ${isResizingThis ? 'overflow-visible' : 'overflow-hidden'}
                                   ${style.continuesFromPrevious ? 'rounded-l-none border-l-0' : ''}
                                   ${style.continuesToNext ? 'rounded-r-none' : ''}
                                   ${draggedScheduledJob?.id === job.id ? 'opacity-50' : ''}
-                                  ${isResizingThis ? 'ring-2 ring-white cursor-ew-resize z-30' : ''}`}
-                                style={{ 
-                                  left: style.left, 
-                                  width: style.width 
+                                  ${isResizingThis ? 'ring-2 ring-white cursor-ew-resize z-30' : ''}
+                                  ${!isResizingThis && highlightedJobId === job.id ? 'ring-2 ring-white animate-pulse z-20' : ''}`}
+                                style={{
+                                  left: style.left,
+                                  width: style.width
                                 }}
-                                title={`${job.job_number} - ${job.is_maintenance || job.work_order?.order_type === 'maintenance' ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule, drag edges to resize)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
+                                title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule, drag edges to resize)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
                               >
                                 {/* Left resize handle - only for non-completed jobs */}
                                 {!style.continuesFromPrevious && canResize && (
@@ -2152,36 +2245,8 @@ export default function Schedule({ user, profile, onNavigate }) {
                                     title="Drag to adjust start time"
                                   />
                                 )}
-                                
-                                {/* Unplanned maintenance warning indicator */}
-                                {job.work_order?.maintenance_type === 'unplanned' && (
-                                  <AlertTriangle size={12} className="text-white flex-shrink-0 mr-1" />
-                                )}
-                                
-                                {/* Overdue warning indicator - not for maintenance */}
-                                {isOverdue(job) && !(job.is_maintenance || job.work_order?.order_type === 'maintenance') && (
-                                  <AlertTriangle size={12} className="text-red-300 flex-shrink-0 mr-1" />
-                                )}
-                                
-                                <span className="text-white text-xs font-medium truncate">
-                                  {job.job_number}
-                                </span>
-                                <span className="text-white/70 text-xs ml-1">
-                                  ({job.quantity})
-                                </span>
-                                <span className="text-white/70 text-xs ml-2 truncate hidden sm:inline">
-                                  {job.is_maintenance || job.work_order?.order_type === 'maintenance' 
-                                    ? (job.work_order?.maintenance_type === 'unplanned' ? 'UNPLANNED' : 'MAINT')
-                                    : job.component?.part_number
-                                  }
-                                </span>
-                                {job.requires_attendance && (
-                                  <User size={12} className="ml-1 text-white/70 flex-shrink-0" />
-                                )}
-                                {/* Status indicator for completed jobs */}
-                                {isCompleted && (
-                                  <span className="ml-1 text-xs text-gray-400">✓</span>
-                                )}
+
+                                <JobBlockContent job={job} sizeTier={getBlockSizeTier(style.endHour - style.startHour)} />
                                 
                                 {/* Duration indicator during resize */}
                                 {isResizingThis && (
@@ -2240,12 +2305,24 @@ export default function Schedule({ user, profile, onNavigate }) {
               <span className="text-gray-400">Off-shift</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-4 h-3 bg-green-600 ring-2 ring-green-400 ring-offset-1 ring-offset-gray-900 rounded-sm"></div>
+              <div className="w-4 h-3 bg-blue-500 ring-2 ring-blue-300 ring-offset-1 ring-offset-gray-900 rounded-sm"></div>
+              <span className="text-gray-400">In Setup</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-3 bg-teal-600 ring-2 ring-teal-300 ring-offset-1 ring-offset-gray-900 rounded-sm"></div>
               <span className="text-gray-400">In Progress</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-3 bg-gray-700/50 border border-gray-500 opacity-60 rounded-sm"></div>
               <span className="text-gray-400">Complete</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-3 bg-green-600 border-l-4 border-l-red-500 rounded-sm"></div>
+              <span className="text-gray-400">Critical</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-3 bg-green-600 border-l-4 border-l-yellow-500 rounded-sm"></div>
+              <span className="text-gray-400">High Priority</span>
             </div>
             <div className="flex items-center gap-2">
               <AlertTriangle size={12} className="text-red-400" />
@@ -2298,224 +2375,6 @@ export default function Schedule({ user, profile, onNavigate }) {
           </div>
         </div>
       </div>
-
-      {/* Schedule Modal */}
-      {scheduleModal && (
-        <div 
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => {
-            setScheduleModal(null)
-            setNoTimeAvailable(false)
-          }}
-        >
-          <div 
-            className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                  {scheduleModal.isReschedule ? 'Reschedule Job' : 'Schedule Job'}
-                  {scheduleModal.isReschedule && <Edit3 size={18} className="text-skynet-accent" />}
-                </h3>
-                <p className="text-gray-400">
-                  Assign to {scheduleModal.machineName}
-                  <span className="text-gray-500 ml-1">({scheduleModal.machineCode})</span>
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setScheduleModal(null)
-                  setNoTimeAvailable(false)
-                }}
-                className="text-gray-500 hover:text-white transition-colors"
-              >
-                <X size={24} />
-              </button>
-            </div>
-
-            <div className="bg-gray-800 rounded-lg p-4 mb-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-white font-mono font-bold">{scheduleModal.job.job_number}</span>
-                <div className={`w-2 h-2 rounded-full ${getPriorityColor(scheduleModal.job.priority)}`}></div>
-                {scheduleModal.job.status === 'incomplete' && (
-                  <span className="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded flex items-center gap-1">
-                    <AlertTriangle size={10} />
-                    Incomplete
-                  </span>
-                )}
-              </div>
-              <p className="text-skynet-accent">{scheduleModal.job.component?.part_number}</p>
-              <p className="text-gray-400 text-sm">{scheduleModal.job.work_order?.wo_number}</p>
-              <p className="text-gray-400 text-sm">Qty: {scheduleModal.job.quantity}</p>
-              {scheduleModal.job.work_order?.due_date && (
-                <p className="text-gray-500 text-sm mt-1">Due: {formatDate(scheduleModal.job.work_order.due_date)}</p>
-              )}
-              
-              {/* Incomplete job details in modal */}
-              {scheduleModal.job.status === 'incomplete' && (
-                <div className="mt-3 pt-3 border-t border-red-800/30 space-y-1">
-                  {scheduleModal.job.incomplete_reason && (
-                    <p className="text-xs text-red-300">
-                      <span className="text-gray-500">Reason:</span> {scheduleModal.job.incomplete_reason}
-                    </p>
-                  )}
-                  <div className="flex items-center gap-3 text-xs">
-                    <span className="text-gray-500">Progress:</span>
-                    <span className="text-green-400">{scheduleModal.job.good_pieces || 0} good</span>
-                    <span className="text-red-400">{scheduleModal.job.bad_pieces || 0} bad</span>
-                  </div>
-                  <p className="text-xs text-yellow-400">
-                    {scheduleModal.job.quantity - (scheduleModal.job.good_pieces || 0)} pieces remaining of {scheduleModal.job.quantity}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {durationSource && !scheduleModal.isReschedule && (
-              <div className={`flex items-center gap-2 mb-4 px-3 py-2 rounded text-sm ${
-                durationSource === 'database' || durationSource === 'database-scaled'
-                  ? 'bg-blue-900/30 text-blue-300 border border-blue-800'
-                  : 'bg-gray-800 text-gray-400 border border-gray-700'
-              }`}>
-                {durationSource === 'database' ? (
-                  <>
-                    <Database size={14} />
-                    <span>Duration loaded from saved estimates</span>
-                  </>
-                ) : durationSource === 'database-scaled' ? (
-                  <>
-                    <Database size={14} />
-                    <span>Duration scaled by quantity ({scheduleModal.durationRecord?.base_quantity} → {scheduleModal.job?.quantity} pcs)</span>
-                  </>
-                ) : (
-                  <>
-                    <Info size={14} />
-                    <span>Duration from job (not saved for this machine yet)</span>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* No time available warning */}
-            {noTimeAvailable && (
-              <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 mb-4">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle size={20} className="text-red-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-red-400 font-medium">No Shift Time Available</p>
-                    <p className="text-red-300/70 text-sm mt-1">
-                      There is no available time during shift hours (7am-4pm) on this day for this machine. 
-                      Consider scheduling for a different day, or override if scheduling outside shift hours is necessary.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-gray-400 text-sm mb-1">Date</label>
-                <div className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white">
-                  {formatFullDate(new Date(scheduleModal.date))}
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-gray-400 text-sm">Start Time</label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const durationMins = (scheduleForm.durationHours * 60) + scheduleForm.durationMinutes
-                      const nextTime = getNextAvailableTime(
-                        scheduleModal.machineId, 
-                        scheduleModal.date, 
-                        durationMins || 60,
-                        scheduleModal.isReschedule ? scheduleModal.job.id : null
-                      )
-                      const timeStr = `${String(nextTime.hours).padStart(2, '0')}:${String(nextTime.minutes).padStart(2, '0')}`
-                      setScheduleForm(prev => ({ ...prev, startTime: timeStr }))
-                      setNoTimeAvailable(nextTime.noTimeAvailable)
-                    }}
-                    className="flex items-center gap-1 text-xs text-skynet-accent hover:text-blue-400 transition-colors"
-                  >
-                    <Clock size={12} />
-                    Next Available
-                  </button>
-                </div>
-                <input
-                  type="time"
-                  value={scheduleForm.startTime}
-                  onChange={(e) => setScheduleForm(prev => ({ ...prev, startTime: e.target.value }))}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                  style={{ colorScheme: 'dark' }}
-                />
-              </div>
-
-              <div>
-                <label className="block text-gray-400 text-sm mb-1">Estimated Duration</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="0"
-                    max="72"
-                    value={scheduleForm.durationHours}
-                    onChange={(e) => setScheduleForm(prev => ({ ...prev, durationHours: parseInt(e.target.value) || 0 }))}
-                    className="w-20 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                  />
-                  <span className="text-gray-400">hours</span>
-                  <input
-                    type="number"
-                    min="0"
-                    max="59"
-                    step="15"
-                    value={scheduleForm.durationMinutes}
-                    onChange={(e) => setScheduleForm(prev => ({ ...prev, durationMinutes: parseInt(e.target.value) || 0 }))}
-                    className="w-20 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                  />
-                  <span className="text-gray-400">min</span>
-                </div>
-              </div>
-
-              {saveError && (
-                <div className="p-3 bg-red-900/50 border border-red-700 rounded text-red-300 text-sm">
-                  {saveError}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  onClick={() => {
-                    setScheduleModal(null)
-                    setNoTimeAvailable(false)
-                  }}
-                  className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveSchedule}
-                  disabled={saving || (scheduleForm.durationHours === 0 && scheduleForm.durationMinutes === 0)}
-                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {saving ? (
-                    <>
-                      <Loader2 size={18} className="animate-spin" />
-                      {scheduleModal.isReschedule ? 'Updating...' : 'Scheduling...'}
-                    </>
-                  ) : (
-                    <>
-                      <Save size={18} />
-                      {scheduleModal.isReschedule ? 'Update Schedule' : 'Schedule Job'}
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Job Detail Popup */}
       {selectedJob && (
@@ -2611,7 +2470,10 @@ export default function Schedule({ user, profile, onNavigate }) {
                 <div>
                   <span className="text-gray-500 text-sm">Estimated Duration</span>
                   <p className="text-white">
-                    {Math.floor(selectedJob.estimated_minutes / 60)}h {selectedJob.estimated_minutes % 60}m
+                    {selectedJob.estimated_minutes >= 1440
+                      ? `${Math.floor(selectedJob.estimated_minutes / 1440)}d ${Math.floor((selectedJob.estimated_minutes % 1440) / 60)}h${selectedJob.estimated_minutes % 60 > 0 ? ` ${selectedJob.estimated_minutes % 60}m` : ''}`
+                      : `${Math.floor(selectedJob.estimated_minutes / 60)}h ${selectedJob.estimated_minutes % 60}m`
+                    }
                   </p>
                 </div>
               )}
@@ -2672,33 +2534,8 @@ export default function Schedule({ user, profile, onNavigate }) {
                   <div className="flex items-center gap-3 mb-3">
                     <button
                       onClick={() => {
-                        // Open schedule modal in edit mode for maintenance
-                        const machine = machines.find(m => m.id === selectedJob.assigned_machine_id)
-                        
-                        setScheduleModal({
-                          job: selectedJob,
-                          machineId: selectedJob.assigned_machine_id,
-                          machineName: machine?.name || selectedJob.assigned_machine?.name || 'Unknown',
-                          machineCode: machine?.code || selectedJob.assigned_machine?.code || '',
-                          date: new Date(selectedJob.scheduled_start),
-                          durationRecord: null,
-                          isReschedule: true,
-                          isMaintenance: true // Flag for maintenance edit mode
-                        })
-                        
-                        // Pre-fill form with current values
-                        const startTime = new Date(selectedJob.scheduled_start).toTimeString().slice(0, 5)
-                        const hours = Math.floor((selectedJob.estimated_minutes || 60) / 60)
-                        const minutes = (selectedJob.estimated_minutes || 60) % 60
-                        
-                        setScheduleForm({
-                          startTime,
-                          durationHours: hours,
-                          durationMinutes: minutes,
-                          requiresAttendance: false,
-                          saveDuration: false
-                        })
-                        setDurationSource('job')
+                        setScheduleClickJob(selectedJob)
+                        setScheduleClickEditMode(true)
                         setSelectedJob(null)
                       }}
                       className={`flex items-center gap-2 px-4 py-2 font-medium rounded transition-colors ${
@@ -2741,33 +2578,8 @@ export default function Schedule({ user, profile, onNavigate }) {
               <div className="flex items-center gap-3 pt-4 border-t border-gray-700">
                 <button
                   onClick={() => {
-                    // Open schedule modal in edit mode
-                    const machine = machines.find(m => m.id === selectedJob.assigned_machine_id)
-                    const durationRecord = getDurationForPartMachine(selectedJob.component_id, selectedJob.assigned_machine_id)
-                    
-                    setScheduleModal({
-                      job: selectedJob,
-                      machineId: selectedJob.assigned_machine_id,
-                      machineName: machine?.name || selectedJob.assigned_machine?.name || 'Unknown',
-                      machineCode: machine?.code || selectedJob.assigned_machine?.code || '',
-                      date: new Date(selectedJob.scheduled_start),
-                      durationRecord,
-                      isReschedule: true
-                    })
-                    
-                    // Pre-fill form with current values
-                    const startTime = new Date(selectedJob.scheduled_start).toTimeString().slice(0, 5)
-                    const hours = Math.floor((selectedJob.estimated_minutes || 60) / 60)
-                    const minutes = (selectedJob.estimated_minutes || 60) % 60
-                    
-                    setScheduleForm({
-                      startTime,
-                      durationHours: hours,
-                      durationMinutes: minutes,
-                      requiresAttendance: selectedJob.requires_attendance || false,
-                      saveDuration: false
-                    })
-                    setDurationSource('job')
+                    setScheduleClickJob(selectedJob)
+                    setScheduleClickEditMode(true)
                     setSelectedJob(null)
                   }}
                   className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
@@ -3030,6 +2842,31 @@ export default function Schedule({ user, profile, onNavigate }) {
             fetchData() // Refresh the schedule
           }}
           machines={machines}
+        />
+      )}
+
+      {/* Click-to-Schedule / Reschedule / Drag-Drop Modal (unified) */}
+      {scheduleClickJob && (
+        <ScheduleJobModal
+          isOpen={!!scheduleClickJob}
+          onClose={() => {
+            setScheduleClickJob(null)
+            setScheduleClickEditMode(false)
+            setScheduleClickDefaults(null)
+          }}
+          onSuccess={() => {
+            setScheduleClickJob(null)
+            setScheduleClickEditMode(false)
+            setScheduleClickDefaults(null)
+            fetchData()
+          }}
+          job={scheduleClickJob}
+          machines={machines}
+          partMachineDurations={partMachineDurations}
+          scheduledJobs={scheduledJobs}
+          profile={profile}
+          editMode={scheduleClickEditMode}
+          defaults={scheduleClickDefaults}
         />
       )}
     </div>

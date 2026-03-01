@@ -45,6 +45,18 @@ export default function Kiosk() {
   const [operator, setOperator] = useState(null)
   const [authError, setAuthError] = useState(null)
   const [authenticating, setAuthenticating] = useState(false)
+
+  // Toast notification state
+  const [toastMessage, setToastMessage] = useState(null)
+
+  // Cross-machine session state
+  const [crossMachineModal, setCrossMachineModal] = useState(null) // { sessions, activeJobs, operatorData }
+  const [pendingLogin, setPendingLogin] = useState(null) // holds operator data during modal
+
+  // Inactivity timeout
+  const [lastActivity, setLastActivity] = useState(Date.now())
+  const [showTimeoutWarning, setShowTimeoutWarning] = useState(false)
+  const INACTIVITY_TIMEOUT = 30 * 60 * 1000 // 30 minutes
   
   // Job state
   const [jobs, setJobs] = useState([])
@@ -140,7 +152,14 @@ export default function Kiosk() {
   const [materialTypes, setMaterialTypes] = useState([])
   const [barSizes, setBarSizes] = useState([])
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
-  
+  const [lotMismatchModal, setLotMismatchModal] = useState(null) // { existingLot, newLot }
+
+  // Finishing send state
+  const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
+  const [finishingSendQty, setFinishingSendQty] = useState('')
+  const [finishingSendNotes, setFinishingSendNotes] = useState('')
+  const [finishingSends, setFinishingSends] = useState([])
+
   // Admin state
   const [showJobHistory, setShowJobHistory] = useState(false)
   const [jobHistory, setJobHistory] = useState([])
@@ -208,6 +227,7 @@ export default function Kiosk() {
   }
   
   const secondaryConfig = machine ? getSecondaryConfig() : null
+  const isBoltMaster = machine?.code?.toLowerCase().startsWith('bm')
 
   // Common downtime reasons
   const DOWNTIME_REASONS = [
@@ -263,6 +283,41 @@ export default function Kiosk() {
     return () => {
       document.title = 'SkyNet MES'
     }
+  }, [machine])
+
+  // Restore session on page load / refresh
+  useEffect(() => {
+    if (!machine || operator) return
+
+    const restoreSession = async () => {
+      try {
+        const { data: session } = await supabase
+          .from('kiosk_sessions')
+          .select('operator_id')
+          .eq('machine_id', machine.id)
+          .eq('is_active', true)
+          .order('logged_in_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (session) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', session.operator_id)
+            .eq('is_active', true)
+            .maybeSingle()
+
+          if (profile) {
+            setOperator(profile)
+          }
+        }
+      } catch {
+        // No active session — stay on PIN screen (normal)
+      }
+    }
+
+    restoreSession()
   }, [machine])
 
   // Keyboard support for PIN entry
@@ -330,6 +385,113 @@ export default function Kiosk() {
     }
   }, [operator, machine])
 
+  // Realtime: force-logout if session deactivated by another kiosk
+  useEffect(() => {
+    if (!operator || !machine) return
+
+    const sessionSub = supabase
+      .channel(`kiosk-session-${operator.id}-${machine.id}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'kiosk_sessions',
+        filter: `operator_id=eq.${operator.id}`
+      }, (payload) => {
+        if (payload.new.machine_id === machine.id && payload.new.is_active === false) {
+          // Delay + re-check to avoid race with completeLogin
+          // (step 1 deactivates all, step 2 reactivates this one)
+          setTimeout(async () => {
+            try {
+              const { data: currentSession } = await supabase
+                .from('kiosk_sessions')
+                .select('is_active')
+                .eq('operator_id', operator.id)
+                .eq('machine_id', machine.id)
+                .single()
+
+              if (!currentSession || !currentSession.is_active) {
+                handleLogout()
+              }
+            } catch {
+              // If query fails, don't force logout
+            }
+          }, 500)
+        }
+      })
+      .subscribe()
+
+    return () => supabase.removeChannel(sessionSub)
+  }, [operator, machine])
+
+  // Session validity polling — fallback for Realtime
+  useEffect(() => {
+    if (!operator || !machine) return
+
+    const checkSession = async () => {
+      try {
+        const { data: session } = await supabase
+          .from('kiosk_sessions')
+          .select('is_active')
+          .eq('operator_id', operator.id)
+          .eq('machine_id', machine.id)
+          .maybeSingle()
+
+        if (!session || !session.is_active) {
+          console.log('Session deactivated — forcing logout')
+          handleLogout()
+        }
+      } catch (err) {
+        console.error('Session check failed:', err)
+      }
+    }
+
+    const interval = setInterval(checkSession, 30000)
+    return () => clearInterval(interval)
+  }, [operator, machine])
+
+  // Track user activity — reset timer on any interaction
+  useEffect(() => {
+    if (!operator) return
+
+    const resetActivity = () => {
+      setLastActivity(Date.now())
+      setShowTimeoutWarning(false)
+    }
+
+    window.addEventListener('click', resetActivity)
+    window.addEventListener('touchstart', resetActivity)
+    window.addEventListener('keydown', resetActivity)
+    window.addEventListener('scroll', resetActivity)
+
+    return () => {
+      window.removeEventListener('click', resetActivity)
+      window.removeEventListener('touchstart', resetActivity)
+      window.removeEventListener('keydown', resetActivity)
+      window.removeEventListener('scroll', resetActivity)
+    }
+  }, [operator])
+
+  // Check for inactivity timeout
+  useEffect(() => {
+    if (!operator) return
+
+    const checkTimeout = () => {
+      const elapsed = Date.now() - lastActivity
+      if (elapsed > INACTIVITY_TIMEOUT) {
+        setShowTimeoutWarning(false)
+        console.log('Inactivity timeout — logging out')
+        handleLogout()
+      } else if (elapsed > INACTIVITY_TIMEOUT - 2 * 60 * 1000) {
+        setShowTimeoutWarning(true)
+      } else {
+        setShowTimeoutWarning(false)
+      }
+    }
+
+    const interval = setInterval(checkTimeout, 60000)
+    return () => clearInterval(interval)
+  }, [operator, lastActivity])
+
   // Build activity log when active job changes
   useEffect(() => {
     if (activeJob) {
@@ -347,6 +509,15 @@ export default function Kiosk() {
       setJobMaterials([])
     }
   }, [activeJob?.id])
+
+  // Load finishing sends when active job changes
+  useEffect(() => {
+    if (activeJob?.id && activeJob.status === 'in_progress') {
+      loadFinishingSends(activeJob.id)
+    } else {
+      setFinishingSends([])
+    }
+  }, [activeJob?.id, activeJob?.status])
 
   // Load orphaned downtimes (downtimes with no end_time for this machine)
   const loadOrphanedDowntimes = async () => {
@@ -435,6 +606,14 @@ export default function Kiosk() {
     }
     loadCurrentTools()
   }, [activeJob?.id])
+
+  // Auto-dismiss toast after 5 seconds
+  useEffect(() => {
+    if (toastMessage) {
+      const timer = setTimeout(() => setToastMessage(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [toastMessage])
 
   const loadMachine = async () => {
     setMachineLoading(true)
@@ -998,6 +1177,37 @@ export default function Kiosk() {
     setAuthError(null)
   }
 
+  // Shared login completion — deactivate all sessions, create new one, set operator
+  const completeLogin = async (profile) => {
+    try {
+      // Step 1: Deactivate ALL sessions for this operator (clean slate)
+      await supabase
+        .from('kiosk_sessions')
+        .update({ is_active: false })
+        .eq('operator_id', profile.id)
+
+      // Step 2: Upsert active session for current machine
+      await supabase
+        .from('kiosk_sessions')
+        .upsert({
+          operator_id: profile.id,
+          machine_id: machine.id,
+          logged_in_at: new Date().toISOString(),
+          is_active: true
+        }, { onConflict: 'operator_id,machine_id' })
+    } catch (err) {
+      // Session management failure must never block machine access
+      console.error('Session management error (non-blocking):', err)
+    }
+
+    // Always complete the login regardless of session errors
+    setOperator(profile)
+    setPin('')
+    setAuthError(null)
+    setCrossMachineModal(null)
+    setPendingLogin(null)
+  }
+
   const handlePinSubmit = async () => {
     if (pin.length < 4) {
       setAuthError('PIN must be at least 4 digits')
@@ -1007,6 +1217,7 @@ export default function Kiosk() {
     setAuthError(null)
 
     try {
+      // Validate PIN
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
@@ -1017,14 +1228,36 @@ export default function Kiosk() {
       if (error) {
         if (error.code === 'PGRST116') setAuthError('Invalid PIN')
         else throw error
-      } else {
-        if (!['machinist', 'admin', 'display'].includes(data.role)) {
-          setAuthError('Unauthorized role for kiosk access')
-        } else {
-          setOperator(data)
-          setPin('')
-        }
+        return
       }
+
+      if (!['machinist', 'admin', 'display'].includes(data.role)) {
+        setAuthError('Unauthorized role for kiosk access')
+        return
+      }
+
+      if (!machine) {
+        setAuthError('Machine not loaded')
+        return
+      }
+
+      // Check for in_setup jobs on OTHER machines (for pause warning)
+      const { data: setupJobs } = await supabase
+        .from('jobs')
+        .select('id, job_number, status, assigned_machine_id, machines:assigned_machine_id(name)')
+        .eq('assigned_user_id', data.id)
+        .eq('status', 'in_setup')
+        .neq('assigned_machine_id', machine.id)
+
+      if (setupJobs && setupJobs.length > 0) {
+        // Has setup jobs on other machines — show pause confirmation modal
+        setPendingLogin(data)
+        setCrossMachineModal({ activeJobs: setupJobs })
+        return
+      }
+
+      // No setup jobs elsewhere — login immediately
+      await completeLogin(data)
     } catch (err) {
       console.error('Auth error:', err)
       setAuthError('Authentication failed')
@@ -1033,7 +1266,59 @@ export default function Kiosk() {
     }
   }
 
-  const handleLogout = () => {
+  // Cross-machine modal: confirm pause & switch
+  const handleConfirmMachineSwitch = async () => {
+    if (!pendingLogin || !crossMachineModal) return
+    setAuthenticating(true)
+    try {
+      const { activeJobs } = crossMachineModal
+      // Pause setup jobs on other machines
+      const now = new Date().toISOString()
+      for (const job of activeJobs) {
+        await supabase
+          .from('jobs')
+          .update({ paused_at: now, pause_reason: 'auto_machine_switch', updated_at: now })
+          .eq('id', job.id)
+      }
+
+      const pausedNames = activeJobs.map(j => `${j.job_number} on ${j.machines?.name || 'unknown'}`).join(', ')
+      setToastMessage(`Auto-paused: ${pausedNames}`)
+    } catch (err) {
+      console.error('Pause failed (non-blocking):', err)
+    }
+
+    // Always complete the login — even if pause failed
+    try {
+      await completeLogin(pendingLogin)
+    } catch (err) {
+      console.error('Login completion error:', err)
+    } finally {
+      setAuthenticating(false)
+    }
+  }
+
+  // Cross-machine modal: cancel — go back to PIN screen
+  const handleCancelMachineSwitch = () => {
+    setCrossMachineModal(null)
+    setPendingLogin(null)
+    setPin('')
+    setAuthenticating(false)
+    setAuthError(null)
+  }
+
+  const handleLogout = async () => {
+    // Deactivate kiosk session
+    if (operator && machine) {
+      try {
+        await supabase
+          .from('kiosk_sessions')
+          .update({ is_active: false })
+          .eq('operator_id', operator.id)
+          .eq('machine_id', machine.id)
+      } catch (err) {
+        console.error('Session deactivation failed:', err)
+      }
+    }
     setOperator(null)
     setPin('')
     setJobs([])
@@ -1088,6 +1373,41 @@ export default function Kiosk() {
     setShowOutOfOrderWarning(false)
   }
 
+  // B2: Pause/Resume setup
+  const handlePauseSetup = async () => {
+    if (!activeJob || activeJob.status !== 'in_setup') return
+    setActionLoading(true)
+    try {
+      const { error } = await supabase
+        .from('jobs')
+        .update({ paused_at: new Date().toISOString(), pause_reason: 'manual_pause', updated_at: new Date().toISOString() })
+        .eq('id', activeJob.id)
+      if (error) throw error
+      await loadJobs()
+    } catch (err) {
+      console.error('Pause setup error:', err)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleResumeSetup = async () => {
+    if (!activeJob || activeJob.status !== 'in_setup') return
+    setActionLoading(true)
+    try {
+      const { error } = await supabase
+        .from('jobs')
+        .update({ paused_at: null, pause_reason: null, updated_at: new Date().toISOString() })
+        .eq('id', activeJob.id)
+      if (error) throw error
+      await loadJobs()
+    } catch (err) {
+      console.error('Resume setup error:', err)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleStartSetup = async (job) => {
     if (!canOperate || !job) return
     setActionLoading(true)
@@ -1132,6 +1452,38 @@ export default function Kiosk() {
         .eq('id', job.id)
 
       if (error) throw error
+
+      // B3: Track idle time — fire-and-forget, don't block setup
+      try {
+        const { data: prevJob } = await supabase
+          .from('jobs')
+          .select('id, actual_end')
+          .eq('assigned_machine_id', machine.id)
+          .not('actual_end', 'is', null)
+          .neq('id', job.id)
+          .order('actual_end', { ascending: false })
+          .limit(1)
+          .single()
+
+        if (prevJob?.actual_end) {
+          const idleStart = new Date(prevJob.actual_end)
+          const idleEnd = new Date()
+          const idleMinutes = Math.round((idleEnd - idleStart) / 60000)
+          if (idleMinutes > 0) {
+            await supabase.from('machine_idle_logs').insert({
+              machine_id: machine.id,
+              previous_job_id: prevJob.id,
+              next_job_id: job.id,
+              idle_start: idleStart.toISOString(),
+              idle_end: idleEnd.toISOString(),
+              idle_minutes: idleMinutes
+            })
+          }
+        }
+      } catch (idleErr) {
+        console.error('Idle time logging failed (non-blocking):', idleErr)
+      }
+
       await loadJobs()
       setSelectedJob(null)
     } catch (err) {
@@ -1485,6 +1837,89 @@ export default function Kiosk() {
     }
   }
 
+  // ========== FINISHING SENDS ==========
+  const loadFinishingSends = async (jobId) => {
+    const { data } = await supabase
+      .from('finishing_sends')
+      .select('*')
+      .eq('job_id', jobId)
+      .order('sent_at', { ascending: true })
+    setFinishingSends(data || [])
+  }
+
+  const handleFinishingSend = async () => {
+    if (!activeJob || !finishingSendQty) return
+    const qty = parseInt(finishingSendQty)
+    if (qty <= 0 || isNaN(qty)) return
+
+    // Warn if total sent exceeds job quantity
+    const totalSent = finishingSends.reduce((sum, s) => sum + s.quantity, 0)
+    if (totalSent + qty > activeJob.quantity) {
+      if (!confirm(`Warning: Total sent (${totalSent + qty}) will exceed job quantity (${activeJob.quantity}). Continue?`)) return
+    }
+
+    setActionLoading(true)
+    try {
+      const { data: materials } = await supabase
+        .from('job_materials')
+        .select('lot_number')
+        .eq('job_id', activeJob.id)
+        .not('lot_number', 'is', null)
+        .limit(1)
+
+      const materialLot = materials?.[0]?.lot_number || null
+
+      const { error } = await supabase
+        .from('finishing_sends')
+        .insert({
+          job_id: activeJob.id,
+          machine_id: machine.id,
+          sent_by: operator.id,
+          quantity: qty,
+          production_lot_number: activeJob.production_lot_number || null,
+          material_lot_number: materialLot,
+          status: 'pending_finishing',
+          notes: finishingSendNotes || null
+        })
+
+      if (error) throw error
+
+      await loadFinishingSends(activeJob.id)
+      setShowFinishingSendModal(false)
+      setFinishingSendQty('')
+      setFinishingSendNotes('')
+      setToastMessage(`Sent ${qty} pieces to finishing`)
+    } catch (err) {
+      console.error('Finishing send error:', err)
+      alert('Failed to send to finishing: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  // ========== LOT NUMBER GENERATION ==========
+  const generateProductionLotNumber = async () => {
+    const now = new Date()
+    const datePart = now.toISOString().slice(2, 10).replace(/-/g, '') // YYMMDD
+    const prefix = 'PLN'
+
+    try {
+      const { data, error } = await supabase.rpc('next_lot_number', {
+        p_prefix: prefix,
+        p_date_part: datePart
+      })
+
+      if (error) throw error
+      const seq = String(data).padStart(4, '0')
+      return `${prefix}-${datePart}-${seq}`
+    } catch (err) {
+      // Fallback: timestamp-based number if RPC fails
+      const fallback = `${prefix}-${datePart}-${now.getTime().toString().slice(-4)}`
+      console.warn('Lot number RPC failed, using fallback:', fallback, err)
+      return fallback
+    }
+  }
+
   // ========== MATERIALS ==========
   const handleOpenMaterials = async () => {
     if (!activeJob) return
@@ -1502,29 +1937,62 @@ export default function Kiosk() {
     })
   }
 
+  const isBlanks = materialForm.material_type?.toLowerCase().includes('blank')
+
   const handleAddMaterial = async () => {
     if (!materialForm.material_type) {
       alert('Please select a material type')
       return
     }
-    if (!materialForm.bar_size) {
+    if (!isBlanks && !materialForm.bar_size) {
       alert('Please select a bar size')
       return
     }
     if (!materialForm.bars_loaded || materialForm.bars_loaded <= 0) {
-      alert('Please enter the number of bars loaded')
+      alert(`Please enter the number of ${isBlanks ? 'blanks' : 'bars'} loaded`)
       return
+    }
+
+    // B1: Block lot number changes — compliance check
+    const newLot = materialForm.lot_number?.trim()
+    if (newLot) {
+      const existingWithLot = jobMaterials.find(m => m.lot_number?.trim())
+      if (existingWithLot) {
+        const existingLotNorm = existingWithLot.lot_number.trim().toLowerCase()
+        if (newLot.toLowerCase() !== existingLotNorm) {
+          setLotMismatchModal({ existingLot: existingWithLot.lot_number.trim(), newLot })
+          // Log the mismatch attempt (fire-and-forget)
+          supabase.from('audit_logs').insert({
+            event_type: 'lot_mismatch',
+            job_id: activeJob.id,
+            machine_id: machine?.id || null,
+            operator_id: operator.id,
+            details: { existing_lot: existingWithLot.lot_number.trim(), attempted_lot: newLot, job_number: activeJob.job_number }
+          }).then()
+          return // BLOCK the add
+        }
+      }
     }
 
     setActionLoading(true)
     try {
+      // C2: Auto-generate production lot number on first material entry
+      if (!activeJob.production_lot_number) {
+        const prodLot = await generateProductionLotNumber()
+        await supabase
+          .from('jobs')
+          .update({ production_lot_number: prodLot, updated_at: new Date().toISOString() })
+          .eq('id', activeJob.id)
+        setActiveJob(prev => ({ ...prev, production_lot_number: prodLot }))
+      }
+
       const { error } = await supabase
         .from('job_materials')
         .insert({
           job_id: activeJob.id,
           material_type: materialForm.material_type,
-          bar_size: materialForm.bar_size,
-          bar_length: materialForm.bar_length ? parseFloat(materialForm.bar_length) : null,
+          bar_size: isBlanks ? 'N/A' : materialForm.bar_size,
+          bar_length: !isBlanks && materialForm.bar_length ? parseFloat(materialForm.bar_length) : null,
           lot_number: materialForm.lot_number || null,
           bars_loaded: parseInt(materialForm.bars_loaded),
           loaded_by: operator.id,
@@ -2443,6 +2911,60 @@ export default function Kiosk() {
     return null
   }
 
+  // Cross-machine modal element — extracted so it renders on both PIN and main screens
+  const crossMachineModalElement = crossMachineModal && (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+      <div className="bg-gray-900 border border-yellow-700 rounded-lg w-full max-w-md">
+        <div className="px-6 py-4 border-b border-gray-800 bg-yellow-900/20">
+          <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+            <AlertTriangle className="text-yellow-500" size={24} />
+            Active Job on Another Machine
+          </h2>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <p className="text-gray-300 text-sm">
+            You have active jobs on other machines that will be paused:
+          </p>
+          <div className="space-y-2">
+            {crossMachineModal.activeJobs.map(job => (
+              <div key={job.id} className="bg-gray-800 rounded-lg p-3 flex items-center justify-between">
+                <div>
+                  <span className="text-white font-mono font-medium">{job.job_number}</span>
+                  <span className="text-gray-500 mx-2">on</span>
+                  <span className="text-yellow-400">{job.machines?.name || 'Unknown'}</span>
+                </div>
+                <span className="text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-400">
+                  In Setup
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-gray-400 text-xs">
+            Switching will auto-pause these jobs and log you out of the other machine.
+          </p>
+        </div>
+
+        <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+          <button
+            onClick={handleCancelMachineSwitch}
+            className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors font-semibold border border-gray-600"
+          >
+            Go Back
+          </button>
+          <button
+            onClick={handleConfirmMachineSwitch}
+            disabled={authenticating}
+            className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white rounded-lg transition-colors font-semibold flex items-center justify-center gap-2"
+          >
+            {authenticating ? <Loader2 size={18} className="animate-spin" /> : <PauseCircle size={18} />}
+            Auto-Pause & Switch
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // ========== RENDER: Loading ==========
   if (machineLoading) {
     return (
@@ -2525,13 +3047,31 @@ export default function Kiosk() {
         <footer className="bg-gray-900 border-t border-gray-800 px-6 py-3">
           <p className="text-gray-600 text-xs text-center font-mono">SkyNet MES - Machine Kiosk</p>
         </footer>
+        {crossMachineModalElement}
       </div>
     )
   }
 
   // ========== RENDER: Main Kiosk ==========
   return (
-    <div className="min-h-screen bg-skynet-dark flex flex-col">
+    <div className="min-h-screen bg-skynet-dark flex flex-col relative">
+      {/* Toast notification */}
+      {toastMessage && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 bg-yellow-600/90 text-white text-sm font-medium rounded-lg shadow-lg flex items-center gap-2 animate-pulse">
+          <PauseCircle size={16} />
+          {toastMessage}
+          <button onClick={() => setToastMessage(null)} className="ml-2 text-white/70 hover:text-white">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+      {/* Inactivity timeout warning */}
+      {showTimeoutWarning && (
+        <div className="bg-yellow-600/90 text-white text-center py-2 px-4 text-sm font-medium animate-pulse">
+          <AlertTriangle size={14} className="inline mr-2" />
+          Session will timeout due to inactivity. Tap anywhere to stay logged in.
+        </div>
+      )}
       {/* Header */}
       <header className="bg-gray-900 border-b border-gray-800 px-6 py-4">
         <div className="flex items-center justify-between">
@@ -2903,8 +3443,28 @@ export default function Kiosk() {
                       <div className="flex items-center gap-3 mb-1">
                         <span className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)}`}></span>
                         <span className="text-2xl font-bold text-white font-mono">{activeJob.job_number}</span>
+                        {activeJob.paused_at && (
+                          <span className="px-2 py-0.5 bg-yellow-600/20 text-yellow-400 text-xs font-bold rounded border border-yellow-600/50 flex items-center gap-1">
+                            <PauseCircle size={12} />PAUSED
+                          </span>
+                        )}
                       </div>
                       <p className="text-gray-400">{activeJob.work_order?.wo_number} • {activeJob.work_order?.customer}</p>
+                      {activeJob.production_lot_number && (
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-gray-500 text-sm">Production Lot:</span>
+                          <span className="text-green-400 font-mono text-sm">{activeJob.production_lot_number}</span>
+                        </div>
+                      )}
+                      {finishingSends.length > 0 && (
+                        <div className="flex items-center gap-2 mt-1 text-sm">
+                          <SendHorizontal size={14} className="text-cyan-400" />
+                          <span className="text-cyan-400">
+                            {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs sent to finishing
+                          </span>
+                          <span className="text-gray-500">({finishingSends.length} {finishingSends.length === 1 ? 'send' : 'sends'})</span>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right">
                       <p className="text-sm text-gray-500">Due</p>
@@ -3064,18 +3624,50 @@ export default function Kiosk() {
                     <div className="flex gap-3">
                       {activeJob.status === 'in_setup' && (
                         <>
-                          <button onClick={handleOpenTooling} disabled={actionLoading} className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                            <Wrench size={20} />Confirm Tooling
-                          </button>
-                          <button onClick={handleCancelSetup} disabled={actionLoading} className="px-4 py-3 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-gray-300 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-gray-600">
-                            <X size={20} />Cancel Setup
-                          </button>
+                          {activeJob.paused_at ? (
+                            <>
+                              <button onClick={handleResumeSetup} disabled={actionLoading} className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                                <Play size={20} />Resume Setup
+                              </button>
+                              <button onClick={handleCancelSetup} disabled={actionLoading} className="px-4 py-3 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-gray-300 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-gray-600">
+                                <X size={20} />Cancel Setup
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {activeJob.tooling_required ? (
+                                <button onClick={handleOpenTooling} disabled={actionLoading} className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                                  <Wrench size={20} />Confirm Tooling
+                                </button>
+                              ) : (
+                                <div className="flex-1 flex flex-col gap-1">
+                                  <button onClick={handleOpenMaterials} disabled={actionLoading} className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                                    <Package size={20} />Load Materials
+                                  </button>
+                                  <button onClick={handleOpenTooling} className="text-xs text-gray-500 hover:text-gray-400 transition-colors flex items-center justify-center gap-1">
+                                    <Wrench size={12} />Add Tooling (optional)
+                                  </button>
+                                </div>
+                              )}
+                              <button onClick={handlePauseSetup} disabled={actionLoading} className="px-4 py-3 bg-yellow-600/20 hover:bg-yellow-600/30 text-yellow-400 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-yellow-600/50">
+                                <PauseCircle size={20} />Pause
+                              </button>
+                              <button onClick={handleCancelSetup} disabled={actionLoading} className="px-4 py-3 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-gray-300 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-gray-600">
+                                <X size={20} />Cancel Setup
+                              </button>
+                            </>
+                          )}
                         </>
                       )}
                       {activeJob.status === 'in_progress' && (
-                        <button onClick={handleOpenComplete} disabled={actionLoading} className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                          <CheckCircle size={20} />Complete Job
-                        </button>
+                        <>
+                          <button onClick={() => setShowFinishingSendModal(true)} disabled={actionLoading} className="flex-1 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                            <SendHorizontal size={18} />Send to Finishing
+                          </button>
+                          <button onClick={handleOpenComplete} disabled={actionLoading} className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                            <CheckCircle size={20} />Complete Job
+                          </button>
+                        </>
                       )}
                       <button onClick={handleOpenDowntime} className="px-4 py-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-red-600/50">
                         <AlertTriangle size={20} />Log Downtime
@@ -3551,63 +4143,72 @@ export default function Kiosk() {
               <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
                 <h3 className="text-white font-medium flex items-center gap-2">
                   <Plus size={18} className="text-green-400" />
-                  Add Bar Stock
+                  Add Material
                 </h3>
                 
-                <div className="grid grid-cols-2 gap-4">
+                <div className={`grid ${isBlanks ? 'grid-cols-1' : 'grid-cols-2'} gap-4`}>
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">Material Type *</label>
-                    <select 
-                      value={materialForm.material_type} 
-                      onChange={(e) => setMaterialForm({...materialForm, material_type: e.target.value})}
+                    <select
+                      value={materialForm.material_type}
+                      onChange={(e) => setMaterialForm({...materialForm, material_type: e.target.value, bar_size: '', bar_length: ''})}
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
                     >
                       <option value="">Select material...</option>
-                      {materialTypes.map(mt => (
-                        <option key={mt.id} value={mt.name}>{mt.name}</option>
-                      ))}
+                      {materialTypes
+                        .filter(mt => isBoltMaster
+                          ? mt.name.toLowerCase().includes('blank')
+                          : !mt.name.toLowerCase().includes('blank')
+                        )
+                        .map(mt => (
+                          <option key={mt.id} value={mt.name}>{mt.name}</option>
+                        ))}
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-gray-400 text-sm mb-2">Bar Size *</label>
-                    <select 
-                      value={materialForm.bar_size} 
-                      onChange={(e) => setMaterialForm({...materialForm, bar_size: e.target.value})}
-                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
-                    >
-                      <option value="">Select size...</option>
-                      {barSizes.map(bs => (
-                        <option key={bs.id} value={bs.size}>{bs.size}</option>
-                      ))}
-                    </select>
-                  </div>
+                  {!isBlanks && (
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-2">Bar Size *</label>
+                      <select
+                        value={materialForm.bar_size}
+                        onChange={(e) => setMaterialForm({...materialForm, bar_size: e.target.value})}
+                        className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
+                      >
+                        <option value="">Select size...</option>
+                        {barSizes.map(bs => (
+                          <option key={bs.id} value={bs.size}>{bs.size}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-gray-400 text-sm mb-2">Bar Length (in.)</label>
-                    <input 
-                      type="number" 
-                      min="0"
-                      step="0.25"
-                      value={materialForm.bar_length} 
-                      onChange={(e) => setMaterialForm({...materialForm, bar_length: e.target.value})}
-                      placeholder="144"
-                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
-                    />
-                  </div>
+                <div className={`grid ${isBlanks ? 'grid-cols-2' : 'grid-cols-3'} gap-4`}>
+                  {!isBlanks && (
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-2">Bar Length (in.)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.25"
+                        value={materialForm.bar_length}
+                        onChange={(e) => setMaterialForm({...materialForm, bar_length: e.target.value})}
+                        placeholder="144"
+                        className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
+                      />
+                    </div>
+                  )}
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">Lot / Heat Number</label>
-                    <input 
-                      type="text" 
-                      value={materialForm.lot_number} 
+                    <input
+                      type="text"
+                      value={materialForm.lot_number}
                       onChange={(e) => setMaterialForm({...materialForm, lot_number: e.target.value})}
                       placeholder="Lot #"
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
                     />
                   </div>
                   <div>
-                    <label className="block text-gray-400 text-sm mb-2">Bars Loaded *</label>
+                    <label className="block text-gray-400 text-sm mb-2">{isBlanks ? 'Blanks Loaded *' : 'Bars Loaded *'}</label>
                     <input 
                       type="number" 
                       min="1"
@@ -3621,7 +4222,7 @@ export default function Kiosk() {
 
                 <button 
                   onClick={handleAddMaterial}
-                  disabled={actionLoading || !materialForm.material_type || !materialForm.bar_size || !materialForm.bars_loaded}
+                  disabled={actionLoading || !materialForm.material_type || (!isBlanks && !materialForm.bar_size) || !materialForm.bars_loaded}
                   className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
                   <Plus size={20} />Add Material
@@ -3648,13 +4249,15 @@ export default function Kiosk() {
                         <div className="flex-1">
                           <div className="flex items-center gap-3">
                             <span className="text-white font-medium">{material.material_type}</span>
-                            <span className="text-gray-400 text-sm">{material.bar_size}</span>
+                            {material.bar_size && material.bar_size !== 'N/A' && (
+                              <span className="text-gray-400 text-sm">{material.bar_size}</span>
+                            )}
                             {material.bar_length && (
                               <span className="text-gray-500 text-sm">× {material.bar_length}"</span>
                             )}
                           </div>
                           <div className="flex items-center gap-4 mt-1 text-sm">
-                            <span className="text-blue-400">{material.bars_loaded} bars</span>
+                            <span className="text-blue-400">{material.bars_loaded} {material.material_type?.toLowerCase().includes('blank') ? 'blanks' : 'bars'}</span>
                             {material.lot_number && (
                               <span className="text-gray-500">Lot: {material.lot_number}</span>
                             )}
@@ -3677,14 +4280,16 @@ export default function Kiosk() {
             {activeJob.status === 'in_setup' ? (
               <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <button 
+                  <button
                     onClick={() => {
                       setShowMaterialModal(false)
-                      setShowToolingModal(true)
-                    }} 
+                      if (activeJob.tooling_required) {
+                        setShowToolingModal(true)
+                      }
+                    }}
                     className="px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"
                   >
-                    <ArrowLeft size={16} />Back
+                    <ArrowLeft size={16} />{activeJob.tooling_required ? 'Back' : 'Close'}
                   </button>
                   <button 
                     onClick={handleSkipMaterials} 
@@ -3770,6 +4375,132 @@ export default function Kiosk() {
               >
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <SkipForward size={20} />}
                 Skip & Start Production
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lot Mismatch Warning Modal */}
+      {/* Send to Finishing Modal */}
+      {showFinishingSendModal && activeJob && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-800 bg-cyan-900/20">
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <SendHorizontal className="text-cyan-400" size={24} />
+                Send to Finishing
+              </h2>
+              <p className="text-gray-500 text-sm mt-1">{activeJob.job_number} • {activeJob.component?.part_number}</p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {finishingSends.length > 0 && (
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-gray-400 text-xs mb-2">Previous sends:</p>
+                  {finishingSends.map(send => (
+                    <div key={send.id} className="flex justify-between text-sm text-gray-300">
+                      <span>{send.quantity} pcs</span>
+                      <span className="text-gray-500">{new Date(send.sent_at).toLocaleString()}</span>
+                    </div>
+                  ))}
+                  <div className="border-t border-gray-700 mt-2 pt-2 flex justify-between text-sm font-medium">
+                    <span className="text-gray-300">Total sent so far:</span>
+                    <span className="text-cyan-400">{finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs</span>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">Quantity to Send *</label>
+                <input
+                  type="number"
+                  value={finishingSendQty}
+                  onChange={(e) => setFinishingSendQty(e.target.value)}
+                  placeholder="e.g., 300"
+                  min="1"
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-lg focus:border-cyan-500 focus:outline-none"
+                />
+                <p className="text-gray-500 text-xs mt-1">
+                  Job quantity: {activeJob.quantity} | Already sent: {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} | Remaining: {activeJob.quantity - finishingSends.reduce((sum, s) => sum + s.quantity, 0)}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">Notes (optional)</label>
+                <textarea
+                  value={finishingSendNotes}
+                  onChange={(e) => setFinishingSendNotes(e.target.value)}
+                  placeholder="e.g., First batch ready for passivation"
+                  rows={2}
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+
+              {activeJob.production_lot_number && (
+                <div className="bg-gray-800/50 rounded-lg p-3 flex justify-between items-center">
+                  <span className="text-gray-400 text-sm">Production Lot:</span>
+                  <span className="text-green-400 font-mono text-sm">{activeJob.production_lot_number}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+              <button
+                onClick={() => { setShowFinishingSendModal(false); setFinishingSendQty(''); setFinishingSendNotes('') }}
+                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors font-semibold border border-gray-600"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleFinishingSend}
+                disabled={!finishingSendQty || parseInt(finishingSendQty) <= 0 || actionLoading}
+                className="flex-1 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white rounded-lg transition-colors font-semibold flex items-center justify-center gap-2"
+              >
+                {actionLoading ? <Loader2 size={18} className="animate-spin" /> : <SendHorizontal size={18} />}
+                Send {finishingSendQty ? `${finishingSendQty} pcs` : ''}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lotMismatchModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-red-700 rounded-lg w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-800">
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <AlertTriangle className="text-red-500" size={24} />
+                Lot Number Mismatch
+              </h2>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-red-900/30 border border-red-600/50 rounded-lg p-4">
+                <p className="text-gray-300 text-sm">
+                  This job already has material from Lot <span className="text-white font-bold">{lotMismatchModal.existingLot}</span>.
+                </p>
+                <p className="text-gray-300 text-sm mt-2">
+                  You entered Lot <span className="text-white font-bold">{lotMismatchModal.newLot}</span>.
+                </p>
+              </div>
+
+              <div className="bg-gray-800 rounded-lg p-4">
+                <p className="text-gray-300 text-sm font-medium mb-2">A single job cannot mix material lots.</p>
+                <p className="text-gray-400 text-sm">To use a different lot:</p>
+                <ol className="text-gray-400 text-sm mt-1 space-y-1 list-decimal list-inside">
+                  <li>Complete the current job with a partial quantity</li>
+                  <li>A new job will be created for the remaining quantity with the new lot</li>
+                </ol>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800">
+              <button
+                onClick={() => setLotMismatchModal(null)}
+                className="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors font-semibold"
+              >
+                OK
               </button>
             </div>
           </div>
@@ -4067,6 +4798,28 @@ export default function Kiosk() {
                     <p className="text-gray-400 text-sm">Required Pieces</p>
                     <p className="text-3xl font-bold text-white">{activeJob.quantity}</p>
                   </div>
+
+                  {finishingSends.length > 0 && (
+                    <div className="bg-cyan-900/20 border border-cyan-800 rounded-lg p-3 space-y-1">
+                      <div className="flex items-center gap-2 text-cyan-400 text-sm font-medium">
+                        <SendHorizontal size={14} />
+                        Sent to Finishing During Production
+                      </div>
+                      {finishingSends.map(send => (
+                        <div key={send.id} className="flex justify-between text-sm text-gray-300 pl-5">
+                          <span>{send.quantity} pcs</span>
+                          <span className="text-gray-500">{new Date(send.sent_at).toLocaleTimeString()}</span>
+                        </div>
+                      ))}
+                      <div className="border-t border-cyan-800 pt-1 mt-1 flex justify-between text-sm pl-5">
+                        <span className="text-cyan-300 font-medium">Total already sent:</span>
+                        <span className="text-cyan-400 font-medium">{finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs</span>
+                      </div>
+                      <p className="text-gray-500 text-xs pl-5 pt-1">
+                        Enter your total good/bad count for the entire job — including pieces already sent.
+                      </p>
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">Actual End Time *</label>

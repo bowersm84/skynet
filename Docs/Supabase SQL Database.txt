@@ -26,6 +26,19 @@ CREATE TABLE public.assembly_component_checkins (
   CONSTRAINT assembly_component_checkins_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT assembly_component_checkins_checked_in_by_fkey FOREIGN KEY (checked_in_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.audit_logs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  event_type text NOT NULL,
+  job_id uuid,
+  machine_id uuid,
+  operator_id uuid,
+  details jsonb,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT audit_logs_pkey PRIMARY KEY (id),
+  CONSTRAINT audit_logs_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT audit_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
+  CONSTRAINT audit_logs_operator_id_fkey FOREIGN KEY (operator_id) REFERENCES public.profiles(id)
+);
 CREATE TABLE public.bar_sizes (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   size text NOT NULL UNIQUE,
@@ -48,6 +61,24 @@ CREATE TABLE public.document_types (
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
   CONSTRAINT document_types_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.finishing_sends (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL,
+  machine_id uuid NOT NULL,
+  sent_by uuid NOT NULL,
+  quantity integer NOT NULL CHECK (quantity > 0),
+  production_lot_number text,
+  material_lot_number text,
+  status text DEFAULT 'pending_finishing'::text CHECK (status = ANY (ARRAY['pending_finishing'::text, 'in_finishing'::text, 'finishing_complete'::text])),
+  notes text,
+  sent_at timestamp with time zone DEFAULT now(),
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT finishing_sends_pkey PRIMARY KEY (id),
+  CONSTRAINT finishing_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT finishing_sends_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
+  CONSTRAINT finishing_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.job_document_snapshots (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -201,6 +232,10 @@ CREATE TABLE public.jobs (
   passivation_end timestamp with time zone,
   passivation_operator_id uuid,
   passivation_notes text,
+  paused_at timestamp with time zone,
+  pause_reason text,
+  tooling_required boolean DEFAULT false,
+  production_lot_number text,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -215,6 +250,16 @@ CREATE TABLE public.jobs (
   CONSTRAINT jobs_material_override_by_fkey FOREIGN KEY (material_override_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_passivation_operator_id_fkey FOREIGN KEY (passivation_operator_id) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.kiosk_sessions (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  operator_id uuid NOT NULL,
+  machine_id uuid NOT NULL,
+  logged_in_at timestamp with time zone DEFAULT now(),
+  is_active boolean DEFAULT true,
+  CONSTRAINT kiosk_sessions_pkey PRIMARY KEY (id),
+  CONSTRAINT kiosk_sessions_operator_id_fkey FOREIGN KEY (operator_id) REFERENCES public.profiles(id),
+  CONSTRAINT kiosk_sessions_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id)
+);
 CREATE TABLE public.locations (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   name character varying NOT NULL,
@@ -224,6 +269,14 @@ CREATE TABLE public.locations (
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT locations_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.lot_number_sequences (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  prefix text NOT NULL,
+  date_part text NOT NULL,
+  last_sequence integer NOT NULL DEFAULT 0,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT lot_number_sequences_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.machine_downtime_logs (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -242,6 +295,20 @@ CREATE TABLE public.machine_downtime_logs (
   CONSTRAINT machine_downtime_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
   CONSTRAINT machine_downtime_logs_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT machine_downtime_logs_logged_by_fkey FOREIGN KEY (logged_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.machine_idle_logs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  machine_id uuid NOT NULL,
+  previous_job_id uuid,
+  next_job_id uuid,
+  idle_start timestamp with time zone NOT NULL,
+  idle_end timestamp with time zone,
+  idle_minutes integer,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT machine_idle_logs_pkey PRIMARY KEY (id),
+  CONSTRAINT machine_idle_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
+  CONSTRAINT machine_idle_logs_previous_job_id_fkey FOREIGN KEY (previous_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT machine_idle_logs_next_job_id_fkey FOREIGN KEY (next_job_id) REFERENCES public.jobs(id)
 );
 CREATE TABLE public.machines (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -304,7 +371,7 @@ CREATE TABLE public.part_machine_durations (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   part_id uuid NOT NULL,
   machine_id uuid NOT NULL,
-  estimated_minutes integer NOT NULL CHECK (estimated_minutes > 0),
+  estimated_minutes integer CHECK (estimated_minutes IS NULL OR estimated_minutes > 0),
   is_preferred boolean DEFAULT false,
   preference_order integer DEFAULT 0,
   notes text,

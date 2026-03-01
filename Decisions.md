@@ -257,3 +257,51 @@ compliance stage. Updated in `part_document_requirements.required_at` from
 - **Document Storage:** AWS S3 with signed URLs
 - **Deployment:** AWS Amplify (CI/CD from GitHub main branch)
 - **Domain:** skynet.skybolt.com (SSL via ACM wildcard *.skybolt.com)
+
+# Sprint 2 New Decisions — March 1, 2026
+
+---
+
+## Kiosk Session Management
+
+**Single-Machine Login:** One operator can only be logged into one kiosk at a time. Logging into Machine B automatically logs out Machine A. If Machine A has a job in `in_setup`, the auto-pause modal fires first. No modal for `in_progress` jobs — CNC machines run autonomously.
+
+**Session Persistence:** Kiosk sessions survive page refresh. On mount, the kiosk checks `kiosk_sessions` for an active session on this machine and restores the operator state. Uses `.maybeSingle()` (not `.single()`) to avoid 406 errors on first visit.
+
+**Force-Logout via Realtime:** `kiosk_sessions` table added to Supabase Realtime publication (`ALTER PUBLICATION supabase_realtime ADD TABLE kiosk_sessions`). When a session is deactivated by another kiosk, the old tab receives the change event and immediately returns to the PIN screen. Polling fallback (every 30 seconds) catches cases where Realtime drops.
+
+**Inactivity Timeout:** 30-minute inactivity timeout on kiosk sessions. Warning banner appears at 28 minutes. Any interaction (click, tap, keypress, scroll) resets the timer.
+
+**Login Must Always Succeed:** Session management is wrapped in try/catch — if session DB operations fail, the operator still gets logged in. Machinists must never be locked out.
+
+## Pause Behavior
+
+**Pause Only During Setup:** Pause (both manual and auto-pause on machine switch) ONLY applies to `in_setup` status. Jobs in `in_progress` run autonomously on the CNC — walking away doesn't stop the machine. No pause button shown during `in_progress`. Auto-pause query filters to `status = 'in_setup'` only.
+
+## Material Handling
+
+**Blanks Material Matching:** Uses `material_type.toLowerCase().includes('blank')` pattern instead of exact match. Supports renamed variants like "Blank Studs - 4000 Series".
+
+**Bolt Master Material Filtering:** Bolt Master machines (code starts with 'bm') only show blank material types in dropdown. All other machines hide blank types. Determined by `machine?.code?.toLowerCase().startsWith('bm')`.
+
+## Production Lot Numbers
+
+**Format:** `PLN-YYMMDD-XXXX` (e.g., PLN-260301-0001). Sequential counter resets per day.
+
+**Generation Trigger:** Auto-generated on first material entry for a job. Uses atomic DB function (`next_lot_number`) with upsert to prevent duplicates from concurrent kiosks.
+
+**Persistence:** `lot_number_sequences` table tracks counters by prefix + date. Production lot number stored on `jobs.production_lot_number`. Persists permanently after job completion.
+
+## Finishing Sends
+
+**Partial Send to Finishing:** Machinists can send partial quantities to finishing while the job stays `in_progress`. `finishing_sends` table captures quantity, production lot number, material lot number, operator, and timestamp per send.
+
+**No Status Change on Send:** Partial sends do NOT change job status. Job stays `in_progress`. Multiple sends allowed. Warning (not block) if total sent exceeds job quantity.
+
+**Complete Job Modal Context:** When completing a job with finishing sends, the modal shows all sends with quantities and times, plus a note: "Enter your total good/bad count for the entire job — including pieces already sent."
+
+**Finishing Sends Realtime:** `finishing_sends` added to Realtime publication for future finishing station use.
+
+## Deferred Items
+
+**Fishbowl Import (#31):** Deferred from Sprint 2. Waiting on sample Fishbowl export file for field mapping. Will revisit when file is available — may slot into S3 or S4.

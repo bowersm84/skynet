@@ -337,7 +337,8 @@ export default function Dashboard({ user, profile }) {
             assigned_machine_id,
             scheduled_start,
             work_order_assembly_id,
-            component:parts!component_id(part_number, description)
+            component:parts!component_id(part_number, description),
+            machine:assigned_machine_id(name)
           )
         `)
         .order('created_at', { ascending: false })
@@ -1437,10 +1438,11 @@ export default function Dashboard({ user, profile }) {
                                         <div className="px-4 py-2 pl-10 bg-gray-800/20 border-b border-gray-700">
                                           <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
                                             <div className="col-span-2">Job #</div>
-                                            <div className="col-span-3">Component</div>
+                                            <div className="col-span-2">Component</div>
                                             <div className="col-span-1 text-center">Qty</div>
+                                            <div className="col-span-2">Machine</div>
                                             <div className="col-span-2">Status</div>
-                                            <div className="col-span-2">Progress</div>
+                                            <div className="col-span-1">Progress</div>
                                             <div className="col-span-2 text-right">Actions</div>
                                           </div>
                                         </div>
@@ -1456,17 +1458,20 @@ export default function Dashboard({ user, profile }) {
                                                 <div className="col-span-2">
                                                   <span className="text-white font-mono text-sm">{job.job_number}</span>
                                                 </div>
-                                                <div className="col-span-3">
+                                                <div className="col-span-2">
                                                   <div className="flex items-center gap-2">
-                                                    <Wrench size={12} className="text-gray-500" />
-                                                    <div>
+                                                    <Wrench size={12} className="text-gray-500 flex-shrink-0" />
+                                                    <div className="min-w-0">
                                                       <span className="text-gray-300 text-sm font-mono">{job.component?.part_number}</span>
-                                                      <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                                                      <p className="text-xs text-gray-500 truncate">{job.component?.description}</p>
                                                     </div>
                                                   </div>
                                                 </div>
                                                 <div className="col-span-1 text-center">
                                                   <span className="text-white text-sm">{job.quantity}</span>
+                                                </div>
+                                                <div className="col-span-2">
+                                                  <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
                                                 </div>
                                                 <div className="col-span-2">
                                                   <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
@@ -1476,15 +1481,12 @@ export default function Dashboard({ user, profile }) {
                                                     {statusBadge.label}
                                                   </span>
                                                 </div>
-                                                <div className="col-span-2 text-sm text-gray-400">
+                                                <div className="col-span-1 text-sm text-gray-400">
                                                   {job.status === 'complete' && job.good_pieces !== null && (
-                                                    <span>{job.good_pieces}/{job.quantity} good</span>
-                                                  )}
-                                                  {job.status === 'assigned' && job.scheduled_start && (
-                                                    <span>Sched: {new Date(job.scheduled_start).toLocaleDateString()}</span>
+                                                    <span>{job.good_pieces}/{job.quantity}</span>
                                                   )}
                                                   {['in_setup', 'in_progress'].includes(job.status) && (
-                                                    <span className="text-green-400">• Active</span>
+                                                    <span className="text-green-400">Active</span>
                                                   )}
                                                 </div>
                                                 <div className="col-span-2 text-right flex items-center justify-end gap-1">
@@ -1526,10 +1528,11 @@ export default function Dashboard({ user, profile }) {
                                 <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-700">
                                   <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
                                     <div className="col-span-2">Job #</div>
-                                    <div className="col-span-3">Part</div>
+                                    <div className="col-span-2">Part</div>
                                     <div className="col-span-1 text-center">Qty</div>
+                                    <div className="col-span-2">Machine</div>
                                     <div className="col-span-2">Status</div>
-                                    <div className="col-span-2">Progress</div>
+                                    <div className="col-span-1">Progress</div>
                                     <div className="col-span-2 text-right">Actions</div>
                                   </div>
                                 </div>
@@ -1545,17 +1548,20 @@ export default function Dashboard({ user, profile }) {
                                         <div className="col-span-2">
                                           <span className="text-white font-mono text-sm">{job.job_number}</span>
                                         </div>
-                                        <div className="col-span-3">
+                                        <div className="col-span-2">
                                           <div className="flex items-center gap-2">
-                                            <Package size={14} className="text-gray-500" />
-                                            <div>
+                                            <Package size={14} className="text-gray-500 flex-shrink-0" />
+                                            <div className="min-w-0">
                                               <span className="text-skynet-accent text-sm font-mono">{job.component?.part_number}</span>
-                                              <p className="text-xs text-gray-500 truncate max-w-[150px]">{job.component?.description}</p>
+                                              <p className="text-xs text-gray-500 truncate">{job.component?.description}</p>
                                             </div>
                                           </div>
                                         </div>
                                         <div className="col-span-1 text-center">
                                           <span className="text-white text-sm">{job.quantity}</span>
+                                        </div>
+                                        <div className="col-span-2">
+                                          <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
                                         </div>
                                         <div className="col-span-2">
                                           <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
@@ -1565,15 +1571,12 @@ export default function Dashboard({ user, profile }) {
                                             {statusBadge.label}
                                           </span>
                                         </div>
-                                        <div className="col-span-2 text-sm text-gray-400">
+                                        <div className="col-span-1 text-sm text-gray-400">
                                           {job.status === 'complete' && job.good_pieces !== null && (
-                                            <span>{job.good_pieces}/{job.quantity} good</span>
-                                          )}
-                                          {job.status === 'assigned' && job.scheduled_start && (
-                                            <span>Sched: {new Date(job.scheduled_start).toLocaleDateString()}</span>
+                                            <span>{job.good_pieces}/{job.quantity}</span>
                                           )}
                                           {['in_setup', 'in_progress'].includes(job.status) && (
-                                            <span className="text-green-400">• Active</span>
+                                            <span className="text-green-400">Active</span>
                                           )}
                                         </div>
                                         <div className="col-span-2 text-right flex items-center justify-end gap-1">

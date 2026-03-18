@@ -6,7 +6,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
-import Secondary from './pages/Secondary'
+import Finishing from './pages/Finishing'
 import MasterData from './pages/MasterData'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
@@ -266,8 +266,8 @@ function App() {
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />
 
-        {/* Secondary operations route (passivation, paint, etc.) */}
-        <Route path="/secondary/:operationType" element={<Secondary />} />
+        {/* Finishing station route */}
+        <Route path="/finishing" element={<Finishing />} />
 
         {/* Print traveler route - opens in new tab */}
         <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />

@@ -333,6 +333,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
             work_order_id: workOrder.id,
             assembly_id: assemblyPart.id,
             quantity: assembly.orderQuantity + assembly.additionalForStock,
+            order_quantity: isMTS ? null : assembly.orderQuantity || null,
+            stock_quantity: assembly.additionalForStock || null,
             status: 'pending'
           })
           .select('id')

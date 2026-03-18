@@ -75,10 +75,23 @@ CREATE TABLE public.finishing_sends (
   sent_at timestamp with time zone DEFAULT now(),
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
+  finishing_stage text DEFAULT 'wash'::text CHECK (finishing_stage = ANY (ARRAY['wash'::text, 'treatment'::text, 'dry'::text])),
+  stage_started_at timestamp with time zone,
+  finishing_operator_id uuid,
+  finishing_started_at timestamp with time zone,
+  finishing_completed_at timestamp with time zone,
+  finishing_lot_number text,
+  incoming_count integer,
+  verified_count integer,
+  count_discrepancy integer,
+  verified_by uuid,
+  verified_at timestamp with time zone,
   CONSTRAINT finishing_sends_pkey PRIMARY KEY (id),
   CONSTRAINT finishing_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT finishing_sends_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT finishing_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id)
+  CONSTRAINT finishing_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id),
+  CONSTRAINT finishing_sends_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
+  CONSTRAINT finishing_sends_verified_by_fkey FOREIGN KEY (verified_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.job_document_snapshots (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -228,14 +241,15 @@ CREATE TABLE public.jobs (
   material_override_at timestamp with time zone,
   is_maintenance boolean DEFAULT false,
   maintenance_description text,
-  passivation_start timestamp with time zone,
-  passivation_end timestamp with time zone,
-  passivation_operator_id uuid,
-  passivation_notes text,
+  finishing_start timestamp with time zone,
+  finishing_end timestamp with time zone,
+  finishing_operator_id uuid,
+  finishing_notes text,
   paused_at timestamp with time zone,
   pause_reason text,
   tooling_required boolean DEFAULT false,
   production_lot_number text,
+  finishing_lot_number text,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -248,7 +262,7 @@ CREATE TABLE public.jobs (
   CONSTRAINT jobs_incomplete_by_fkey FOREIGN KEY (incomplete_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_material_confirmed_by_fkey FOREIGN KEY (material_confirmed_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_material_override_by_fkey FOREIGN KEY (material_override_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_passivation_operator_id_fkey FOREIGN KEY (passivation_operator_id) REFERENCES public.profiles(id)
+  CONSTRAINT jobs_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.kiosk_sessions (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -493,6 +507,8 @@ CREATE TABLE public.work_order_assemblies (
   assembler_number integer,
   good_quantity integer,
   bad_quantity integer,
+  order_quantity integer,
+  stock_quantity integer,
   CONSTRAINT work_order_assemblies_pkey PRIMARY KEY (id),
   CONSTRAINT work_order_assemblies_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT work_order_assemblies_assembly_id_fkey FOREIGN KEY (assembly_id) REFERENCES public.parts(id),

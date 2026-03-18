@@ -1,6 +1,6 @@
 # SkyNet — DECISIONS.md
 ## Architectural Decisions & Key Design Patterns
-### Updated: Feb 23, 2026 (Sprint 1 Complete)
+### Updated: March 18, 2026 (Sprint 3 Batches A & B Complete)
 
 ---
 
@@ -67,6 +67,9 @@ Display format: "Qty: 700 (500 order + 200 stock)"
 
 Floor workers can see the split to prioritize committed orders during urgent situations.
 
+Per-assembly order/stock split is stored on `work_order_assemblies.order_quantity` and
+`work_order_assemblies.stock_quantity` — not derived by calculation from WO totals.
+
 ---
 
 ## Make-to-Stock for Individual Components
@@ -118,10 +121,6 @@ a single-window approach:
 - Three blank rows for floor-added steps
 - Footer: print timestamp
 
-### Document Sources
-- Part Documents: master docs from `part_documents` where `is_current=true`
-- Job Documents: per-job uploads from `job_documents`
-
 ---
 
 ## TCO (Total Close Out)
@@ -145,78 +144,15 @@ Jody and Tom designated as backup approvers.
 
 ---
 
-## Conditional Passivation
+## Soft Deletes
 
-Passivation document requirements in compliance review are only displayed when the
-component's routing includes passivation-related steps. This is checked against
-the `requires_passivation` flag on the parts table AND the routing step names.
-
----
-
-## Document Requirements Configuration
-
-Configured per component in Master Data (component edit modal):
-- Collapsible "Document Requirements" section
-- Each row: Document Type (dropdown) | Required At (stage) | Required (flag)
-- Stored in `part_document_requirements` table
-- Drives compliance review checklist automatically
-
----
-
-## Traveler Field Mapping
-
-The paper traveler is replaced by data from multiple SkyNet tables.
-No single "traveler" table — data is composed at print time.
-
-| Traveler Field | SkyNet Source |
-|---------------|---------------|
-| Part Number | parts.part_number |
-| Customer | work_orders.customer |
-| Order Number | work_orders.wo_number |
-| Final Process | Derived: last step in job_routing_steps |
-| Manufacturing # | job_materials.lot_number |
-| Heat / Lot # | job_materials.lot_number |
-| Material | material_types.name (via parts.material_type_id) |
-| QA Initial | Future field (not S1) |
-| Draw. Rev | parts.drawing_revision |
-| TSO Rev | Future field (not S1) |
-| Start Date | jobs.actual_start |
-| Due Date | work_orders.due_date |
-| Routing Steps | job_routing_steps (step_name, station, lot#, qty, date, operator) |
-| Notes | work_orders.notes + jobs.notes |
-
----
-
-## Key Database Facts
-
-### Sprint 1 Schema Additions
-
-**New Tables:**
-- `routing_templates` — reusable routing template definitions
-- `routing_template_steps` — ordered steps for each template
-- `part_routing_steps` — per-component master routing
-- `job_routing_steps` — per-job runtime routing with full tracking
-
-**New Columns:**
-- `work_orders.stock_quantity` (integer) — additional units for inventory
-- `work_orders.tco_notes` (text) — TCO review comments
-- `work_orders.closed_by` (uuid FK profiles) — who completed TCO
-- `work_orders.closed_at` (timestamptz) — when TCO was completed
-- `profiles.can_approve_compliance` (boolean) — backup compliance approver flag
-- `parts.material_type_id` (uuid FK material_types) — material type link
-- `parts.drawing_revision` (varchar 20) — current drawing revision
-
-### Naming Conventions
-- Production jobs: `J-######` (e.g., J-000241)
-- Planned maintenance: `DTP-######`
-- Unplanned maintenance: `DTU-######`
-- Work orders: `WO-YYMM-####` (e.g., WO-2602-0231)
-
-### Soft Deletes
 All deletions use soft delete pattern (is_active=false or status='cancelled').
 No hard deletes in production data.
 
-### Two-Step Job Cancellation
+---
+
+## Two-Step Job Cancellation
+
 Job cancellation requires explicit confirmation to prevent accidental data loss.
 
 ---
@@ -229,27 +165,6 @@ compliance stage. Updated in `part_document_requirements.required_at` from
 
 ---
 
-## Sprint 1 Action Items Completed
-
-| # | Action Item | Status |
-|---|------------|--------|
-| 1 | WO form routing display + job creation + step modification | ✓ Complete |
-| 2 | MTS for individual components | ✓ Complete |
-| 3 | Move packing slip to post-mfg | ✓ Complete |
-| 4 | Print for Production (Print Package) | ✓ Complete |
-| 5 | Conditional passivation | ✓ Complete |
-| 6 | Backup compliance officers | ✓ Complete |
-| 30 | TCO cleanup with notes + closed_by | ✓ Complete |
-| 31 | Fishbowl import | Deferred to S2 |
-| 34 | Document requirements config in Master Data | ✓ Complete |
-| 43 | Stock Quantity field | ✓ Complete |
-| NEW | Routing Templates UI in Master Data | ✓ Complete |
-| NEW | Part Routing in component create/edit | ✓ Complete |
-| NEW | Compliance routing review (approve/reject/restore/reset/reorder) | ✓ Complete |
-| NEW | Print Package modal + Print Hub workflow | ✓ Complete |
-
----
-
 ## Technology Stack
 
 - **Frontend:** React 18 + Vite + Tailwind CSS
@@ -258,50 +173,239 @@ compliance stage. Updated in `part_document_requirements.required_at` from
 - **Deployment:** AWS Amplify (CI/CD from GitHub main branch)
 - **Domain:** skynet.skybolt.com (SSL via ACM wildcard *.skybolt.com)
 
-# Sprint 2 New Decisions — March 1, 2026
+---
+
+# Sprint 2 Decisions — March 1, 2026
 
 ---
 
 ## Kiosk Session Management
 
-**Single-Machine Login:** One operator can only be logged into one kiosk at a time. Logging into Machine B automatically logs out Machine A. If Machine A has a job in `in_setup`, the auto-pause modal fires first. No modal for `in_progress` jobs — CNC machines run autonomously.
+**Single-Machine Login:** One operator can only be logged into one kiosk at a time.
+Logging into Machine B automatically logs out Machine A. If Machine A has a job in
+`in_setup`, the auto-pause modal fires first. No modal for `in_progress` jobs — CNC
+machines run autonomously.
 
-**Session Persistence:** Kiosk sessions survive page refresh. On mount, the kiosk checks `kiosk_sessions` for an active session on this machine and restores the operator state. Uses `.maybeSingle()` (not `.single()`) to avoid 406 errors on first visit.
+**Session Persistence:** Kiosk sessions survive page refresh. On mount, the kiosk checks
+`kiosk_sessions` for an active session on this machine and restores the operator state.
+Uses `.maybeSingle()` (not `.single()`) to avoid 406 errors on first visit.
 
-**Force-Logout via Realtime:** `kiosk_sessions` table added to Supabase Realtime publication (`ALTER PUBLICATION supabase_realtime ADD TABLE kiosk_sessions`). When a session is deactivated by another kiosk, the old tab receives the change event and immediately returns to the PIN screen. Polling fallback (every 30 seconds) catches cases where Realtime drops.
+**Force-Logout via Realtime:** `kiosk_sessions` table added to Supabase Realtime
+publication. When a session is deactivated by another kiosk, the old tab receives the
+change event and immediately returns to the PIN screen. 30-second polling fallback.
 
-**Inactivity Timeout:** 30-minute inactivity timeout on kiosk sessions. Warning banner appears at 28 minutes. Any interaction (click, tap, keypress, scroll) resets the timer.
+**Inactivity Timeout:** 30-minute inactivity timeout on kiosk sessions. Warning banner
+appears at 28 minutes. Any interaction resets the timer.
 
-**Login Must Always Succeed:** Session management is wrapped in try/catch — if session DB operations fail, the operator still gets logged in. Machinists must never be locked out.
+**Login Must Always Succeed:** Session management is wrapped in try/catch — if session DB
+operations fail, the operator still gets logged in.
+
+**Finishing Station Session Integration:** The finishing station (`/finishing`) also
+participates in `kiosk_sessions`. Logging into the finishing station deactivates any
+active kiosk session for that operator, and vice versa. Same Realtime listener pattern
+as production kiosks.
 
 ## Pause Behavior
 
-**Pause Only During Setup:** Pause (both manual and auto-pause on machine switch) ONLY applies to `in_setup` status. Jobs in `in_progress` run autonomously on the CNC — walking away doesn't stop the machine. No pause button shown during `in_progress`. Auto-pause query filters to `status = 'in_setup'` only.
+**Pause Only During Setup:** Pause ONLY applies to `in_setup` status. Jobs in
+`in_progress` run autonomously. No pause button shown during `in_progress`.
 
 ## Material Handling
 
-**Blanks Material Matching:** Uses `material_type.toLowerCase().includes('blank')` pattern instead of exact match. Supports renamed variants like "Blank Studs - 4000 Series".
+**Blanks Material Matching:** Uses `material_type.toLowerCase().includes('blank')` pattern.
 
-**Bolt Master Material Filtering:** Bolt Master machines (code starts with 'bm') only show blank material types in dropdown. All other machines hide blank types. Determined by `machine?.code?.toLowerCase().startsWith('bm')`.
+**Bolt Master Material Filtering:** Bolt Master machines (code starts with 'bm') only show
+blank material types. All other machines hide blank types.
+
+**Quantity UOM for Blanks:** When a material type contains 'blank', quantity is displayed
+as "pieces" not "bars" throughout the kiosk UI.
 
 ## Production Lot Numbers
 
 **Format:** `PLN-YYMMDD-XXXX` (e.g., PLN-260301-0001). Sequential counter resets per day.
 
-**Generation Trigger:** Auto-generated on first material entry for a job. Uses atomic DB function (`next_lot_number`) with upsert to prevent duplicates from concurrent kiosks.
+**Generation Trigger (UPDATED Sprint 3):** Auto-generated when the machinist clicks
+"Start Production" (transition to `in_progress`), NOT on material entry. This ensures
+every job gets a PLN regardless of whether the machinist loads material before starting.
+If `production_lot_number` is already set (e.g., from a prior partial entry), it is not
+overwritten.
 
-**Persistence:** `lot_number_sequences` table tracks counters by prefix + date. Production lot number stored on `jobs.production_lot_number`. Persists permanently after job completion.
+**Persistence:** `lot_number_sequences` table tracks counters by prefix + date.
+Production lot number stored on `jobs.production_lot_number`. Persists permanently.
 
 ## Finishing Sends
 
-**Partial Send to Finishing:** Machinists can send partial quantities to finishing while the job stays `in_progress`. `finishing_sends` table captures quantity, production lot number, material lot number, operator, and timestamp per send.
+**Partial Send to Finishing:** Machinists can send partial quantities to finishing while
+the job stays `in_progress`. `finishing_sends` table captures quantity, production lot
+number, material lot number, operator, and timestamp per send.
 
-**No Status Change on Send:** Partial sends do NOT change job status. Job stays `in_progress`. Multiple sends allowed. Warning (not block) if total sent exceeds job quantity.
+**No Status Change on Send:** Partial sends do NOT change job status. Job stays
+`in_progress`. Multiple sends allowed.
 
-**Complete Job Modal Context:** When completing a job with finishing sends, the modal shows all sends with quantities and times, plus a note: "Enter your total good/bad count for the entire job — including pieces already sent."
+**Auto-Send on Job Complete:** When a machinist clicks "Complete Job," the system
+automatically calculates remaining quantity (`job.quantity - total already sent`) and
+creates a `finishing_sends` record for any remainder. If the machinist already sent
+everything manually, no record is created (remainder = 0).
 
-**Finishing Sends Realtime:** `finishing_sends` added to Realtime publication for future finishing station use.
+---
 
-## Deferred Items
+# Sprint 3 Decisions — March 18, 2026
 
-**Fishbowl Import (#31):** Deferred from Sprint 2. Waiting on sample Fishbowl export file for field mapping. Will revisit when file is available — may slot into S3 or S4.
+---
+
+## Finishing Station Architecture
+
+**Single Station, Two Tanks:** The Dashboard shows one "Finishing Station" card (not one
+card per tank). Both physical tanks (FIN-1, FIN-2) are tracked in the `machines` table
+with `machine_type = 'finishing'` but appear as status indicators within the single card,
+not as separate workstations. Launch button on the card opens `/finishing`.
+
+**Route:** `/finishing` — standalone PIN-authenticated page, not under the main app auth
+wrapper. Same pattern as `/kiosk/:machineCode`.
+
+**Batch Model (not job model):** James works on `finishing_sends` records, not jobs
+directly. A single job may have multiple sends (partial quantities sent across the day).
+Each send goes through the full Wash → Treatment → Dry cycle independently.
+
+**Multiple Simultaneous Active Batches:** There is no limit on the number of batches
+James can have active (`in_finishing`) at the same time. He routinely runs multiple
+batches at different stages simultaneously. The active batches panel shows all
+`in_finishing` records, each independently advanceable.
+
+**Collapsible Batch Cards:** Active batch cards can be collapsed to save screen space.
+Collapsed state shows: job number, part number, current stage badge, duration timer.
+Expanded state shows full detail and the advance/complete button. Cards start expanded
+by default. Collapse state is tracked per batch ID in component state.
+
+**Job/Station View Toggle:** The active batches panel has a toggle between:
+- **Job view** (default) — collapsible cards, one per batch
+- **Station view** — three columns (Wash | Treatment | Dry), showing which batches
+  are at each stage. No advance/complete buttons in station view — read-only.
+
+**Tank Selection at Treatment (not at login):** When James advances a batch from Wash to
+Treatment, a tank selection modal appears asking which physical tank (FIN-1 or FIN-2)
+the batch is going into. Tank is stored on the `finishing_sends` record. No session-level
+machine selection — tank is chosen per batch at the Treatment step.
+
+**Job Status After Finishing:** When all `finishing_sends` for a job reach
+`finishing_complete`, the parent job automatically advances to
+`pending_post_manufacturing`. This triggers appearance in Roger's post-mfg compliance
+queue. Jobs remain at `manufacturing_complete` while any sends are still in-progress.
+
+**Dashboard Compliance Counter:** Only counts `pending_compliance` and
+`pending_post_manufacturing`. Does NOT include `manufacturing_complete` — those belong
+to finishing, not Roger's queue.
+
+---
+
+## Lot Number Chain of Custody
+
+Three lot numbers travel with every batch through the system. All three appear on the
+`finishing_sends` record for full chain-of-custody traceability.
+
+### Material Lot # (vendor traceability)
+- Source: vendor's heat/cert number, entered by machinist at kiosk during material loading
+- Stored on: `job_materials.lot_number`, carried to `finishing_sends.material_lot_number`
+- Persistence: stays with the material bar stock — does not change per job
+- System behavior: entered manually, never auto-generated
+- Lot blocking: once a lot number is set on a job, all subsequent materials must use the
+  same lot (compliance requirement). Mismatches are blocked and logged to `audit_logs`.
+
+### Production Lot # (PLN — job traceability)
+- Format: `PLN-YYMMDD-XXXX` (e.g., PLN-260318-0003)
+- Source: auto-generated by `next_lot_number('PLN', datePart)` RPC
+- Trigger: generated when machinist clicks "Start Production" (transition to `in_progress`)
+- Stored on: `jobs.production_lot_number`, carried to `finishing_sends.production_lot_number`
+- Persistence: tied to the job — unique per job, never reused
+- Dies: permanently associated with the job after completion, never reopened
+
+### Finishing Lot # (FLN — finishing batch traceability)
+- Format: `FLN-YYMMDD-XXXX` (e.g., FLN-260318-0007)
+- Source: auto-generated by `next_lot_number('FLN', datePart)` RPC, confirmed by James
+- Trigger: generated/suggested when James starts a batch in the finishing station
+- Stored on: `finishing_sends.finishing_lot_number`, copied to `jobs.finishing_lot_number`
+  on batch completion
+- Persistence rule: **FLN persists across multiple batches as long as the same material
+  heat AND the same tank chemicals are in use.** System defaults to the most recent active
+  FLN (queried from most recent non-completed `finishing_sends` record with a lot number).
+- Resets when: material lot changes OR chemicals change (James generates new via "New" button)
+- Override: James can always manually edit the FLN field or click "New" to generate fresh
+- Fallback: if `next_lot_number` RPC fails, timestamp-based fallback is used
+
+### Chemical Lot # (chemical traceability)
+- Source: lot number from treatment chemical containers in the tank, entered by James
+- Stored on: `finishing_sends.chemical_lot_number`
+- Persistence: pre-filled from most recent `finishing_sends` record with a chemical lot
+- Captured at: Start Batch modal, alongside FLN and incoming count
+- Relationship to FLN: when chemical lot changes, James should also generate a new FLN.
+  System displays reminder but does not enforce this automatically — James's judgment.
+
+---
+
+## Count Verification at Finishing
+
+Two count entry points per batch:
+
+**Incoming Count (at batch start):**
+- James physically counts parts received from the machinist
+- Entered in Start Batch modal; pre-filled with `finishing_sends.quantity` (machinist's
+  send quantity) as a starting point — James must consciously change if different
+- Stored on: `finishing_sends.incoming_count`
+- Discrepancy warning shown inline if count differs from send quantity (not a block)
+
+**Verified Count (at batch completion):**
+- James counts good parts after finishing is complete
+- Entered in completion modal at the Dry stage; field starts blank (not pre-filled)
+  to force conscious entry
+- Required — cannot complete batch without entering a verified count
+- Stored on: `finishing_sends.verified_count`
+- `count_discrepancy` = verified_count - incoming_count (negative = parts lost)
+- `verified_by` and `verified_at` recorded on completion
+- Discrepancy warning shown inline if count differs from incoming count (not a block)
+
+**Discrepancy Logging:** ALL discrepancies (any non-zero difference) are logged to
+`audit_logs` with `event_type = 'finishing_count_discrepancy'`. No percentage threshold —
+even 1 part difference is logged. Report filtering by percentage is a reporting-layer
+concern, not a capture-layer concern.
+
+---
+
+## finishing_sends Table — Sprint 3 Columns Added
+
+In addition to Sprint 2 columns (job_id, machine_id, sent_by, quantity,
+production_lot_number, material_lot_number, status, notes, sent_at):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| finishing_stage | text | Current stage: wash, treatment, dry |
+| stage_started_at | timestamptz | When current stage began |
+| finishing_operator_id | uuid FK profiles | James's operator ID |
+| finishing_started_at | timestamptz | When batch entered in_finishing |
+| finishing_completed_at | timestamptz | When batch reached finishing_complete |
+| finishing_lot_number | text | FLN auto-generated at batch start |
+| chemical_lot_number | text | Treatment chemical lot, entered by James |
+| incoming_count | integer | James's count of parts received |
+| verified_count | integer | James's count of good parts after finishing |
+| count_discrepancy | integer | verified_count - incoming_count |
+| verified_by | uuid FK profiles | Who entered the verified count |
+| verified_at | timestamptz | When verified count was entered |
+
+---
+
+## jobs Table — Sprint 3 Columns Added
+
+| Column | Type | Description |
+|--------|------|-------------|
+| finishing_start | timestamptz | Renamed from passivation_start |
+| finishing_end | timestamptz | Renamed from passivation_end |
+| finishing_operator_id | uuid FK profiles | Renamed from passivation_operator_id |
+| finishing_notes | text | Renamed from passivation_notes |
+| finishing_lot_number | text | Copied from finishing_sends on batch complete |
+
+---
+
+## Backlog Items Identified in Sprint 3
+
+| Item | Description | Priority |
+|------|-------------|----------|
+| Finishing status in WO Lookup | Show "In Finishing (X pcs)" cyan badge on job rows in April's WO Lookup when finishing_sends records exist for that job. Query finishing_sends grouped by job_id, sum quantities by status, display inline. | P2 |

@@ -1,0 +1,1473 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { supabase } from '../lib/supabase'
+import {
+  Lock,
+  Unlock,
+  Loader2,
+  LogOut,
+  Play,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  AlertTriangle,
+  Package,
+  Beaker,
+  FileText,
+  X,
+  Timer,
+  RefreshCw,
+  ChevronDown,
+  ChevronRight,
+  ArrowRight,
+  Droplets,
+  Flame,
+  Wind,
+  List,
+  Columns,
+  Hash,
+  RotateCw
+} from 'lucide-react'
+
+// Stage definitions
+const STAGES = [
+  { key: 'wash', label: 'Wash', icon: Droplets },
+  { key: 'treatment', label: 'Treatment', icon: Flame },
+  { key: 'dry', label: 'Dry', icon: Wind }
+]
+
+export default function Finishing() {
+  // Auth state
+  const [pin, setPin] = useState('')
+  const [operator, setOperator] = useState(null)
+  const [authError, setAuthError] = useState(null)
+  const [authenticating, setAuthenticating] = useState(false)
+
+  // Queue state
+  const [queue, setQueue] = useState([])
+  const [activeBatches, setActiveBatches] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState(false)
+
+  // Machine state
+  const [finishingMachines, setFinishingMachines] = useState([])
+
+  // Tank selection modal (shown when advancing Wash → Treatment)
+  const [showTankModal, setShowTankModal] = useState(false)
+  const [pendingAdvanceBatch, setPendingAdvanceBatch] = useState(null)
+
+  // Completion state
+  const [completionNotes, setCompletionNotes] = useState({})
+  const [verifiedCounts, setVerifiedCounts] = useState({}) // {batchId: count}
+
+  // Start batch modal state
+  const [showStartModal, setShowStartModal] = useState(false)
+  const [startModalSend, setStartModalSend] = useState(null)
+  const [startLotNumber, setStartLotNumber] = useState('')
+  const [startChemicalLot, setStartChemicalLot] = useState('')
+  const [startIncomingCount, setStartIncomingCount] = useState('')
+  const [generatingLot, setGeneratingLot] = useState(false)
+
+  // Collapsed state per batch
+  const [collapsedBatches, setCollapsedBatches] = useState({})
+
+  // Active batches view toggle
+  const [activeView, setActiveView] = useState('job') // 'job' | 'station'
+
+  // Auto-refresh
+  const [lastUpdated, setLastUpdated] = useState(null)
+
+  // Duration timer
+  const [, setTick] = useState(0)
+  const timerRef = useRef(null)
+
+  // Set browser tab title
+  useEffect(() => {
+    document.title = 'Finishing Station - SkyNet'
+  }, [])
+
+  // Duration timer - tick every 30s when active batch exists
+  useEffect(() => {
+    if (activeBatches.length > 0) {
+      timerRef.current = setInterval(() => setTick(t => t + 1), 30000)
+    } else {
+      clearInterval(timerRef.current)
+    }
+    return () => clearInterval(timerRef.current)
+  }, [activeBatches.length])
+
+  // Load finishing machines
+  const loadMachines = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('machines')
+        .select('id, name, code, status, status_reason, machine_type')
+        .eq('machine_type', 'finishing')
+        .eq('is_active', true)
+
+      if (error) throw error
+      setFinishingMachines(data || [])
+    } catch (err) {
+      console.error('Error loading finishing machines:', err)
+    }
+  }, [])
+
+  // Generate finishing lot number via RPC
+  const generateFinishingLotNumber = async () => {
+    const now = new Date()
+    const datePart = now.toISOString().slice(2, 10).replace(/-/g, '') // YYMMDD
+    const prefix = 'FLN'
+
+    try {
+      const { data, error } = await supabase.rpc('next_lot_number', {
+        p_prefix: prefix,
+        p_date_part: datePart
+      })
+
+      if (error) throw error
+      const seq = String(data).padStart(4, '0')
+      return `${prefix}-${datePart}-${seq}`
+    } catch (err) {
+      // Fallback: timestamp-based number if RPC fails
+      console.error('Lot number generation failed, using fallback:', err)
+      const fallback = `${prefix}-${datePart}-${now.getTime().toString().slice(-4)}`
+      return fallback
+    }
+  }
+
+  // Get current active finishing lot (persistence rule)
+  const getCurrentFinishingLot = async () => {
+    try {
+      const { data } = await supabase
+        .from('finishing_sends')
+        .select('finishing_lot_number')
+        .not('finishing_lot_number', 'is', null)
+        .neq('status', 'finishing_complete')
+        .order('finishing_started_at', { ascending: false })
+        .limit(1)
+
+      if (data && data.length > 0 && data[0].finishing_lot_number) {
+        return data[0].finishing_lot_number
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  // Get most recent chemical lot number (persistence rule)
+  const getCurrentChemicalLot = async () => {
+    try {
+      const { data } = await supabase
+        .from('finishing_sends')
+        .select('chemical_lot_number')
+        .not('chemical_lot_number', 'is', null)
+        .order('finishing_started_at', { ascending: false })
+        .limit(1)
+
+      if (data && data.length > 0 && data[0].chemical_lot_number) {
+        return data[0].chemical_lot_number
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  // Load queue and active batch
+  const loadData = useCallback(async () => {
+    try {
+      // Fetch pending finishing sends
+      const { data: pendingData, error: pendingError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          *,
+          job:jobs(
+            id, job_number, quantity, production_lot_number,
+            work_order:work_orders(wo_number, customer, priority, due_date),
+            component:parts!component_id(id, part_number, description)
+          ),
+          sent_by_profile:profiles!sent_by(full_name)
+        `)
+        .eq('status', 'pending_finishing')
+        .order('sent_at', { ascending: true })
+
+      if (pendingError) throw pendingError
+      setQueue(pendingData || [])
+
+      // Fetch all active batches (in_finishing)
+      const { data: activeData, error: activeError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          *,
+          job:jobs(
+            id, job_number, quantity, production_lot_number,
+            work_order:work_orders(wo_number, customer, priority, due_date),
+            component:parts!component_id(id, part_number, description)
+          ),
+          sent_by_profile:profiles!sent_by(full_name)
+        `)
+        .eq('status', 'in_finishing')
+        .order('finishing_started_at', { ascending: true })
+
+      if (activeError) throw activeError
+      setActiveBatches(activeData || [])
+
+      setLastUpdated(new Date())
+    } catch (err) {
+      console.error('Error loading data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // Initial load and real-time subscription
+  useEffect(() => {
+    if (operator) {
+      loadData()
+      loadMachines()
+
+      // Subscribe to finishing_sends changes
+      const subscription = supabase
+        .channel('finishing-sends')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'finishing_sends' }, loadData)
+        .subscribe()
+
+      // Refresh machines every 60 seconds
+      const machineInterval = setInterval(loadMachines, 60000)
+      // Refresh data every 30 seconds
+      const dataInterval = setInterval(loadData, 30000)
+
+      return () => {
+        supabase.removeChannel(subscription)
+        clearInterval(machineInterval)
+        clearInterval(dataInterval)
+      }
+    }
+  }, [operator, loadData, loadMachines])
+
+  // Realtime: force-logout if session deactivated by another kiosk
+  useEffect(() => {
+    if (!operator) return
+
+    // Get the finishing machine used for this session
+    const getSessionMachineId = async () => {
+      try {
+        const { data } = await supabase
+          .from('machines')
+          .select('id')
+          .eq('machine_type', 'finishing')
+          .eq('is_active', true)
+          .limit(1)
+          .single()
+        return data?.id
+      } catch {
+        return null
+      }
+    }
+
+    let sessionSub
+    getSessionMachineId().then(machineId => {
+      if (!machineId) return
+
+      sessionSub = supabase
+        .channel(`finishing-session-${operator.id}`)
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'kiosk_sessions',
+          filter: `operator_id=eq.${operator.id}`
+        }, (payload) => {
+          if (payload.new.machine_id === machineId && payload.new.is_active === false) {
+            // Delay + re-check to avoid race with own login sequence
+            setTimeout(async () => {
+              try {
+                const { data: currentSession } = await supabase
+                  .from('kiosk_sessions')
+                  .select('is_active')
+                  .eq('operator_id', operator.id)
+                  .eq('machine_id', machineId)
+                  .single()
+
+                if (!currentSession || !currentSession.is_active) {
+                  handleLogout()
+                }
+              } catch {
+                // If query fails, don't force logout
+              }
+            }, 500)
+          }
+        })
+        .subscribe()
+    })
+
+    return () => {
+      if (sessionSub) supabase.removeChannel(sessionSub)
+    }
+  }, [operator])
+
+  // Keyboard support for PIN entry
+  useEffect(() => {
+    if (operator) return
+
+    const handleKeyDown = (e) => {
+      if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault()
+        handlePinInput(e.key)
+      } else if (e.key === 'Backspace') {
+        e.preventDefault()
+        handlePinBackspace()
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        if (pin.length >= 4) handlePinSubmit()
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        handlePinClear()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [operator, pin])
+
+  // PIN Authentication — numpad handlers (matches Kiosk pattern)
+  const handlePinInput = (digit) => {
+    if (pin.length < 6) {
+      setPin(prev => prev + digit)
+      setAuthError(null)
+    }
+  }
+
+  const handlePinBackspace = () => {
+    setPin(prev => prev.slice(0, -1))
+    setAuthError(null)
+  }
+
+  const handlePinClear = () => {
+    setPin('')
+    setAuthError(null)
+  }
+
+  const handlePinSubmit = async () => {
+    if (pin.length < 4) {
+      setAuthError('PIN must be at least 4 digits')
+      return
+    }
+
+    setAuthenticating(true)
+    setAuthError(null)
+
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('pin_code', pin)
+        .eq('is_active', true)
+        .single()
+
+      if (error) {
+        if (error.code === 'PGRST116') setAuthError('Invalid PIN')
+        else throw error
+        return
+      }
+
+      // Session enforcement — deactivate all existing sessions, create finishing session
+      try {
+        await supabase
+          .from('kiosk_sessions')
+          .update({ is_active: false })
+          .eq('operator_id', data.id)
+
+        // Use first finishing machine as session anchor
+        const { data: finMachine } = await supabase
+          .from('machines')
+          .select('id')
+          .eq('machine_type', 'finishing')
+          .eq('is_active', true)
+          .limit(1)
+          .single()
+
+        if (finMachine) {
+          await supabase
+            .from('kiosk_sessions')
+            .upsert({
+              operator_id: data.id,
+              machine_id: finMachine.id,
+              logged_in_at: new Date().toISOString(),
+              is_active: true
+            }, { onConflict: 'operator_id,machine_id' })
+        }
+      } catch (err) {
+        // Session management failure must never block access
+        console.error('Session management error (non-blocking):', err)
+      }
+
+      setOperator(data)
+      setPin('')
+    } catch (err) {
+      console.error('Auth error:', err)
+      setAuthError('Authentication failed')
+    } finally {
+      setAuthenticating(false)
+    }
+  }
+
+  const handleLogout = async () => {
+    // Deactivate session on logout
+    if (operator) {
+      try {
+        await supabase
+          .from('kiosk_sessions')
+          .update({ is_active: false })
+          .eq('operator_id', operator.id)
+          .eq('is_active', true)
+      } catch (err) {
+        console.error('Session deactivation error (non-blocking):', err)
+      }
+    }
+
+    setOperator(null)
+    setActiveBatches([])
+    setQueue([])
+    setPin('')
+    setCompletionNotes({})
+    setVerifiedCounts({})
+    setShowStartModal(false)
+    setStartModalSend(null)
+  }
+
+  // Start batch - open start modal directly (lot # + incoming count + chemical lot)
+  const handleStartBatch = async (send) => {
+    setStartModalSend(send)
+    setStartIncomingCount(String(send.quantity || ''))
+    setGeneratingLot(true)
+    setShowStartModal(true)
+
+    // Pre-fill lot numbers in parallel
+    const [currentLot, currentChemicalLot] = await Promise.all([
+      getCurrentFinishingLot(),
+      getCurrentChemicalLot()
+    ])
+
+    if (currentLot) {
+      setStartLotNumber(currentLot)
+    } else {
+      const newLot = await generateFinishingLotNumber()
+      setStartLotNumber(newLot)
+    }
+    setStartChemicalLot(currentChemicalLot || '')
+    setGeneratingLot(false)
+  }
+
+  const handleGenerateNewLot = async () => {
+    setGeneratingLot(true)
+    try {
+      const newLot = await generateFinishingLotNumber()
+      setStartLotNumber(newLot)
+    } catch (err) {
+      console.error('Error generating lot:', err)
+    } finally {
+      setGeneratingLot(false)
+    }
+  }
+
+  // Tank selection for Wash → Treatment advance
+  const handleTankSelect = async (machine) => {
+    if (!pendingAdvanceBatch) return
+    setShowTankModal(false)
+    setActionLoading(true)
+
+    try {
+      const now = new Date().toISOString()
+      const nextStage = 'treatment'
+      const { error } = await supabase
+        .from('finishing_sends')
+        .update({
+          finishing_stage: nextStage,
+          stage_started_at: now,
+          machine_id: machine.id,
+          updated_at: now
+        })
+        .eq('id', pendingAdvanceBatch.id)
+
+      if (error) throw error
+      setPendingAdvanceBatch(null)
+      await loadData()
+    } catch (err) {
+      console.error('Error advancing to treatment:', err)
+      alert('Failed to advance to treatment: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleConfirmStartBatch = async () => {
+    if (!startModalSend) return
+    const incomingCount = parseInt(startIncomingCount) || 0
+    if (incomingCount <= 0) {
+      alert('Please enter a valid incoming count')
+      return
+    }
+
+    setActionLoading(true)
+    try {
+      const now = new Date().toISOString()
+      const { error } = await supabase
+        .from('finishing_sends')
+        .update({
+          status: 'in_finishing',
+          finishing_stage: 'wash',
+          stage_started_at: now,
+          finishing_operator_id: operator.id,
+          finishing_started_at: now,
+          finishing_lot_number: startLotNumber || null,
+          chemical_lot_number: startChemicalLot.trim() || null,
+          incoming_count: incomingCount,
+          updated_at: now
+        })
+        .eq('id', startModalSend.id)
+
+      if (error) throw error
+      setShowStartModal(false)
+      setStartModalSend(null)
+      setStartLotNumber('')
+      setStartChemicalLot('')
+      setStartIncomingCount('')
+      await loadData()
+    } catch (err) {
+      console.error('Error starting batch:', err)
+      alert('Failed to start batch: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  // Advance stage or complete
+  const handleAdvanceStage = async (batch) => {
+    if (!batch) return
+
+    const currentStage = batch.finishing_stage
+    const currentIndex = STAGES.findIndex(s => s.key === currentStage)
+    const isLastStage = currentIndex === STAGES.length - 1
+
+    // On last stage, require verified count (must be explicitly entered)
+    if (isLastStage) {
+      const rawValue = verifiedCounts[batch.id]
+      const verifiedCount = parseInt(rawValue)
+      if (rawValue == null || rawValue === '' || isNaN(verifiedCount) || verifiedCount < 0) {
+        alert('Please enter a verified count before completing the batch')
+        return
+      }
+    }
+
+    setActionLoading(true)
+    try {
+      const now = new Date().toISOString()
+      const batchNotes = completionNotes[batch.id] || ''
+
+      if (isLastStage) {
+        const verifiedCount = parseInt(verifiedCounts[batch.id]) || 0
+        const incomingCount = batch.incoming_count || 0
+        const discrepancy = verifiedCount - incomingCount
+
+        // Complete the batch with count verification
+        const { error } = await supabase
+          .from('finishing_sends')
+          .update({
+            status: 'finishing_complete',
+            finishing_completed_at: now,
+            verified_count: verifiedCount,
+            count_discrepancy: discrepancy,
+            verified_by: operator.id,
+            verified_at: now,
+            notes: batchNotes || batch.notes || null,
+            updated_at: now
+          })
+          .eq('id', batch.id)
+
+        if (error) throw error
+
+        // Log significant discrepancies (>5%) to audit_logs
+        if (discrepancy !== 0) {
+          try {
+            await supabase.from('audit_logs').insert({
+              event_type: 'finishing_count_discrepancy',
+              job_id: batch.job_id || batch.job?.id,
+              operator_id: operator.id,
+              details: {
+                send_id: batch.id,
+                incoming_count: incomingCount,
+                verified_count: verifiedCount,
+                discrepancy: discrepancy
+              }
+            })
+          } catch (auditErr) {
+            console.error('Audit log insert failed (non-blocking):', auditErr)
+          }
+        }
+
+        setCompletionNotes(prev => {
+          const next = { ...prev }
+          delete next[batch.id]
+          return next
+        })
+        setVerifiedCounts(prev => {
+          const next = { ...prev }
+          delete next[batch.id]
+          return next
+        })
+
+        // Copy finishing lot number to parent job
+        const jobId = batch.job_id || batch.job?.id
+        if (jobId && batch.finishing_lot_number) {
+          try {
+            await supabase
+              .from('jobs')
+              .update({ finishing_lot_number: batch.finishing_lot_number, updated_at: now })
+              .eq('id', jobId)
+          } catch (lotErr) {
+            console.error('Job lot number update failed (non-blocking):', lotErr)
+          }
+        }
+
+        // Check if all sends for this job are now complete → advance job status
+        console.log('[Finishing] Batch complete. job_id:', jobId)
+
+        if (jobId) {
+          const { data: allSends, error: sendsError } = await supabase
+            .from('finishing_sends')
+            .select('id, status')
+            .eq('job_id', jobId)
+
+          console.log('[Finishing] All sends for job:', allSends, 'error:', sendsError)
+
+          const allComplete = allSends && allSends.length > 0 && allSends.every(s => s.status === 'finishing_complete')
+
+          if (allComplete) {
+            // Only advance if the job itself is already manufacturing_complete
+            // (machinist has finished producing all parts)
+            const { data: parentJob } = await supabase
+              .from('jobs')
+              .select('status')
+              .eq('id', jobId)
+              .single()
+
+            if (parentJob?.status === 'manufacturing_complete') {
+              console.log('[Finishing] Advancing job', jobId, 'to pending_post_manufacturing')
+              const { error: jobError } = await supabase
+                .from('jobs')
+                .update({ status: 'pending_post_manufacturing', updated_at: now })
+                .eq('id', jobId)
+              console.log('[Finishing] Job update result — error:', jobError)
+            } else {
+              console.log('[Finishing] All sends complete but job status is', parentJob?.status, '— not advancing yet')
+            }
+          }
+        }
+      } else {
+        // Advance to next stage
+        const nextStage = STAGES[currentIndex + 1].key
+
+        // Wash → Treatment requires tank selection
+        if (currentStage === 'wash' && nextStage === 'treatment') {
+          setPendingAdvanceBatch(batch)
+          setShowTankModal(true)
+          setActionLoading(false)
+          return
+        }
+
+        const { error } = await supabase
+          .from('finishing_sends')
+          .update({
+            finishing_stage: nextStage,
+            stage_started_at: now,
+            updated_at: now
+          })
+          .eq('id', batch.id)
+
+        if (error) throw error
+      }
+
+      await loadData()
+    } catch (err) {
+      console.error('Error advancing stage:', err)
+      alert('Failed to advance stage: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  // Helpers
+  const getPriorityColor = (priority) => {
+    switch (priority) {
+      case 'critical': return 'bg-red-500'
+      case 'high': return 'bg-yellow-500'
+      case 'normal': return 'bg-green-500'
+      case 'low': return 'bg-gray-500'
+      default: return 'bg-gray-500'
+    }
+  }
+
+  const getPriorityBorder = (priority) => {
+    switch (priority) {
+      case 'critical': return 'border-red-600'
+      case 'high': return 'border-yellow-600'
+      case 'normal': return 'border-green-600'
+      case 'low': return 'border-gray-600'
+      default: return 'border-gray-600'
+    }
+  }
+
+  const formatTime = (timestamp) => {
+    if (!timestamp) return '-'
+    return new Date(timestamp).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
+  const formatDuration = (start) => {
+    if (!start) return '-'
+    const startTime = new Date(start)
+    const now = new Date()
+    const diff = Math.floor((now - startTime) / 1000 / 60)
+    const hours = Math.floor(diff / 60)
+    const mins = diff % 60
+    return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+  }
+
+  const formatRelativeTime = (timestamp) => {
+    if (!timestamp) return ''
+    const diff = Math.floor((new Date() - new Date(timestamp)) / 1000 / 60)
+    if (diff < 1) return 'Just now'
+    if (diff < 60) return `${diff}m ago`
+    const hours = Math.floor(diff / 60)
+    if (hours < 24) return `${hours}h ago`
+    return `${Math.floor(hours / 24)}d ago`
+  }
+
+  const getMachineStatusDot = (status) => {
+    if (['down', 'offline', 'maintenance'].includes(status)) {
+      return 'bg-red-500'
+    }
+    return 'bg-green-500'
+  }
+
+  const isMachineDown = (status) => {
+    return ['down', 'offline', 'maintenance'].includes(status)
+  }
+
+  // ==================== RENDER ====================
+
+  // PIN Entry Screen — numpad layout matching Kiosk
+  if (!operator) {
+    return (
+      <div className="min-h-screen bg-skynet-dark flex flex-col">
+        <header className="bg-gray-900 border-b border-gray-800 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl font-bold text-white">SkyNet</span>
+              <div className="w-2 h-2 bg-skynet-green rounded-full animate-pulse"></div>
+            </div>
+            <div className="text-right">
+              <p className="text-white font-semibold">Finishing Station</p>
+            </div>
+          </div>
+        </header>
+
+        <div className="flex-1 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 w-full max-w-sm">
+            <div className="text-center mb-6">
+              <Lock className="w-12 h-12 text-cyan-400 mx-auto mb-3" />
+              <h2 className="text-xl font-semibold text-white">Operator Login</h2>
+              <p className="text-gray-500 text-sm mt-1">Enter your PIN to continue</p>
+            </div>
+
+            <div className="flex justify-center gap-2 mb-6">
+              {[...Array(6)].map((_, i) => (
+                <div key={i} className={`w-10 h-12 rounded-lg border-2 flex items-center justify-center text-2xl font-bold transition-colors ${i < pin.length ? 'border-cyan-500 bg-cyan-500/20 text-white' : 'border-gray-700 bg-gray-800 text-gray-600'}`}>
+                  {i < pin.length ? '•' : ''}
+                </div>
+              ))}
+            </div>
+
+            {authError && (
+              <div className="flex items-center gap-2 text-red-400 text-sm mb-4 justify-center">
+                <AlertCircle size={16} />{authError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {[1,2,3,4,5,6,7,8,9].map((digit) => (
+                <button key={digit} onClick={() => handlePinInput(digit.toString())} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">{digit}</button>
+              ))}
+              <button onClick={handlePinClear} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">Clear</button>
+              <button onClick={() => handlePinInput('0')} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">0</button>
+              <button onClick={handlePinBackspace} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">←</button>
+            </div>
+
+            <button onClick={handlePinSubmit} disabled={pin.length < 4 || authenticating} className="w-full h-12 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+              {authenticating ? <><Loader2 className="w-5 h-5 animate-spin" />Verifying...</> : <><Unlock size={20} />Login</>}
+            </button>
+          </div>
+        </div>
+
+        <footer className="bg-gray-900 border-t border-gray-800 px-6 py-3">
+          <p className="text-gray-600 text-xs text-center font-mono">SkyNet MES - Finishing Station</p>
+        </footer>
+      </div>
+    )
+  }
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-skynet-dark flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 text-cyan-500 animate-spin mx-auto mb-4" />
+          <p className="text-gray-500">Loading finishing queue...</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-skynet-dark">
+      {/* Header */}
+      <header className="bg-gray-900 border-b border-gray-800 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-10 h-10 bg-cyan-600/20 rounded-lg flex items-center justify-center">
+              <Beaker size={24} className="text-cyan-400" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-white">Finishing Station</h1>
+              <p className="text-gray-500 text-sm">Wash → Treatment → Dry</p>
+            </div>
+          </div>
+
+          {/* Machine status strip */}
+          <div className="flex items-center gap-3">
+            {finishingMachines.map(m => (
+              <div key={m.id} className="flex items-center gap-1.5 px-2 py-1 bg-gray-800 rounded text-xs">
+                <div className={`w-2 h-2 rounded-full ${getMachineStatusDot(m.status)}`} />
+                <span className={isMachineDown(m.status) ? 'text-red-400' : 'text-gray-300'}>
+                  {m.name}
+                </span>
+                {isMachineDown(m.status) && (
+                  <span className="text-red-500 font-semibold ml-1">DOWN</span>
+                )}
+                {isMachineDown(m.status) && m.status_reason && (
+                  <span className="text-red-400/70 ml-1 max-w-[120px] truncate" title={m.status_reason}>
+                    — {m.status_reason}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-4">
+            {lastUpdated && (
+              <span className="text-gray-500 text-xs flex items-center gap-1">
+                <RefreshCw size={12} />
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
+            <div className="text-right">
+              <p className="text-white text-sm">{operator.full_name}</p>
+              <p className="text-gray-500 text-xs capitalize">{operator.role}</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded transition-colors"
+            >
+              <LogOut size={18} />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* Left Panel — Active Batches */}
+          <div className="lg:col-span-1">
+            <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-cyan-400 font-semibold flex items-center gap-2">
+                  <Play size={18} />
+                  Active Batches ({activeBatches.length})
+                </h2>
+                {activeBatches.length > 0 && (
+                  <div className="bg-gray-800 rounded-lg p-0.5 flex">
+                    <button
+                      onClick={() => setActiveView('job')}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        activeView === 'job' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <List size={12} />
+                      Job
+                    </button>
+                    <button
+                      onClick={() => setActiveView('station')}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        activeView === 'station' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <Columns size={12} />
+                      Station
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {activeBatches.length > 0 ? (
+                <>
+                {/* Job View */}
+                {activeView === 'job' && (
+                <div className="space-y-4 max-h-[700px] overflow-y-auto">
+                  {activeBatches.map(batch => {
+                    const batchIsLastStage = batch.finishing_stage === STAGES[STAGES.length - 1].key
+                    const isCollapsed = !!collapsedBatches[batch.id]
+                    const currentStageDef = STAGES.find(s => s.key === batch.finishing_stage)
+
+                    return (
+                      <div key={batch.id} className="rounded-lg border border-gray-700 overflow-hidden">
+                        {/* Collapsed header — always visible, clickable */}
+                        <button
+                          onClick={() => setCollapsedBatches(prev => ({ ...prev, [batch.id]: !prev[batch.id] }))}
+                          className={`w-full flex items-center gap-3 px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}
+                        >
+                          <ChevronDown size={16} className={`text-gray-500 flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : 'rotate-0'}`} />
+                          <span className="text-white font-mono">{batch.job?.job_number}</span>
+                          <span className="text-gray-400 text-sm truncate">{batch.job?.component?.part_number} — {batch.job?.component?.description}</span>
+                          <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+                            <span className="px-2 py-0.5 rounded text-xs font-medium bg-cyan-600 text-white flex items-center gap-1">
+                              {currentStageDef && <currentStageDef.icon size={10} />}
+                              {currentStageDef?.label}
+                            </span>
+                            <span className="text-gray-400 text-sm font-mono flex items-center gap-1">
+                              <Timer size={12} className="text-cyan-400" />
+                              {formatDuration(batch.finishing_started_at)}
+                            </span>
+                          </span>
+                        </button>
+
+                        {/* Expanded content */}
+                        {!isCollapsed && (
+                          <div className="space-y-3 p-4">
+                            {/* Batch Details */}
+                            <div className={`bg-gray-800 rounded-lg p-4 border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
+                              <div className="flex items-start justify-between mb-2">
+                                <div>
+                                  <p className="text-white font-mono text-lg">{batch.job?.job_number}</p>
+                                  <p className="text-gray-400 text-sm">{batch.job?.work_order?.wo_number}</p>
+                                </div>
+                                <div className={`w-3 h-3 rounded-full ${getPriorityColor(batch.job?.work_order?.priority)}`}
+                                     title={batch.job?.work_order?.priority} />
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4 mt-4">
+                                <div>
+                                  <p className="text-gray-500 text-xs">Part</p>
+                                  <p className="text-white">{batch.job?.component?.part_number}</p>
+                                  <p className="text-gray-400 text-sm">{batch.job?.component?.description}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Customer</p>
+                                  <p className="text-white">{batch.job?.work_order?.customer || '-'}</p>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4 mt-4">
+                                <div>
+                                  <p className="text-gray-500 text-xs">Batch Quantity</p>
+                                  <p className="text-white text-xl">{batch.quantity}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Due Date</p>
+                                  <p className="text-white">
+                                    {batch.job?.work_order?.due_date
+                                      ? new Date(batch.job.work_order.due_date).toLocaleDateString()
+                                      : '-'}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4 mt-4">
+                                <div>
+                                  <p className="text-gray-500 text-xs">Production Lot #</p>
+                                  <p className="text-white font-mono text-sm">{batch.production_lot_number || '-'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Finishing Lot #</p>
+                                  <p className="text-cyan-400 font-mono text-sm">{batch.finishing_lot_number || <span className="text-gray-600">Not assigned</span>}</p>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4 mt-4">
+                                <div>
+                                  <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                                  <p className="text-white font-mono text-sm">{batch.chemical_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Material Lot #</p>
+                                  <p className="text-white font-mono text-sm">{batch.material_lot_number || '-'}</p>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4 mt-4">
+                                <div>
+                                  <p className="text-gray-500 text-xs">Incoming Count</p>
+                                  <p className="text-white text-sm">
+                                    {batch.incoming_count != null ? batch.incoming_count : '-'}
+                                    {batch.incoming_count != null && batch.incoming_count !== batch.quantity && (
+                                      <span className="text-yellow-400 text-xs ml-1">(sent: {batch.quantity})</span>
+                                    )}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="mt-4 pt-3 border-t border-gray-700">
+                                <p className="text-gray-500 text-xs">
+                                  Sent by <span className="text-gray-300">{batch.sent_by_profile?.full_name || 'Unknown'}</span>
+                                  {batch.sent_at && (
+                                    <span className="ml-2">
+                                      {new Date(batch.sent_at).toLocaleString('en-US', {
+                                        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                                      })}
+                                    </span>
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Stage Progress Bar */}
+                            <div className="bg-gray-800 rounded-lg p-4">
+                              <p className="text-gray-500 text-xs mb-3">Stage Progress</p>
+                              <div className="flex items-center gap-2">
+                                {STAGES.map((stage, idx) => {
+                                  const currentIdx = STAGES.findIndex(s => s.key === batch.finishing_stage)
+                                  const isComplete = idx < currentIdx
+                                  const isCurrent = idx === currentIdx
+                                  const StageIcon = stage.icon
+
+                                  return (
+                                    <div key={stage.key} className="flex items-center flex-1">
+                                      <div className={`flex items-center gap-1.5 px-3 py-2 rounded flex-1 justify-center text-sm font-medium transition-colors ${
+                                        isCurrent
+                                          ? 'bg-cyan-600 text-white'
+                                          : isComplete
+                                            ? 'bg-cyan-900/50 text-cyan-400'
+                                            : 'bg-gray-700 text-gray-500'
+                                      }`}>
+                                        {isComplete ? (
+                                          <CheckCircle size={14} />
+                                        ) : (
+                                          <StageIcon size={14} />
+                                        )}
+                                        {stage.label}
+                                      </div>
+                                      {idx < STAGES.length - 1 && (
+                                        <ChevronRight size={16} className="text-gray-600 mx-1 flex-shrink-0" />
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Time Tracking */}
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="bg-gray-800 rounded-lg p-4">
+                                <p className="text-gray-500 text-xs mb-1">Started</p>
+                                <p className="text-cyan-400 text-lg font-mono">
+                                  {formatTime(batch.finishing_started_at)}
+                                </p>
+                              </div>
+                              <div className="bg-gray-800 rounded-lg p-4">
+                                <p className="text-gray-500 text-xs mb-1">Duration</p>
+                                <p className="text-white text-lg font-mono flex items-center gap-2">
+                                  <Timer size={16} className="text-cyan-400" />
+                                  {formatDuration(batch.finishing_started_at)}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Verified count + Completion notes - shown on last stage */}
+                            {batchIsLastStage && (
+                              <div className="space-y-3">
+                                <div>
+                                  <label className="block text-gray-400 text-sm mb-2">
+                                    <Hash size={14} className="inline mr-1" />
+                                    Verified Count <span className="text-red-400">*</span>
+                                  </label>
+                                  <p className="text-gray-600 text-xs mb-2">Count of good parts after finishing.</p>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={verifiedCounts[batch.id] ?? ''}
+                                    onChange={(e) => setVerifiedCounts(prev => ({ ...prev, [batch.id]: e.target.value }))}
+                                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                                    placeholder="Enter verified count"
+                                  />
+                                  {(() => {
+                                    const vc = parseInt(verifiedCounts[batch.id])
+                                    const ic = batch.incoming_count || 0
+                                    if (verifiedCounts[batch.id] != null && verifiedCounts[batch.id] !== '' && !isNaN(vc) && vc !== ic) {
+                                      return (
+                                        <div className="flex items-center gap-1.5 text-yellow-400 text-xs mt-2">
+                                          <AlertTriangle size={12} />
+                                          Count differs from incoming ({ic} pcs). Discrepancy of {Math.abs(vc - ic)} pcs will be logged.
+                                        </div>
+                                      )
+                                    }
+                                    return null
+                                  })()}
+                                </div>
+                                <div>
+                                  <label className="block text-gray-400 text-sm mb-2">
+                                    <FileText size={14} className="inline mr-1" />
+                                    Completion Notes (Optional)
+                                  </label>
+                                  <textarea
+                                    value={completionNotes[batch.id] || ''}
+                                    onChange={(e) => setCompletionNotes(prev => ({ ...prev, [batch.id]: e.target.value }))}
+                                    placeholder="Any observations or issues during processing..."
+                                    rows={2}
+                                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white placeholder-gray-500 focus:border-cyan-500 focus:outline-none"
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Advance / Complete Button */}
+                            <button
+                              onClick={() => handleAdvanceStage(batch)}
+                              disabled={actionLoading}
+                              className="w-full py-3 bg-green-600 hover:bg-green-500 text-white rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                            >
+                              {actionLoading ? (
+                                <Loader2 className="animate-spin" size={20} />
+                              ) : batchIsLastStage ? (
+                                <CheckCircle size={20} />
+                              ) : (
+                                <ArrowRight size={20} />
+                              )}
+                              {batchIsLastStage ? 'Complete Batch' : `Advance to ${STAGES[STAGES.findIndex(s => s.key === batch.finishing_stage) + 1]?.label}`}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                )}
+
+                {/* Station View */}
+                {activeView === 'station' && (
+                <div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {STAGES.map(stage => {
+                      const stageBatches = activeBatches.filter(b => b.finishing_stage === stage.key)
+                      const StageIcon = stage.icon
+                      return (
+                        <div key={stage.key} className="bg-gray-800 rounded-lg overflow-hidden">
+                          <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
+                            <StageIcon size={14} className="text-cyan-400" />
+                            <span className="text-white text-sm font-medium">{stage.label}</span>
+                            <span className="ml-auto text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded">{stageBatches.length}</span>
+                          </div>
+                          <div className="p-2 space-y-2 min-h-[100px]">
+                            {stageBatches.length > 0 ? (
+                              stageBatches.map(batch => (
+                                <div key={batch.id} className={`bg-gray-900 rounded p-3 border-l-2 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
+                                  <p className="text-white font-mono text-sm">{batch.job?.job_number}</p>
+                                  <p className="text-gray-400 text-xs truncate">{batch.job?.component?.part_number}</p>
+                                  <div className="flex items-center justify-between mt-2">
+                                    <span className="text-white text-sm">Qty: {batch.quantity}</span>
+                                    <span className="text-gray-400 text-xs font-mono flex items-center gap-1">
+                                      <Timer size={10} className="text-cyan-400" />
+                                      {formatDuration(batch.finishing_started_at)}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="flex items-center justify-center h-full min-h-[80px]">
+                                <p className="text-gray-600 text-xs">Nothing in {stage.label}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <p className="text-gray-600 text-xs text-center mt-3">Switch to Job view to advance stages</p>
+                </div>
+                )}
+                </>
+              ) : (
+                <div className="text-center py-12">
+                  <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <Beaker size={32} className="text-gray-600" />
+                  </div>
+                  <p className="text-gray-500">No active batches</p>
+                  <p className="text-gray-600 text-sm mt-1">Select from queue to begin</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel — Incoming Queue */}
+          <div className="lg:col-span-1">
+            <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
+              <h2 className="text-white font-semibold mb-4 flex items-center gap-2">
+                <Package size={18} className="text-gray-400" />
+                Incoming Queue
+                <span className="ml-auto text-gray-500 text-sm">{queue.length} batches</span>
+              </h2>
+
+              {queue.length === 0 ? (
+                <div className="text-center py-12">
+                  <CheckCircle size={48} className="text-green-500/50 mx-auto mb-4" />
+                  <p className="text-gray-500">All caught up</p>
+                  <p className="text-gray-600 text-sm">No batches waiting for finishing</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                  {queue.map(send => (
+                    <div
+                      key={send.id}
+                      className={`bg-gray-800 rounded-lg p-4 border-l-4 ${getPriorityBorder(send.job?.work_order?.priority)} hover:bg-gray-750 transition-colors`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-white font-mono">{send.job?.job_number}</p>
+                            <div className={`w-2 h-2 rounded-full ${getPriorityColor(send.job?.work_order?.priority)}`} />
+                            {send.job?.work_order?.priority === 'critical' && (
+                              <span className="text-xs bg-red-900/50 text-red-300 border border-red-700 px-1.5 py-0.5 rounded">
+                                Critical
+                              </span>
+                            )}
+                            {send.job?.work_order?.priority === 'high' && (
+                              <span className="text-xs bg-yellow-900/50 text-yellow-300 border border-yellow-700 px-1.5 py-0.5 rounded">
+                                High
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-cyan-400 text-sm">{send.job?.component?.part_number}</p>
+                          <p className="text-gray-500 text-xs">
+                            {send.job?.work_order?.wo_number} • {send.job?.work_order?.customer || '-'}
+                          </p>
+                          <div className="flex items-center gap-4 mt-2">
+                            <span className="text-white text-sm">Qty: {send.quantity}</span>
+                            {send.sent_at && (
+                              <span className="text-gray-500 text-xs flex items-center gap-1">
+                                <Clock size={10} />
+                                Sent {formatRelativeTime(send.sent_at)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleStartBatch(send)}
+                          disabled={actionLoading}
+                          className="px-4 py-2 rounded font-medium transition-colors flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-white disabled:opacity-50"
+                        >
+                          {actionLoading ? (
+                            <Loader2 className="animate-spin" size={16} />
+                          ) : (
+                            <Play size={16} />
+                          )}
+                          Start
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Start Batch Modal */}
+      {showStartModal && startModalSend && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-700">
+              <h3 className="text-white font-semibold flex items-center gap-2">
+                <Play size={20} className="text-cyan-400" />
+                Start Batch
+              </h3>
+              <button
+                onClick={() => { setShowStartModal(false); setStartModalSend(null) }}
+                className="text-gray-400 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {/* Batch summary */}
+              <div className="bg-gray-800 rounded-lg p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-mono">{startModalSend.job?.job_number}</span>
+                  <span className="text-gray-400 text-sm">Qty: {startModalSend.quantity}</span>
+                </div>
+                <p className="text-cyan-400 text-sm">{startModalSend.job?.component?.part_number}</p>
+                <p className="text-gray-500 text-xs">{startModalSend.job?.component?.description}</p>
+              </div>
+
+              {/* Finishing Lot # */}
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  <Hash size={14} className="inline mr-1" />
+                  Finishing Lot #
+                </label>
+                <p className="text-gray-600 text-xs mb-2">Auto-filled from current lot. Change if material or chemicals have changed.</p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={startLotNumber}
+                    onChange={(e) => setStartLotNumber(e.target.value)}
+                    className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-cyan-400 font-mono focus:border-cyan-500 focus:outline-none"
+                    placeholder={generatingLot ? 'Generating...' : 'FLN-YYMMDD-XXXX'}
+                    disabled={generatingLot}
+                  />
+                  <button
+                    onClick={handleGenerateNewLot}
+                    disabled={generatingLot}
+                    className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-gray-400 hover:text-white transition-colors flex items-center gap-1 text-sm disabled:opacity-50"
+                    title="Generate new lot number"
+                  >
+                    <RotateCw size={14} className={generatingLot ? 'animate-spin' : ''} />
+                    New
+                  </button>
+                </div>
+              </div>
+
+              {/* Chemical Lot # */}
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  <Beaker size={14} className="inline mr-1" />
+                  Chemical Lot #
+                </label>
+                <p className="text-gray-600 text-xs mb-2">Lot number from treatment chemicals in tank</p>
+                <input
+                  type="text"
+                  value={startChemicalLot}
+                  onChange={(e) => setStartChemicalLot(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                  placeholder="Enter chemical lot number"
+                />
+                {!startChemicalLot.trim() && (
+                  <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
+                )}
+              </div>
+
+              {/* Incoming Count */}
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  <Package size={14} className="inline mr-1" />
+                  Incoming Count <span className="text-red-400">*</span>
+                </label>
+                <p className="text-gray-600 text-xs mb-2">Count the parts physically in front of you.</p>
+                <input
+                  type="number"
+                  min="0"
+                  value={startIncomingCount}
+                  onChange={(e) => setStartIncomingCount(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  placeholder="Enter count"
+                />
+                {(() => {
+                  const ic = parseInt(startIncomingCount)
+                  if (!isNaN(ic) && ic !== startModalSend.quantity) {
+                    return (
+                      <div className="flex items-center gap-1.5 text-yellow-400 text-xs mt-2">
+                        <AlertTriangle size={12} />
+                        Count differs from machinist's send quantity ({startModalSend.quantity} pcs). Discrepancy will be logged.
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+              </div>
+
+              {/* Confirm button */}
+              <button
+                onClick={handleConfirmStartBatch}
+                disabled={actionLoading || !startIncomingCount || parseInt(startIncomingCount) <= 0}
+                className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+              >
+                {actionLoading ? (
+                  <Loader2 className="animate-spin" size={20} />
+                ) : (
+                  <Play size={20} />
+                )}
+                Start Batch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tank Selection Modal (Wash → Treatment) */}
+      {showTankModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-700">
+              <h3 className="text-white font-semibold flex items-center gap-2">
+                <Flame size={20} className="text-cyan-400" />
+                Select Treatment Tank
+              </h3>
+              <button
+                onClick={() => { setShowTankModal(false); setPendingAdvanceBatch(null) }}
+                className="text-gray-400 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3">
+              <p className="text-gray-400 text-sm mb-4">
+                Select the tank for treatment processing.
+              </p>
+              {finishingMachines
+                .filter(m => !['offline', 'down'].includes(m.status))
+                .map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => handleTankSelect(m)}
+                    disabled={actionLoading}
+                    className="w-full flex items-center gap-3 p-4 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors text-left disabled:opacity-50"
+                  >
+                    <div className={`w-3 h-3 rounded-full ${getMachineStatusDot(m.status)}`} />
+                    <div>
+                      <p className="text-white font-medium">{m.name}</p>
+                      <p className="text-gray-500 text-xs">{m.code} • {m.status}</p>
+                    </div>
+                  </button>
+                ))}
+              {finishingMachines.filter(m => !['offline', 'down'].includes(m.status)).length === 0 && (
+                <p className="text-gray-500 text-center py-4">No available finishing machines</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">
+        <p className="text-gray-600 text-xs text-center font-mono">
+          SkyNet MES - Finishing Station
+        </p>
+      </footer>
+    </div>
+  )
+}

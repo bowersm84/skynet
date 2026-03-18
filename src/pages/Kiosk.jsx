@@ -184,28 +184,30 @@ export default function Kiosk() {
   const [clearingDowntime, setClearingDowntime] = useState(false)
 
   // ========== SECONDARY OPERATION DETECTION ==========
-  // Detect if this is a secondary operation station (passivation, paint, etc.)
-  const isSecondaryStation = machine?.code?.toLowerCase().startsWith('pass') || 
+  // Detect if this is a secondary operation station (finishing, paint, etc.)
+  const isSecondaryStation = machine?.code?.toLowerCase().startsWith('pass') ||
                              machine?.name?.toLowerCase().includes('passivation') ||
+                             machine?.code?.toLowerCase().startsWith('fin') ||
+                             machine?.name?.toLowerCase().includes('finishing') ||
                              machine?.code?.toLowerCase().startsWith('paint') ||
                              machine?.name?.toLowerCase().includes('paint')
-  
+
   const getSecondaryConfig = () => {
     if (!machine) return null
     const code = machine.code?.toLowerCase() || ''
     const name = machine.name?.toLowerCase() || ''
-    
-    if (code.startsWith('pass') || name.includes('passivation')) {
+
+    if (code.startsWith('pass') || name.includes('passivation') || code.startsWith('fin') || name.includes('finishing')) {
       return {
-        type: 'passivation',
-        title: 'Passivation',
+        type: 'finishing',
+        title: 'Finishing',
         pendingStatus: 'pending_passivation',
         inProgressStatus: 'in_passivation',
         nextStatus: 'pending_post_manufacturing',
-        startField: 'passivation_start',
-        endField: 'passivation_end',
-        operatorField: 'passivation_operator_id',
-        notesField: 'passivation_notes',
+        startField: 'finishing_start',
+        endField: 'finishing_end',
+        operatorField: 'finishing_operator_id',
+        notesField: 'finishing_notes',
         color: 'cyan'
       }
     }
@@ -659,7 +661,7 @@ export default function Kiosk() {
       // Determine which statuses to query based on station type
       let statusFilter
       if (secondaryConfig) {
-        // Secondary operation stations (Passivation, Paint)
+        // Secondary operation stations (Finishing, Paint)
         statusFilter = [secondaryConfig.pendingStatus, secondaryConfig.inProgressStatus]
       } else {
         // Normal production machines
@@ -1420,7 +1422,7 @@ export default function Kiosk() {
       let updateData
       
       if (secondaryConfig) {
-        // Secondary operation (passivation, paint) - go directly to in_progress
+        // Secondary operation (finishing, paint) - go directly to in_progress
         updateData = {
           status: secondaryConfig.inProgressStatus,
           [secondaryConfig.startField]: now,
@@ -1494,7 +1496,7 @@ export default function Kiosk() {
     }
   }
 
-  // Complete secondary operation (passivation, paint)
+  // Complete secondary operation (finishing, paint)
   const handleCompleteSecondaryOperation = async () => {
     if (!activeJob || !secondaryConfig) return
     
@@ -1976,16 +1978,6 @@ export default function Kiosk() {
 
     setActionLoading(true)
     try {
-      // C2: Auto-generate production lot number on first material entry
-      if (!activeJob.production_lot_number) {
-        const prodLot = await generateProductionLotNumber()
-        await supabase
-          .from('jobs')
-          .update({ production_lot_number: prodLot, updated_at: new Date().toISOString() })
-          .eq('id', activeJob.id)
-        setActiveJob(prev => ({ ...prev, production_lot_number: prodLot }))
-      }
-
       const { error } = await supabase
         .from('job_materials')
         .insert({
@@ -2038,19 +2030,28 @@ export default function Kiosk() {
 
     setActionLoading(true)
     try {
+      // Generate PLN on production start if not already set
+      let productionLotNumber = activeJob.production_lot_number
+      if (!productionLotNumber) {
+        productionLotNumber = await generateProductionLotNumber()
+      }
+
+      const now = new Date().toISOString()
       const { error } = await supabase
         .from('jobs')
         .update({
           status: 'in_progress',
-          production_start: new Date().toISOString(),
+          production_start: now,
+          production_lot_number: productionLotNumber,
           material_confirmed: true,
-          material_confirmed_at: new Date().toISOString(),
+          material_confirmed_at: now,
           material_confirmed_by: operator.id,
-          updated_at: new Date().toISOString()
+          updated_at: now
         })
         .eq('id', activeJob.id)
 
       if (error) throw error
+      setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber }))
       setShowMaterialModal(false)
       await loadJobs()
     } catch (err) {
@@ -2070,20 +2071,29 @@ export default function Kiosk() {
   const handleConfirmMaterialOverride = async () => {
     setActionLoading(true)
     try {
+      // Generate PLN on production start if not already set
+      let productionLotNumber = activeJob.production_lot_number
+      if (!productionLotNumber) {
+        productionLotNumber = await generateProductionLotNumber()
+      }
+
+      const now = new Date().toISOString()
       const { error } = await supabase
         .from('jobs')
         .update({
           status: 'in_progress',
-          production_start: new Date().toISOString(),
+          production_start: now,
+          production_lot_number: productionLotNumber,
           material_confirmed: false,
           material_override: true,
           material_override_by: operator.id,
-          material_override_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          material_override_at: now,
+          updated_at: now
         })
         .eq('id', activeJob.id)
 
       if (error) throw error
+      setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber }))
       setShowMaterialOverrideModal(false)
       setShowMaterialModal(false)
       await loadJobs()
@@ -2582,10 +2592,34 @@ export default function Kiosk() {
         }
       }
 
-      // Determine next status based on part's passivation requirement
-      const nextStatus = activeJob.component?.requires_passivation 
-        ? 'pending_passivation' 
-        : 'pending_post_manufacturing'
+      // Jobs go to manufacturing_complete; finishing is handled via finishing_sends
+      const nextStatus = 'manufacturing_complete'
+
+      // Auto-create finishing send for any remaining quantity not already sent
+      try {
+        const { data: existingSends } = await supabase
+          .from('finishing_sends')
+          .select('quantity')
+          .eq('job_id', activeJob.id)
+
+        const alreadySent = (existingSends || []).reduce((sum, s) => sum + s.quantity, 0)
+        const remaining = goodPieces - alreadySent
+
+        if (remaining > 0) {
+          await supabase.from('finishing_sends').insert({
+            job_id: activeJob.id,
+            machine_id: activeJob.assigned_machine_id,
+            sent_by: operator.id,
+            quantity: remaining,
+            production_lot_number: activeJob.production_lot_number || null,
+            material_lot_number: activeJob.materials?.[0]?.lot_number || null,
+            status: 'pending_finishing',
+            notes: 'Auto-sent on job completion'
+          })
+        }
+      } catch (sendErr) {
+        console.error('Auto finishing send failed (non-blocking):', sendErr)
+      }
 
       const { error } = await supabase
         .from('jobs')
@@ -3248,7 +3282,7 @@ export default function Kiosk() {
 
               {activeJob ? (
                 secondaryConfig ? (
-                  /* Secondary Operation Active Panel (Passivation/Paint) */
+                  /* Secondary Operation Active Panel (Finishing/Paint) */
                   <div className="p-6">
                     <div className="flex items-start justify-between mb-6">
                       <div>
@@ -3592,7 +3626,7 @@ export default function Kiosk() {
                               )}
                             </div>
                             <div className="flex items-center gap-3">
-                              <span className="text-blue-400">{material.bars_loaded} bars</span>
+                              <span className="text-blue-400">{material.bars_loaded} {material.material_type?.toLowerCase().includes('blank') ? 'pieces' : 'bars'}</span>
                               {material.lot_number && (
                                 <span className="text-gray-600 text-xs">Lot: {material.lot_number}</span>
                               )}
@@ -4431,7 +4465,7 @@ export default function Kiosk() {
                 <textarea
                   value={finishingSendNotes}
                   onChange={(e) => setFinishingSendNotes(e.target.value)}
-                  placeholder="e.g., First batch ready for passivation"
+                  placeholder="e.g., First batch ready for finishing"
                   rows={2}
                   className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
                 />

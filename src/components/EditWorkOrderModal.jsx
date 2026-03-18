@@ -205,10 +205,15 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       // 2. Update existing assembly quantities
       for (const assembly of existingAssemblies) {
         const currentTotal = assembly.orderQuantity + assembly.additionalForStock
-        if (currentTotal !== assembly.originalQuantity) {
+        if (currentTotal !== assembly.originalQuantity || assembly.orderQuantity !== assembly.originalOrderQuantity || assembly.additionalForStock !== assembly.originalAdditionalForStock) {
+          const isMTS = workOrder.order_type === 'make_to_stock'
           const { error: woaErr } = await supabase
             .from('work_order_assemblies')
-            .update({ quantity: currentTotal })
+            .update({
+              quantity: currentTotal,
+              order_quantity: isMTS ? null : assembly.orderQuantity || null,
+              stock_quantity: assembly.additionalForStock || null
+            })
             .eq('id', assembly.woaId)
           if (woaErr) throw woaErr
         }
@@ -249,12 +254,15 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
 		
         for (const assembly of newAssemblies) {
           // Create WOA record
+          const isMTS = workOrder.order_type === 'make_to_stock'
           const { data: woaData, error: woaErr } = await supabase
             .from('work_order_assemblies')
             .insert({
               work_order_id: workOrder.id,
               assembly_id: assembly.assemblyId,
               quantity: assembly.orderQuantity + assembly.additionalForStock,
+              order_quantity: isMTS ? null : assembly.orderQuantity || null,
+              stock_quantity: assembly.additionalForStock || null,
               status: 'pending'
             })
             .select('id')

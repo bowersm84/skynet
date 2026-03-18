@@ -297,12 +297,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       .select('*, document_type:document_types(*)')
       .eq('part_id', job.component.id)
 
-    // A3: Filter out passivation doc requirements if component doesn't require passivation
+    // A3: Filter out finishing/passivation doc requirements if component doesn't require finishing
     if (!job.component?.requires_passivation && requirements) {
       requirements = requirements.filter(r => {
         const code = (r.document_type?.code || '').toLowerCase()
         const name = (r.document_type?.name || '').toLowerCase()
-        return !code.includes('passivation') && !name.includes('passivation')
+        return !code.includes('passivation') && !name.includes('passivation') &&
+               !code.includes('finishing') && !name.includes('finishing')
       })
     }
 
@@ -710,14 +711,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       <div className="text-sm text-gray-500">
                         <span className="text-skynet-accent">{job.component?.part_number}</span>
                         <span className="mx-2">•</span>
-                        <span>Qty: {job.quantity}
-                          {job.work_order?.order_type === 'make_to_order' && job.work_order?.order_quantity && job.work_order?.stock_quantity
-                            ? ` (${job.work_order.order_quantity} order + ${job.work_order.stock_quantity} stock)`
-                            : job.work_order?.order_type === 'make_to_stock'
-                              ? ' (stock)'
-                              : ''
-                          }
-                        </span>
+                        <span>Qty: {job.quantity}</span>
                         {job.work_order?.customer && (
                           <span className="mx-2">• {job.work_order.customer}</span>
                         )}
@@ -1126,11 +1120,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       </div>
                     )}
 
-                    {/* Show passivation info if applicable */}
-                    {job.passivation_end && (
+                    {/* Show finishing info if applicable */}
+                    {job.finishing_end && (
                       <div className="mt-2 text-xs text-cyan-400 flex items-center gap-1">
                         <Beaker size={12} />
-                        Passivated: {new Date(job.passivation_end).toLocaleString()}
+                        Finished: {new Date(job.finishing_end).toLocaleString()}
                       </div>
                     )}
 
@@ -1297,11 +1291,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                     </div>
                     <div className="text-sm text-gray-500">
                       <span>Qty: {job.quantity}</span>
-                      {job.work_order?.order_quantity && job.work_order?.stock_quantity ? (
-                        <span className="text-gray-600"> ({job.work_order.order_quantity} order + {job.work_order.stock_quantity} stock)</span>
-                      ) : job.work_order?.order_type === 'make_to_stock' ? (
-                        <span className="text-gray-600"> (stock)</span>
-                      ) : null}
                       {job.work_order?.order_type === 'make_to_order' && job.work_order?.customer && (
                         <>
                           <span className="mx-2">·</span>

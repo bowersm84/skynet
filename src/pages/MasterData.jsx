@@ -844,7 +844,7 @@ export default function MasterData({ profile }) {
                           {part.requires_passivation && (
                             <span className="text-xs px-2 py-0.5 bg-cyan-900/50 text-cyan-300 rounded flex items-center gap-1">
                               <Beaker size={10} />
-                              Passivation
+                              Finishing
                             </span>
                           )}
                           {part.part_type === 'purchased' && (
@@ -1181,7 +1181,7 @@ export default function MasterData({ profile }) {
                   />
                   <div className="flex items-center gap-2">
                     <Beaker size={16} className="text-cyan-400" />
-                    <span className="text-white">Requires Passivation</span>
+                    <span className="text-white">Requires Finishing</span>
                   </div>
                 </label>
               )}
@@ -1535,7 +1535,7 @@ export default function MasterData({ profile }) {
                             <span className="text-gray-500 ml-2">{bom.component?.description}</span>
                             {bom.component?.requires_passivation && (
                               <span className="ml-2 text-xs text-cyan-400">
-                                <Beaker size={10} className="inline" /> Passivation
+                                <Beaker size={10} className="inline" /> Finishing
                               </span>
                             )}
                           </div>

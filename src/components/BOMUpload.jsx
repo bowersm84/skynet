@@ -862,10 +862,10 @@ export default function BOMUpload({ onComplete, onCancel }) {
                     </div>
                   )}
                   
-                  {/* Part Type + Passivation + Machines - always visible */}
+                  {/* Part Type + Finishing + Machines - always visible */}
                   {editingComponent !== idx && (
                     <div className="mt-2 pt-2 border-t border-gray-700/50 pl-9 space-y-2">
-                      {/* Row 1: Type + Passivation */}
+                      {/* Row 1: Type + Finishing */}
                       <div className="flex items-center gap-4">
                         {/* Manufactured / Purchased toggle */}
                         <div className="flex items-center gap-1.5">
@@ -892,7 +892,7 @@ export default function BOMUpload({ onComplete, onCancel }) {
                           </button>
                         </div>
 
-                        {/* Requires Passivation checkbox */}
+                        {/* Requires Finishing checkbox */}
                         <label className="flex items-center gap-1.5 cursor-pointer">
                           <input
                             type="checkbox"
@@ -905,7 +905,7 @@ export default function BOMUpload({ onComplete, onCancel }) {
                             className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
                           />
                           <span className={`text-xs ${comp.requires_passivation ? 'text-cyan-400' : 'text-gray-500'}`}>
-                            Requires Passivation
+                            Requires Finishing
                           </span>
                         </label>
                       </div>

@@ -1,139 +1,177 @@
 # SkyNet Sprint 3 — Implementation Plan
-## Finishing Overhaul & Material Tracking (Weeks 5–6, ~34 hrs)
-### March 1, 2026
+## Finishing Overhaul & Material Tracking
+### Originally: March 1, 2026 | Updated: March 18, 2026
 
 ---
 
 ## Sprint Goal
-Transform the passivation module into a full Finishing station with multi-stage processing. Implement inch-based material tracking. This is the largest sprint and the most complex domain overhaul.
+Transform the passivation module into a full Finishing station with multi-stage processing.
+Implement inch-based material tracking. This is the largest sprint and the most complex
+domain overhaul.
 
 ## Foundations from Previous Sprints
-- **S1 Routing System:** `routing_templates` + `job_routing_steps` provide the step-based processing framework that finishing stages will build on
-- **S2 `finishing_sends` table:** Partial sends from manufacturing kiosks feed into the finishing queue (status = `pending_finishing`)
-- **S2 Production Lot Numbers:** `jobs.production_lot_number` carries through to finishing for chain-of-custody traceability
-- **S2 `lot_number_sequences` table:** Reusable for finishing lot number generation (prefix = 'FLN')
+- **S1 Routing System:** `routing_templates` + `job_routing_steps` provide the step-based
+  processing framework that finishing stages will build on
+- **S2 `finishing_sends` table:** Partial sends from manufacturing kiosks feed into the
+  finishing queue (status = `pending_finishing`)
+- **S2 Production Lot Numbers:** `jobs.production_lot_number` carries through to finishing
+  for chain-of-custody traceability
+- **S2 `lot_number_sequences` table:** Reusable for finishing lot number generation
+  (prefix = 'FLN')
 
 ---
 
 ## Action Items
 
-| # | Action Item | Lead | Type | Effort | Notes |
-|---|-------------|------|------|--------|-------|
-| 21 | Rename Passivation to Finishing; implement multi-stage process per component master data | James | Modify | XL (6-12 hrs) | Secondary.jsx overhaul. Stage config per part. Every component goes through finishing. |
-| 22 | Add second finishing machine in system | James | Config | S (<1 hr) | Insert machine record. Tank assignment if needed. |
-| 24 | Add production lot + finishing lot number fields | James | Modify | M (1-3 hrs) | DB columns on jobs + finishing kiosk UI fields. |
-| 25 | Add DOWN indicators for finishing machines | James | Modify | S (<1 hr) | Reuse existing DOWN indicator pattern. |
-| 53 | Auto-generate finishing lot numbers at finishing start | James | New | M (1-3 hrs) | Reuse `next_lot_number` function with prefix='FLN'. |
-| 54 | Finishing count field — James enters verified count, flags discrepancy | James | New | M (1-3 hrs) | Machine count vs James's count. Log delta. |
-| 58 | Finishing queue part lookup — search by part# to find job | James | New | M (1-3 hrs) | James needs this for unknown parts on his table. |
-| 7 | Override logging — all overrides logged with operator ID, timestamp, forced notes | All | New | L (3-6 hrs) | Audit trail table + UI. |
-| 8 | Flexible document upload at any workflow point | Roger | Modify | M (1-3 hrs) | Extend existing S3 upload to allow docs at any stage. |
-| 9 | Add good/bad quantity entry to post-mfg compliance review | Roger | Modify | S (<1 hr) | Add fields to ComplianceReview.jsx. |
-| 10 | Add notes section to post-mfg compliance review | Roger | Modify | S (<1 hr) | Text field for Roger's audit trail. |
-| 32a | Material master with inch-based UOM and conversions | James | New | L (3-6 hrs) | Base UOM = inches. Display conversions to feet, bars, weight. |
-| 32b | Raw material receiving log | James | New | M (1-3 hrs) | Receiving module in Master Data. Foundation for inventory. |
-| 66 | Import Harry's Trello machine data (serial numbers, mfr dates, photos) | Harry | Config | M (1-3 hrs) | One-time data import. |
-
-**Total: 14 items | Est: ~34 hours (1x XL, 1x L+, 7x M, 4x S, 1x Config)**
+| # | Action Item | Lead | Type | Effort | Status |
+|---|-------------|------|------|--------|--------|
+| 21 | Rename Passivation to Finishing; implement multi-stage process | James | Modify | XL | ✅ Batch A |
+| 22 | Add second finishing machine in system | James | Config | S | ✅ Batch A |
+| 24 | Add production lot + finishing lot number fields | James | Modify | M | ✅ Batch B |
+| 25 | Add DOWN indicators for finishing machines | James | Modify | S | ✅ Batch A |
+| 53 | Auto-generate finishing lot numbers at finishing start | James | New | M | ✅ Batch B |
+| 54 | Finishing count field — James enters verified count, flags discrepancy | James | New | M | ✅ Batch B |
+| 58 | Finishing queue part lookup — search by part# to find job | James | New | M | 🔲 Batch C |
+| 7 | Override logging — all overrides logged with operator ID, timestamp | All | New | L | 🔲 Batch C |
+| 8 | Flexible document upload at any workflow point | Roger | Modify | M | 🔲 Batch C |
+| 9 | Add good/bad quantity entry to post-mfg compliance review | Roger | Modify | S | 🔲 Batch C |
+| 10 | Add notes section to post-mfg compliance review | Roger | Modify | S | 🔲 Batch C |
+| 32a | Material master with inch-based UOM and conversions | James | New | L | 🔲 Batch D |
+| 32b | Raw material receiving log | James | New | M | 🔲 Batch D |
+| 66 | Import Harry's Trello machine data | Harry | Config | M | 🔲 Batch D |
 
 ---
 
-## Batch Organization
+## Batch A: Finishing Station Core (#21, #22, #25) — ✅ COMPLETE
 
-### Batch A: Finishing Station Core (#21, #22, #25) — ~10 hrs
-**Goal:** Transform Secondary.jsx from passivation-only to full finishing station.
+**Delivered:**
+- `src/pages/Finishing.jsx` — new finishing station (replaces Secondary.jsx)
+- Route `/finishing` added to App.jsx; `/secondary/passivation` removed
+- Passivation columns renamed to finishing equivalents on `jobs` table
+- `finishing_sends` columns added: `finishing_stage`, `stage_started_at`,
+  `finishing_operator_id`, `finishing_started_at`, `finishing_completed_at`
+- FIN-1 machine renamed from PASS-01, `machine_type` updated to 'finishing'
+- FIN-2 (Finishing Tank 2) inserted as second finishing machine
+- Dashboard shows single "Finishing Station" card (not per-tank cards)
+- DOWN indicators for finishing machines shown in station header
+- Real-time subscription on `finishing_sends` table
 
-**Scope:**
-- Rename all "Passivation" references to "Finishing" across UI, DB, and code
-- Implement multi-stage processing: Wash → Treatment → Dry (stages driven by component master data — not every part gets passivation)
-- Add second finishing machine record
-- DOWN indicators for finishing machines (reuse production pattern)
-- Integrate `finishing_sends` as the incoming queue (replace direct job status transition)
-- Steel path: wash → anti-rust oil → external heat treat
-- Aluminum path: wash → Zexel coating
+**Design decisions made during testing (deviations from original plan):**
+- Single finishing station card on Dashboard, not one card per tank — tank status shown
+  as indicators within the single card
+- Multiple simultaneous active batches supported (no one-at-a-time limit)
+- Tank selection moved from login to the Treatment stage advance step
+- Collapsible batch cards added for space management
+- Job/Station view toggle added (Job view = collapsible cards; Station view = three columns
+  by stage)
+- "Launch Finishing Station" button on Dashboard card instead of "Launch Kiosk"
+- Finishing station integrated with `kiosk_sessions` for single-login enforcement
+- Auto-send to finishing on "Complete Job": remaining quantity auto-creates
+  `finishing_sends` record if machinist never manually sent
+- Job status advances to `pending_post_manufacturing` when all sends for a job
+  reach `finishing_complete`
+- PIN login upgraded to match Kiosk numpad style with keyboard support
 
-**Key Design Decision:** The finishing station reads from `finishing_sends WHERE status = 'pending_finishing'` as its work queue. Each send becomes a finishing batch. James processes batches, not individual jobs.
+**Kiosk fixes delivered alongside Batch A:**
+- "Send to Finishing" no longer changes job status (was incorrectly moving job out
+  of `in_progress`)
+- Blank material types display "pieces" not "bars" for quantity UOM
+- PLN generation moved from material entry to production start (ensures every job
+  gets a PLN even if machinist skips material loading)
 
-**Dependencies:** S1 routing system, S2 finishing_sends table
-
-**Claude Code Prompt Sections:**
-1. Database: rename passivation columns/statuses, add finishing_stage enum, add second machine
-2. UI: overhaul Secondary.jsx — queue view, stage tracking, batch processing
-3. DOWN indicators: copy pattern from production machines
+**Dashboard fixes delivered alongside Batch A:**
+- Pending Compliance counter includes `pending_post_manufacturing`
+- Assembly line item order/stock qty uses stored `woa.order_quantity` /
+  `woa.stock_quantity` (not calculated from WO totals)
+- `work_order_assemblies` table: `order_quantity` and `stock_quantity` columns added;
+  `CreateWorkOrderModal` and `EditWorkOrderModal` updated to save per-assembly splits
+- Compliance view job rows show plain job quantity (no WO-level order/stock breakdown)
 
 ---
 
-### Batch B: Lot Numbers & Count Verification (#24, #53, #54) — ~6 hrs
-**Goal:** Complete the lot number chain and add James's count verification.
+## Batch B: Lot Numbers & Count Verification (#24, #53, #54) — ✅ COMPLETE
 
-**Scope:**
-- Add `finishing_lot_number` column to finishing records
-- Auto-generate finishing lot numbers using existing `next_lot_number` function (prefix = 'FLN')
-- Finishing lot persists across daily batches for same material lot (only changes on material lot change or tank chemical change)
-- Count verification: James enters his count, system compares to machine count, flags discrepancy
-- Display both production lot and finishing lot in finishing UI
+**Delivered:**
+- Finishing Lot # (FLN) auto-generated at batch start using `next_lot_number('FLN', ...)`
+- FLN persists across batches: pre-filled from most recent active lot, not always new
+- "Generate New" button allows James to force a new FLN when chemicals/material change
+- Chemical Lot # field added to Start Batch modal — persists across batches same as FLN
+- Incoming Count field at batch start (pre-filled from send quantity, editable)
+- Verified Count field at batch completion (starts blank, required)
+- Discrepancy warnings shown inline at both entry points (non-blocking)
+- ALL discrepancies logged to `audit_logs` — no percentage threshold
+- `jobs.finishing_lot_number` updated when batch completes
 
-**Key Rule (from James):** Finishing lot stays the same for weeks/months as long as same material heat is used. Only changes when material changes or passivation chemicals change. System auto-generates, but James can override if chemicals change.
+**New DB columns added in Batch B:**
+
+On `finishing_sends`:
+- `finishing_lot_number` text
+- `chemical_lot_number` text
+- `incoming_count` integer
+- `verified_count` integer
+- `count_discrepancy` integer
+- `verified_by` uuid FK profiles
+- `verified_at` timestamptz
+
+On `jobs`:
+- `finishing_lot_number` text
+
+**Design decisions made during testing:**
+- Chemical lot number added to Start Batch modal (not in original scope) — required for
+  Roger's compliance audit trail and is the signal for when FLN should change
+- Verified count starts blank (not pre-filled) to force conscious entry — pre-filling
+  caused a UI bug where the field wasn't recognized as user-entered
+- All discrepancies logged regardless of size — threshold removed; percentage filtering
+  is a reporting concern, not a data capture concern
 
 ---
 
-### Batch C: Finishing Queue & Compliance (#58, #7, #8, #9, #10) — ~10 hrs
+## Batch C: Finishing Queue & Compliance (#58, #7, #8, #9, #10) — 🔲 NEXT
+
 **Goal:** Part lookup for finishing, override audit trail, and compliance improvements.
 
 **Scope:**
-- Finishing queue part lookup: search by part number to find associated job/send
-- Override logging: `audit_logs` table (already created in S2) — log all overrides with operator, timestamp, reason
-- Flexible document upload: extend doc upload to finishing stage, not just compliance
-- Post-mfg compliance: add good/bad quantity entry fields + notes section
+- Finishing queue part lookup: search by part number to find associated job/send.
+  James needs this to identify unknown parts that arrive on his table without paperwork.
+- Override logging: `audit_logs` table (already created in S2) — log all overrides with
+  operator, timestamp, reason. Build override confirmation modal UI.
+- Flexible document upload: extend S3 doc upload to finishing stage, not just compliance.
+  Roger wants James to scan and attach production logs directly to jobs at finishing.
+- Post-mfg compliance: add good/bad quantity entry fields + notes section to
+  `ComplianceReview.jsx` post-mfg section.
 
-**Dependencies:** S2 `audit_logs` table
+**Dependencies:** S2 `audit_logs` table (exists)
+
+**Claude Code Prompt Sections:**
+1. Finishing queue search bar — filter pending queue by part number
+2. Override logging modal — confirm + notes required, log to audit_logs
+3. Document upload at finishing stage — extend existing S3 upload pattern
+4. ComplianceReview.jsx post-mfg section — good qty, bad qty, notes fields
 
 ---
 
-### Batch D: Material Master & Data Import (#32a, #32b, #66) — ~8 hrs
+## Batch D: Material Master & Data Import (#32a, #32b, #66) — 🔲 PLANNED
+
 **Goal:** Inch-based material tracking and raw material receiving.
 
 **Scope:**
-- Material master table: `materials` with base UOM in inches, auto-conversions to feet (÷12), bars (÷bar_length), weight (using material density)
+- Material master table: `materials` with base UOM in inches, auto-conversions to feet
+  (÷12), bars (÷bar_length), weight (using material density)
 - Material types already exist (`material_types` table from S2) — link to material master
-- Raw material receiving log: new page in Master Data section for logging incoming material (vendor, heat/lot number, quantity, date received)
-- Import Harry's Trello machine data (one-time script)
+- Raw material receiving log: new page in Master Data section for logging incoming
+  material (vendor, heat/lot number, quantity, date received). Betty would use this.
+- Import Harry's Trello machine data (serial numbers, mfr dates, photos) — one-time script
 
-**Key Decision (MB):** Base UOM = inches. All conversions derive from inches. Display shows all three: inches, feet, bars.
+**Key Decision (MB):** Base UOM = inches. All conversions derive from inches. Display
+shows all three: inches, feet, bars.
 
----
-
-## Database Changes (Preview)
-
+**Database Changes:**
 ```sql
--- Batch A: Finishing station
-ALTER TABLE jobs RENAME COLUMN passivation_start TO finishing_start;
-ALTER TABLE jobs RENAME COLUMN passivation_end TO finishing_end;
-ALTER TABLE jobs RENAME COLUMN passivation_operator_id TO finishing_operator_id;
-ALTER TABLE jobs RENAME COLUMN passivation_notes TO finishing_notes;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS finishing_lot_number text;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS finishing_stage text; -- 'wash', 'treatment', 'dry'
-
--- Update job status enum to replace passivation references
--- (This requires careful migration — may need to update CHECK constraint)
-
--- Batch A: Second finishing machine
-INSERT INTO machines (name, code, type, location, is_active)
-VALUES ('Finishing Tank 2', 'FIN-2', 'finishing', 'Leesburg', true);
-
--- Batch B: Count verification
-ALTER TABLE finishing_sends ADD COLUMN IF NOT EXISTS machine_count integer;
-ALTER TABLE finishing_sends ADD COLUMN IF NOT EXISTS verified_count integer;
-ALTER TABLE finishing_sends ADD COLUMN IF NOT EXISTS count_discrepancy integer;
-ALTER TABLE finishing_sends ADD COLUMN IF NOT EXISTS verified_by uuid REFERENCES profiles(id);
-ALTER TABLE finishing_sends ADD COLUMN IF NOT EXISTS verified_at timestamptz;
-
--- Batch D: Material master
 CREATE TABLE IF NOT EXISTS public.materials (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   material_type_id uuid NOT NULL REFERENCES material_types(id),
-  bar_size_inches numeric NOT NULL,        -- base UOM
-  density_lbs_per_cubic_inch numeric,       -- for weight calc
+  bar_size_inches numeric NOT NULL,
+  density_lbs_per_cubic_inch numeric,
   vendor text,
   is_active boolean DEFAULT true,
   created_at timestamptz DEFAULT now(),
@@ -158,39 +196,34 @@ CREATE TABLE IF NOT EXISTS public.material_receiving (
 
 ---
 
-## Schedule
+## Backlog Items Identified During Sprint 3
 
-| Week | Batch | Items | Hours | Notes |
-|------|-------|-------|-------|-------|
-| 5a | A: Finishing Core | #21, #22, #25 | ~10 | Largest item — Secondary.jsx overhaul |
-| 5b | B: Lot Numbers & Counts | #24, #53, #54 | ~6 | Builds on Batch A finishing station |
-| 6a | C: Queue & Compliance | #58, #7, #8, #9, #10 | ~10 | Independent of A/B |
-| 6b | D: Material Master & Data | #32a, #32b, #66 | ~8 | Can partially parallel with C |
-
-**Total: ~34 hours across 2 weeks**
+| Item | Description | Sprint |
+|------|-------------|--------|
+| Finishing status in WO Lookup | Show "In Finishing (X pcs)" cyan badge on job rows in April's WO Lookup when `finishing_sends` records exist. Query `finishing_sends` grouped by `job_id`, sum quantities by status, display inline on job row. | S4 |
 
 ---
 
-## Risks & Mitigations
+## Sprint 3 Success Criteria
 
-| Risk | Mitigation |
-|------|-----------|
-| #21 is XL and touches core workflow | Break into sub-tasks: rename first, then stages, then queue integration |
-| Passivation→Finishing rename touches DB constraints | Test status enum migration on dev data first |
-| James's finishing workflow is complex (multi-day batches) | Keep MVP simple: one finishing record per send. Daily batch grouping in Phase 2 |
-| Material master scope creep | Keep to inch-based UOM + display conversions. No Fishbowl integration yet |
-| Harry's Trello data may need cleanup | Manual review before import — one-time effort |
-
----
-
-## Success Criteria
-- [ ] "Passivation" renamed to "Finishing" everywhere in UI
-- [ ] James can see incoming work from `finishing_sends` queue
-- [ ] Multi-stage processing (wash/treatment/dry) per component configuration
-- [ ] Finishing lot numbers auto-generated
-- [ ] James's count verification with discrepancy flagging
-- [ ] Part lookup in finishing queue
-- [ ] Override logging with audit trail
-- [ ] Post-mfg compliance has good/bad qty + notes
-- [ ] Material master with inch-based UOM
-- [ ] Raw material receiving log functional
+- [x] "Passivation" renamed to "Finishing" everywhere in UI
+- [x] James can see incoming work from `finishing_sends` queue
+- [x] Multi-stage processing (Wash → Treatment → Dry)
+- [x] Single finishing station card on Dashboard with queue count
+- [x] Multiple simultaneous active batches supported
+- [x] Collapsible batch cards + Job/Station view toggle
+- [x] Tank selection at Treatment stage
+- [x] Finishing lot numbers auto-generated with persistence logic
+- [x] Chemical lot number captured and persisted
+- [x] Incoming count at batch start
+- [x] Verified count at batch completion (required, starts blank)
+- [x] All discrepancies logged to audit_logs
+- [x] Job advances to pending_post_manufacturing when all sends complete
+- [x] PLN generated at production start (not material entry)
+- [x] Auto-send to finishing on job complete
+- [x] kiosk_sessions integration for single-login enforcement
+- [ ] Part lookup in finishing queue (Batch C)
+- [ ] Override logging with audit trail (Batch C)
+- [ ] Post-mfg compliance has good/bad qty + notes (Batch C)
+- [ ] Material master with inch-based UOM (Batch D)
+- [ ] Raw material receiving log functional (Batch D)

@@ -25,6 +25,9 @@ export default function Dashboard({ user, profile }) {
   // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
   const [activeMaintenanceJobs, setActiveMaintenanceJobs] = useState([])
+
+  // Finishing queue count
+  const [finishingQueueCount, setFinishingQueueCount] = useState(0)
   
   // Auto-refresh state
   const [autoRefresh, setAutoRefresh] = useState(true) // Enabled by default
@@ -89,7 +92,6 @@ export default function Dashboard({ user, profile }) {
           assigned_machine:machines(id, name, code)
         `)
         .not('status', 'eq', 'complete')
-        .not('status', 'eq', 'manufacturing_complete')
         .not('status', 'eq', 'incomplete')
         .not('status', 'eq', 'cancelled')
         .order('created_at', { ascending: true })
@@ -113,6 +115,16 @@ export default function Dashboard({ user, profile }) {
       } else {
         console.log('✅ Ongoing downtimes fetched:', ongoingDowntimesData?.length || 0)
         setOngoingDowntimes(ongoingDowntimesData || [])
+      }
+
+      // Fetch finishing queue count
+      const { count: finishingCount, error: finishingError } = await supabase
+        .from('finishing_sends')
+        .select('id', { count: 'exact', head: true })
+        .in('status', ['pending_finishing', 'in_finishing'])
+
+      if (!finishingError) {
+        setFinishingQueueCount(finishingCount || 0)
       }
 
       // Fetch for assembly-ready work orders
@@ -256,9 +268,9 @@ export default function Dashboard({ user, profile }) {
     const code = machine.code?.toLowerCase() || ''
     const name = machine.name?.toLowerCase() || ''
     
-    if (code.startsWith('pass') || name.includes('passivation')) {
+    if (code.startsWith('pass') || name.includes('passivation') || code.startsWith('fin') || name.includes('finishing')) {
       return {
-        type: 'passivation',
+        type: 'finishing',
         statuses: ['pending_passivation', 'in_passivation']
       }
     }
@@ -277,7 +289,7 @@ export default function Dashboard({ user, profile }) {
     const secondaryConfig = getSecondaryConfig(machine)
     
     if (secondaryConfig) {
-      // For secondary operations (Passivation, Paint), show ALL jobs with matching status
+      // For secondary operations (Finishing, Paint), show ALL jobs with matching status
       // These jobs are not assigned to a specific machine
       return jobs.filter(job => secondaryConfig.statuses.includes(job.status))
     }
@@ -322,6 +334,8 @@ export default function Dashboard({ user, profile }) {
           work_order_assemblies (
             id,
             quantity,
+            order_quantity,
+            stock_quantity,
             status,
             good_quantity,
             bad_quantity,
@@ -393,8 +407,8 @@ export default function Dashboard({ user, profile }) {
       in_setup: { label: 'In Setup', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
       in_progress: { label: 'In Progress', color: 'bg-green-900/50 text-green-300 border-green-700' },
       manufacturing_complete: { label: 'Mfg Complete', color: 'bg-teal-900/50 text-teal-300 border-teal-700' },
-      pending_passivation: { label: 'Pending Passivation', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
-      in_passivation: { label: 'In Passivation', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
+      pending_passivation: { label: 'Pending Finishing (Legacy)', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
+      in_passivation: { label: 'In Finishing (Legacy)', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
       pending_post_manufacturing: { label: 'Post-Mfg Review', color: 'bg-orange-900/50 text-orange-300 border-orange-700' },
       ready_for_assembly: { label: 'Ready for Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
       in_assembly: { label: 'In Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
@@ -453,7 +467,7 @@ export default function Dashboard({ user, profile }) {
   }
 
   // Job categorization - incomplete jobs included with unassigned
-  const pendingComplianceJobs = jobs.filter(job => 
+  const pendingComplianceJobs = jobs.filter(job =>
     job.status === 'pending_compliance' || job.status === 'pending_post_manufacturing'
   )
   const incompleteJobs = jobs.filter(job => job.status === 'incomplete')
@@ -840,16 +854,52 @@ export default function Dashboard({ user, profile }) {
 
                   {expandedLocations[locationName] && (
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-                      {locationMachines.map(machine => (
-                        <MachineCard 
-                          key={machine.id} 
-                          machine={machine} 
+                      {locationMachines.filter(m => m.machine_type !== 'finishing').map(machine => (
+                        <MachineCard
+                          key={machine.id}
+                          machine={machine}
                           jobs={getJobsForMachine(machine.id)}
                           getPriorityColor={getPriorityColor}
                           ongoingDowntime={getOngoingDowntimeForMachine(machine.id)}
                           activeMaintenanceJob={getActiveMaintenanceForMachine(machine.id)}
                         />
                       ))}
+                      {/* Finishing Station card — shown once per location that has finishing machines */}
+                      {locationMachines.some(m => m.machine_type === 'finishing') && (
+                        <div className="bg-gray-900 rounded-lg border border-cyan-800/50 overflow-hidden">
+                          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Beaker size={16} className="text-cyan-400" />
+                              <span className="text-white font-semibold text-sm">Finishing Station</span>
+                            </div>
+                          </div>
+                          <div className="p-3 space-y-2">
+                            <div className="text-center py-3">
+                              <p className="text-2xl font-bold text-cyan-400">{finishingQueueCount}</p>
+                              <p className="text-gray-500 text-xs">{finishingQueueCount === 1 ? 'batch' : 'batches'} pending</p>
+                            </div>
+                            {/* Machine status indicators */}
+                            <div className="space-y-1">
+                              {locationMachines.filter(m => m.machine_type === 'finishing').map(m => (
+                                <div key={m.id} className="flex items-center gap-1.5 text-xs">
+                                  <div className={`w-2 h-2 rounded-full ${['down','offline','maintenance'].includes(m.status) ? 'bg-red-500' : 'bg-green-500'}`} />
+                                  <span className={['down','offline','maintenance'].includes(m.status) ? 'text-red-400' : 'text-gray-400'}>{m.name}</span>
+                                  {['down','offline','maintenance'].includes(m.status) && <span className="text-red-500 font-semibold">DOWN</span>}
+                                </div>
+                              ))}
+                            </div>
+                            <a
+                              href="/finishing"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="w-full mt-2 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-cyan-500 text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
+                            >
+                              <Beaker size={16} />
+                              Launch Finishing Station
+                            </a>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1422,7 +1472,11 @@ export default function Dashboard({ user, profile }) {
                                           </div>
                                         </div>
                                         <div className="flex items-center gap-3 text-sm">
-                                          <span className="text-gray-500">Qty: {woa.quantity}</span>
+                                          <span className="text-gray-500">Qty: {woa.quantity}
+                                            {woa.order_quantity != null && (
+                                              <span className="text-gray-600"> ({woa.order_quantity} order + {woa.stock_quantity || 0} stock)</span>
+                                            )}
+                                          </span>
                                           {woa.status === 'complete' && (
                                             <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-400 rounded">
                                               {woa.good_quantity}/{woa.quantity} good

@@ -188,14 +188,26 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
           <p className="text-gray-600 text-xs text-center mt-2">Ready for assignment</p>
         )}
 
-        {/* Launch Kiosk Button */}
-        <button
-          onClick={handleLaunchKiosk}
-          className="w-full mt-3 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-skynet-accent text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
-        >
-          <Monitor size={16} />
-          Launch Kiosk
-        </button>
+        {/* Launch Kiosk / Finishing Station Button */}
+        {machine.machine_type === 'finishing' ? (
+          <a
+            href="/finishing"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full mt-3 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-skynet-accent text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
+          >
+            <Monitor size={16} />
+            Launch Finishing Station
+          </a>
+        ) : (
+          <button
+            onClick={handleLaunchKiosk}
+            className="w-full mt-3 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-skynet-accent text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
+          >
+            <Monitor size={16} />
+            Launch Kiosk
+          </button>
+        )}
       </div>
     </div>
   )

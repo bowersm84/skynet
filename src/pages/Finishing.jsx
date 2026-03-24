@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import {
   Lock,
   Unlock,
@@ -25,7 +26,11 @@ import {
   List,
   Columns,
   Hash,
-  RotateCw
+  RotateCw,
+  Search,
+  Paperclip,
+  Upload,
+  Eye
 } from 'lucide-react'
 
 // Stage definitions
@@ -45,6 +50,9 @@ export default function Finishing() {
   // Queue state
   const [queue, setQueue] = useState([])
   const [activeBatches, setActiveBatches] = useState([])
+  const [recentCompletions, setRecentCompletions] = useState([])
+  const [recentExpanded, setRecentExpanded] = useState(false)
+  const [batchLabels, setBatchLabels] = useState({})
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
 
@@ -69,6 +77,14 @@ export default function Finishing() {
 
   // Collapsed state per batch
   const [collapsedBatches, setCollapsedBatches] = useState({})
+
+  // Queue search
+  const [queueSearch, setQueueSearch] = useState('')
+  const [queueExpanded, setQueueExpanded] = useState(false)
+
+  // Document upload
+  const [uploadingDoc, setUploadingDoc] = useState(null) // batch send ID
+  const [batchDocuments, setBatchDocuments] = useState({}) // { sendId: [docs] }
 
   // Active batches view toggle
   const [activeView, setActiveView] = useState('job') // 'job' | 'station'
@@ -204,13 +220,52 @@ export default function Finishing() {
             work_order:work_orders(wo_number, customer, priority, due_date),
             component:parts!component_id(id, part_number, description)
           ),
-          sent_by_profile:profiles!sent_by(full_name)
+          sent_by_profile:profiles!sent_by(full_name),
+          machine:machines(id, name, code)
         `)
         .eq('status', 'in_finishing')
         .order('finishing_started_at', { ascending: true })
 
       if (activeError) throw activeError
       setActiveBatches(activeData || [])
+
+      // Fetch recent completions (last 5 days)
+      const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      const { data: recentData } = await supabase
+        .from('finishing_sends')
+        .select(`
+          *,
+          job:jobs(
+            id, job_number,
+            work_order:work_orders(wo_number, customer),
+            component:parts!component_id(part_number, description)
+          )
+        `)
+        .eq('status', 'finishing_complete')
+        .gte('finishing_completed_at', fiveDaysAgo)
+        .order('finishing_completed_at', { ascending: false })
+        .limit(50)
+      setRecentCompletions(recentData || [])
+
+      // Build batch labels (A, B, C...) for jobs with multiple sends
+      const allSends = [...(pendingData || []), ...(activeData || []), ...(recentData || [])]
+      const byJob = {}
+      ;[...allSends].sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
+        .forEach(send => {
+          const jid = send.job_id || send.job?.id
+          if (!jid) return
+          if (!byJob[jid]) byJob[jid] = []
+          byJob[jid].push(send.id)
+        })
+      const labels = {}
+      Object.values(byJob).forEach(ids => {
+        ids.forEach((id, i) => {
+          if (ids.length > 1) {
+            labels[id] = String.fromCharCode(65 + i)
+          }
+        })
+      })
+      setBatchLabels(labels)
 
       setLastUpdated(new Date())
     } catch (err) {
@@ -467,6 +522,69 @@ export default function Finishing() {
       console.error('Error generating lot:', err)
     } finally {
       setGeneratingLot(false)
+    }
+  }
+
+  // Document upload handlers
+  const handleDocumentUpload = async (sendId, jobId, file) => {
+    setUploadingDoc(sendId)
+    try {
+      const s3Path = `jobs/${jobId}/finishing`
+      const { filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
+
+      const { error } = await supabase
+        .from('job_documents')
+        .insert({
+          job_id: jobId,
+          document_type_id: '644c26a8-7c13-4939-9e52-130dff278191',
+          file_name: file.name,
+          file_url: filePath,
+          file_size: fileSize,
+          mime_type: mimeType,
+          status: 'approved',
+          uploaded_by: operator.id,
+        })
+
+      if (error) throw error
+      await loadBatchDocuments(sendId, jobId)
+    } catch (err) {
+      console.error('Upload error:', err)
+      alert('Failed to upload: ' + err.message)
+    } finally {
+      setUploadingDoc(null)
+    }
+  }
+
+  const loadBatchDocuments = async (sendId, jobId) => {
+    const { data } = await supabase
+      .from('job_documents')
+      .select('*')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false })
+    setBatchDocuments(prev => ({ ...prev, [sendId]: data || [] }))
+  }
+
+  const handleViewDocument = async (filePath) => {
+    try {
+      const signedUrl = await getDocumentUrl(filePath)
+      window.open(signedUrl, '_blank')
+    } catch (err) {
+      alert('Failed to open document')
+    }
+  }
+
+  const handleRemoveDocument = async (docId, sendId, jobId) => {
+    if (!confirm('Remove this document?')) return
+    try {
+      const { error } = await supabase
+        .from('job_documents')
+        .delete()
+        .eq('id', docId)
+      if (error) throw error
+      await loadBatchDocuments(sendId, jobId)
+    } catch (err) {
+      console.error('Remove error:', err)
+      alert('Failed to remove document')
     }
   }
 
@@ -756,6 +874,15 @@ export default function Finishing() {
     return ['down', 'offline', 'maintenance'].includes(status)
   }
 
+  // Filtered queue for search
+  const filteredQueue = queueSearch.trim()
+    ? queue.filter(send =>
+        send.job?.component?.part_number?.toLowerCase().includes(queueSearch.toLowerCase()) ||
+        send.job?.job_number?.toLowerCase().includes(queueSearch.toLowerCase()) ||
+        send.job?.work_order?.wo_number?.toLowerCase().includes(queueSearch.toLowerCase())
+      )
+    : queue
+
   // ==================== RENDER ====================
 
   // PIN Entry Screen — numpad layout matching Kiosk
@@ -888,7 +1015,7 @@ export default function Finishing() {
       </header>
 
       <main className="p-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className={`grid gap-6 ${activeView === 'station' && !queueExpanded ? 'grid-cols-[1fr_auto]' : 'grid-cols-1 lg:grid-cols-2'}`}>
 
           {/* Left Panel — Active Batches */}
           <div className="lg:col-span-1">
@@ -910,7 +1037,7 @@ export default function Finishing() {
                       Job
                     </button>
                     <button
-                      onClick={() => setActiveView('station')}
+                      onClick={() => { setActiveView('station'); setQueueExpanded(false) }}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                         activeView === 'station' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
                       }`}
@@ -936,17 +1063,30 @@ export default function Finishing() {
                       <div key={batch.id} className="rounded-lg border border-gray-700 overflow-hidden">
                         {/* Collapsed header — always visible, clickable */}
                         <button
-                          onClick={() => setCollapsedBatches(prev => ({ ...prev, [batch.id]: !prev[batch.id] }))}
+                          onClick={() => {
+                            const wasCollapsed = !!collapsedBatches[batch.id]
+                            setCollapsedBatches(prev => ({ ...prev, [batch.id]: !prev[batch.id] }))
+                            if (wasCollapsed && !batchDocuments[batch.id]) {
+                              const jobId = batch.job_id || batch.job?.id
+                              if (jobId) loadBatchDocuments(batch.id, jobId)
+                            }
+                          }}
                           className={`w-full flex items-center gap-3 px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}
                         >
                           <ChevronDown size={16} className={`text-gray-500 flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : 'rotate-0'}`} />
                           <span className="text-white font-mono">{batch.job?.job_number}</span>
+                          {batchLabels[batch.id] && (
+                            <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
+                          )}
                           <span className="text-gray-400 text-sm truncate">{batch.job?.component?.part_number} — {batch.job?.component?.description}</span>
                           <span className="ml-auto flex items-center gap-2 flex-shrink-0">
                             <span className="px-2 py-0.5 rounded text-xs font-medium bg-cyan-600 text-white flex items-center gap-1">
                               {currentStageDef && <currentStageDef.icon size={10} />}
                               {currentStageDef?.label}
                             </span>
+                            {batch.finishing_stage === 'treatment' && batch.machine?.name && (
+                              <span className="text-xs text-gray-500">{batch.machine.name}</span>
+                            )}
                             <span className="text-gray-400 text-sm font-mono flex items-center gap-1">
                               <Timer size={12} className="text-cyan-400" />
                               {formatDuration(batch.finishing_started_at)}
@@ -961,7 +1101,12 @@ export default function Finishing() {
                             <div className={`bg-gray-800 rounded-lg p-4 border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
                               <div className="flex items-start justify-between mb-2">
                                 <div>
-                                  <p className="text-white font-mono text-lg">{batch.job?.job_number}</p>
+                                  <p className="text-white font-mono text-lg">
+                                    {batch.job?.job_number}
+                                    {batchLabels[batch.id] && (
+                                      <span className="ml-2 px-2 py-0.5 rounded text-sm font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
+                                    )}
+                                  </p>
                                   <p className="text-gray-400 text-sm">{batch.job?.work_order?.wo_number}</p>
                                 </div>
                                 <div className={`w-3 h-3 rounded-full ${getPriorityColor(batch.job?.work_order?.priority)}`}
@@ -1095,6 +1240,72 @@ export default function Finishing() {
                               </div>
                             </div>
 
+                            {/* Documents Section */}
+                            <div className="bg-gray-800 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-2">
+                                <p className="text-gray-400 text-sm flex items-center gap-1.5">
+                                  <Paperclip size={14} />
+                                  Job Documents {batchDocuments[batch.id]?.length > 0 && `(${batchDocuments[batch.id].length})`}
+                                  <span className="text-gray-600 text-xs font-normal ml-1">shared across all batches for this job</span>
+                                </p>
+                                <label className="flex items-center gap-1 px-2 py-1 text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded cursor-pointer transition-colors">
+                                  {uploadingDoc === batch.id ? (
+                                    <Loader2 size={12} className="animate-spin" />
+                                  ) : (
+                                    <Upload size={12} />
+                                  )}
+                                  {uploadingDoc === batch.id ? 'Uploading...' : 'Upload'}
+                                  <input
+                                    type="file"
+                                    className="hidden"
+                                    accept=".pdf,.jpg,.jpeg,.png"
+                                    onChange={(e) => {
+                                      const file = e.target.files[0]
+                                      if (file) {
+                                        const jobId = batch.job_id || batch.job?.id
+                                        if (jobId) handleDocumentUpload(batch.id, jobId, file)
+                                      }
+                                      e.target.value = ''
+                                    }}
+                                    disabled={uploadingDoc === batch.id}
+                                  />
+                                </label>
+                              </div>
+                              {batchDocuments[batch.id]?.length > 0 && (
+                                <p className="text-gray-600 text-xs mb-1">Removing a document removes it for all batches of this job.</p>
+                              )}
+                              {(!batchDocuments[batch.id] || batchDocuments[batch.id].length === 0) ? (
+                                <p className="text-gray-600 text-xs">
+                                  {!batchDocuments[batch.id]
+                                    ? <button onClick={() => loadBatchDocuments(batch.id, batch.job_id || batch.job?.id)} className="text-cyan-400 hover:text-cyan-300">Load documents</button>
+                                    : 'No documents uploaded yet'}
+                                </p>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {batchDocuments[batch.id].map(doc => (
+                                    <div key={doc.id} className="flex items-center justify-between bg-gray-900 rounded px-3 py-2">
+                                      <span className="text-gray-300 text-xs truncate mr-2">{doc.file_name}</span>
+                                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                                        <button
+                                          onClick={() => handleViewDocument(doc.file_url)}
+                                          className="flex items-center gap-1 px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 text-white rounded"
+                                        >
+                                          <Eye size={10} />
+                                          View
+                                        </button>
+                                        <button
+                                          onClick={() => handleRemoveDocument(doc.id, batch.id, batch.job_id || batch.job?.id)}
+                                          className="px-2 py-0.5 text-xs bg-red-900/40 hover:bg-red-900/70 text-red-400 rounded transition-colors"
+                                        >
+                                          Remove
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
                             {/* Verified count + Completion notes - shown on last stage */}
                             {batchIsLastStage && (
                               <div className="space-y-3">
@@ -1166,47 +1377,71 @@ export default function Finishing() {
                 )}
 
                 {/* Station View */}
-                {activeView === 'station' && (
-                <div>
-                  <div className="grid grid-cols-3 gap-3">
-                    {STAGES.map(stage => {
-                      const stageBatches = activeBatches.filter(b => b.finishing_stage === stage.key)
-                      const StageIcon = stage.icon
-                      return (
-                        <div key={stage.key} className="bg-gray-800 rounded-lg overflow-hidden">
-                          <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
-                            <StageIcon size={14} className="text-cyan-400" />
-                            <span className="text-white text-sm font-medium">{stage.label}</span>
-                            <span className="ml-auto text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded">{stageBatches.length}</span>
+                {activeView === 'station' && (() => {
+                  const washBatches = activeBatches.filter(b => b.finishing_stage === 'wash')
+                  const treatmentBatches = activeBatches.filter(b => b.finishing_stage === 'treatment')
+                  const dryBatches = activeBatches.filter(b => b.finishing_stage === 'dry')
+                  const unassignedTreatment = treatmentBatches.filter(b => !b.machine_id)
+                  const treatmentColumns = finishingMachines.map(m => ({
+                    key: m.id,
+                    label: `Treatment — ${m.name.replace('Finishing ', '')}`,
+                    batches: treatmentBatches.filter(b => b.machine_id === m.id)
+                  }))
+                  if (unassignedTreatment.length > 0) {
+                    treatmentColumns.push({ key: 'unassigned', label: 'Treatment — Unassigned', batches: unassignedTreatment })
+                  }
+                  const totalCols = 2 + treatmentColumns.length // Wash + treatment cols + Dry
+                  const gridClass = totalCols <= 3 ? 'grid-cols-3' : totalCols === 4 ? 'grid-cols-4' : `grid-cols-${totalCols}`
+
+                  const renderBatchCard = (batch) => (
+                    <div key={batch.id} className={`bg-gray-900 rounded p-3 border-l-2 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
+                      <p className="text-white font-mono text-sm">
+                        {batch.job?.job_number}
+                        {batchLabels[batch.id] && (
+                          <span className="ml-1 px-1 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">{batchLabels[batch.id]}</span>
+                        )}
+                      </p>
+                      <p className="text-gray-400 text-xs truncate">{batch.job?.component?.part_number}</p>
+                      <div className="flex items-center justify-between mt-2">
+                        <span className="text-white text-sm">Qty: {batch.quantity}</span>
+                        <span className="text-gray-400 text-xs font-mono flex items-center gap-1">
+                          <Timer size={10} className="text-cyan-400" />
+                          {formatDuration(batch.finishing_started_at)}
+                        </span>
+                      </div>
+                    </div>
+                  )
+
+                  const renderColumn = (key, icon, label, batches, emptyLabel) => (
+                    <div key={key} className="bg-gray-800 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
+                        {icon}
+                        <span className="text-white text-sm font-medium truncate">{label}</span>
+                        <span className="ml-auto text-xs bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded flex-shrink-0">{batches.length}</span>
+                      </div>
+                      <div className="p-2 space-y-2 min-h-[100px]">
+                        {batches.length > 0 ? batches.map(renderBatchCard) : (
+                          <div className="flex items-center justify-center h-full min-h-[80px]">
+                            <p className="text-gray-600 text-xs">Nothing in {emptyLabel}</p>
                           </div>
-                          <div className="p-2 space-y-2 min-h-[100px]">
-                            {stageBatches.length > 0 ? (
-                              stageBatches.map(batch => (
-                                <div key={batch.id} className={`bg-gray-900 rounded p-3 border-l-2 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
-                                  <p className="text-white font-mono text-sm">{batch.job?.job_number}</p>
-                                  <p className="text-gray-400 text-xs truncate">{batch.job?.component?.part_number}</p>
-                                  <div className="flex items-center justify-between mt-2">
-                                    <span className="text-white text-sm">Qty: {batch.quantity}</span>
-                                    <span className="text-gray-400 text-xs font-mono flex items-center gap-1">
-                                      <Timer size={10} className="text-cyan-400" />
-                                      {formatDuration(batch.finishing_started_at)}
-                                    </span>
-                                  </div>
-                                </div>
-                              ))
-                            ) : (
-                              <div className="flex items-center justify-center h-full min-h-[80px]">
-                                <p className="text-gray-600 text-xs">Nothing in {stage.label}</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
+                        )}
+                      </div>
+                    </div>
+                  )
+
+                  return (
+                  <div>
+                    <div className={`grid ${gridClass} gap-3`}>
+                      {renderColumn('wash', <Droplets size={14} className="text-cyan-400" />, 'Wash', washBatches, 'Wash')}
+                      {treatmentColumns.map(col =>
+                        renderColumn(col.key, <Flame size={14} className="text-cyan-400" />, col.label, col.batches, col.label)
+                      )}
+                      {renderColumn('dry', <Wind size={14} className="text-cyan-400" />, 'Dry', dryBatches, 'Dry')}
+                    </div>
+                    <p className="text-gray-600 text-xs text-center mt-3">Switch to Job view to advance stages</p>
                   </div>
-                  <p className="text-gray-600 text-xs text-center mt-3">Switch to Job view to advance stages</p>
-                </div>
-                )}
+                  )
+                })()}
                 </>
               ) : (
                 <div className="text-center py-12">
@@ -1221,13 +1456,66 @@ export default function Finishing() {
           </div>
 
           {/* Right Panel — Incoming Queue */}
+          {activeView === 'station' && !queueExpanded ? (
+            <div className="w-48 space-y-3">
+              <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 flex flex-col items-center gap-2">
+                <Package size={18} className="text-gray-400" />
+                <span className="text-white font-semibold text-sm">Queue</span>
+                <span className="text-2xl font-bold text-cyan-400">{queue.length}</span>
+                <span className="text-gray-500 text-xs">pending</span>
+                <button
+                  onClick={() => setQueueExpanded(true)}
+                  className="text-gray-500 hover:text-white text-xs mt-2 flex items-center gap-1"
+                >
+                  View all <ChevronRight size={12} />
+                </button>
+              </div>
+              <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 flex flex-col items-center gap-2">
+                <CheckCircle size={16} className="text-green-500" />
+                <span className="text-gray-400 text-xs">Completed</span>
+                <span className="text-lg font-bold text-green-400">{recentCompletions.length}</span>
+                <span className="text-gray-600 text-xs">last 5 days</span>
+              </div>
+            </div>
+          ) : (
           <div className="lg:col-span-1">
             <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
               <h2 className="text-white font-semibold mb-4 flex items-center gap-2">
                 <Package size={18} className="text-gray-400" />
                 Incoming Queue
-                <span className="ml-auto text-gray-500 text-sm">{queue.length} batches</span>
+                <span className="ml-auto text-gray-500 text-sm">
+                  {queueSearch.trim() ? `${filteredQueue.length} of ${queue.length}` : queue.length} batches
+                </span>
+                {activeView === 'station' && (
+                  <button
+                    onClick={() => setQueueExpanded(false)}
+                    className="text-gray-500 hover:text-white ml-2"
+                    title="Collapse queue"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
               </h2>
+
+              {/* Queue Search */}
+              <div className="relative mb-4">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                <input
+                  type="text"
+                  value={queueSearch}
+                  onChange={(e) => setQueueSearch(e.target.value)}
+                  placeholder="Search by part #, job #, or WO..."
+                  className="w-full pl-9 pr-8 py-2 bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-500 text-sm focus:border-cyan-500 focus:outline-none"
+                />
+                {queueSearch && (
+                  <button
+                    onClick={() => setQueueSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
 
               {queue.length === 0 ? (
                 <div className="text-center py-12">
@@ -1235,9 +1523,20 @@ export default function Finishing() {
                   <p className="text-gray-500">All caught up</p>
                   <p className="text-gray-600 text-sm">No batches waiting for finishing</p>
                 </div>
+              ) : filteredQueue.length === 0 ? (
+                <div className="text-center py-8">
+                  <Search size={32} className="text-gray-600 mx-auto mb-3" />
+                  <p className="text-gray-500">No batches matching '{queueSearch}'</p>
+                  <button
+                    onClick={() => setQueueSearch('')}
+                    className="text-cyan-400 hover:text-cyan-300 text-sm mt-2"
+                  >
+                    Clear search
+                  </button>
+                </div>
               ) : (
                 <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                  {queue.map(send => (
+                  {filteredQueue.map(send => (
                     <div
                       key={send.id}
                       className={`bg-gray-800 rounded-lg p-4 border-l-4 ${getPriorityBorder(send.job?.work_order?.priority)} hover:bg-gray-750 transition-colors`}
@@ -1246,6 +1545,9 @@ export default function Finishing() {
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
                             <p className="text-white font-mono">{send.job?.job_number}</p>
+                            {batchLabels[send.id] && (
+                              <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[send.id]}</span>
+                            )}
                             <div className={`w-2 h-2 rounded-full ${getPriorityColor(send.job?.work_order?.priority)}`} />
                             {send.job?.work_order?.priority === 'critical' && (
                               <span className="text-xs bg-red-900/50 text-red-300 border border-red-700 px-1.5 py-0.5 rounded">
@@ -1291,7 +1593,63 @@ export default function Finishing() {
                 </div>
               )}
             </div>
+
+            {/* Recent Completions */}
+            <div className="bg-gray-900 rounded-lg border border-gray-800 mt-4">
+              <div
+                className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-800/50 transition-colors"
+                onClick={() => setRecentExpanded(prev => !prev)}
+              >
+                <div className="flex items-center gap-2">
+                  <CheckCircle size={16} className="text-green-500" />
+                  <span className="text-white font-semibold text-sm">Recent Completions</span>
+                  <span className="text-gray-500 text-xs">Last 5 days</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400 text-sm">{recentCompletions.length}</span>
+                  {recentExpanded
+                    ? <ChevronDown size={16} className="text-gray-400" />
+                    : <ChevronRight size={16} className="text-gray-400" />
+                  }
+                </div>
+              </div>
+
+              {recentExpanded && (
+                <div className="border-t border-gray-800 divide-y divide-gray-800 max-h-96 overflow-y-auto">
+                  {recentCompletions.length === 0 ? (
+                    <p className="text-gray-500 text-sm text-center py-6">No completions in the last 5 days</p>
+                  ) : (
+                    recentCompletions.map(send => (
+                      <div key={send.id} className="px-4 py-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-white text-sm font-mono">
+                              {send.job?.job_number}
+                              {batchLabels[send.id] && (
+                                <span className="ml-1.5 px-1 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">{batchLabels[send.id]}</span>
+                              )}
+                            </p>
+                            <p className="text-cyan-400 text-xs">{send.job?.component?.part_number}</p>
+                            <p className="text-gray-500 text-xs">{send.job?.work_order?.wo_number} · {send.job?.work_order?.customer}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-white text-sm">{send.verified_count ?? send.quantity} pcs</p>
+                            <p className="text-gray-500 text-xs">
+                              {new Date(send.finishing_completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </p>
+                            {send.finishing_lot_number && (
+                              <p className="text-gray-600 text-xs font-mono">{send.finishing_lot_number}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           </div>
+          )}
         </div>
       </main>
 

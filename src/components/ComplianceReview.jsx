@@ -20,7 +20,8 @@ import {
   Beaker,
   ArrowUp,
   ArrowDown,
-  Printer
+  Printer,
+  ClipboardCheck
 } from 'lucide-react'
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
@@ -39,6 +40,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [newStepType, setNewStepType] = useState('internal')
   const [newStepStation, setNewStepStation] = useState('')
   const [printPackageJob, setPrintPackageJob] = useState(null)
+  const [postMfgData, setPostMfgData] = useState({})
+  // Shape: { [jobId]: { good_qty: string, bad_qty: string, notes: string } }
 
   const handleApproveRoutingRemoval = async (stepId, jobId) => {
     setApprovingRouting(stepId)
@@ -478,12 +481,25 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         }
       }
 
+      const pmData = postMfgData[jobId] || {}
+      const updatePayload = {
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+      }
+      if (currentStatus === 'pending_post_manufacturing') {
+        if (pmData.good_qty !== undefined && pmData.good_qty !== '')
+          updatePayload.post_mfg_good_qty = parseInt(pmData.good_qty)
+        if (pmData.bad_qty !== undefined && pmData.bad_qty !== '')
+          updatePayload.post_mfg_bad_qty = parseInt(pmData.bad_qty)
+        if (pmData.notes?.trim())
+          updatePayload.post_mfg_notes = pmData.notes.trim()
+        updatePayload.post_mfg_reviewed_by = profile.id
+        updatePayload.post_mfg_reviewed_at = new Date().toISOString()
+      }
+
       const { error } = await supabase
         .from('jobs')
-        .update({
-          status: nextStatus,
-          updated_at: new Date().toISOString()
-        })
+        .update(updatePayload)
         .eq('id', jobId)
 
       if (error) throw error
@@ -511,12 +527,25 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         }
       }
 
+      const pmData = postMfgData[job.id] || {}
+      const updatePayload = {
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+      }
+      if (job.status === 'pending_post_manufacturing') {
+        if (pmData.good_qty !== undefined && pmData.good_qty !== '')
+          updatePayload.post_mfg_good_qty = parseInt(pmData.good_qty)
+        if (pmData.bad_qty !== undefined && pmData.bad_qty !== '')
+          updatePayload.post_mfg_bad_qty = parseInt(pmData.bad_qty)
+        if (pmData.notes?.trim())
+          updatePayload.post_mfg_notes = pmData.notes.trim()
+        updatePayload.post_mfg_reviewed_by = profile.id
+        updatePayload.post_mfg_reviewed_at = new Date().toISOString()
+      }
+
       const { error } = await supabase
         .from('jobs')
-        .update({
-          status: nextStatus,
-          updated_at: new Date().toISOString()
-        })
+        .update(updatePayload)
         .eq('id', job.id)
 
       if (error) throw error
@@ -1158,6 +1187,72 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               </div>
                             )
                           })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Post-Mfg Review Fields — only for post-mfg jobs */}
+                    {job.status === 'pending_post_manufacturing' && (
+                      <div className="mt-4 p-4 bg-gray-800/50 rounded-lg border border-indigo-800/30 space-y-4">
+                        <h4 className="text-indigo-400 font-medium text-sm flex items-center gap-2">
+                          <ClipboardCheck size={16} />
+                          Post-Manufacturing Review
+                        </h4>
+
+                        {/* Good/Bad quantity row */}
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-gray-400 text-xs mb-1">
+                              Good Quantity
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={postMfgData[job.id]?.good_qty ?? ''}
+                              onChange={(e) => setPostMfgData(prev => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], good_qty: e.target.value }
+                              }))}
+                              placeholder={String(job.quantity)}
+                              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                         text-sm focus:border-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-gray-400 text-xs mb-1">
+                              Bad Quantity
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={postMfgData[job.id]?.bad_qty ?? ''}
+                              onChange={(e) => setPostMfgData(prev => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], bad_qty: e.target.value }
+                              }))}
+                              placeholder="0"
+                              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                         text-sm focus:border-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Notes */}
+                        <div>
+                          <label className="block text-gray-400 text-xs mb-1">
+                            Review Notes (Optional)
+                          </label>
+                          <textarea
+                            value={postMfgData[job.id]?.notes ?? ''}
+                            onChange={(e) => setPostMfgData(prev => ({
+                              ...prev,
+                              [job.id]: { ...prev[job.id], notes: e.target.value }
+                            }))}
+                            placeholder="Any observations, quality issues, or notes for this job..."
+                            rows={3}
+                            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                       placeholder-gray-500 text-sm focus:border-indigo-500 focus:outline-none"
+                          />
                         </div>
                       </div>
                     )}

@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench } from 'lucide-react'
 
 export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const modalContentRef = useRef(null)
   const [assemblies, setAssemblies] = useState([])
   const [loadingAssemblies, setLoadingAssemblies] = useState(true)
 
@@ -172,7 +173,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   }
 
   const addAssembly = () => {
-    setSelectedAssemblies([...selectedAssemblies, { assemblyId: '', orderQuantity: 1, additionalForStock: 0, jobs: [] }])
+    setSelectedAssemblies(prev => [{ assemblyId: '', orderQuantity: 1, additionalForStock: 0, jobs: [] }, ...prev])
+    // Scroll modal content to top so the new row is visible
+    setTimeout(() => {
+      modalContentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+    }, 50)
   }
 
   const removeAssembly = (index) => {
@@ -641,7 +646,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+        <div ref={modalContentRef} className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
           {error && (
             <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded text-red-300 text-sm">
               {error}

@@ -142,6 +142,9 @@ export default function Kiosk() {
   // Material tracking state
   const [showMaterialModal, setShowMaterialModal] = useState(false)
   const [showMaterialOverrideModal, setShowMaterialOverrideModal] = useState(false)
+  const [overrideReason, setOverrideReason] = useState('')
+  const [showToolingOverrideModal, setShowToolingOverrideModal] = useState(false)
+  const [toolingOverrideReason, setToolingOverrideReason] = useState('')
   const [materialForm, setMaterialForm] = useState({
     material_type: '',
     bar_size: '',
@@ -1813,7 +1816,15 @@ export default function Kiosk() {
     }
   }
   
-  const handleConfirmTooling = async () => {
+  const handleConfirmTooling = () => {
+    if (jobTools.length === 0) {
+      setShowToolingOverrideModal(true)
+    } else {
+      handleProceedFromTooling()
+    }
+  }
+
+  const handleProceedFromTooling = async () => {
     setActionLoading(true)
     try {
       // Mark tooling as confirmed but don't start production yet
@@ -2021,13 +2032,15 @@ export default function Kiosk() {
     }
   }
 
-  const handleConfirmMaterials = async () => {
+  const handleConfirmStartProduction = () => {
     if (jobMaterials.length === 0) {
-      if (!confirm('No materials have been added. Are you sure you want to start production without recording bar stock?')) {
-        return
-      }
+      setShowMaterialOverrideModal(true)
+    } else {
+      handleConfirmMaterials()
     }
+  }
 
+  const handleConfirmMaterials = async () => {
     setActionLoading(true)
     try {
       // Generate PLN on production start if not already set
@@ -2062,10 +2075,7 @@ export default function Kiosk() {
     }
   }
 
-  // Show override modal for skipping materials
-  const handleSkipMaterials = () => {
-    setShowMaterialOverrideModal(true)
-  }
+
 
   // Confirm skipping materials after override modal confirmation
   const handleConfirmMaterialOverride = async () => {
@@ -2093,6 +2103,21 @@ export default function Kiosk() {
         .eq('id', activeJob.id)
 
       if (error) throw error
+
+      // Log material override to audit_logs
+      supabase.from('audit_logs').insert({
+        event_type: 'material_override',
+        job_id: activeJob.id,
+        machine_id: machine?.id || null,
+        operator_id: operator.id,
+        details: {
+          job_number: activeJob.job_number,
+          reason: overrideReason,
+          override_at: now
+        }
+      }).then()
+      setOverrideReason('')
+
       setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber }))
       setShowMaterialOverrideModal(false)
       setShowMaterialModal(false)
@@ -2187,10 +2212,10 @@ export default function Kiosk() {
     }
   }
 
-  const handleOverrideTooling = async () => {
-    if (!confirm('Are you sure you want to skip tooling confirmation? This will be tracked.')) return
+  const handleConfirmToolingOverride = async () => {
     setActionLoading(true)
     try {
+      const now = new Date().toISOString()
       // Mark tooling as overridden but don't start production yet
       const { error } = await supabase
         .from('jobs')
@@ -2198,14 +2223,30 @@ export default function Kiosk() {
           tooling_confirmed: false,
           tooling_override: true,
           tooling_override_by: operator.id,
-          tooling_override_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          tooling_override_at: now,
+          updated_at: now
         })
         .eq('id', activeJob.id)
 
       if (error) throw error
+
+      // Log tooling override to audit_logs
+      supabase.from('audit_logs').insert({
+        event_type: 'tooling_override',
+        job_id: activeJob.id,
+        machine_id: machine?.id || null,
+        operator_id: operator.id,
+        details: {
+          job_number: activeJob.job_number,
+          reason: toolingOverrideReason,
+          override_at: now
+        }
+      }).then()
+      setToolingOverrideReason('')
+
+      setShowToolingOverrideModal(false)
       setShowToolingModal(false)
-      
+
       // Open materials modal for next step
       await handleOpenMaterials()
       await loadJobs()
@@ -4150,7 +4191,6 @@ export default function Kiosk() {
             <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <button onClick={() => setShowToolingModal(false)} className="px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"><ArrowLeft size={16} />Back</button>
-                <button onClick={handleOverrideTooling} disabled={actionLoading} className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"><SkipForward size={16} />Skip Tooling</button>
               </div>
               <button onClick={handleConfirmTooling} disabled={actionLoading} className="px-6 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg flex items-center gap-2">
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}Confirm Tooling
@@ -4325,17 +4365,10 @@ export default function Kiosk() {
                   >
                     <ArrowLeft size={16} />{activeJob.tooling_required ? 'Back' : 'Close'}
                   </button>
-                  <button 
-                    onClick={handleSkipMaterials} 
-                    disabled={actionLoading} 
-                    className="px-4 py-2 text-yellow-500 hover:text-yellow-400 text-sm flex items-center gap-2"
-                  >
-                    <SkipForward size={16} />Skip Materials
-                  </button>
                 </div>
-                <button 
-                  onClick={handleConfirmMaterials} 
-                  disabled={actionLoading} 
+                <button
+                  onClick={handleConfirmStartProduction}
+                  disabled={actionLoading}
                   className="px-6 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg flex items-center gap-2"
                 >
                   {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Play size={20} />}
@@ -4390,22 +4423,32 @@ export default function Kiosk() {
                 </ul>
               </div>
 
-              <p className="text-gray-400 text-center text-sm">
-                Are you sure you want to continue without material tracking?
-              </p>
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">
+                  Reason for override <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="Enter reason for skipping material entry..."
+                  rows={3}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                             placeholder-gray-500 focus:border-yellow-500 focus:outline-none text-sm"
+                />
+              </div>
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
-              <button 
-                onClick={() => setShowMaterialOverrideModal(false)} 
+              <button
+                onClick={() => { setShowMaterialOverrideModal(false); setOverrideReason('') }}
                 className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
               >
                 Go Back
               </button>
-              <button 
-                onClick={handleConfirmMaterialOverride} 
-                disabled={actionLoading} 
-                className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              <button
+                onClick={handleConfirmMaterialOverride}
+                disabled={actionLoading || !overrideReason.trim()}
+                className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
               >
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <SkipForward size={20} />}
                 Skip & Start Production
@@ -4415,7 +4458,74 @@ export default function Kiosk() {
         </div>
       )}
 
-      {/* Lot Mismatch Warning Modal */}
+      {/* Tooling Override Confirmation Modal */}
+      {showToolingOverrideModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md">
+            <div className="px-6 py-4 border-b border-gray-800">
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <AlertTriangle className="text-yellow-500" size={24} />
+                Skip Tooling Setup
+              </h2>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="text-yellow-500 flex-shrink-0 mt-0.5" size={24} />
+                  <div>
+                    <h3 className="text-yellow-400 font-medium mb-1">No Tooling Confirmed</h3>
+                    <p className="text-gray-300 text-sm">
+                      You are about to skip tooling confirmation. This will be tracked for compliance purposes.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-gray-800 rounded-lg p-4">
+                <p className="text-gray-300 text-sm mb-2">This action will be logged:</p>
+                <ul className="text-gray-400 text-sm space-y-1">
+                  <li>• Operator: <span className="text-white">{operator?.full_name}</span></li>
+                  <li>• Time: <span className="text-white">{new Date().toLocaleString()}</span></li>
+                  <li>• Job: <span className="text-white">{activeJob?.job_number}</span></li>
+                </ul>
+              </div>
+
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">
+                  Reason for override <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={toolingOverrideReason}
+                  onChange={(e) => setToolingOverrideReason(e.target.value)}
+                  placeholder="Enter reason for skipping tooling confirmation..."
+                  rows={3}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                             placeholder-gray-500 focus:border-yellow-500 focus:outline-none text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+              <button
+                onClick={() => { setShowToolingOverrideModal(false); setToolingOverrideReason('') }}
+                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              >
+                Go Back
+              </button>
+              <button
+                onClick={handleConfirmToolingOverride}
+                disabled={actionLoading || !toolingOverrideReason.trim()}
+                className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <SkipForward size={20} />}
+                Skip Tooling
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Send to Finishing Modal */}
       {showFinishingSendModal && activeJob && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">

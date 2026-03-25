@@ -1,6 +1,6 @@
 # SkyNet — DECISIONS.md
 ## Architectural Decisions & Key Design Patterns
-### Updated: March 25, 2026 (Sprint 3 Batches A, B & C Complete)
+### Updated: March 25, 2026 (Sprint 3 All Batches Complete)
 
 ---
 
@@ -272,9 +272,92 @@ in_assembly, complete, shipped, on_hold, closed, cancelled`
 
 ---
 
+# Sprint 3 Batch D Decisions — March 25, 2026
+
+## Material Master Tab Architecture
+
+Three existing/new tabs serve distinct, non-overlapping purposes and all remain:
+
+| Tab | Table | Purpose |
+|-----|-------|---------|
+| Materials | `material_types` | Type name list (303 Stainless, Aluminum 6061, etc.). Used as FK everywhere. |
+| Bar Sizes | `bar_sizes` | Standard diameter catalog. Used in kiosk dropdowns. |
+| Material Master | `materials` (new) | Specific combinations: type + bar size + vendor. The catalog for inventory tracking. |
+
+`materials` is the foundation for future inventory deduction. You cannot track
+"how many bars do we have" until you define what a specific stockable item is.
+
+**Base UOM = inches.** Display in inches, feet, or bars as context requires.
+
+## Material Receiving — Vendor-First Flow
+
+Receiving is restricted to combinations that exist in the `materials` table.
+Free-text material entry is not permitted.
+
+**Entry order enforced:** Vendor (dropdown from materials.vendor) →
+Material (dropdown filtered to that vendor's materials) → Lot # → Quantity → Notes.
+
+Material dropdown is disabled until a vendor is selected. If no vendors are
+defined in the materials table yet, a warning is shown instead of the dropdown.
+
+**"Heat lot number" renamed to "Lot #"** — in the DB column (`lot_number`),
+all UI labels, state variables, and comments throughout the codebase.
+
+**Bar length not captured at receiving.** This is a future phase concern (needed
+for inch-based inventory deduction). The `bar_length_inches` column exists on
+`material_receiving` for future use but is not populated by the current UI.
+
+## Machine Type Values
+
+`machines.machine_type` uses **descriptive functional values**, not brand names:
+
+| Value | Machines |
+|-------|----------|
+| `Lathe` | All Mazaks, all Nexturns |
+| `Mill` | Ganesh |
+| `Roller` | All Bolt Masters |
+| `finishing` | FIN-1, FIN-2 |
+
+These values were already present in the DB before the Batch D script ran.
+The script's `WHERE machine_type IS NULL OR machine_type = ''` guard preserved them.
+Functional labels are preferred over brand labels for grouping and display.
+
+## Material Lot # — Always Query Fresh
+
+**Pattern:** Never rely on `activeJob.materials` for lot numbers in send operations.
+`loadJobs()` does not include a `job_materials` join — `activeJob.materials` is
+always `undefined`.
+
+**Correct pattern:** Query `job_materials` fresh from the DB immediately before
+inserting a `finishing_sends` record, whether manual send or auto-send on complete.
+This was a pre-existing Batch C bug caught during Batch D testing.
+
+## Dashboard Finishing Station Card
+
+Card upgraded from count-only to live batch display:
+- **Active batches** (`in_finishing`): one row per batch showing job #, current
+  stage (wash/treatment/dry), part number, quantity
+- **Pending queue** (`pending_finishing`): count pill only (not individual rows)
+- **Tank status dots** moved to card header (saves vertical space)
+- Data fetch upgraded from `count: exact` to full record fetch with job join
+- `finishingQueueCount` state replaced by `finishingSends` array; active/pending
+  split derived in component body
+
+## Barcode Printing — Deferred
+
+Barcode printing for Material Master records is deferred to a future phase.
+Each `materials` record will eventually have a printable barcode (Code 128 or QR)
+encoding `materials.id`. A "Print Barcode Sheet" button on the Material Master tab
+will open a print-ready page. Receiver scans the barcode to pre-fill the vendor,
+material type, and bar size on the receiving form automatically.
+
+---
+
 ## Backlog Items
 
 | Item | Description | Priority |
 |------|-------------|----------|
 | Finishing status in WO Lookup | "In Finishing (X pcs)" badge on April's WO Lookup job rows | P2 |
-| Assembly partial check-in | Each compliance-approved batch checks into assembly as its own quantity | P1 — Batch D |
+| Barcode printing for Material Master | Print barcode sheet per material/vendor combo; receiver scans to pre-fill receiving form. Encodes `materials.id`. Print button on Material Master tab. | P2 |
+| Inventory deduction | Connect kiosk material entry to receiving log; bar counts decrement automatically. Foundation tables exist. | P1 — Sprint 4 |
+| Fishbowl import | Deferred from Sprint 1. | P2 |

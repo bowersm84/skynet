@@ -26,9 +26,12 @@ material tracking (Batch D).
 | 8 | Flexible document upload at finishing | Roger | ✅ Complete | C |
 | 9 | Good/bad quantity in post-mfg compliance | Roger | ✅ Complete | C |
 | 10 | Notes section in post-mfg compliance | Roger | ✅ Complete | C |
-| 32a | Material master with inch-based UOM | James | 🔲 Pending | D |
-| 32b | Raw material receiving log | James | 🔲 Pending | D |
-| 66 | Import Harry's Trello machine data | Harry | 🔲 Pending | D |
+| 32a | Material master with inch-based UOM | James | ✅ Complete | D |
+| 32b | Raw material receiving log | James | ✅ Complete | D |
+| 66 | Machine type population (was: Harry's Trello import) | Harry | ✅ Complete | D |
+| — | Assembly partial check-in on batch approval | Roger | ✅ Complete | D |
+| — | Material lot # bug fix (auto-send path) | Dev | ✅ Complete | D |
+| — | Dashboard Finishing Station card redesign | Dev | ✅ Complete | D |
 
 ---
 
@@ -126,57 +129,70 @@ material tracking (Batch D).
 
 ---
 
-## Batch D: Material Master & Data Import — 🔲 NEXT
+## Batch D: Material Master, Machine Types & Assembly Check-In — ✅ COMPLETE
 
-**Goal:** Inch-based material tracking and raw material receiving.
-**Also:** Assembly partial check-in (each compliance-approved batch checks into
-assembly independently — deferred from Batch C).
+**Delivered:**
 
-**Scope:**
-- Material master table with base UOM in inches, conversions to feet/bars/weight
-- Raw material receiving log in Master Data (Betty's module)
-- Import Harry's Trello machine data (one-time script)
-- Assembly partial check-in: approved batches check into assembly as own quantity
+**Material Master (Action Items 32a + 32b):**
+- New `materials` table — specific material type + bar size + vendor combinations
+- New `material_receiving` table — receiving log with lot # traceability
+- Material Master tab added to MasterData.jsx (admin add/edit, all users read)
+- Receiving log sub-section: last 90 days, vendor-first entry flow
+- Receiving restricted to vendor/material combos defined in `materials` table
+- Vendor → Material (filtered) → Lot # entry order enforced
+- "Heat lot number" renamed to "Lot #" throughout (DB column + UI)
 
-**Key Decision (MB):** Base UOM = inches. Display: inches, feet, bars.
+**Machine Type Population (Action Item 66):**
+- `machine_type` column populated on all machines via one-time SQL script
+- Existing descriptive values preserved: Lathe, Mill, Roller, finishing
+- Reference script saved as `Docs/Batch_D_Machine_Types.sql`
 
-**Database:**
+**Assembly Partial Check-In:**
+- `assembly_component_checkins` record auto-created on batch compliance approval
+- Quantity = good_qty if entered by Roger, otherwise = full send quantity
+- Non-fatal: batch approval never blocked by check-in insert failure
+- Only fires when job has `work_order_assembly_id` (skips finished_good → TCO path)
+
+**Bug Fix — Material Lot # on Auto-Send:**
+- Pre-existing Batch C bug: auto-send on job complete was passing null for
+  `material_lot_number` because `activeJob` does not include `job_materials`
+- Fix: query `job_materials` fresh from DB in the auto-send path, same as the
+  manual "Send to Finishing" path already did
+- File: `src/pages/Kiosk.jsx`
+
+**Dashboard Finishing Station Card Redesign:**
+- Card now shows active batches (in_finishing) with job #, stage, part #, qty
+- Pending queue count pill shows how many are waiting
+- Tank status dots moved to card header
+- Upgraded data fetch from count-only to full `finishing_sends` records with job info
+- File: `src/pages/Dashboard.jsx`
+
+**New DB tables:**
 ```sql
-CREATE TABLE IF NOT EXISTS public.materials (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  material_type_id uuid NOT NULL REFERENCES material_types(id),
-  bar_size_inches numeric NOT NULL,
-  density_lbs_per_cubic_inch numeric,
-  vendor text,
-  is_active boolean DEFAULT true,
-  created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now()
-);
+public.materials (
+  id, material_type_id, bar_size_inches, density_lbs_per_cubic_inch,
+  vendor, notes, is_active, created_at, updated_at
+)
 
-CREATE TABLE IF NOT EXISTS public.material_receiving (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  material_id uuid REFERENCES materials(id),
-  material_type text NOT NULL,
-  bar_size text,
-  bar_length_inches numeric,
-  heat_lot_number text NOT NULL,
-  quantity integer NOT NULL,
-  received_by uuid REFERENCES profiles(id),
-  received_at timestamptz DEFAULT now(),
-  vendor text,
-  notes text,
-  created_at timestamptz DEFAULT now()
-);
+public.material_receiving (
+  id, material_id, material_type, bar_size, bar_length_inches,
+  lot_number, quantity, received_by, received_at, vendor, notes, created_at
+)
 ```
+
+**RLS policies:** Read (all authenticated), Insert/Update (admin only) on `materials`.
+Read + Insert (all authenticated), Delete (admin only) on `material_receiving`.
 
 ---
 
 ## Backlog Items (Post-Sprint 3)
 
-| Item | Description |
-|------|-------------|
-| Finishing status in WO Lookup | "In Finishing (X pcs)" badge on April's job rows |
-| Assembly partial check-in | Batch D scope |
+| Item | Description | Priority |
+|------|-------------|----------|
+| Finishing status in WO Lookup | "In Finishing (X pcs)" badge on April's WO Lookup job rows | P2 |
+| Barcode printing for Material Master | Print barcode sheet per material/vendor combo; receiver scans to pre-fill receiving form. Each barcode encodes `materials.id`. Print button on Material Master tab. | P2 |
+| Inventory deduction | Connect kiosk material entry to receiving log so bar counts decrement automatically. Foundation tables now exist. | P1 — Sprint 4 |
+| Fishbowl import | Deferred from Sprint 1. Part/component data import. | P2 |
 
 ---
 
@@ -202,6 +218,9 @@ CREATE TABLE IF NOT EXISTS public.material_receiving (
 - [x] Document upload at finishing with remove
 - [x] Post-mfg compliance: quantity check + documents
 - [x] Merged Pre/Post-Mfg compliance sections correctly named
-- [ ] Assembly partial check-in (Batch D)
-- [ ] Material master inch-based UOM (Batch D)
-- [ ] Raw material receiving log (Batch D)
+- [x] Assembly partial check-in on batch approval
+- [x] Material master inch-based UOM
+- [x] Raw material receiving log
+- [x] Machine types populated on all machines
+- [x] Dashboard Finishing Station card shows live batch status
+- [x] Material lot # flows correctly through auto-send path

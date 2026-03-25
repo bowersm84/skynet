@@ -2659,13 +2659,23 @@ export default function Kiosk() {
         const remaining = goodPieces - alreadySent
 
         if (remaining > 0) {
+          // Fetch material lot number fresh from DB (activeJob does not include materials)
+          const { data: jobMaterialsData } = await supabase
+            .from('job_materials')
+            .select('lot_number')
+            .eq('job_id', activeJob.id)
+            .not('lot_number', 'is', null)
+            .limit(1)
+
+          const autoSendMaterialLot = jobMaterialsData?.[0]?.lot_number || null
+
           await supabase.from('finishing_sends').insert({
             job_id: activeJob.id,
             machine_id: activeJob.assigned_machine_id,
             sent_by: operator.id,
             quantity: remaining,
             production_lot_number: activeJob.production_lot_number || null,
-            material_lot_number: activeJob.materials?.[0]?.lot_number || null,
+            material_lot_number: autoSendMaterialLot,
             status: 'pending_finishing',
             notes: 'Auto-sent on job completion'
           })

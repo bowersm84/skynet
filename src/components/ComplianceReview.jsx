@@ -85,6 +85,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         *,
         job:jobs(
           id, job_number, quantity, production_lot_number, status,
+          work_order_assembly_id,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type),
           component:parts!component_id(id, part_number, description, part_type)
         ),
@@ -185,6 +186,28 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         .eq('id', send.id)
 
       if (sendError) throw sendError
+
+      // 1b. Create assembly_component_checkins record if job belongs to an assembly
+      const woaId = send.job?.work_order_assembly_id
+      if (woaId) {
+        const checkinQty = reviewData.good_qty
+          ? parseInt(reviewData.good_qty)
+          : send.quantity
+        const { error: checkinError } = await supabase
+          .from('assembly_component_checkins')
+          .insert({
+            work_order_assembly_id: woaId,
+            job_id: send.job_id,
+            quantity_received: checkinQty,
+            checked_in_by: profile.id,
+            checked_in_at: now,
+            condition_notes: reviewData.notes?.trim() || null
+          })
+        if (checkinError) {
+          // Non-fatal — log but don't block the approval
+          console.error('Check-in insert failed (non-fatal):', checkinError)
+        }
+      }
 
       // 2. Check if job should advance
       const jobId = send.job_id

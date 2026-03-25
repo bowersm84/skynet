@@ -27,7 +27,7 @@ export default function Dashboard({ user, profile }) {
   const [activeMaintenanceJobs, setActiveMaintenanceJobs] = useState([])
 
   // Finishing queue count
-  const [finishingQueueCount, setFinishingQueueCount] = useState(0)
+  const [finishingSends, setFinishingSends] = useState([])
   const [pendingBatchComplianceCount, setPendingBatchComplianceCount] = useState(0)
   
   // Auto-refresh state
@@ -118,14 +118,23 @@ export default function Dashboard({ user, profile }) {
         setOngoingDowntimes(ongoingDowntimesData || [])
       }
 
-      // Fetch finishing queue count
-      const { count: finishingCount, error: finishingError } = await supabase
+      // Fetch finishing sends with job info
+      const { data: finishingSendsData, error: finishingError } = await supabase
         .from('finishing_sends')
-        .select('id', { count: 'exact', head: true })
+        .select(`
+          id, quantity, status, is_partial_send, sent_at, finishing_stage,
+          finishing_lot_number,
+          job:jobs(
+            id, job_number, quantity,
+            work_order:work_orders(wo_number, customer, priority),
+            component:parts!component_id(part_number, description)
+          )
+        `)
         .in('status', ['pending_finishing', 'in_finishing'])
+        .order('sent_at', { ascending: true })
 
       if (!finishingError) {
-        setFinishingQueueCount(finishingCount || 0)
+        setFinishingSends(finishingSendsData || [])
       }
 
       // Fetch pending batch compliance count
@@ -478,6 +487,10 @@ export default function Dashboard({ user, profile }) {
       [locationName]: !prev[locationName]
     }))
   }
+
+  // Finishing sends split
+  const finishingActive  = finishingSends.filter(s => s.status === 'in_finishing')
+  const finishingPending = finishingSends.filter(s => s.status === 'pending_finishing')
 
   // Job categorization - incomplete jobs included with unassigned
   const pendingComplianceJobs = jobs.filter(job =>
@@ -878,41 +891,86 @@ export default function Dashboard({ user, profile }) {
                         />
                       ))}
                       {/* Finishing Station card — shown once per location that has finishing machines */}
-                      {locationMachines.some(m => m.machine_type === 'finishing') && (
-                        <div className="bg-gray-900 rounded-lg border border-cyan-800/50 overflow-hidden">
-                          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Beaker size={16} className="text-cyan-400" />
-                              <span className="text-white font-semibold text-sm">Finishing Station</span>
+                      {locationMachines.some(m => m.machine_type === 'finishing') && (() => {
+                        const isAnyTankDown = locationMachines
+                          .filter(m => m.machine_type === 'finishing')
+                          .some(m => ['down', 'offline', 'maintenance'].includes(m.status))
+
+                        return (
+                          <div className={`bg-gray-900 rounded-lg border overflow-hidden ${
+                            isAnyTankDown ? 'border-red-800/60' : 'border-cyan-800/50'
+                          }`}>
+                            {/* Header */}
+                            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <Beaker size={16} className="text-cyan-400" />
+                                <span className="text-white font-semibold text-sm">Finishing Station</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {/* Tank status dots */}
+                                {locationMachines.filter(m => m.machine_type === 'finishing').map(m => {
+                                  const isDown = ['down', 'offline', 'maintenance'].includes(m.status)
+                                  return (
+                                    <div key={m.id} className="flex items-center gap-1" title={m.name}>
+                                      <div className={`w-2 h-2 rounded-full ${isDown ? 'bg-red-500' : 'bg-green-500'}`} />
+                                      <span className={`text-xs ${isDown ? 'text-red-400' : 'text-gray-500'}`}>
+                                        {m.name.replace('Finishing ', '')}
+                                      </span>
+                                    </div>
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                          <div className="p-3 space-y-2">
-                            <div className="text-center py-3">
-                              <p className="text-2xl font-bold text-cyan-400">{finishingQueueCount}</p>
-                              <p className="text-gray-500 text-xs">{finishingQueueCount === 1 ? 'batch' : 'batches'} pending</p>
-                            </div>
-                            {/* Machine status indicators */}
-                            <div className="space-y-1">
-                              {locationMachines.filter(m => m.machine_type === 'finishing').map(m => (
-                                <div key={m.id} className="flex items-center gap-1.5 text-xs">
-                                  <div className={`w-2 h-2 rounded-full ${['down','offline','maintenance'].includes(m.status) ? 'bg-red-500' : 'bg-green-500'}`} />
-                                  <span className={['down','offline','maintenance'].includes(m.status) ? 'text-red-400' : 'text-gray-400'}>{m.name}</span>
-                                  {['down','offline','maintenance'].includes(m.status) && <span className="text-red-500 font-semibold">DOWN</span>}
+
+                            <div className="p-3 space-y-2">
+
+                              {/* Active batches */}
+                              {finishingActive.length > 0 ? (
+                                <div className="space-y-1.5">
+                                  {finishingActive.map(send => (
+                                    <div key={send.id} className="bg-cyan-950/40 border border-cyan-800/40 rounded px-2.5 py-1.5">
+                                      <div className="flex items-center justify-between gap-1">
+                                        <span className="text-cyan-300 font-mono text-xs font-semibold truncate">
+                                          {send.job?.job_number}
+                                        </span>
+                                        <span className="text-cyan-500 text-xs shrink-0 capitalize">
+                                          {send.finishing_stage || 'wash'}
+                                        </span>
+                                      </div>
+                                      <div className="text-gray-400 text-xs truncate mt-0.5">
+                                        {send.job?.component?.part_number} · {send.quantity} pcs
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
-                              ))}
+                              ) : (
+                                <div className="text-center py-2">
+                                  <p className="text-gray-600 text-xs">No active batches</p>
+                                </div>
+                              )}
+
+                              {/* Pending queue count */}
+                              {finishingPending.length > 0 && (
+                                <div className="flex items-center justify-between px-2 py-1 bg-gray-800/60 rounded text-xs">
+                                  <span className="text-gray-400">Pending queue</span>
+                                  <span className="text-white font-semibold">{finishingPending.length}</span>
+                                </div>
+                              )}
+
+                              {/* Launch button */}
+                              <a
+                                href="/finishing"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="w-full mt-1 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-cyan-500 text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
+                              >
+                                <Beaker size={16} />
+                                Launch Finishing Station
+                              </a>
                             </div>
-                            <a
-                              href="/finishing"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="w-full mt-2 py-2 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-cyan-500 text-gray-400 hover:text-white rounded transition-colors flex items-center justify-center gap-2 text-sm"
-                            >
-                              <Beaker size={16} />
-                              Launch Finishing Station
-                            </a>
                           </div>
-                        </div>
-                      )}
+                        )
+                      })()}
                     </div>
                   )}
                 </div>

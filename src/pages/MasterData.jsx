@@ -89,6 +89,34 @@ export default function MasterData({ profile }) {
   const [docRequirements, setDocRequirements] = useState([])
   const [showDocRequirements, setShowDocRequirements] = useState(false)
 
+  // Material Master & Receiving
+  const [materials, setMaterials] = useState([])
+  const [receivingLog, setReceivingLog] = useState([])
+  const [showMaterialMasterModal, setShowMaterialMasterModal] = useState(false)
+  const [showReceivingModal, setShowReceivingModal] = useState(false)
+  const [editingMaterialMaster, setEditingMaterialMaster] = useState(null)
+  const [materialMasterForm, setMaterialMasterForm] = useState({
+    material_type_id: '',
+    bar_size_inches: '',
+    density_lbs_per_cubic_inch: '',
+    vendor: '',
+    notes: ''
+  })
+  const [receivingForm, setReceivingForm] = useState({
+    material_id: '',
+    vendor: '',
+    lot_number: '',
+    quantity: '',
+    notes: ''
+  })
+  const materialMasterCount = materials.filter(m => m.is_active).length
+  const materialVendors = [...new Set(
+    materials.filter(m => m.vendor).map(m => m.vendor)
+  )].sort()
+  const vendorMaterials = receivingForm.vendor
+    ? materials.filter(m => m.vendor === receivingForm.vendor)
+    : []
+
   // Loading states
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(null)
@@ -140,6 +168,24 @@ export default function MasterData({ profile }) {
 
       if (barSizesError) throw barSizesError
       setBarSizes(barSizesData || [])
+
+      // Fetch material master records
+      const { data: materialMasterData, error: materialMasterError } = await supabase
+        .from('materials')
+        .select('*, material_type:material_types(name, short_code)')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+      if (!materialMasterError) setMaterials(materialMasterData || [])
+
+      // Fetch receiving log (last 90 days)
+      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+      const { data: receivingData } = await supabase
+        .from('material_receiving')
+        .select('*, received_by_profile:profiles!received_by(full_name)')
+        .gte('received_at', ninetyDaysAgo)
+        .order('received_at', { ascending: false })
+        .limit(200)
+      setReceivingLog(receivingData || [])
 
       // Fetch machines
       const { data: machinesData, error: machinesError } = await supabase
@@ -722,6 +768,69 @@ export default function MasterData({ profile }) {
     }
   }
 
+  const handleSaveMaterialMaster = async () => {
+    setSaving(true)
+    try {
+      const payload = {
+        material_type_id: materialMasterForm.material_type_id,
+        bar_size_inches: parseFloat(materialMasterForm.bar_size_inches),
+        density_lbs_per_cubic_inch: materialMasterForm.density_lbs_per_cubic_inch
+          ? parseFloat(materialMasterForm.density_lbs_per_cubic_inch) : null,
+        vendor: materialMasterForm.vendor?.trim() || null,
+        notes: materialMasterForm.notes?.trim() || null,
+        updated_at: new Date().toISOString()
+      }
+      if (editingMaterialMaster) {
+        const { error } = await supabase
+          .from('materials')
+          .update(payload)
+          .eq('id', editingMaterialMaster.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase.from('materials').insert(payload)
+        if (error) throw error
+      }
+      setShowMaterialMasterModal(false)
+      setEditingMaterialMaster(null)
+      setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' })
+      await fetchData()
+    } catch (err) {
+      alert('Error saving material: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleSaveReceiving = async () => {
+    setSaving(true)
+    try {
+      const selectedMaterial = materials.find(m => m.id === receivingForm.material_id)
+
+      const { error } = await supabase
+        .from('material_receiving')
+        .insert({
+          material_id: receivingForm.material_id,
+          material_type: selectedMaterial?.material_type?.name || '',
+          bar_size: selectedMaterial ? `${selectedMaterial.bar_size_inches}"` : null,
+          bar_length_inches: null,
+          lot_number: receivingForm.lot_number,
+          quantity: parseInt(receivingForm.quantity),
+          vendor: receivingForm.vendor,
+          notes: receivingForm.notes?.trim() || null,
+          received_by: profile.id,
+          received_at: new Date().toISOString()
+        })
+      if (error) throw error
+      setShowReceivingModal(false)
+      setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', notes: '' })
+      await fetchData()
+    } catch (err) {
+      alert('Error saving receiving entry: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -756,7 +865,8 @@ export default function MasterData({ profile }) {
               { id: 'components', label: 'Components', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
               { id: 'materials', label: 'Materials', icon: Layers, count: materialTypes.length },
               { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: barSizes.length },
-              { id: 'routing', label: 'Routing Templates', icon: Route, count: routingTemplates.length }
+              { id: 'routing', label: 'Routing Templates', icon: Route, count: routingTemplates.length },
+              { id: 'material_master', label: 'Material Master', icon: Layers, count: materialMasterCount }
             ].map(tab => (
               <button
                 key={tab.id}
@@ -1050,6 +1160,130 @@ export default function MasterData({ profile }) {
         {/* Routing Templates Tab */}
         {activeTab === 'routing' && (
           <RoutingTemplatesTab onDataChange={fetchData} />
+        )}
+
+        {/* Material Master Tab */}
+        {activeTab === 'material_master' && (
+          <div className="space-y-6">
+
+            {/* ── Section 1: Material Definitions ── */}
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-white">Material Definitions</h2>
+                {profile?.role === 'admin' && (
+                  <button
+                    onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setShowMaterialMasterModal(true) }}
+                    className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+                  >
+                    <Plus size={18} /> Add Material
+                  </button>
+                )}
+              </div>
+
+              {materials.length === 0 ? (
+                <p className="text-gray-400 text-sm">No material definitions yet.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Material Type</th>
+                        <th className="px-4 py-3 text-left">Bar Size (in)</th>
+                        <th className="px-4 py-3 text-left">Density (lb/in³)</th>
+                        <th className="px-4 py-3 text-left">Vendor</th>
+                        <th className="px-4 py-3 text-left">Notes</th>
+                        {profile?.role === 'admin' && <th className="px-4 py-3 text-left">Actions</th>}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700">
+                      {materials.map(m => (
+                        <tr key={m.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
+                          <td className="px-4 py-3 text-white font-medium">{m.material_type?.name || '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{m.bar_size_inches}"</td>
+                          <td className="px-4 py-3 text-gray-300">{m.density_lbs_per_cubic_inch ?? '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{m.vendor || '—'}</td>
+                          <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{m.notes || '—'}</td>
+                          {profile?.role === 'admin' && (
+                            <td className="px-4 py-3">
+                              <button
+                                onClick={() => {
+                                  setEditingMaterialMaster(m)
+                                  setMaterialMasterForm({
+                                    material_type_id: m.material_type_id,
+                                    bar_size_inches: String(m.bar_size_inches),
+                                    density_lbs_per_cubic_inch: m.density_lbs_per_cubic_inch != null ? String(m.density_lbs_per_cubic_inch) : '',
+                                    vendor: m.vendor || '',
+                                    notes: m.notes || ''
+                                  })
+                                  setShowMaterialMasterModal(true)
+                                }}
+                                className="p-1.5 text-gray-400 hover:text-white rounded transition-colors"
+                              >
+                                <Edit2 size={15} />
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* ── Section 2: Receiving Log ── */}
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">Last 90 days</p>
+                </div>
+                <button
+                  onClick={() => { setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', notes: '' }); setShowReceivingModal(true) }}
+                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+                >
+                  <Plus size={18} /> Log Receipt
+                </button>
+              </div>
+
+              {receivingLog.length === 0 ? (
+                <p className="text-gray-400 text-sm">No receiving entries in the last 90 days.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Received</th>
+                        <th className="px-4 py-3 text-left">Material Type</th>
+                        <th className="px-4 py-3 text-left">Bar Size</th>
+                        <th className="px-4 py-3 text-left">Lot #</th>
+                        <th className="px-4 py-3 text-left">Qty</th>
+                        <th className="px-4 py-3 text-left">Vendor</th>
+                        <th className="px-4 py-3 text-left">Received By</th>
+                        <th className="px-4 py-3 text-left">Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700">
+                      {receivingLog.map(r => (
+                        <tr key={r.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
+                          <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
+                            {new Date(r.received_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </td>
+                          <td className="px-4 py-3 text-white font-medium">{r.material_type}</td>
+                          <td className="px-4 py-3 text-gray-300">{r.bar_size || '—'}</td>
+                          <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{r.lot_number}</td>
+                          <td className="px-4 py-3 text-white font-semibold">{r.quantity}</td>
+                          <td className="px-4 py-3 text-gray-300">{r.vendor || '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{r.received_by_profile?.full_name || '—'}</td>
+                          <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{r.notes || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
@@ -1770,6 +2004,197 @@ export default function MasterData({ profile }) {
           }}
           onCancel={() => setShowBOMUpload(false)}
         />
+      )}
+
+      {/* Material Definition Modal */}
+      {showMaterialMasterModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">
+                {editingMaterialMaster ? 'Edit Material' : 'Add Material'}
+              </h2>
+              <button onClick={() => setShowMaterialMasterModal(false)} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Material Type *</label>
+                <select
+                  value={materialMasterForm.material_type_id}
+                  onChange={e => setMaterialMasterForm(f => ({ ...f, material_type_id: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                >
+                  <option value="">— Select —</option>
+                  {materialTypes.map(mt => (
+                    <option key={mt.id} value={mt.id}>{mt.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Size (inches) *</label>
+                <input
+                  type="number" step="0.001"
+                  value={materialMasterForm.bar_size_inches}
+                  onChange={e => setMaterialMasterForm(f => ({ ...f, bar_size_inches: e.target.value }))}
+                  placeholder="e.g. 0.375"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Density (lb/in³)</label>
+                <input
+                  type="number" step="0.0001"
+                  value={materialMasterForm.density_lbs_per_cubic_inch}
+                  onChange={e => setMaterialMasterForm(f => ({ ...f, density_lbs_per_cubic_inch: e.target.value }))}
+                  placeholder="e.g. 0.289"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Vendor</label>
+                <input
+                  type="text"
+                  value={materialMasterForm.vendor}
+                  onChange={e => setMaterialMasterForm(f => ({ ...f, vendor: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
+                <textarea
+                  value={materialMasterForm.notes}
+                  onChange={e => setMaterialMasterForm(f => ({ ...f, notes: e.target.value }))}
+                  rows={2}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setShowMaterialMasterModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveMaterialMaster}
+                disabled={saving || !materialMasterForm.material_type_id || !materialMasterForm.bar_size_inches}
+                className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {saving && <Loader2 size={16} className="animate-spin" />}
+                {editingMaterialMaster ? 'Save Changes' : 'Add Material'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Receiving Log Modal */}
+      {showReceivingModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Log Material Receipt</h2>
+              <button onClick={() => setShowReceivingModal(false)} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {/* Step 1: Vendor */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Vendor *</label>
+                {materialVendors.length > 0 ? (
+                  <select
+                    value={receivingForm.vendor}
+                    onChange={e => setReceivingForm(f => ({
+                      ...f,
+                      vendor: e.target.value,
+                      material_id: ''
+                    }))}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">— Select vendor —</option>
+                    {materialVendors.map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="mt-1 text-sm text-yellow-500">
+                    No vendors defined yet. Add material definitions with vendors first.
+                  </p>
+                )}
+              </div>
+
+              {/* Step 2: Material (filtered by vendor) */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Material *</label>
+                <select
+                  value={receivingForm.material_id}
+                  onChange={e => setReceivingForm(f => ({ ...f, material_id: e.target.value }))}
+                  disabled={!receivingForm.vendor || vendorMaterials.length === 0}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent disabled:opacity-50"
+                >
+                  <option value="">— Select material —</option>
+                  {vendorMaterials.map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.material_type?.name} — {m.bar_size_inches}"
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Step 3: Lot # */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Lot # *</label>
+                <input
+                  type="text"
+                  value={receivingForm.lot_number}
+                  onChange={e => setReceivingForm(f => ({ ...f, lot_number: e.target.value }))}
+                  placeholder="e.g. 2026-001"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Quantity */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Quantity (bars) *</label>
+                <input
+                  type="number" min="1"
+                  value={receivingForm.quantity}
+                  onChange={e => setReceivingForm(f => ({ ...f, quantity: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
+                <textarea
+                  value={receivingForm.notes}
+                  onChange={e => setReceivingForm(f => ({ ...f, notes: e.target.value }))}
+                  rows={2}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setShowReceivingModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveReceiving}
+                disabled={saving || !receivingForm.vendor || !receivingForm.material_id || !receivingForm.lot_number || !receivingForm.quantity}
+                className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {saving && <Loader2 size={16} className="animate-spin" />}
+                Log Receipt
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

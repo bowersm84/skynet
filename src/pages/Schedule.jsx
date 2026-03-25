@@ -76,6 +76,25 @@ export default function Schedule({ user, profile, onNavigate }) {
   const [maintenanceEndTime, setMaintenanceEndTime] = useState('')
   const [unscheduling, setUnscheduling] = useState(false)
   
+  // Scroll sync refs for header/body
+  const headerScrollRef = useRef(null)
+  const bodyScrollRef = useRef(null)
+  const isSyncingScroll = useRef(false)
+
+  const handleHeaderScroll = (e) => {
+    if (isSyncingScroll.current) return
+    isSyncingScroll.current = true
+    if (bodyScrollRef.current) bodyScrollRef.current.scrollLeft = e.target.scrollLeft
+    isSyncingScroll.current = false
+  }
+
+  const handleBodyScroll = (e) => {
+    if (isSyncingScroll.current) return
+    isSyncingScroll.current = true
+    if (headerScrollRef.current) headerScrollRef.current.scrollLeft = e.target.scrollLeft
+    isSyncingScroll.current = false
+  }
+
   // Resize state for drag-to-resize in day view
   const [resizing, setResizing] = useState(null) // { jobId, edge: 'start' | 'end', initialX, initialStart, initialEnd }
   const [resizePreview, setResizePreview] = useState(null) // { jobId, newStart, newEnd }
@@ -1917,7 +1936,7 @@ export default function Schedule({ user, profile, onNavigate }) {
             
             {/* Week View Headers */}
             {!zoomedDay && (
-              <div className="flex-1 flex overflow-x-auto">
+              <div className="flex-1 flex overflow-x-hidden" ref={headerScrollRef} onScroll={handleHeaderScroll}>
                 {weekDates.map((date, index) => (
                   <div 
                     key={index}
@@ -1946,7 +1965,7 @@ export default function Schedule({ user, profile, onNavigate }) {
           </div>
 
           {/* Machine Rows / Swim Lanes */}
-          <div className={`flex-1 overflow-auto`}>
+          <div className={`flex-1 overflow-auto`} ref={bodyScrollRef} onScroll={handleBodyScroll}>
             <div className={zoomedDay ? 'min-w-max' : ''}>
             {/* Day View Hour Headers - inside scrollable area */}
             {zoomedDay && (

@@ -1186,10 +1186,13 @@ export default function Kiosk() {
   const completeLogin = async (profile) => {
     try {
       // Step 1: Deactivate ALL sessions for this operator (clean slate)
-      await supabase
-        .from('kiosk_sessions')
-        .update({ is_active: false })
-        .eq('operator_id', profile.id)
+      // Admin users are exempt — they can be logged into multiple machines
+      if (profile.role !== 'admin') {
+        await supabase
+          .from('kiosk_sessions')
+          .update({ is_active: false })
+          .eq('operator_id', profile.id)
+      }
 
       // Step 2: Upsert active session for current machine
       await supabase
@@ -1882,6 +1885,14 @@ export default function Kiosk() {
 
       const materialLot = materials?.[0]?.lot_number || null
 
+      // Get existing send count to compute batch label
+      const { count: existingCount } = await supabase
+        .from('finishing_sends')
+        .select('*', { count: 'exact', head: true })
+        .eq('job_id', activeJob.id)
+
+      const batchLabel = String.fromCharCode(65 + (existingCount || 0))
+
       const { error } = await supabase
         .from('finishing_sends')
         .insert({
@@ -1892,7 +1903,8 @@ export default function Kiosk() {
           production_lot_number: activeJob.production_lot_number || null,
           material_lot_number: materialLot,
           status: 'pending_finishing',
-          notes: finishingSendNotes || null
+          notes: finishingSendNotes || null,
+          is_partial_send: true
         })
 
       if (error) throw error
@@ -1901,7 +1913,7 @@ export default function Kiosk() {
       setShowFinishingSendModal(false)
       setFinishingSendQty('')
       setFinishingSendNotes('')
-      setToastMessage(`Sent ${qty} pieces to finishing`)
+      setToastMessage(existingCount > 0 ? `Batch ${batchLabel} sent to finishing — ${qty} pcs` : `Sent to finishing — ${qty} pcs`)
     } catch (err) {
       console.error('Finishing send error:', err)
       alert('Failed to send to finishing: ' + err.message)
@@ -3537,7 +3549,11 @@ export default function Kiosk() {
                           <span className="text-cyan-400">
                             {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs sent to finishing
                           </span>
-                          <span className="text-gray-500">({finishingSends.length} {finishingSends.length === 1 ? 'send' : 'sends'})</span>
+                          {finishingSends.length > 1 && (
+                            <span className="text-gray-500">
+                              ({finishingSends.map((s, i) => `Batch ${String.fromCharCode(65 + i)}`).join(', ')})
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -4542,9 +4558,9 @@ export default function Kiosk() {
               {finishingSends.length > 0 && (
                 <div className="bg-gray-800/50 rounded-lg p-3">
                   <p className="text-gray-400 text-xs mb-2">Previous sends:</p>
-                  {finishingSends.map(send => (
+                  {finishingSends.map((send, idx) => (
                     <div key={send.id} className="flex justify-between text-sm text-gray-300">
-                      <span>{send.quantity} pcs</span>
+                      <span>{finishingSends.length > 1 && <span className="text-cyan-400 font-mono mr-1">Batch {String.fromCharCode(65 + idx)}</span>}{finishingSends.length > 1 ? '— ' : ''}{send.quantity} pcs</span>
                       <span className="text-gray-500">{new Date(send.sent_at).toLocaleString()}</span>
                     </div>
                   ))}
@@ -4949,9 +4965,9 @@ export default function Kiosk() {
                         <SendHorizontal size={14} />
                         Sent to Finishing During Production
                       </div>
-                      {finishingSends.map(send => (
+                      {finishingSends.map((send, idx) => (
                         <div key={send.id} className="flex justify-between text-sm text-gray-300 pl-5">
-                          <span>{send.quantity} pcs</span>
+                          <span>{finishingSends.length > 1 && <span className="text-cyan-400 font-mono mr-1">Batch {String.fromCharCode(65 + idx)}</span>}{finishingSends.length > 1 ? '— ' : ''}{send.quantity} pcs</span>
                           <span className="text-gray-500">{new Date(send.sent_at).toLocaleTimeString()}</span>
                         </div>
                       ))}

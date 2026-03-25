@@ -86,12 +86,21 @@ CREATE TABLE public.finishing_sends (
   count_discrepancy integer,
   verified_by uuid,
   verified_at timestamp with time zone,
+  chemical_lot_number text,
+  compliance_status text CHECK (compliance_status = ANY (ARRAY['pending_compliance'::text, 'approved'::text, 'rejected'::text])),
+  compliance_approved_by uuid,
+  compliance_approved_at timestamp with time zone,
+  compliance_notes text,
+  compliance_good_qty integer,
+  compliance_bad_qty integer,
+  is_partial_send boolean DEFAULT false,
   CONSTRAINT finishing_sends_pkey PRIMARY KEY (id),
   CONSTRAINT finishing_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT finishing_sends_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
   CONSTRAINT finishing_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id),
   CONSTRAINT finishing_sends_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
-  CONSTRAINT finishing_sends_verified_by_fkey FOREIGN KEY (verified_by) REFERENCES public.profiles(id)
+  CONSTRAINT finishing_sends_verified_by_fkey FOREIGN KEY (verified_by) REFERENCES public.profiles(id),
+  CONSTRAINT finishing_sends_compliance_approved_by_fkey FOREIGN KEY (compliance_approved_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.job_document_snapshots (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -250,6 +259,11 @@ CREATE TABLE public.jobs (
   tooling_required boolean DEFAULT false,
   production_lot_number text,
   finishing_lot_number text,
+  post_mfg_good_qty integer,
+  post_mfg_bad_qty integer,
+  post_mfg_notes text,
+  post_mfg_reviewed_by uuid,
+  post_mfg_reviewed_at timestamp with time zone,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -262,7 +276,8 @@ CREATE TABLE public.jobs (
   CONSTRAINT jobs_incomplete_by_fkey FOREIGN KEY (incomplete_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_material_confirmed_by_fkey FOREIGN KEY (material_confirmed_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_material_override_by_fkey FOREIGN KEY (material_override_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id)
+  CONSTRAINT jobs_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
+  CONSTRAINT jobs_post_mfg_reviewed_by_fkey FOREIGN KEY (post_mfg_reviewed_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.kiosk_sessions (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -521,7 +536,7 @@ CREATE TABLE public.work_orders (
   customer character varying,
   po_number character varying,
   priority character varying DEFAULT 'normal'::character varying CHECK (priority::text = ANY (ARRAY['critical'::character varying, 'high'::character varying, 'normal'::character varying, 'low'::character varying]::text[])),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending'::character varying, 'in_progress'::character varying, 'ready_for_assembly'::character varying, 'in_assembly'::character varying, 'complete'::character varying, 'shipped'::character varying, 'on_hold'::character varying, 'closed'::character varying]::text[])),
+  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending'::text, 'in_progress'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'complete'::text, 'shipped'::text, 'on_hold'::text, 'closed'::text, 'cancelled'::text])),
   due_date date,
   notes text,
   created_by uuid,

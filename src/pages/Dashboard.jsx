@@ -28,6 +28,7 @@ export default function Dashboard({ user, profile }) {
 
   // Finishing queue count
   const [finishingQueueCount, setFinishingQueueCount] = useState(0)
+  const [pendingBatchComplianceCount, setPendingBatchComplianceCount] = useState(0)
   
   // Auto-refresh state
   const [autoRefresh, setAutoRefresh] = useState(true) // Enabled by default
@@ -126,6 +127,13 @@ export default function Dashboard({ user, profile }) {
       if (!finishingError) {
         setFinishingQueueCount(finishingCount || 0)
       }
+
+      // Fetch pending batch compliance count
+      const { count: batchComplianceCount } = await supabase
+        .from('finishing_sends')
+        .select('id', { count: 'exact', head: true })
+        .eq('compliance_status', 'pending_compliance')
+      setPendingBatchComplianceCount(batchComplianceCount || 0)
 
       // Fetch for assembly-ready work orders
       // An assembly is ready when ALL its linked jobs have status ready_for_assembly
@@ -352,7 +360,12 @@ export default function Dashboard({ user, profile }) {
             scheduled_start,
             work_order_assembly_id,
             component:parts!component_id(part_number, description),
-            machine:assigned_machine_id(name)
+            machine:assigned_machine_id(name),
+            finishing_sends (
+              id, quantity, status, compliance_status, is_partial_send,
+              finishing_lot_number, sent_at, finishing_completed_at,
+              compliance_approved_at
+            )
           )
         `)
         .order('created_at', { ascending: false })
@@ -752,9 +765,9 @@ export default function Dashboard({ user, profile }) {
         <StatCard
           id="compliance"
           label="Pending Compliance"
-          value={pendingComplianceJobs.length}
+          value={pendingComplianceJobs.length + pendingBatchComplianceCount}
           colorClass="text-purple-400"
-          borderClass={pendingComplianceJobs.length > 0 ? 'border-purple-800' : 'border-gray-800'}
+          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
         <StatCard
@@ -1564,6 +1577,42 @@ export default function Dashboard({ user, profile }) {
                                                   )}
                                                 </div>
                                               </div>
+                                              {(job.finishing_sends?.some(s => s.is_partial_send) || job.finishing_sends?.length > 1) && (
+                                                <div className="mt-2 space-y-1">
+                                                  {[...job.finishing_sends]
+                                                    .sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
+                                                    .map((send, idx) => {
+                                                      const label = `Batch ${String.fromCharCode(65 + idx)}`
+                                                      const statusLabel = {
+                                                        'pending_finishing': 'Pending Finishing',
+                                                        'in_finishing': 'In Finishing',
+                                                        'finishing_complete': send.compliance_status === 'pending_compliance'
+                                                          ? 'Awaiting Compliance'
+                                                          : send.compliance_status === 'approved'
+                                                          ? 'Compliance Approved'
+                                                          : 'Finishing Complete',
+                                                      }[send.status] || send.status
+                                                      const statusColor = {
+                                                        'pending_finishing': 'text-gray-400',
+                                                        'in_finishing': 'text-cyan-400',
+                                                        'finishing_complete': send.compliance_status === 'approved'
+                                                          ? 'text-green-400'
+                                                          : 'text-yellow-400',
+                                                      }[send.status] || 'text-gray-400'
+                                                      return (
+                                                        <div key={send.id}
+                                                             className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
+                                                          <span className="text-gray-500 font-mono">{label}</span>
+                                                          <span className="text-gray-600">&middot;</span>
+                                                          <span className="text-gray-400">{send.quantity} pcs</span>
+                                                          <span className="text-gray-600">&middot;</span>
+                                                          <span className={statusColor}>{statusLabel}</span>
+                                                        </div>
+                                                      )
+                                                    })
+                                                  }
+                                                </div>
+                                              )}
                                             </div>
                                           )
                                         })}
@@ -1654,6 +1703,42 @@ export default function Dashboard({ user, profile }) {
                                           )}
                                         </div>
                                       </div>
+                                      {(job.finishing_sends?.some(s => s.is_partial_send) || job.finishing_sends?.length > 1) && (
+                                        <div className="mt-2 space-y-1">
+                                          {[...job.finishing_sends]
+                                            .sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
+                                            .map((send, idx) => {
+                                              const label = `Batch ${String.fromCharCode(65 + idx)}`
+                                              const statusLabel = {
+                                                'pending_finishing': 'Pending Finishing',
+                                                'in_finishing': 'In Finishing',
+                                                'finishing_complete': send.compliance_status === 'pending_compliance'
+                                                  ? 'Awaiting Compliance'
+                                                  : send.compliance_status === 'approved'
+                                                  ? 'Compliance Approved'
+                                                  : 'Finishing Complete',
+                                              }[send.status] || send.status
+                                              const statusColor = {
+                                                'pending_finishing': 'text-gray-400',
+                                                'in_finishing': 'text-cyan-400',
+                                                'finishing_complete': send.compliance_status === 'approved'
+                                                  ? 'text-green-400'
+                                                  : 'text-yellow-400',
+                                              }[send.status] || 'text-gray-400'
+                                              return (
+                                                <div key={send.id}
+                                                     className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
+                                                  <span className="text-gray-500 font-mono">{label}</span>
+                                                  <span className="text-gray-600">&middot;</span>
+                                                  <span className="text-gray-400">{send.quantity} pcs</span>
+                                                  <span className="text-gray-600">&middot;</span>
+                                                  <span className={statusColor}>{statusLabel}</span>
+                                                </div>
+                                              )
+                                            })
+                                          }
+                                        </div>
+                                      )}
                                     </div>
                                   )
                                 })}

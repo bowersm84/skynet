@@ -1,171 +1,146 @@
 # SkyNet Sprint 3 — Implementation Plan
 ## Finishing Overhaul & Material Tracking
-### Originally: March 1, 2026 | Updated: March 18, 2026
+### Originally: March 1, 2026 | Updated: March 25, 2026
 
 ---
 
 ## Sprint Goal
-Transform the passivation module into a full Finishing station with multi-stage processing.
-Implement inch-based material tracking. This is the largest sprint and the most complex
-domain overhaul.
-
-## Foundations from Previous Sprints
-- **S1 Routing System:** `routing_templates` + `job_routing_steps` provide the step-based
-  processing framework that finishing stages will build on
-- **S2 `finishing_sends` table:** Partial sends from manufacturing kiosks feed into the
-  finishing queue (status = `pending_finishing`)
-- **S2 Production Lot Numbers:** `jobs.production_lot_number` carries through to finishing
-  for chain-of-custody traceability
-- **S2 `lot_number_sequences` table:** Reusable for finishing lot number generation
-  (prefix = 'FLN')
+Transform the passivation module into a full Finishing station with multi-stage
+processing. Implement partial batch progression through compliance. Inch-based
+material tracking (Batch D).
 
 ---
 
-## Action Items
+## Action Items Status
 
-| # | Action Item | Lead | Type | Effort | Status |
-|---|-------------|------|------|--------|--------|
-| 21 | Rename Passivation to Finishing; implement multi-stage process | James | Modify | XL | ✅ Batch A |
-| 22 | Add second finishing machine in system | James | Config | S | ✅ Batch A |
-| 24 | Add production lot + finishing lot number fields | James | Modify | M | ✅ Batch B |
-| 25 | Add DOWN indicators for finishing machines | James | Modify | S | ✅ Batch A |
-| 53 | Auto-generate finishing lot numbers at finishing start | James | New | M | ✅ Batch B |
-| 54 | Finishing count field — James enters verified count, flags discrepancy | James | New | M | ✅ Batch B |
-| 58 | Finishing queue part lookup — search by part# to find job | James | New | M | 🔲 Batch C |
-| 7 | Override logging — all overrides logged with operator ID, timestamp | All | New | L | 🔲 Batch C |
-| 8 | Flexible document upload at any workflow point | Roger | Modify | M | 🔲 Batch C |
-| 9 | Add good/bad quantity entry to post-mfg compliance review | Roger | Modify | S | 🔲 Batch C |
-| 10 | Add notes section to post-mfg compliance review | Roger | Modify | S | 🔲 Batch C |
-| 32a | Material master with inch-based UOM and conversions | James | New | L | 🔲 Batch D |
-| 32b | Raw material receiving log | James | New | M | 🔲 Batch D |
-| 66 | Import Harry's Trello machine data | Harry | Config | M | 🔲 Batch D |
+| # | Action Item | Lead | Status | Batch |
+|---|-------------|------|--------|-------|
+| 21 | Rename Passivation → Finishing; multi-stage process | James | ✅ Complete | A |
+| 22 | Add second finishing machine | James | ✅ Complete | A |
+| 24 | Production lot + finishing lot number fields | James | ✅ Complete | B |
+| 25 | DOWN indicators for finishing machines | James | ✅ Complete | A |
+| 53 | Auto-generate finishing lot numbers | James | ✅ Complete | B |
+| 54 | Finishing count field + discrepancy flagging | James | ✅ Complete | B |
+| 58 | Finishing queue part lookup | James | ✅ Complete | C |
+| 7 | Override logging with audit trail | All | ✅ Complete | C |
+| 8 | Flexible document upload at finishing | Roger | ✅ Complete | C |
+| 9 | Good/bad quantity in post-mfg compliance | Roger | ✅ Complete | C |
+| 10 | Notes section in post-mfg compliance | Roger | ✅ Complete | C |
+| 32a | Material master with inch-based UOM | James | 🔲 Pending | D |
+| 32b | Raw material receiving log | James | 🔲 Pending | D |
+| 66 | Import Harry's Trello machine data | Harry | 🔲 Pending | D |
 
 ---
 
-## Batch A: Finishing Station Core (#21, #22, #25) — ✅ COMPLETE
+## Batch A: Finishing Station Core — ✅ COMPLETE
 
 **Delivered:**
-- `src/pages/Finishing.jsx` — new finishing station (replaces Secondary.jsx)
-- Route `/finishing` added to App.jsx; `/secondary/passivation` removed
-- Passivation columns renamed to finishing equivalents on `jobs` table
-- `finishing_sends` columns added: `finishing_stage`, `stage_started_at`,
-  `finishing_operator_id`, `finishing_started_at`, `finishing_completed_at`
-- FIN-1 machine renamed from PASS-01, `machine_type` updated to 'finishing'
-- FIN-2 (Finishing Tank 2) inserted as second finishing machine
-- Dashboard shows single "Finishing Station" card (not per-tank cards)
-- DOWN indicators for finishing machines shown in station header
-- Real-time subscription on `finishing_sends` table
+- `src/pages/Finishing.jsx` — full finishing station replacing Secondary.jsx
+- Route `/finishing` in App.jsx; `/secondary/passivation` removed
+- Passivation columns renamed to finishing equivalents on `jobs`
+- FIN-1 renamed from PASS-01; FIN-2 inserted
+- Single "Finishing Station" card on Dashboard (not per-tank)
+- DOWN indicators in station header
+- Real-time subscription on `finishing_sends`
+- Multiple simultaneous active batches (no limit)
+- Collapsible batch cards + Job/Station view toggle
+- Tank selection at Treatment stage (not login)
+- Session enforcement via `kiosk_sessions` (admin exempt)
 
-**Design decisions made during testing (deviations from original plan):**
-- Single finishing station card on Dashboard, not one card per tank — tank status shown
-  as indicators within the single card
-- Multiple simultaneous active batches supported (no one-at-a-time limit)
-- Tank selection moved from login to the Treatment stage advance step
-- Collapsible batch cards added for space management
-- Job/Station view toggle added (Job view = collapsible cards; Station view = three columns
-  by stage)
-- "Launch Finishing Station" button on Dashboard card instead of "Launch Kiosk"
-- Finishing station integrated with `kiosk_sessions` for single-login enforcement
-- Auto-send to finishing on "Complete Job": remaining quantity auto-creates
-  `finishing_sends` record if machinist never manually sent
-- Job status advances to `pending_post_manufacturing` when all sends for a job
-  reach `finishing_complete`
-- PIN login upgraded to match Kiosk numpad style with keyboard support
+**Kiosk fixes delivered with Batch A:**
+- "Send to Finishing" no longer changes job status
+- Blank material types show "pieces" not "bars"
+- PLN generation moved to production start (not material entry)
+- Auto-send remaining qty on job complete
 
-**Kiosk fixes delivered alongside Batch A:**
-- "Send to Finishing" no longer changes job status (was incorrectly moving job out
-  of `in_progress`)
-- Blank material types display "pieces" not "bars" for quantity UOM
-- PLN generation moved from material entry to production start (ensures every job
-  gets a PLN even if machinist skips material loading)
-
-**Dashboard fixes delivered alongside Batch A:**
+**Dashboard fixes delivered with Batch A:**
 - Pending Compliance counter includes `pending_post_manufacturing`
-- Assembly line item order/stock qty uses stored `woa.order_quantity` /
-  `woa.stock_quantity` (not calculated from WO totals)
-- `work_order_assemblies` table: `order_quantity` and `stock_quantity` columns added;
-  `CreateWorkOrderModal` and `EditWorkOrderModal` updated to save per-assembly splits
-- Compliance view job rows show plain job quantity (no WO-level order/stock breakdown)
+- Assembly qty uses stored `woa.order_quantity/stock_quantity`
+- `work_order_assemblies` columns added for per-assembly splits
+- Compliance view shows plain job qty (no WO-level breakdown)
 
 ---
 
-## Batch B: Lot Numbers & Count Verification (#24, #53, #54) — ✅ COMPLETE
+## Batch B: Lot Numbers & Count Verification — ✅ COMPLETE
 
 **Delivered:**
-- Finishing Lot # (FLN) auto-generated at batch start using `next_lot_number('FLN', ...)`
-- FLN persists across batches: pre-filled from most recent active lot, not always new
-- "Generate New" button allows James to force a new FLN when chemicals/material change
-- Chemical Lot # field added to Start Batch modal — persists across batches same as FLN
-- Incoming Count field at batch start (pre-filled from send quantity, editable)
-- Verified Count field at batch completion (starts blank, required)
-- Discrepancy warnings shown inline at both entry points (non-blocking)
-- ALL discrepancies logged to `audit_logs` — no percentage threshold
-- `jobs.finishing_lot_number` updated when batch completes
+- FLN auto-generated at batch start, persists across batches
+- "Generate New" button for when chemicals/material change
+- Chemical Lot # field — persists across batches
+- Incoming Count at batch start (blank, required)
+- Verified Count at Dry completion (blank, required)
+- ALL discrepancies logged to `audit_logs` (no threshold)
+- `jobs.finishing_lot_number` updated on batch complete
 
-**New DB columns added in Batch B:**
+**New DB columns on `finishing_sends`:**
+`finishing_lot_number`, `chemical_lot_number`, `incoming_count`, `verified_count`,
+`count_discrepancy`, `verified_by`, `verified_at`
 
-On `finishing_sends`:
-- `finishing_lot_number` text
-- `chemical_lot_number` text
-- `incoming_count` integer
-- `verified_count` integer
-- `count_discrepancy` integer
-- `verified_by` uuid FK profiles
-- `verified_at` timestamptz
-
-On `jobs`:
-- `finishing_lot_number` text
-
-**Design decisions made during testing:**
-- Chemical lot number added to Start Batch modal (not in original scope) — required for
-  Roger's compliance audit trail and is the signal for when FLN should change
-- Verified count starts blank (not pre-filled) to force conscious entry — pre-filling
-  caused a UI bug where the field wasn't recognized as user-entered
-- All discrepancies logged regardless of size — threshold removed; percentage filtering
-  is a reporting concern, not a data capture concern
+**New DB column on `jobs`:** `finishing_lot_number`
 
 ---
 
-## Batch C: Finishing Queue & Compliance (#58, #7, #8, #9, #10) — 🔲 NEXT
+## Batch C: Finishing Queue & Compliance — ✅ COMPLETE
 
-**Goal:** Part lookup for finishing, override audit trail, and compliance improvements.
+**Delivered (original scope #58, #7, #8, #9, #10):**
+- Queue search by part #, job #, WO # (client-side, real-time filter)
+- Material and tooling override modals require mandatory reason
+- Override reason logged to `audit_logs` (fire-and-forget)
+- "Skip Materials" and "Skip Tooling" buttons removed
+- Document upload at finishing station (job-level, shared across batches)
+- Document remove button with RLS DELETE policy fix
+- Post-mfg compliance: good/bad qty + notes + Quantity Check section
+- Routing steps removed from post-mfg compliance view
 
-**Scope:**
-- Finishing queue part lookup: search by part number to find associated job/send.
-  James needs this to identify unknown parts that arrive on his table without paperwork.
-- Override logging: `audit_logs` table (already created in S2) — log all overrides with
-  operator, timestamp, reason. Build override confirmation modal UI.
-- Flexible document upload: extend S3 doc upload to finishing stage, not just compliance.
-  Roger wants James to scan and attach production logs directly to jobs at finishing.
-- Post-mfg compliance: add good/bad quantity entry fields + notes section to
-  `ComplianceReview.jsx` post-mfg section.
+**Delivered (additional scope discovered during testing):**
+- Partial batch progression: each `finishing_sends` advances through compliance
+  independently while job stays on machinist kiosk
+- `compliance_status` column on `finishing_sends`
+- Batch labels (A, B, C) using `is_partial_send` flag
+- `is_partial_send` column on `finishing_sends`
+- Merged Post-Mfg Review section (batches + legacy jobs together)
+- Recently Approved Batches section in ComplianceReview
+- WO Lookup batch status summary with compliance states
+- `allJobSendsMap` for accurate cross-history batch labeling
+- Job advancement guard: only advances when totalSentQty >= jobQty
+- Admin multi-kiosk exception to single-login rule
+- Recent Completions panel on finishing station (last 5 days)
+- Station view splits Treatment into Tank 1 / Tank 2 columns
+- Incoming Queue collapses to compact strip in Station view
+- Documents auto-load on batch card expand (no manual "Load" button)
+- Batch label in Start Batch modal
+- Quantity fields in post-mfg not pre-filled (forces conscious entry)
+- CreateWorkOrderModal new products prepend to top
+- Schedule module single scrollbar sync for header + body
+- `work_orders` status constraint updated to include `cancelled`
+- `document_types`: "Passivation Card" → "Finishing Card"; "Other" added
+- RLS DELETE policies added to 7 tables
 
-**Dependencies:** S2 `audit_logs` table (exists)
+**New DB columns on `finishing_sends`:**
+`compliance_status`, `compliance_approved_by`, `compliance_approved_at`,
+`compliance_notes`, `compliance_good_qty`, `compliance_bad_qty`, `is_partial_send`
 
-**Claude Code Prompt Sections:**
-1. Finishing queue search bar — filter pending queue by part number
-2. Override logging modal — confirm + notes required, log to audit_logs
-3. Document upload at finishing stage — extend existing S3 upload pattern
-4. ComplianceReview.jsx post-mfg section — good qty, bad qty, notes fields
+**New DB columns on `jobs`:**
+`post_mfg_good_qty`, `post_mfg_bad_qty`, `post_mfg_notes`,
+`post_mfg_reviewed_by`, `post_mfg_reviewed_at`
 
 ---
 
-## Batch D: Material Master & Data Import (#32a, #32b, #66) — 🔲 PLANNED
+## Batch D: Material Master & Data Import — 🔲 NEXT
 
 **Goal:** Inch-based material tracking and raw material receiving.
+**Also:** Assembly partial check-in (each compliance-approved batch checks into
+assembly independently — deferred from Batch C).
 
 **Scope:**
-- Material master table: `materials` with base UOM in inches, auto-conversions to feet
-  (÷12), bars (÷bar_length), weight (using material density)
-- Material types already exist (`material_types` table from S2) — link to material master
-- Raw material receiving log: new page in Master Data section for logging incoming
-  material (vendor, heat/lot number, quantity, date received). Betty would use this.
-- Import Harry's Trello machine data (serial numbers, mfr dates, photos) — one-time script
+- Material master table with base UOM in inches, conversions to feet/bars/weight
+- Raw material receiving log in Master Data (Betty's module)
+- Import Harry's Trello machine data (one-time script)
+- Assembly partial check-in: approved batches check into assembly as own quantity
 
-**Key Decision (MB):** Base UOM = inches. All conversions derive from inches. Display
-shows all three: inches, feet, bars.
+**Key Decision (MB):** Base UOM = inches. Display: inches, feet, bars.
 
-**Database Changes:**
+**Database:**
 ```sql
 CREATE TABLE IF NOT EXISTS public.materials (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -196,34 +171,37 @@ CREATE TABLE IF NOT EXISTS public.material_receiving (
 
 ---
 
-## Backlog Items Identified During Sprint 3
+## Backlog Items (Post-Sprint 3)
 
-| Item | Description | Sprint |
-|------|-------------|--------|
-| Finishing status in WO Lookup | Show "In Finishing (X pcs)" cyan badge on job rows in April's WO Lookup when `finishing_sends` records exist. Query `finishing_sends` grouped by `job_id`, sum quantities by status, display inline on job row. | S4 |
+| Item | Description |
+|------|-------------|
+| Finishing status in WO Lookup | "In Finishing (X pcs)" badge on April's job rows |
+| Assembly partial check-in | Batch D scope |
 
 ---
 
 ## Sprint 3 Success Criteria
 
-- [x] "Passivation" renamed to "Finishing" everywhere in UI
-- [x] James can see incoming work from `finishing_sends` queue
-- [x] Multi-stage processing (Wash → Treatment → Dry)
-- [x] Single finishing station card on Dashboard with queue count
-- [x] Multiple simultaneous active batches supported
-- [x] Collapsible batch cards + Job/Station view toggle
-- [x] Tank selection at Treatment stage
-- [x] Finishing lot numbers auto-generated with persistence logic
-- [x] Chemical lot number captured and persisted
-- [x] Incoming count at batch start
-- [x] Verified count at batch completion (required, starts blank)
-- [x] All discrepancies logged to audit_logs
-- [x] Job advances to pending_post_manufacturing when all sends complete
-- [x] PLN generated at production start (not material entry)
-- [x] Auto-send to finishing on job complete
-- [x] kiosk_sessions integration for single-login enforcement
-- [ ] Part lookup in finishing queue (Batch C)
-- [ ] Override logging with audit trail (Batch C)
-- [ ] Post-mfg compliance has good/bad qty + notes (Batch C)
-- [ ] Material master with inch-based UOM (Batch D)
-- [ ] Raw material receiving log functional (Batch D)
+- [x] Passivation renamed to Finishing everywhere
+- [x] James can see incoming queue from `finishing_sends`
+- [x] Multi-stage Wash → Treatment → Dry
+- [x] Single finishing station card on Dashboard
+- [x] Multiple simultaneous active batches
+- [x] Collapsible cards + Job/Station view toggle
+- [x] Tank selection at Treatment
+- [x] Finishing lot numbers with persistence
+- [x] Chemical lot number captured
+- [x] Count verification (incoming + verified, both blank)
+- [x] All discrepancies logged
+- [x] Job advances to `ready_for_assembly` on first batch compliance approval
+- [x] Job stays on kiosk while remaining qty still on machine
+- [x] PLN at production start
+- [x] Batch labels A/B/C for split jobs
+- [x] Partial batch progression end-to-end (finishing → compliance)
+- [x] Override logging with mandatory reason
+- [x] Document upload at finishing with remove
+- [x] Post-mfg compliance: quantity check + documents
+- [x] Merged Pre/Post-Mfg compliance sections correctly named
+- [ ] Assembly partial check-in (Batch D)
+- [ ] Material master inch-based UOM (Batch D)
+- [ ] Raw material receiving log (Batch D)

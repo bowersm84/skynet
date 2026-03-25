@@ -258,9 +258,11 @@ export default function Finishing() {
           byJob[jid].push(send.id)
         })
       const labels = {}
-      Object.values(byJob).forEach(ids => {
+      Object.entries(byJob).forEach(([jobId, ids]) => {
         ids.forEach((id, i) => {
-          if (ids.length > 1) {
+          const send = allSends.find(s => s.id === id)
+          const isPartial = send?.is_partial_send === true
+          if (ids.length > 1 || isPartial) {
             labels[id] = String.fromCharCode(65 + i)
           }
         })
@@ -299,6 +301,17 @@ export default function Finishing() {
       }
     }
   }, [operator, loadData, loadMachines])
+
+  // Auto-load documents for initially-expanded batch cards
+  useEffect(() => {
+    activeBatches.forEach(batch => {
+      const isCollapsed = !!collapsedBatches[batch.id]
+      if (!isCollapsed) {
+        const jobId = batch.job_id || batch.job?.id
+        if (jobId) loadBatchDocuments(batch.id, jobId)
+      }
+    })
+  }, [activeBatches])
 
   // Realtime: force-logout if session deactivated by another kiosk
   useEffect(() => {
@@ -426,11 +439,14 @@ export default function Finishing() {
       }
 
       // Session enforcement — deactivate all existing sessions, create finishing session
+      // Admin users are exempt — they can be logged into multiple machines
       try {
-        await supabase
-          .from('kiosk_sessions')
-          .update({ is_active: false })
-          .eq('operator_id', data.id)
+        if (data.role !== 'admin') {
+          await supabase
+            .from('kiosk_sessions')
+            .update({ is_active: false })
+            .eq('operator_id', data.id)
+        }
 
         // Use first finishing machine as session anchor
         const { data: finMachine } = await supabase
@@ -493,7 +509,7 @@ export default function Finishing() {
   // Start batch - open start modal directly (lot # + incoming count + chemical lot)
   const handleStartBatch = async (send) => {
     setStartModalSend(send)
-    setStartIncomingCount(String(send.quantity || ''))
+    setStartIncomingCount('')
     setGeneratingLot(true)
     setShowStartModal(true)
 
@@ -747,40 +763,20 @@ export default function Finishing() {
           }
         }
 
-        // Check if all sends for this job are now complete → advance job status
-        console.log('[Finishing] Batch complete. job_id:', jobId)
+        // Each batch now independently enters compliance review when it completes finishing
+        // Set compliance_status to pending_compliance on this send
+        const { error: complianceError } = await supabase
+          .from('finishing_sends')
+          .update({
+            compliance_status: 'pending_compliance',
+            updated_at: now
+          })
+          .eq('id', batch.id)
 
-        if (jobId) {
-          const { data: allSends, error: sendsError } = await supabase
-            .from('finishing_sends')
-            .select('id, status')
-            .eq('job_id', jobId)
-
-          console.log('[Finishing] All sends for job:', allSends, 'error:', sendsError)
-
-          const allComplete = allSends && allSends.length > 0 && allSends.every(s => s.status === 'finishing_complete')
-
-          if (allComplete) {
-            // Only advance if the job itself is already manufacturing_complete
-            // (machinist has finished producing all parts)
-            const { data: parentJob } = await supabase
-              .from('jobs')
-              .select('status')
-              .eq('id', jobId)
-              .single()
-
-            if (parentJob?.status === 'manufacturing_complete') {
-              console.log('[Finishing] Advancing job', jobId, 'to pending_post_manufacturing')
-              const { error: jobError } = await supabase
-                .from('jobs')
-                .update({ status: 'pending_post_manufacturing', updated_at: now })
-                .eq('id', jobId)
-              console.log('[Finishing] Job update result — error:', jobError)
-            } else {
-              console.log('[Finishing] All sends complete but job status is', parentJob?.status, '— not advancing yet')
-            }
-          }
+        if (complianceError) {
+          console.error('[Finishing] Failed to set compliance status:', complianceError)
         }
+        // Do NOT advance the parent job status here — job status is managed by compliance approval
       } else {
         // Advance to next stage
         const nextStage = STAGES[currentIndex + 1].key
@@ -1066,7 +1062,7 @@ export default function Finishing() {
                           onClick={() => {
                             const wasCollapsed = !!collapsedBatches[batch.id]
                             setCollapsedBatches(prev => ({ ...prev, [batch.id]: !prev[batch.id] }))
-                            if (wasCollapsed && !batchDocuments[batch.id]) {
+                            if (wasCollapsed) {
                               const jobId = batch.job_id || batch.job?.id
                               if (jobId) loadBatchDocuments(batch.id, jobId)
                             }
@@ -1275,11 +1271,7 @@ export default function Finishing() {
                                 <p className="text-gray-600 text-xs mb-1">Removing a document removes it for all batches of this job.</p>
                               )}
                               {(!batchDocuments[batch.id] || batchDocuments[batch.id].length === 0) ? (
-                                <p className="text-gray-600 text-xs">
-                                  {!batchDocuments[batch.id]
-                                    ? <button onClick={() => loadBatchDocuments(batch.id, batch.job_id || batch.job?.id)} className="text-cyan-400 hover:text-cyan-300">Load documents</button>
-                                    : 'No documents uploaded yet'}
-                                </p>
+                                <p className="text-gray-600 text-xs">No documents uploaded yet</p>
                               ) : (
                                 <div className="space-y-1.5">
                                   {batchDocuments[batch.id].map(doc => (
@@ -1674,7 +1666,15 @@ export default function Finishing() {
               {/* Batch summary */}
               <div className="bg-gray-800 rounded-lg p-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-white font-mono">{startModalSend.job?.job_number}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-white font-mono">{startModalSend.job?.job_number}</span>
+                    {batchLabels[startModalSend.id] && (
+                      <span className="text-xs px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400
+                                       border border-cyan-700 rounded font-mono">
+                        Batch {batchLabels[startModalSend.id]}
+                      </span>
+                    )}
+                  </div>
                   <span className="text-gray-400 text-sm">Qty: {startModalSend.quantity}</span>
                 </div>
                 <p className="text-cyan-400 text-sm">{startModalSend.job?.component?.part_number}</p>

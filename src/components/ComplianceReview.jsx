@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import PrintPackageModal from './PrintPackageModal'
@@ -42,6 +42,197 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [printPackageJob, setPrintPackageJob] = useState(null)
   const [postMfgData, setPostMfgData] = useState({})
   // Shape: { [jobId]: { good_qty: string, bad_qty: string, notes: string } }
+
+  // Per-batch compliance state
+  const [pendingBatches, setPendingBatches] = useState([])
+  const [expandedBatch, setExpandedBatch] = useState(null)
+  const [batchReviewData, setBatchReviewData] = useState({})
+  // Shape: { [sendId]: { good_qty: string, bad_qty: string, notes: string } }
+  const [approvingBatch, setApprovingBatch] = useState(null)
+  const [batchDetails, setBatchDetails] = useState({})
+  // Shape: { [sendId]: { requirements: [], jobDocs: [] } }
+  const [recentlyApprovedBatches, setRecentlyApprovedBatches] = useState([])
+  const [showRecentBatches, setShowRecentBatches] = useState(false)
+  const [allJobSendsMap, setAllJobSendsMap] = useState({})
+  // Shape: { [jobId]: [sends sorted by sent_at] }
+
+  const fetchBatchDetails = async (send) => {
+    const jobId = send.job_id
+    const partId = send.job?.component?.id
+    if (!partId) return
+
+    let { data: requirements } = await supabase
+      .from('part_document_requirements')
+      .select('*, document_type:document_types(*)')
+      .eq('part_id', partId)
+
+    const { data: jobDocs } = await supabase
+      .from('job_documents')
+      .select('*, document_type:document_types(*)')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: true })
+
+    setBatchDetails(prev => ({
+      ...prev,
+      [send.id]: { requirements: requirements || [], jobDocs: jobDocs || [] }
+    }))
+  }
+
+  const fetchPendingBatches = async () => {
+    const { data, error } = await supabase
+      .from('finishing_sends')
+      .select(`
+        *,
+        job:jobs(
+          id, job_number, quantity, production_lot_number, status,
+          work_order:work_orders(wo_number, customer, priority, due_date, order_type),
+          component:parts!component_id(id, part_number, description, part_type)
+        ),
+        sent_by_profile:profiles!sent_by(full_name),
+        finishing_operator:profiles!finishing_operator_id(full_name)
+      `)
+      .eq('compliance_status', 'pending_compliance')
+      .order('finishing_completed_at', { ascending: true })
+
+    if (!error) {
+      setPendingBatches(data || [])
+
+      // Fetch all sends for jobs with pending batches (for accurate batch labeling)
+      const jobIds = [...new Set((data || []).map(s => s.job_id))]
+      if (jobIds.length > 0) {
+        const { data: allSends } = await supabase
+          .from('finishing_sends')
+          .select('id, job_id, quantity, sent_at, is_partial_send')
+          .in('job_id', jobIds)
+          .order('sent_at', { ascending: true })
+
+        const map = {}
+        allSends?.forEach(s => {
+          if (!map[s.job_id]) map[s.job_id] = []
+          map[s.job_id].push(s)
+        })
+        setAllJobSendsMap(map)
+      }
+    }
+  }
+
+  const fetchRecentlyApprovedBatches = async () => {
+    const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+    const { data } = await supabase
+      .from('finishing_sends')
+      .select(`
+        *,
+        job:jobs(
+          id, job_number, quantity,
+          work_order:work_orders(wo_number, customer),
+          component:parts!component_id(part_number, description)
+        )
+      `)
+      .eq('compliance_status', 'approved')
+      .gte('compliance_approved_at', fiveDaysAgo)
+      .order('compliance_approved_at', { ascending: false })
+      .limit(50)
+    setRecentlyApprovedBatches(data || [])
+  }
+
+  useEffect(() => {
+    fetchPendingBatches()
+    fetchRecentlyApprovedBatches()
+
+    const sub = supabase
+      .channel('compliance-finishing-sends')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'finishing_sends'
+      }, () => { fetchPendingBatches(); fetchRecentlyApprovedBatches() })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(sub)
+    }
+  }, [])
+
+  const getBatchLabel = (send) => {
+    const jobSends = allJobSendsMap[send.job_id] || []
+    const isPartial = send.is_partial_send === true
+    // If map not loaded yet, return null — will re-render once loaded
+    if (jobSends.length === 0) return null
+    if (jobSends.length === 1 && !isPartial) return null
+    const idx = jobSends.findIndex(s => s.id === send.id)
+    if (idx === -1) return null
+    return String.fromCharCode(65 + idx) // A, B, C...
+  }
+
+  const handleApproveBatch = async (send) => {
+    setApprovingBatch(send.id)
+    const now = new Date().toISOString()
+    const reviewData = batchReviewData[send.id] || {}
+
+    try {
+      // 1. Approve this finishing_send
+      const { error: sendError } = await supabase
+        .from('finishing_sends')
+        .update({
+          compliance_status: 'approved',
+          compliance_approved_by: profile.id,
+          compliance_approved_at: now,
+          compliance_notes: reviewData.notes?.trim() || null,
+          compliance_good_qty: reviewData.good_qty ? parseInt(reviewData.good_qty) : null,
+          compliance_bad_qty: reviewData.bad_qty ? parseInt(reviewData.bad_qty) : null,
+          updated_at: now
+        })
+        .eq('id', send.id)
+
+      if (sendError) throw sendError
+
+      // 2. Check if job should advance
+      const jobId = send.job_id
+      const { data: parentJob } = await supabase
+        .from('jobs')
+        .select('status, quantity, component:parts!component_id(part_type)')
+        .eq('id', jobId)
+        .single()
+
+      // Get all sends for this job to check if full quantity has been sent
+      const { data: allSends } = await supabase
+        .from('finishing_sends')
+        .select('id, quantity, status')
+        .eq('job_id', jobId)
+
+      const totalSentQty = allSends?.reduce((sum, s) => sum + (s.quantity || 0), 0) || 0
+      const jobQty = parentJob?.quantity || send.job?.quantity || 0
+      const allQtySent = totalSentQty >= jobQty
+
+      // Only advance job status if ALL quantity has been sent to finishing
+      // AND machining is complete (not still in_progress with remaining qty)
+      const canAdvance = allQtySent && ['in_progress', 'manufacturing_complete'].includes(parentJob?.status)
+
+      if (canAdvance) {
+        const partType = parentJob?.component?.part_type
+        const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .update({ status: nextStatus, updated_at: now })
+          .eq('id', jobId)
+
+        if (jobError) throw jobError
+      }
+      // If totalSentQty < jobQty — remaining quantity still on the machine
+      // Leave job at in_progress so machinist kiosk stays intact
+
+      await fetchPendingBatches()
+      await fetchRecentlyApprovedBatches()
+      onUpdate() // refresh parent dashboard
+
+    } catch (err) {
+      console.error('Batch approval error:', err)
+      alert('Failed to approve batch: ' + err.message)
+    } finally {
+      setApprovingBatch(null)
+    }
+  }
 
   const handleApproveRoutingRemoval = async (stepId, jobId) => {
     setApprovingRouting(stepId)
@@ -328,11 +519,21 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       .eq('job_id', jobId)
       .order('step_order')
 
+    const { data: latestSend } = await supabase
+      .from('finishing_sends')
+      .select('production_lot_number, finishing_lot_number, material_lot_number, chemical_lot_number, incoming_count, verified_count, count_discrepancy')
+      .eq('job_id', jobId)
+      .eq('status', 'finishing_complete')
+      .order('finishing_completed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
     return {
       requirements: requirements || [],
       partDocs: partDocs || [],
       jobDocs: jobDocs || [],
-      routingSteps: routingSteps || []
+      routingSteps: routingSteps || [],
+      latestSend: latestSend || null
     }
   }
 
@@ -760,8 +961,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
                   return (
                   <div className="border-t border-gray-700 p-4">
-                    {/* Full Routing Display */}
-                    {hasRouting && (
+                    {/* Full Routing Display — only for pre-mfg compliance review */}
+                    {requiredStage === 'compliance_review' && hasRouting && (
                       <div className="mb-4 pb-4 border-b border-gray-700">
                         <h4 className="text-gray-400 text-sm font-medium mb-2 flex items-center gap-2">
                           Routing
@@ -1328,6 +1529,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   // If no compliance-related jobs at all, don't render anything
   const hasAnyContent = pendingMachiningJobs.length > 0 ||
                         pendingPostMfgJobs.length > 0 ||
+                        pendingBatches.length > 0 ||
                         approvedUnassignedJobs.length > 0 ||
                         recentlyApprovedJobs.length > 0
 
@@ -1338,18 +1540,801 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       {/* Pending Review - Machining */}
       {renderPendingSection(
         pendingMachiningJobs, 
-        'Pending Review - Machining', 
+        'Pending Review - Pre-Manufacturing',
         'border-purple-800',
         'compliance_review'
       )}
 
-      {/* Pending Review - Post-Manufacturing */}
-      {renderPendingSection(
-        pendingPostMfgJobs, 
-        'Pending Review - Post-Manufacturing', 
-        'border-indigo-800',
-        'manufacturing_complete'
-      )}
+      {/* Pending Review - Post-Manufacturing (merged batches + legacy jobs) */}
+      {(() => {
+        const mergedPostMfg = [
+          ...pendingBatches.map(s => ({ type: 'batch', data: s, sortDate: s.finishing_completed_at })),
+          ...pendingPostMfgJobs.map(j => ({ type: 'job', data: j, sortDate: j.updated_at }))
+        ].sort((a, b) => new Date(a.sortDate) - new Date(b.sortDate))
+
+        if (mergedPostMfg.length === 0) return null
+
+        return (
+          <div className="bg-gray-900 rounded-lg border border-indigo-800 p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-purple-400 font-semibold flex items-center gap-2">
+                <Clock size={18} />
+                Pending Review - Post-Manufacturing ({mergedPostMfg.length})
+              </h3>
+            </div>
+
+            <div className="space-y-2">
+              {mergedPostMfg.map(item => {
+                if (item.type === 'batch') {
+                  const send = item.data
+                  const isExpanded = expandedBatch === send.id
+                  const reviewData = batchReviewData[send.id] || {}
+                  const batchLabel = getBatchLabel(send)
+                  const isApproving = approvingBatch === send.id
+
+                  return (
+                    <div key={`batch-${send.id}`} className="bg-gray-800 rounded-lg overflow-hidden">
+                      {/* Batch collapsed header */}
+                      <div
+                        className="flex items-center justify-between p-3 cursor-pointer
+                                   hover:bg-gray-750 border-l-4 border-cyan-600"
+                        onClick={() => {
+                          setExpandedBatch(isExpanded ? null : send.id)
+                          if (!isExpanded) fetchBatchDetails(send)
+                        }}
+                      >
+                        <div className="flex items-center gap-3">
+                          {isExpanded
+                            ? <ChevronDown size={18} className="text-cyan-400" />
+                            : <ChevronRight size={18} className="text-gray-500" />
+                          }
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-white font-mono">{send.job?.job_number}</span>
+                              {batchLabel && (
+                                <span className="text-xs px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400
+                                                 border border-cyan-700 rounded font-mono">
+                                  Batch {batchLabel}
+                                </span>
+                              )}
+                              <span className="text-gray-500">&middot;</span>
+                              <span className="text-gray-400">{send.job?.work_order?.wo_number}</span>
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              <span className="text-skynet-accent">{send.job?.component?.part_number}</span>
+                              <span className="mx-2">&middot;</span>
+                              <span>Qty: {send.quantity}</span>
+                              {send.job?.work_order?.customer && (
+                                <span className="mx-2">&middot; {send.job.work_order.customer}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500">
+                            Finished {send.finishing_completed_at ? new Date(send.finishing_completed_at).toLocaleString('en-US', {
+                              month: 'short', day: 'numeric', year: 'numeric',
+                              hour: 'numeric', minute: '2-digit', hour12: true
+                            }) : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Batch expanded detail */}
+                      {isExpanded && (
+                        <div className="border-t border-gray-700 p-4 space-y-4">
+
+                          {/* Batch details */}
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                              <p className="text-gray-500 text-xs">Production Lot #</p>
+                              <p className="text-white font-mono">
+                                {send.job?.production_lot_number || '—'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Finishing Lot #</p>
+                              <p className="text-cyan-400 font-mono">
+                                {send.finishing_lot_number || '—'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Material Lot #</p>
+                              <p className="text-white">{send.material_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                              <p className="text-white">{send.chemical_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Incoming Count</p>
+                              <p className="text-white">{send.incoming_count ?? send.quantity}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Verified Count</p>
+                              <p className="text-white">{send.verified_count ?? '—'}</p>
+                            </div>
+                            {send.count_discrepancy != null && send.count_discrepancy !== 0 && (
+                              <div className="col-span-2">
+                                <p className="text-xs text-yellow-400 flex items-center gap-1">
+                                  <AlertCircle size={12} />
+                                  Count discrepancy: {send.count_discrepancy > 0 ? '+' : ''}{send.count_discrepancy} pcs
+                                </p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Quantity Check */}
+                          <div className="p-3 bg-gray-800/50 rounded-lg border border-indigo-800/30 space-y-3">
+                            <h4 className="text-indigo-400 font-medium text-sm">Quantity Check</h4>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-gray-400 text-xs mb-1">Good Quantity</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={reviewData.good_qty ?? ''}
+                                  onChange={(e) => setBatchReviewData(prev => ({
+                                    ...prev,
+                                    [send.id]: { ...prev[send.id], good_qty: e.target.value }
+                                  }))}
+                                  placeholder={String(send.verified_count ?? send.quantity)}
+                                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2
+                                             text-white text-sm focus:border-indigo-500 focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-400 text-xs mb-1">Bad Quantity</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={reviewData.bad_qty ?? ''}
+                                  onChange={(e) => setBatchReviewData(prev => ({
+                                    ...prev,
+                                    [send.id]: { ...prev[send.id], bad_qty: e.target.value }
+                                  }))}
+                                  placeholder="0"
+                                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2
+                                             text-white text-sm focus:border-indigo-500 focus:outline-none"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-gray-400 text-xs mb-1">
+                                Review Notes (Optional)
+                              </label>
+                              <textarea
+                                value={reviewData.notes ?? ''}
+                                onChange={(e) => setBatchReviewData(prev => ({
+                                  ...prev,
+                                  [send.id]: { ...prev[send.id], notes: e.target.value }
+                                }))}
+                                placeholder="Any observations or notes for this batch..."
+                                rows={2}
+                                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2
+                                           text-white placeholder-gray-500 text-sm
+                                           focus:border-indigo-500 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Documents section — two groups */}
+                          {batchDetails[send.id] && (() => {
+                            const allReqs = batchDetails[send.id].requirements
+                            const postMfgReqs = allReqs.filter(r => r.required_at === 'manufacturing_complete')
+                            const preMfgReqs = allReqs.filter(r => r.required_at === 'compliance_review' || !r.required_at)
+                            const allJobDocs = batchDetails[send.id].jobDocs
+
+                            return (
+                              <div>
+                                {/* Group 1 — Required Documents (post-mfg stage, interactive) */}
+                                <h4 className="text-gray-400 text-sm font-medium mb-3">Required Documents</h4>
+
+                                {postMfgReqs.length === 0 ? (
+                                  <div className="text-green-500 text-sm bg-green-900/20 p-3 rounded">
+                                    No documents required at this stage.
+                                  </div>
+                                ) : (
+                                  <div className="space-y-4">
+                                    {postMfgReqs.map(req => {
+                                      const docsForType = allJobDocs.filter(d => d.document_type_id === req.document_type_id)
+                                      const hasAnyDocs = docsForType.length > 0
+                                      const hasApproved = docsForType.some(d => d.status === 'approved')
+                                      const uploadKey = send.job_id + '-' + req.document_type_id
+                                      const isUploading = uploading === uploadKey
+
+                                      return (
+                                        <div key={req.id} className="space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                              <span className="text-white text-sm font-medium">{req.document_type?.name}</span>
+                                              {req.is_required && <span className="text-xs text-red-400">Required</span>}
+                                              {hasApproved && <CheckCircle size={14} className="text-green-500" />}
+                                            </div>
+                                            <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
+                                              {isUploading ? (
+                                                <Loader2 size={12} className="animate-spin" />
+                                              ) : hasAnyDocs ? (
+                                                <Plus size={12} />
+                                              ) : (
+                                                <Upload size={12} />
+                                              )}
+                                              {isUploading ? 'Uploading...' : hasAnyDocs ? 'Add More' : 'Upload'}
+                                              <input type="file" className="hidden"
+                                                onChange={(e) => {
+                                                  const file = e.target.files?.[0]
+                                                  if (file) {
+                                                    handleFileUpload(send.job_id, req.document_type_id, req.document_type?.code, file)
+                                                      .then(() => fetchBatchDetails(send))
+                                                  }
+                                                  e.target.value = ''
+                                                }}
+                                                disabled={isUploading}
+                                              />
+                                            </label>
+                                          </div>
+
+                                          {!hasAnyDocs && (
+                                            <div className="flex items-center gap-2 p-3 rounded border border-gray-600 bg-gray-700">
+                                              <AlertCircle size={16} className="text-gray-500" />
+                                              <span className="text-gray-400 text-sm">No document uploaded</span>
+                                            </div>
+                                          )}
+
+                                          {docsForType.map((doc, index) => {
+                                            const isDocApproved = doc.status === 'approved'
+                                            const bgClass = getDocBgClass(doc.status)
+                                            const isReplacing = replacing === doc.id
+
+                                            return (
+                                              <div key={doc.id} className={"flex items-center justify-between p-3 rounded border " + bgClass}>
+                                                <div className="flex items-center gap-3">
+                                                  {isDocApproved && <CheckCircle size={18} className="text-green-500" />}
+                                                  {doc.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
+                                                  <div>
+                                                    <div className="text-xs text-gray-500">{doc.file_name}</div>
+                                                    {docsForType.length > 1 && (
+                                                      <div className="text-xs text-gray-600">Document {index + 1}</div>
+                                                    )}
+                                                  </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                  <ViewButton filePath={doc.file_url} />
+                                                  {isComplianceUser && (
+                                                    <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
+                                                      {isReplacing ? (
+                                                        <Loader2 size={12} className="animate-spin" />
+                                                      ) : (
+                                                        <RefreshCw size={12} />
+                                                      )}
+                                                      {isReplacing ? '...' : 'Replace'}
+                                                      <input type="file" className="hidden"
+                                                        onChange={(e) => {
+                                                          const file = e.target.files?.[0]
+                                                          if (file) {
+                                                            handleReplaceDocument(doc.id, send.job_id, req.document_type_id, file)
+                                                              .then(() => fetchBatchDetails(send))
+                                                          }
+                                                          e.target.value = ''
+                                                        }}
+                                                        disabled={isReplacing}
+                                                      />
+                                                    </label>
+                                                  )}
+                                                  {doc.status === 'pending' && (
+                                                    <button
+                                                      onClick={async () => {
+                                                        await handleApproveDocument(doc.id, send.job_id)
+                                                        fetchBatchDetails(send)
+                                                      }}
+                                                      disabled={approving === doc.id}
+                                                      className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
+                                                    >
+                                                      {approving === doc.id ? (
+                                                        <Loader2 size={12} className="animate-spin" />
+                                                      ) : (
+                                                        <Check size={12} />
+                                                      )}
+                                                      {approving === doc.id ? '...' : 'Approve'}
+                                                    </button>
+                                                  )}
+                                                </div>
+                                              </div>
+                                            )
+                                          })}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* Group 2 — Documents from Pre-Manufacturing (read-only) */}
+                                {preMfgReqs.length > 0 && (
+                                  <>
+                                    <h4 className="text-gray-400 text-sm font-medium mt-6 mb-3 flex items-center gap-2">
+                                      <FileText size={14} />
+                                      Documents from Pre-Manufacturing
+                                    </h4>
+                                    {preMfgReqs.map(req => {
+                                      const docsForType = allJobDocs.filter(d => d.document_type_id === req.document_type_id)
+                                      const hasAnyDocs = docsForType.length > 0
+                                      return (
+                                        <div key={req.id} className="space-y-2 mb-3">
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-white text-sm font-medium">{req.document_type?.name}</span>
+                                            {hasAnyDocs && docsForType.every(d => d.status === 'approved') && (
+                                              <CheckCircle size={14} className="text-green-500" />
+                                            )}
+                                          </div>
+                                          {!hasAnyDocs ? (
+                                            <div className="flex items-center gap-2 p-3 rounded border border-gray-700 bg-gray-800">
+                                              <AlertCircle size={16} className="text-gray-600" />
+                                              <span className="text-gray-500 text-sm">No document uploaded</span>
+                                            </div>
+                                          ) : (
+                                            docsForType.map(doc => (
+                                              <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800">
+                                                <div className="flex items-center gap-3">
+                                                  {doc.status === 'approved'
+                                                    ? <CheckCircle size={18} className="text-green-500" />
+                                                    : <Clock size={18} className="text-yellow-500" />
+                                                  }
+                                                  <span className="text-xs text-gray-400">{doc.file_name}</span>
+                                                </div>
+                                                <ViewButton filePath={doc.file_url} />
+                                              </div>
+                                            ))
+                                          )}
+                                        </div>
+                                      )
+                                    })}
+                                  </>
+                                )}
+
+                                {/* Unclassified uploads (finishing docs, etc.) */}
+                                {(() => {
+                                  const requiredTypeIds = allReqs.map(r => r.document_type_id)
+                                  const unclassified = allJobDocs.filter(
+                                    d => !requiredTypeIds.includes(d.document_type_id)
+                                  )
+                                  if (unclassified.length === 0) return null
+                                  return (
+                                    <div className="mt-4">
+                                      <h4 className="text-gray-500 text-sm font-medium mb-2 flex items-center gap-2">
+                                        <FileText size={16} />
+                                        Other Documents
+                                        <span className="text-gray-600 text-xs font-normal">Uploaded by finishing</span>
+                                      </h4>
+                                      <div className="space-y-2">
+                                        {unclassified.map(doc => {
+                                          const bgClass = getDocBgClass(doc.status)
+                                          return (
+                                            <div key={doc.id} className={"flex items-center justify-between p-3 rounded border " + bgClass}>
+                                              <div className="flex items-center gap-3">
+                                                {doc.status === 'approved' && <CheckCircle size={18} className="text-green-500" />}
+                                                {doc.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
+                                                <div className="text-xs text-gray-500">{doc.file_name}</div>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                <select
+                                                  className="bg-gray-700 border border-gray-600 rounded px-1 py-0.5
+                                                             text-xs text-gray-300 focus:outline-none"
+                                                  defaultValue=""
+                                                  onChange={async (e) => {
+                                                    if (!e.target.value) return
+                                                    await supabase.from('job_documents')
+                                                      .update({ document_type_id: e.target.value })
+                                                      .eq('id', doc.id)
+                                                    fetchBatchDetails(send)
+                                                  }}
+                                                >
+                                                  <option value="">Reassign...</option>
+                                                  {allReqs.map(r => (
+                                                    <option key={r.document_type_id} value={r.document_type_id}>
+                                                      {r.document_type?.name}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                                <ViewButton filePath={doc.file_url} />
+                                                {doc.status === 'pending' && (
+                                                  <button
+                                                    onClick={async () => {
+                                                      await handleApproveDocument(doc.id, send.job_id)
+                                                      fetchBatchDetails(send)
+                                                    }}
+                                                    disabled={approving === doc.id}
+                                                    className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
+                                                  >
+                                                    {approving === doc.id ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                                                    {approving === doc.id ? '...' : 'Approve'}
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                  )
+                                })()}
+                              </div>
+                            )
+                          })()}
+
+                          {/* Approve button */}
+                          <button
+                            onClick={() => handleApproveBatch(send)}
+                            disabled={isApproving}
+                            className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700
+                                       text-white font-semibold rounded-lg transition-colors
+                                       flex items-center justify-center gap-2"
+                          >
+                            {isApproving
+                              ? <><Loader2 size={18} className="animate-spin" /> Approving...</>
+                              : <><CheckCircle size={18} /> Approve Batch {batchLabel || ''}</>
+                            }
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+
+                // Job card — delegate to renderPendingSection's job template
+                const job = item.data
+                const isExpanded = expandedJob === job.id
+                const details = jobDetails[job.id]
+                const jobCanApprove = details ? canApproveJob(job.id, 'manufacturing_complete') : false
+                const borderClass = getPriorityBorder(job.priority)
+                const dotClass = getPriorityColor(job.priority)
+
+                const stageReqs = details?.requirements?.filter(r =>
+                  r.required_at === 'manufacturing_complete' || (!r.required_at && false)
+                ) || []
+                const futureReqs = details?.requirements?.filter(r =>
+                  r.required_at !== 'manufacturing_complete'
+                ) || []
+
+                const allSteps = details?.routingSteps || []
+                const hasRouting = allSteps.length > 0
+                const hasPendingRemovals = allSteps.some(s => s.status === 'removal_pending')
+                const isRoutingChecked = !!routingReviewed[job.id]
+                const canApproveFull = jobCanApprove && (!hasRouting || isRoutingChecked) && !hasPendingRemovals
+
+                return (
+                  <div key={`job-${job.id}`} className="bg-gray-800 rounded-lg overflow-hidden">
+                    <div
+                      className={"flex items-center justify-between p-3 cursor-pointer hover:bg-gray-750 border-l-4 " + borderClass}
+                      onClick={() => toggleJob(job.id)}
+                    >
+                      <div className="flex items-center gap-4">
+                        {isExpanded ? (
+                          <ChevronDown size={18} className="text-purple-400" />
+                        ) : (
+                          <ChevronRight size={18} className="text-gray-500" />
+                        )}
+                        <div className={"w-3 h-3 rounded-full " + dotClass}></div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-mono">{job.job_number}</span>
+                            <span className="text-gray-500">&middot;</span>
+                            <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                            {job.work_order?.order_type === 'make_to_stock' && (
+                              <span className="text-xs px-2 py-0.5 bg-green-900/50 text-green-400 rounded">Stock</span>
+                            )}
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            <span className="text-skynet-accent">{job.component?.part_number}</span>
+                            <span className="mx-2">&middot;</span>
+                            <span>Qty: {job.quantity}</span>
+                            {job.work_order?.customer && (
+                              <span className="mx-2">&middot; {job.work_order.customer}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {isExpanded && details && (
+                      <div className="border-t border-gray-700 p-4 space-y-4">
+                        {/* Traceability grid */}
+                        {details.latestSend && (
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                              <p className="text-gray-500 text-xs">Production Lot #</p>
+                              <p className="text-white font-mono">{details.latestSend.production_lot_number || job.production_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Finishing Lot #</p>
+                              <p className="text-cyan-400 font-mono">{details.latestSend.finishing_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Material Lot #</p>
+                              <p className="text-white">{details.latestSend.material_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                              <p className="text-white">{details.latestSend.chemical_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Incoming Count</p>
+                              <p className="text-white">{details.latestSend.incoming_count ?? '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Verified Count</p>
+                              <p className="text-white">{details.latestSend.verified_count ?? '—'}</p>
+                            </div>
+                            {details.latestSend.count_discrepancy != null && details.latestSend.count_discrepancy !== 0 && (
+                              <div className="col-span-2">
+                                <p className="text-xs text-yellow-400 flex items-center gap-1">
+                                  <AlertCircle size={12} />
+                                  Count discrepancy: {details.latestSend.count_discrepancy > 0 ? '+' : ''}{details.latestSend.count_discrepancy} pcs
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Quantity Check */}
+                        {job.status === 'pending_post_manufacturing' && (
+                          <div className="p-3 bg-gray-800/50 rounded-lg border border-indigo-800/30 space-y-3">
+                            <h4 className="text-indigo-400 font-medium text-sm flex items-center gap-2">
+                              <ClipboardCheck size={16} />
+                              Quantity Check
+                            </h4>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-gray-400 text-xs mb-1">Good Quantity</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={postMfgData[job.id]?.good_qty ?? ''}
+                                  onChange={(e) => setPostMfgData(prev => ({
+                                    ...prev,
+                                    [job.id]: { ...prev[job.id], good_qty: e.target.value }
+                                  }))}
+                                  placeholder={String(job.quantity)}
+                                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                             text-sm focus:border-indigo-500 focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-400 text-xs mb-1">Bad Quantity</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={postMfgData[job.id]?.bad_qty ?? ''}
+                                  onChange={(e) => setPostMfgData(prev => ({
+                                    ...prev,
+                                    [job.id]: { ...prev[job.id], bad_qty: e.target.value }
+                                  }))}
+                                  placeholder="0"
+                                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                             text-sm focus:border-indigo-500 focus:outline-none"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-gray-400 text-xs mb-1">Review Notes (Optional)</label>
+                              <textarea
+                                value={postMfgData[job.id]?.notes ?? ''}
+                                onChange={(e) => setPostMfgData(prev => ({
+                                  ...prev,
+                                  [job.id]: { ...prev[job.id], notes: e.target.value }
+                                }))}
+                                placeholder="Any observations, quality issues, or notes for this job..."
+                                rows={2}
+                                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
+                                           placeholder-gray-500 text-sm focus:border-indigo-500 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Document requirements — two groups */}
+                        {details && !details.noComponent && (() => {
+                          const postMfgReqs = details.requirements.filter(r => r.required_at === 'manufacturing_complete')
+                          const preMfgReqs = details.requirements.filter(r => r.required_at === 'compliance_review' || !r.required_at)
+
+                          return (
+                            <div>
+                              {/* Group 1 — Required Documents (post-mfg stage, interactive) */}
+                              <h4 className="text-gray-400 text-sm font-medium mb-3">Required Documents</h4>
+
+                              {postMfgReqs.length === 0 ? (
+                                <div className="text-green-500 text-sm bg-green-900/20 p-3 rounded">
+                                  No documents required at this stage.
+                                </div>
+                              ) : (
+                                <div className="space-y-4">
+                                  {postMfgReqs.map(req => {
+                                    const docsForType = details.jobDocs.filter(d => d.document_type_id === req.document_type_id)
+                                    const hasAnyDocs = docsForType.length > 0
+                                    const hasApproved = docsForType.some(d => d.status === 'approved')
+                                    const uploadKey = job.id + '-' + req.document_type_id
+                                    const isUploading = uploading === uploadKey
+
+                                    return (
+                                      <div key={req.id} className="space-y-2">
+                                        <div className="flex items-center justify-between">
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-white text-sm font-medium">{req.document_type?.name}</span>
+                                            {req.is_required && <span className="text-xs text-red-400">Required</span>}
+                                            {hasApproved && <CheckCircle size={14} className="text-green-500" />}
+                                          </div>
+                                          <label className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer">
+                                            {isUploading ? (
+                                              <Loader2 size={12} className="animate-spin" />
+                                            ) : hasAnyDocs ? (
+                                              <Plus size={12} />
+                                            ) : (
+                                              <Upload size={12} />
+                                            )}
+                                            {isUploading ? 'Uploading...' : hasAnyDocs ? 'Add More' : 'Upload'}
+                                            <input type="file" className="hidden"
+                                              onChange={(e) => {
+                                                const file = e.target.files?.[0]
+                                                if (file) handleFileUpload(job.id, req.document_type_id, req.document_type?.code, file)
+                                                e.target.value = ''
+                                              }}
+                                              disabled={isUploading}
+                                            />
+                                          </label>
+                                        </div>
+
+                                        {!hasAnyDocs && (
+                                          <div className="flex items-center gap-2 p-3 rounded border border-gray-600 bg-gray-700">
+                                            <AlertCircle size={16} className="text-gray-500" />
+                                            <span className="text-gray-400 text-sm">No document uploaded</span>
+                                          </div>
+                                        )}
+
+                                        {docsForType.map((doc, index) => {
+                                          const isDocApproved = doc.status === 'approved'
+                                          const bgClass = getDocBgClass(doc.status)
+                                          const isReplacing = replacing === doc.id
+
+                                          return (
+                                            <div key={doc.id} className={"flex items-center justify-between p-3 rounded border " + bgClass}>
+                                              <div className="flex items-center gap-3">
+                                                {isDocApproved && <CheckCircle size={18} className="text-green-500" />}
+                                                {doc.status === 'pending' && <Clock size={18} className="text-yellow-500" />}
+                                                <div>
+                                                  <div className="text-xs text-gray-500">{doc.file_name}</div>
+                                                  {docsForType.length > 1 && (
+                                                    <div className="text-xs text-gray-600">Document {index + 1}</div>
+                                                  )}
+                                                </div>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                <ViewButton filePath={doc.file_url} />
+                                                {isComplianceUser && (
+                                                  <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
+                                                    {isReplacing ? (
+                                                      <Loader2 size={12} className="animate-spin" />
+                                                    ) : (
+                                                      <RefreshCw size={12} />
+                                                    )}
+                                                    {isReplacing ? '...' : 'Replace'}
+                                                    <input type="file" className="hidden"
+                                                      onChange={(e) => {
+                                                        const file = e.target.files?.[0]
+                                                        if (file) handleReplaceDocument(doc.id, job.id, req.document_type_id, file)
+                                                        e.target.value = ''
+                                                      }}
+                                                      disabled={isReplacing}
+                                                    />
+                                                  </label>
+                                                )}
+                                                {doc.status === 'pending' && (
+                                                  <button
+                                                    onClick={() => handleApproveDocument(doc.id, job.id)}
+                                                    disabled={approving === doc.id}
+                                                    className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded"
+                                                  >
+                                                    {approving === doc.id ? (
+                                                      <Loader2 size={12} className="animate-spin" />
+                                                    ) : (
+                                                      <Check size={12} />
+                                                    )}
+                                                    {approving === doc.id ? '...' : 'Approve'}
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+
+                              {/* Group 2 — Documents from Pre-Manufacturing (read-only) */}
+                              {preMfgReqs.length > 0 && (
+                                <>
+                                  <h4 className="text-gray-400 text-sm font-medium mt-6 mb-3 flex items-center gap-2">
+                                    <FileText size={14} />
+                                    Documents from Pre-Manufacturing
+                                  </h4>
+                                  {preMfgReqs.map(req => {
+                                    const docsForType = details.jobDocs.filter(d => d.document_type_id === req.document_type_id)
+                                    const hasAnyDocs = docsForType.length > 0
+                                    return (
+                                      <div key={req.id} className="space-y-2 mb-3">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-white text-sm font-medium">{req.document_type?.name}</span>
+                                          {hasAnyDocs && docsForType.every(d => d.status === 'approved') && (
+                                            <CheckCircle size={14} className="text-green-500" />
+                                          )}
+                                        </div>
+                                        {!hasAnyDocs ? (
+                                          <div className="flex items-center gap-2 p-3 rounded border border-gray-700 bg-gray-800">
+                                            <AlertCircle size={16} className="text-gray-600" />
+                                            <span className="text-gray-500 text-sm">No document uploaded</span>
+                                          </div>
+                                        ) : (
+                                          docsForType.map(doc => (
+                                            <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800">
+                                              <div className="flex items-center gap-3">
+                                                {doc.status === 'approved'
+                                                  ? <CheckCircle size={18} className="text-green-500" />
+                                                  : <Clock size={18} className="text-yellow-500" />
+                                                }
+                                                <span className="text-xs text-gray-400">{doc.file_name}</span>
+                                              </div>
+                                              <ViewButton filePath={doc.file_url} />
+                                            </div>
+                                          ))
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </>
+                              )}
+                            </div>
+                          )
+                        })()}
+
+                        {/* Approve buttons */}
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => handleApproveJob(job.id, job.status)}
+                            disabled={approving === job.id}
+                            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {approving === job.id ? (
+                              <Loader2 size={16} className="animate-spin" />
+                            ) : (
+                              <CheckCircle size={16} />
+                            )}
+                            {approving === job.id ? 'Approving...' : 'Approve Job'}
+                          </button>
+                          <button
+                            onClick={() => handleApproveAndPrint(job)}
+                            disabled={approving === job.id}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {approving === job.id ? (
+                              <Loader2 size={16} className="animate-spin" />
+                            ) : (
+                              <>
+                                <CheckCircle size={16} />
+                                <Printer size={16} />
+                              </>
+                            )}
+                            {approving === job.id ? 'Approving...' : 'Approve & Print'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Approved, Unassigned */}
       {approvedUnassignedJobs.length > 0 && (
@@ -1427,6 +2412,66 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Recently Approved Batches (Last 5 Days) */}
+      {recentlyApprovedBatches.length > 0 && (
+        <div className="bg-gray-900 rounded-lg border border-gray-700 p-4">
+          <button
+            onClick={() => setShowRecentBatches(!showRecentBatches)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <h3 className="text-gray-400 font-semibold flex items-center gap-2">
+              <CheckCircle size={18} className="text-green-500" />
+              Recently Approved Batches ({recentlyApprovedBatches.length})
+              <span className="text-gray-600 text-xs font-normal">Last 5 days</span>
+            </h3>
+            <ChevronDown
+              size={20}
+              className={`text-gray-500 transition-transform ${showRecentBatches ? 'rotate-0' : '-rotate-90'}`}
+            />
+          </button>
+
+          {showRecentBatches && (
+            <div className="mt-4">
+              <div className="grid grid-cols-6 gap-2 text-xs text-gray-500 font-medium mb-2 px-3">
+                <span>Job #</span>
+                <span>Batch</span>
+                <span>Part #</span>
+                <span>Qty</span>
+                <span>Approved</span>
+                <span>Customer</span>
+              </div>
+              <div className="space-y-1">
+                {recentlyApprovedBatches.map(send => {
+                  const jobSends = recentlyApprovedBatches.filter(s => s.job_id === send.job_id)
+                    .sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
+                  const isPartial = send.is_partial_send === true
+                  const showLabel = jobSends.length > 1 || isPartial
+                  const idx = jobSends.findIndex(s => s.id === send.id)
+                  const label = showLabel ? `Batch ${String.fromCharCode(65 + idx)}` : '—'
+
+                  return (
+                    <div key={send.id} className="grid grid-cols-6 gap-2 text-sm bg-gray-800 rounded p-3 items-center">
+                      <span className="text-white font-mono">{send.job?.job_number}</span>
+                      <span>{showLabel ? (
+                        <span className="text-xs px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 border border-cyan-700 rounded font-mono">{label}</span>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}</span>
+                      <span className="text-skynet-accent">{send.job?.component?.part_number}</span>
+                      <span className="text-gray-300">{send.quantity} pcs</span>
+                      <span className="text-gray-400">
+                        {new Date(send.compliance_approved_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      </span>
+                      <span className="text-gray-400 truncate">{send.job?.work_order?.customer || '—'}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

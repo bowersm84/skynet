@@ -10,7 +10,7 @@ import TCOReview from '../components/TCOReview'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
 
-export default function Dashboard({ user, profile }) {
+export default function Mainframe({ user, profile }) {
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1537,7 +1537,7 @@ export default function Dashboard({ user, profile }) {
                                           <Package size={18} className="text-skynet-accent" />
                                           <div>
                                             <span className="text-skynet-accent font-mono font-medium">
-                                              {woa.assembly?.part_number || 'Unknown Assembly'}
+                                              {woa.assembly?.part_number || 'Unknown Product'}
                                             </span>
                                             <p className="text-xs text-gray-400">{woa.assembly?.description}</p>
                                           </div>
@@ -1563,7 +1563,7 @@ export default function Dashboard({ user, profile }) {
                                         <div className="px-4 py-2 pl-10 bg-gray-800/20 border-b border-gray-700">
                                           <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 font-medium">
                                             <div className="col-span-2">Job #</div>
-                                            <div className="col-span-2">Component</div>
+                                            <div className="col-span-2">Part</div>
                                             <div className="col-span-1 text-center">Qty</div>
                                             <div className="col-span-2">Machine</div>
                                             <div className="col-span-2">Status</div>

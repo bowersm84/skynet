@@ -596,7 +596,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                                   <span className="text-gray-400 text-sm font-mono">{bom.component.part_number}</span>
                                   <span className="text-gray-600 text-sm">- {bom.component.description}</span>
                                 </div>
-                                <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded">Purchased</span>
+                                <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded">Part (Purchased)</span>
                               </div>
                             )
                           }
@@ -664,7 +664,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                     {/* Assemblies group */}
                     {addableParts.filter(p => p.part_type === 'assembly').length > 0 && (
                       <>
-                        <div className="px-4 py-1.5 bg-gray-800/30 text-xs text-gray-500 font-medium uppercase">Assemblies</div>
+                        <div className="px-4 py-1.5 bg-gray-800/30 text-xs text-gray-500 font-medium uppercase">Products (Assembly)</div>
                         {addableParts.filter(p => p.part_type === 'assembly').map(part => (
                           <button
                             key={part.id}
@@ -676,7 +676,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                               <p className="text-xs text-gray-500">{part.description}</p>
                             </div>
                             <span className="text-xs text-gray-600">
-                              {(part.assembly_bom || []).filter(b => b.component?.part_type !== 'purchased' && b.component?.part_type !== 'assembly').length} components
+                              {(part.assembly_bom || []).filter(b => b.component?.part_type !== 'purchased' && b.component?.part_type !== 'assembly').length} parts
                             </span>
                           </button>
                         ))}

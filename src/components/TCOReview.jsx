@@ -23,6 +23,7 @@ export default function TCOReview({ profile, onUpdate }) {
   const [approving, setApproving] = useState(null)
   const [showCompleted, setShowCompleted] = useState(false)
   const [tcoNotes, setTcoNotes] = useState({})
+  const [tcoQC, setTcoQC] = useState({})
 
   const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
@@ -41,6 +42,9 @@ export default function TCOReview({ profile, onUpdate }) {
           status,
           order_type,
           tco_notes,
+          tco_parts_tested,
+          tco_tensile_pass,
+          tco_shear_pass,
           closed_at,
           closed_by_profile:profiles!work_orders_closed_by_fkey (
             full_name
@@ -140,6 +144,13 @@ export default function TCOReview({ profile, onUpdate }) {
   }, [loadTCOItems])
 
   const handleApproveTCO = async (wo) => {
+    const qc = tcoQC[wo.id]
+    const hasNoQC = !qc?.partsTested && qc?.tensilePass == null && qc?.shearPass == null
+
+    if (hasNoQC) {
+      if (!confirm('No QC data entered. Quality control fields have not been filled in.\nAre you sure you want to approve TCO without recording tensile/shear results?')) return
+    }
+
     if (!confirm(`Approve TCO for ${wo.wo_number}? This will mark the work order as complete.`)) return
 
     setApproving(wo.id)
@@ -162,6 +173,9 @@ export default function TCOReview({ profile, onUpdate }) {
         .update({
           status: 'complete',
           tco_notes: tcoNotes[wo.id]?.trim() || null,
+          tco_parts_tested: tcoQC[wo.id]?.partsTested ?? null,
+          tco_tensile_pass: tcoQC[wo.id]?.tensilePass ?? null,
+          tco_shear_pass: tcoQC[wo.id]?.shearPass ?? null,
           closed_by: profile.id,
           closed_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -282,7 +296,7 @@ export default function TCOReview({ profile, onUpdate }) {
                             </span>
                           ) : (
                             <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">
-                              Assembly
+                              Product
                             </span>
                           )}
                           {!wo.allPendingTCO && (
@@ -386,6 +400,98 @@ export default function TCOReview({ profile, onUpdate }) {
                           />
                         </div>
                       )}
+
+                      {/* Quality Control */}
+                      {isComplianceUser && (
+                        <div className="mt-3 p-3 bg-gray-900/50 rounded border border-gray-700">
+                          <div className="text-gray-500 text-xs font-medium mb-2 flex items-center gap-1">
+                            <Beaker size={12} />
+                            Quality Control (optional)
+                          </div>
+                          <div className="flex items-center gap-4 flex-wrap">
+                            <div>
+                              <label className="text-gray-500 text-xs block mb-1">Parts Tested</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={tcoQC[wo.id]?.partsTested ?? ''}
+                                onChange={(e) => setTcoQC(prev => ({
+                                  ...prev,
+                                  [wo.id]: { ...prev[wo.id], partsTested: e.target.value === '' ? null : parseInt(e.target.value) || 0 }
+                                }))}
+                                placeholder="—"
+                                className="w-24 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:border-amber-600 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-gray-500 text-xs block mb-1">Tensile</label>
+                              <div className="flex gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setTcoQC(prev => ({
+                                    ...prev,
+                                    [wo.id]: { ...prev[wo.id], tensilePass: tcoQC[wo.id]?.tensilePass === true ? null : true }
+                                  }))}
+                                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                                    tcoQC[wo.id]?.tensilePass === true
+                                      ? 'bg-green-700 text-green-100'
+                                      : 'bg-gray-800 text-gray-500 hover:bg-gray-700'
+                                  }`}
+                                >
+                                  Pass
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setTcoQC(prev => ({
+                                    ...prev,
+                                    [wo.id]: { ...prev[wo.id], tensilePass: tcoQC[wo.id]?.tensilePass === false ? null : false }
+                                  }))}
+                                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                                    tcoQC[wo.id]?.tensilePass === false
+                                      ? 'bg-red-700 text-red-100'
+                                      : 'bg-gray-800 text-gray-500 hover:bg-gray-700'
+                                  }`}
+                                >
+                                  Fail
+                                </button>
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-gray-500 text-xs block mb-1">Shear</label>
+                              <div className="flex gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setTcoQC(prev => ({
+                                    ...prev,
+                                    [wo.id]: { ...prev[wo.id], shearPass: tcoQC[wo.id]?.shearPass === true ? null : true }
+                                  }))}
+                                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                                    tcoQC[wo.id]?.shearPass === true
+                                      ? 'bg-green-700 text-green-100'
+                                      : 'bg-gray-800 text-gray-500 hover:bg-gray-700'
+                                  }`}
+                                >
+                                  Pass
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setTcoQC(prev => ({
+                                    ...prev,
+                                    [wo.id]: { ...prev[wo.id], shearPass: tcoQC[wo.id]?.shearPass === false ? null : false }
+                                  }))}
+                                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                                    tcoQC[wo.id]?.shearPass === false
+                                      ? 'bg-red-700 text-red-100'
+                                      : 'bg-gray-800 text-gray-500 hover:bg-gray-700'
+                                  }`}
+                                >
+                                  Fail
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -434,7 +540,7 @@ export default function TCOReview({ profile, onUpdate }) {
                           {wo.isFinishedGood ? (
                             <span className="text-xs text-emerald-400">FG</span>
                           ) : (
-                            <span className="text-xs text-purple-400">Assy</span>
+                            <span className="text-xs text-purple-400">Product</span>
                           )}
                         </div>
                         <div className="text-gray-500 text-xs">
@@ -454,6 +560,26 @@ export default function TCOReview({ profile, onUpdate }) {
                   {wo.tco_notes && (
                     <div className="mt-2 ml-8 text-xs text-gray-500 bg-gray-900/50 rounded px-2 py-1">
                       <span className="text-gray-600">TCO Notes:</span> {wo.tco_notes}
+                    </div>
+                  )}
+                  {(wo.tco_parts_tested != null || wo.tco_tensile_pass != null || wo.tco_shear_pass != null) && (
+                    <div className="mt-1 ml-8 text-xs bg-gray-900/50 rounded px-2 py-1 flex items-center gap-2">
+                      <span className="text-gray-600">QC:</span>
+                      {wo.tco_parts_tested != null && (
+                        <span className="text-gray-400">{wo.tco_parts_tested} parts tested</span>
+                      )}
+                      {wo.tco_tensile_pass != null && (
+                        <>
+                          {wo.tco_parts_tested != null && <span className="text-gray-700">·</span>}
+                          <span>Tensile: <span className={wo.tco_tensile_pass ? 'text-green-400' : 'text-red-400'}>{wo.tco_tensile_pass ? 'Pass' : 'Fail'}</span></span>
+                        </>
+                      )}
+                      {wo.tco_shear_pass != null && (
+                        <>
+                          {(wo.tco_parts_tested != null || wo.tco_tensile_pass != null) && <span className="text-gray-700">·</span>}
+                          <span>Shear: <span className={wo.tco_shear_pass ? 'text-green-400' : 'text-red-400'}>{wo.tco_shear_pass ? 'Pass' : 'Fail'}</span></span>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>

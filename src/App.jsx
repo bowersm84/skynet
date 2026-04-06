@@ -1,15 +1,20 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown } from 'lucide-react'
 import Login from './pages/Login'
-import Dashboard from './pages/Dashboard'
+import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import Finishing from './pages/Finishing'
-import MasterData from './pages/MasterData'
+import Armory from './pages/Armory'
+import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
+
+const DASHBOARDS = [
+  { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
+]
 
 // Main authenticated app component
 function MainApp() {
@@ -17,8 +22,10 @@ function MainApp() {
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
   const [showLoadingScreen, setShowLoadingScreen] = useState(false)
-  const [currentPage, setCurrentPage] = useState('dashboard')
-  
+  const [currentPage, setCurrentPage] = useState('mainframe')
+  const [showDashboardsMenu, setShowDashboardsMenu] = useState(false)
+  const dashboardsMenuRef = useRef(null)
+
   // Track if we've already initialized to prevent duplicate fetches
   const initializedRef = useRef(false)
   const fetchingProfileRef = useRef(false)
@@ -73,7 +80,7 @@ function MainApp() {
           hasSignedInRef.current = false
           setUser(null)
           setProfile(null)
-          setCurrentPage('dashboard')
+          setCurrentPage('mainframe')
           setLoading(false)
         }
         
@@ -83,6 +90,17 @@ function MainApp() {
     )
 
     return () => subscription.unsubscribe()
+  }, [])
+
+  // Close dashboards dropdown on outside click
+  useEffect(() => {
+    const handleMouseDown = (e) => {
+      if (dashboardsMenuRef.current && !dashboardsMenuRef.current.contains(e.target)) {
+        setShowDashboardsMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => document.removeEventListener('mousedown', handleMouseDown)
   }, [])
 
   const fetchProfile = async (userId) => {
@@ -132,8 +150,8 @@ function MainApp() {
   const getPageTitle = () => {
     switch (currentPage) {
       case 'schedule': return 'Schedule'
-      case 'masterdata': return 'Master Data'
-      default: return 'Dashboard'
+      case 'armory': return 'Armory'
+      default: return 'Mainframe'
     }
   }
 
@@ -173,7 +191,7 @@ function MainApp() {
               </div>
               <span className="text-gray-700">|</span>
               <button 
-                onClick={() => setCurrentPage('dashboard')}
+                onClick={() => setCurrentPage('mainframe')}
                 className="text-2xl font-bold text-white hover:text-skynet-accent transition-colors"
               >
                 SkyNet
@@ -188,19 +206,19 @@ function MainApp() {
           <div className="flex items-center gap-2">
             {/* Navigation buttons for authorized roles */}
             
-            {/* Dashboard button - shown when not on Dashboard */}
-            {currentPage !== 'dashboard' && (
+            {/* Mainframe button - shown when not on Mainframe */}
+            {currentPage !== 'mainframe' && (
               <button
-                onClick={() => setCurrentPage('dashboard')}
+                onClick={() => setCurrentPage('mainframe')}
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
               >
                 <LayoutDashboard size={18} />
-                <span className="text-sm font-medium">Dashboard</span>
+                <span className="text-sm font-medium">Mainframe</span>
               </button>
             )}
             
-            {/* Schedule button - shown when on Dashboard and user has access */}
-            {currentPage === 'dashboard' && canAccessSchedule && (
+            {/* Schedule button - shown when on Mainframe and user has access */}
+            {currentPage === 'mainframe' && canAccessSchedule && (
               <button
                 onClick={() => setCurrentPage('schedule')}
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
@@ -210,15 +228,46 @@ function MainApp() {
               </button>
             )}
             
-            {/* Master Data button - shown when on Dashboard and user is admin */}
-            {currentPage === 'dashboard' && canAccessMasterData && (
+            {/* Armory button - shown when on Mainframe and user is admin */}
+            {currentPage === 'mainframe' && canAccessMasterData && (
               <button
-                onClick={() => setCurrentPage('masterdata')}
+                onClick={() => setCurrentPage('armory')}
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
               >
                 <Database size={18} />
-                <span className="text-sm font-medium">Master Data</span>
+                <span className="text-sm font-medium">Armory</span>
               </button>
+            )}
+
+            {/* Dashboards dropdown - admin only */}
+            {currentPage === 'mainframe' && canAccessMasterData && (
+              <div className="relative" ref={dashboardsMenuRef}>
+                <button
+                  onClick={() => setShowDashboardsMenu(prev => !prev)}
+                  className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+                >
+                  <Monitor size={18} />
+                  <span className="text-sm font-medium">Dashboards</span>
+                  <ChevronDown size={14} className={`transition-transform ${showDashboardsMenu ? 'rotate-180' : ''}`} />
+                </button>
+                {showDashboardsMenu && (
+                  <div className="absolute right-0 top-full mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 py-1">
+                    {DASHBOARDS.map(db => (
+                      <a
+                        key={db.path}
+                        href={db.path}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => setShowDashboardsMenu(false)}
+                        className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
+                      >
+                        <Monitor size={14} />
+                        {db.label}
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             
             <div className="text-right ml-2">
@@ -235,19 +284,19 @@ function MainApp() {
         </div>
       </header>
 
-      <main className={currentPage === 'masterdata' ? '' : 'p-6'}>
-        {currentPage === 'dashboard' && (
-          <Dashboard user={user} profile={profile} />
+      <main className={currentPage === 'armory' ? '' : 'p-6'}>
+        {currentPage === 'mainframe' && (
+          <Mainframe user={user} profile={profile} />
         )}
         {currentPage === 'schedule' && canAccessSchedule && (
           <Schedule user={user} profile={profile} onNavigate={setCurrentPage} />
         )}
-        {currentPage === 'masterdata' && canAccessMasterData && (
-          <MasterData profile={profile} />
+        {currentPage === 'armory' && canAccessMasterData && (
+          <Armory profile={profile} />
         )}
       </main>
 
-      {currentPage !== 'masterdata' && (
+      {currentPage !== 'armory' && (
         <footer className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 px-6 py-2">
           <p className="text-gray-600 text-xs text-center font-mono">
             "Don't worry, this one just schedules fasteners." - SkyNet MES v0.1
@@ -268,6 +317,9 @@ function App() {
 
         {/* Finishing station route */}
         <Route path="/finishing" element={<Finishing />} />
+
+        {/* Assembly display - TV dashboard, no login required */}
+        <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
 
         {/* Print traveler route - opens in new tab */}
         <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />

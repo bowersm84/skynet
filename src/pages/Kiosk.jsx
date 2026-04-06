@@ -2015,8 +2015,18 @@ export default function Kiosk() {
         })
 
       if (error) throw error
-      
-      // Reset form and reload
+
+      // Capture form values before reset for inventory deduction
+      const savedMaterialType = materialForm.material_type
+      const savedBarSize = isBlanks ? 'N/A' : materialForm.bar_size
+      const savedLotNumber = materialForm.lot_number || null
+      const savedBarsLoaded = parseInt(materialForm.bars_loaded)
+      const savedBarLength = parseFloat(materialForm.bar_length) || 0
+      const savedJobId = activeJob.id
+      const savedMachineId = machine?.id || null
+      const savedOperatorId = operator.id
+
+      // Reset form and reload immediately — never wait for inventory steps
       setMaterialForm({
         material_type: '',
         bar_size: '',
@@ -2025,6 +2035,84 @@ export default function Kiosk() {
         bars_loaded: 0
       })
       await loadJobMaterials(activeJob.id)
+
+      // Fire-and-forget inventory deduction
+      ;(async () => {
+        try {
+          let matchedReceiving = null
+
+          // Step 1: Find matching material_receiving record (only if lot_number provided)
+          if (savedLotNumber) {
+            const { data: recvData } = await supabase
+              .from('material_receiving')
+              .select('id, material_id, quantity')
+              .eq('lot_number', savedLotNumber)
+              .eq('material_type', savedMaterialType)
+              .eq('bar_size', savedBarSize)
+              .order('received_at', { ascending: false })
+              .limit(1)
+
+            matchedReceiving = recvData?.[0] || null
+          }
+
+          // Step 2: Always insert usage record
+          await supabase.from('material_usage').insert({
+            material_receiving_id: matchedReceiving?.id || null,
+            material_id: matchedReceiving?.material_id || null,
+            lot_number: savedLotNumber,
+            job_id: savedJobId,
+            quantity_used: savedBarsLoaded,
+            quantity_used_inches: savedBarsLoaded * savedBarLength,
+            used_by: savedOperatorId,
+            used_at: new Date().toISOString(),
+            notes: null
+          })
+
+          // Step 3: If no matching receiving record, log warning
+          if (savedLotNumber && !matchedReceiving) {
+            supabase.from('audit_logs').insert({
+              event_type: 'inventory_warning',
+              job_id: savedJobId,
+              machine_id: savedMachineId,
+              operator_id: savedOperatorId,
+              details: {
+                warning: 'No matching material_receiving record found',
+                material_type: savedMaterialType,
+                bar_size: savedBarSize,
+                lot_number: savedLotNumber,
+                bars_loaded: savedBarsLoaded
+              }
+            }).then()
+          }
+
+          // Step 4: Check if deduction goes negative
+          if (matchedReceiving) {
+            const { data: usageData } = await supabase
+              .from('material_usage')
+              .select('quantity_used')
+              .eq('material_id', matchedReceiving.material_id)
+              .eq('lot_number', savedLotNumber)
+
+            const totalUsed = (usageData || []).reduce((sum, u) => sum + (u.quantity_used || 0), 0)
+            if (totalUsed > matchedReceiving.quantity) {
+              supabase.from('audit_logs').insert({
+                event_type: 'inventory_warning',
+                job_id: savedJobId,
+                machine_id: savedMachineId,
+                operator_id: savedOperatorId,
+                details: {
+                  warning: 'Material usage exceeds received quantity',
+                  received_quantity: matchedReceiving.quantity,
+                  total_used_after: totalUsed,
+                  lot_number: savedLotNumber
+                }
+              }).then()
+            }
+          }
+        } catch (err) {
+          console.warn('Inventory deduction failed (non-fatal):', err)
+        }
+      })()
     } catch (err) {
       console.error('Error adding material:', err)
       alert('Failed to add material: ' + err.message)
@@ -2955,6 +3043,16 @@ export default function Kiosk() {
     const minutes = String(d.getMinutes()).padStart(2, '0')
     return `${year}-${month}-${day}T${hours}:${minutes}`
   }
+
+  const NowButton = ({ onSet }) => (
+    <button
+      type="button"
+      onClick={() => onSet(formatDateTimeLocal(new Date()))}
+      className="px-3 py-2 text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded border border-gray-600 transition-colors whitespace-nowrap"
+    >
+      Now
+    </button>
+  )
 
   const formatDuration = (start, end) => {
     if (!start || !end) return '--'
@@ -4824,17 +4922,20 @@ export default function Kiosk() {
                 <div className="p-6 space-y-4">
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">End Time *</label>
-                    <input 
-                      type="datetime-local" 
-                      value={completeForm.actual_end} 
-                      onChange={(e) => setCompleteForm({...completeForm, actual_end: e.target.value})} 
-                      className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white focus:outline-none ${
-                        activeJob.work_order?.maintenance_type === 'unplanned'
-                          ? 'border-purple-700 focus:border-purple-500'
-                          : 'border-blue-700 focus:border-blue-500'
-                      }`}
-                      style={{ colorScheme: 'dark' }} 
-                    />
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="datetime-local"
+                        value={completeForm.actual_end}
+                        onChange={(e) => setCompleteForm({...completeForm, actual_end: e.target.value})}
+                        className={`flex-1 px-4 py-3 bg-gray-800 border rounded-lg text-white focus:outline-none ${
+                          activeJob.work_order?.maintenance_type === 'unplanned'
+                            ? 'border-purple-700 focus:border-purple-500'
+                            : 'border-blue-700 focus:border-blue-500'
+                        }`}
+                        style={{ colorScheme: 'dark' }}
+                      />
+                      <NowButton onSet={(val) => setCompleteForm({...completeForm, actual_end: val})} />
+                    </div>
                   </div>
 
                   <div>
@@ -4993,7 +5094,10 @@ export default function Kiosk() {
 
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">Actual End Time *</label>
-                    <input type="datetime-local" value={completeForm.actual_end} onChange={(e) => setCompleteForm({...completeForm, actual_end: e.target.value})} className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none" style={{ colorScheme: 'dark' }} />
+                    <div className="flex gap-2 items-center">
+                      <input type="datetime-local" value={completeForm.actual_end} onChange={(e) => setCompleteForm({...completeForm, actual_end: e.target.value})} className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none" style={{ colorScheme: 'dark' }} />
+                      <NowButton onSet={(val) => setCompleteForm({...completeForm, actual_end: val})} />
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
@@ -5091,17 +5195,21 @@ export default function Kiosk() {
                         </div>
 
                         {!edit.use_duration ? (
-                          <div>
-                            <input 
-                              type="datetime-local" 
-                              value={edit.end_time || ''} 
+                          <div className="flex gap-2 items-center">
+                            <input
+                              type="datetime-local"
+                              value={edit.end_time || ''}
                               onChange={(e) => setDowntimeEdits({
-                                ...downtimeEdits, 
+                                ...downtimeEdits,
                                 [dt.id]: {...edit, end_time: e.target.value}
                               })}
-                              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:border-skynet-accent focus:outline-none"
+                              className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:border-skynet-accent focus:outline-none"
                               style={{ colorScheme: 'dark' }}
                             />
+                            <NowButton onSet={(val) => setDowntimeEdits(prev => ({
+                              ...prev,
+                              [dt.id]: { ...prev[dt.id], end_time: val }
+                            }))} />
                           </div>
                         ) : (
                           <div className="flex gap-2">
@@ -5924,13 +6032,16 @@ export default function Kiosk() {
 
               <div>
                 <label className="block text-gray-400 text-sm mb-2">Start Time *</label>
-                <input 
-                  type="datetime-local" 
-                  value={downtimeForm.start_time} 
-                  onChange={(e) => setDowntimeForm({...downtimeForm, start_time: e.target.value})} 
-                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-red-500 focus:outline-none"
-                  style={{ colorScheme: 'dark' }}
-                />
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="datetime-local"
+                    value={downtimeForm.start_time}
+                    onChange={(e) => setDowntimeForm({...downtimeForm, start_time: e.target.value})}
+                    className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-red-500 focus:outline-none"
+                    style={{ colorScheme: 'dark' }}
+                  />
+                  <NowButton onSet={(val) => setDowntimeForm({...downtimeForm, start_time: val})} />
+                </div>
               </div>
 
               {/* Toggle between End Time and Duration for resolved downtimes */}
@@ -5956,13 +6067,16 @@ export default function Kiosk() {
                 </div>
 
                 {!downtimeForm.use_duration ? (
-                  <input 
-                    type="datetime-local" 
-                    value={downtimeForm.end_time} 
-                    onChange={(e) => setDowntimeForm({...downtimeForm, end_time: e.target.value})} 
-                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
-                    style={{ colorScheme: 'dark' }}
-                  />
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="datetime-local"
+                      value={downtimeForm.end_time}
+                      onChange={(e) => setDowntimeForm({...downtimeForm, end_time: e.target.value})}
+                      className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
+                      style={{ colorScheme: 'dark' }}
+                    />
+                    <NowButton onSet={(val) => setDowntimeForm({...downtimeForm, end_time: val})} />
+                  </div>
                 ) : (
                   <div className="flex gap-3">
                     <div className="flex-1">

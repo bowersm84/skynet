@@ -361,3 +361,165 @@ material type, and bar size on the receiving form automatically.
 | Barcode printing for Material Master | Print barcode sheet per material/vendor combo; receiver scans to pre-fill receiving form. Encodes `materials.id`. Print button on Material Master tab. | P2 |
 | Inventory deduction | Connect kiosk material entry to receiving log; bar counts decrement automatically. Foundation tables exist. | P1 — Sprint 4 |
 | Fishbowl import | Deferred from Sprint 1. | P2 |
+---
+
+# Sprint 4 Decisions — March 26, 2026
+
+## Master Data → Armory Rename
+
+The Master Data module has been renamed to "Armory" to align
+with the SkyNet theme. Fits the function — it is the central
+repository where all parts, materials, routing configs, and
+operational specs are stored and maintained.
+
+- `src/pages/MasterData.jsx` → `src/pages/Armory.jsx`
+- Nav button label: "Master Data" → "Armory"
+- Page title/header: "Master Data" → "Armory"
+- All imports and references to `MasterData` updated to `Armory`
+- Internal page state value (`'masterdata'`) may be updated to
+  `'armory'` or left as-is — display strings are the priority
+- DB identifiers, table names, and query strings are frozen —
+  only display strings and the filename change
+
+## Armory Tab Labels and Count Rules
+
+"Material Master" tab renamed to "Raw Material" inside Armory.
+
+Tab count badges — show only where they signal something actionable:
+
+| Tab | Count shown |
+|-----|-------------|
+| Products | Always — active product count |
+| Parts | Always — active part count |
+| Materials | Never — remove badge |
+| Bar Sizes | Never — remove badge |
+| Routing Templates | Never — remove badge |
+| Raw Material | Never — remove badge |
+| Inventory | Staging count (rack = null) only; hidden entirely if 0 |
+| Receiving | Never — remove badge |
+
+## Dashboard → Mainframe Rename
+
+The main dashboard has grown into a full operational home screen
+and is being renamed to reflect that.
+
+- `src/pages/Dashboard.jsx` → `src/pages/Mainframe.jsx`
+- Route: `/dashboard` → `/mainframe`
+- Nav label: "Dashboard" → "Mainframe"
+- All imports in `App.jsx` and nav components updated accordingly
+
+## Dashboard Folder Structure
+
+```
+src/pages/
+  Mainframe.jsx                    ← renamed from Dashboard.jsx
+  dashboards/
+    AssemblyDisplay.jsx            ← Sprint 4
+    SalesDashboard.jsx             ← future
+    ShopFloorDisplay.jsx           ← future
+```
+
+Routes for dashboards follow `/dashboards/*` convention.
+The Dashboards nav button is a dropdown (admin only) defined
+via a DASHBOARDS array for easy future expansion.
+
+## Assembly Pipeline Dashboard
+
+**File:** `src/pages/dashboards/AssemblyDisplay.jsx`
+**Route:** `/dashboards/assembly`
+Read-only TV display for Jody's assembly area. Two panels:
+1. In Finishing — active `finishing_sends` batches not yet approved
+2. Ready for Assembly — `jobs` where `status = 'ready_for_assembly'`
+Auto-refresh via Supabase realtime. No login gate.
+
+## #50 Cascade/Push Scheduling — Already Delivered
+
+Fully implemented in `Schedule.jsx`. State: `crashAction`,
+`conflicts`, `conflictResolutions`, `cascadePreview`.
+Options: `return_to_queue` and `push_back`.
+
+## TCO Quality Control Fields
+
+Tom's FAA-mandated tensile/shear testing belongs at TCO
+(work-order level, post-assembly) — NOT at post-mfg compliance.
+
+```sql
+ALTER TABLE public.work_orders
+  ADD COLUMN tco_parts_tested integer,
+  ADD COLUMN tco_tensile_pass boolean,
+  ADD COLUMN tco_shear_pass boolean;
+```
+
+Fields are optional. Warning shown when approving TCO with all
+three fields empty — user must confirm to proceed.
+
+## Terminology Alignment — UI Labels Only
+
+DB identifiers frozen. Only display strings change:
+
+| Current label | New label |
+|---|---|
+| "Component" | "Part" |
+| "Assembly" (product type) | "Product" |
+| "Assembly BOM" | "Product BOM" |
+
+part_type enum display labels:
+
+| DB value | Display label |
+|---|---|
+| `manufactured` | "Part (Manufactured)" |
+| `purchased` | "Part (Purchased)" |
+| `assembly` | "Product (Assembly)" |
+| `finished_good` | "Product (Finished Good)" |
+
+Assembly nav tab name unchanged (Phase 2 module).
+
+New/Product modal filters: "New Product" shows only Product
+types; "New Part" shows only Part types. Edit modal shows all.
+
+## Inventory Deduction — material_usage Table (Option B)
+
+Kiosk material entry decrements via `material_usage` table.
+Never mutates `material_receiving`. Available inventory =
+SUM(received) - SUM(used) per material + lot.
+
+```sql
+CREATE TABLE public.material_usage (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  material_receiving_id uuid REFERENCES public.material_receiving(id),
+  material_id uuid REFERENCES public.materials(id),
+  lot_number text,
+  job_id uuid REFERENCES public.jobs(id),
+  quantity_used integer NOT NULL,
+  quantity_used_inches numeric,
+  used_by uuid REFERENCES public.profiles(id),
+  used_at timestamptz DEFAULT now(),
+  notes text,
+  created_at timestamptz DEFAULT now()
+);
+```
+
+Deduction is fire-and-forget. Never blocks the machinist.
+Warns to `audit_logs` if no matching receiving record or if
+deduction would go negative.
+
+## Raw Material Inventory Screen
+
+**Location:** New "Inventory" tab in Armory (Master Data).
+**Calculation (Option A):** Available = received_inches - used_inches.
+Available bars = available_inches ÷ bar_length_inches (received bar length
+used as the denominator — Option A).
+
+New DB columns added:
+- `material_receiving.rack` (text, nullable) — R1/R2/R3/R4 or null
+- `material_usage.quantity_used_inches` (numeric) — bars × bar_length
+
+**Staging:** rack = null means unassigned/staging. Bars can be
+received to Staging and assigned to a rack inline from the
+Inventory tab via a dropdown in the Assign column.
+
+**Armory tab structure (new):**
+- Material Master — definitions only (receiving log removed)
+- Inventory — computed available stock view
+- Receiving — Raw Material Receiving Log + Log Receipt button
+  (moved from Material Master; shows all records, no 90-day filter)

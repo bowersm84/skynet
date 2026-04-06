@@ -18,12 +18,14 @@ import {
   Layers,
   Database,
   Upload,
-  Route
+  Route,
+  BarChart2,
+  PackageCheck
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 
-export default function MasterData({ profile }) {
+export default function Armory({ profile }) {
   const [activeTab, setActiveTab] = useState('assemblies')
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
@@ -107,8 +109,15 @@ export default function MasterData({ profile }) {
     vendor: '',
     lot_number: '',
     quantity: '',
+    bar_length_inches: '',
+    rack: '',
     notes: ''
   })
+  const [inventoryRows, setInventoryRows] = useState([])
+  const [invFilterMaterial, setInvFilterMaterial] = useState('')
+  const [invFilterRack, setInvFilterRack] = useState('')
+  const [invFilterVendor, setInvFilterVendor] = useState('')
+  const [assigningRack, setAssigningRack] = useState(null)
   const materialMasterCount = materials.filter(m => m.is_active).length
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor).map(m => m.vendor)
@@ -177,14 +186,11 @@ export default function MasterData({ profile }) {
         .order('created_at', { ascending: false })
       if (!materialMasterError) setMaterials(materialMasterData || [])
 
-      // Fetch receiving log (last 90 days)
-      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+      // Fetch receiving log (all records)
       const { data: receivingData } = await supabase
         .from('material_receiving')
         .select('*, received_by_profile:profiles!received_by(full_name)')
-        .gte('received_at', ninetyDaysAgo)
         .order('received_at', { ascending: false })
-        .limit(200)
       setReceivingLog(receivingData || [])
 
       // Fetch machines
@@ -221,9 +227,62 @@ export default function MasterData({ profile }) {
     }
   }, [])
 
+  const loadInventory = useCallback(async () => {
+    try {
+      const { data: receiving } = await supabase
+        .from('material_receiving')
+        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity, vendor, rack, received_at')
+        .order('received_at', { ascending: false })
+
+      const { data: usage } = await supabase
+        .from('material_usage')
+        .select('material_receiving_id, material_id, lot_number, quantity_used, quantity_used_inches')
+
+      const usageMap = {}
+      for (const u of (usage || [])) {
+        if (!u.material_receiving_id) continue
+        if (!usageMap[u.material_receiving_id]) usageMap[u.material_receiving_id] = { bars: 0, inches: 0 }
+        usageMap[u.material_receiving_id].bars += (u.quantity_used || 0)
+        usageMap[u.material_receiving_id].inches += (u.quantity_used_inches || 0)
+      }
+
+      const rows = (receiving || []).map(r => {
+        const used = usageMap[r.id] || { bars: 0, inches: 0 }
+        const receivedInches = (r.quantity || 0) * (r.bar_length_inches || 0)
+        const availableInches = receivedInches - used.inches
+        const availableBars = r.bar_length_inches > 0
+          ? availableInches / r.bar_length_inches
+          : (r.quantity - used.bars)
+        return {
+          id: r.id,
+          material_type: r.material_type,
+          bar_size: r.bar_size,
+          lot_number: r.lot_number,
+          vendor: r.vendor || '—',
+          rack: r.rack || null,
+          received_at: r.received_at,
+          received_bars: r.quantity,
+          received_inches: receivedInches,
+          bar_length_inches: r.bar_length_inches,
+          used_bars: used.bars,
+          used_inches: used.inches,
+          available_inches: Math.max(0, availableInches),
+          available_bars: Math.max(0, availableBars),
+        }
+      })
+      setInventoryRows(rows)
+    } catch (err) {
+      console.error('Error loading inventory:', err)
+    }
+  }, [])
+
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  useEffect(() => {
+    if (activeTab === 'inventory') loadInventory()
+  }, [activeTab, loadInventory])
 
   // Filter parts based on search and tab
   const filteredParts = parts.filter(p => {
@@ -812,17 +871,18 @@ export default function MasterData({ profile }) {
           material_id: receivingForm.material_id,
           material_type: selectedMaterial?.material_type?.name || '',
           bar_size: selectedMaterial ? `${selectedMaterial.bar_size_inches}"` : null,
-          bar_length_inches: null,
+          bar_length_inches: parseFloat(receivingForm.bar_length_inches),
           lot_number: receivingForm.lot_number,
           quantity: parseInt(receivingForm.quantity),
           vendor: receivingForm.vendor,
+          rack: receivingForm.rack || null,
           notes: receivingForm.notes?.trim() || null,
           received_by: profile.id,
           received_at: new Date().toISOString()
         })
       if (error) throw error
       setShowReceivingModal(false)
-      setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', notes: '' })
+      setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', bar_length_inches: '', rack: '', notes: '' })
       await fetchData()
     } catch (err) {
       alert('Error saving receiving entry: ' + err.message)
@@ -830,6 +890,35 @@ export default function MasterData({ profile }) {
       setSaving(false)
     }
   }
+
+  const handleAssignRack = async (receivingId, newRack) => {
+    try {
+      await supabase
+        .from('material_receiving')
+        .update({ rack: newRack || null })
+        .eq('id', receivingId)
+      setAssigningRack(null)
+      await loadInventory()
+    } catch (err) {
+      console.error('Failed to assign rack:', err)
+    }
+  }
+
+  const filteredInventoryRows = inventoryRows
+    .filter(r => {
+      if (invFilterMaterial && r.material_type !== invFilterMaterial) return false
+      if (invFilterRack === 'Staging' && r.rack !== null) return false
+      if (invFilterRack && invFilterRack !== 'Staging' && r.rack !== invFilterRack) return false
+      if (invFilterVendor && r.vendor !== invFilterVendor) return false
+      return true
+    })
+    .sort((a, b) => {
+      const rackA = a.rack || 'Staging'
+      const rackB = b.rack || 'Staging'
+      if (rackA !== rackB) return rackA.localeCompare(rackB)
+      if (a.material_type !== b.material_type) return a.material_type.localeCompare(b.material_type)
+      return (a.lot_number || '').localeCompare(b.lot_number || '')
+    })
 
   if (loading) {
     return (
@@ -848,8 +937,8 @@ export default function MasterData({ profile }) {
             <div className="flex items-center gap-3">
               <Database className="text-skynet-accent" size={28} />
               <div>
-                <h1 className="text-xl font-bold">Master Data</h1>
-                <p className="text-gray-500 text-sm">Manage parts, assemblies, and materials</p>
+                <h1 className="text-xl font-bold">Armory</h1>
+                <p className="text-gray-500 text-sm">The Skybolt parts, materials, and configuration registry</p>
               </div>
             </div>
           </div>
@@ -861,12 +950,14 @@ export default function MasterData({ profile }) {
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex gap-1">
             {[
-              { id: 'assemblies', label: 'Finished Products', icon: Package, count: parts.filter(p => p.part_type === 'assembly' || p.part_type === 'finished_good').length },
-              { id: 'components', label: 'Components', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
-              { id: 'materials', label: 'Materials', icon: Layers, count: materialTypes.length },
-              { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: barSizes.length },
-              { id: 'routing', label: 'Routing Templates', icon: Route, count: routingTemplates.length },
-              { id: 'material_master', label: 'Material Master', icon: Layers, count: materialMasterCount }
+              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => p.part_type === 'assembly' || p.part_type === 'finished_good').length },
+              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
+              { id: 'materials', label: 'Materials', icon: Layers, count: null },
+              { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
+              { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
+              { id: 'material_master', label: 'Raw Material', icon: Layers, count: null },
+              { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
+              { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null }
             ].map(tab => (
               <button
                 key={tab.id}
@@ -879,11 +970,13 @@ export default function MasterData({ profile }) {
               >
                 <tab.icon size={16} />
                 {tab.label}
-                <span className={`px-1.5 py-0.5 text-xs rounded ${
-                  activeTab === tab.id ? 'bg-skynet-accent/20' : 'bg-gray-800'
-                }`}>
-                  {tab.count}
-                </span>
+                {tab.count > 0 && (
+                  <span className={`px-1.5 py-0.5 text-xs rounded ${
+                    activeTab === tab.id ? 'bg-skynet-accent/20' : 'bg-gray-800'
+                  }`}>
+                    {tab.count}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -922,7 +1015,7 @@ export default function MasterData({ profile }) {
                   className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
                 >
                   <Plus size={18} />
-                  Add {activeTab === 'assemblies' ? 'Finished Product' : 'Component'}
+                  Add {activeTab === 'assemblies' ? 'Product' : 'Part'}
                 </button>
               </div>
             </div>
@@ -946,7 +1039,7 @@ export default function MasterData({ profile }) {
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-skynet-accent font-mono font-medium">{part.part_number}</span>
                           {part.part_type === 'assembly' && (
-                            <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Assembly</span>
+                            <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>
                           )}
                           {part.part_type === 'finished_good' && (
                             <span className="text-xs px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Finished Good</span>
@@ -959,7 +1052,7 @@ export default function MasterData({ profile }) {
                           )}
                           {part.part_type === 'purchased' && (
                             <span className="text-xs px-2 py-0.5 bg-orange-900/50 text-orange-300 rounded border border-orange-700/50 flex items-center gap-1">
-                              📦 Purchased
+                              📦 Part (Purchased)
                             </span>
                           )}
                         </div>
@@ -972,7 +1065,7 @@ export default function MasterData({ profile }) {
                         {part.part_type === 'assembly' && part.assembly_bom?.length > 0 && (
                           <div className="mt-2 pt-2 border-t border-gray-700">
                             <p className="text-gray-500 text-xs mb-1">
-                              BOM Components ({part.assembly_bom.length}):
+                              BOM Parts ({part.assembly_bom.length}):
                             </p>
                             <div className="flex flex-wrap gap-1">
                               {part.assembly_bom.slice(0, 5).map(bom => (
@@ -1231,58 +1324,228 @@ export default function MasterData({ profile }) {
               )}
             </div>
 
-            {/* ── Section 2: Receiving Log ── */}
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">Last 90 days</p>
-                </div>
-                <button
-                  onClick={() => { setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', notes: '' }); setShowReceivingModal(true) }}
-                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
-                >
-                  <Plus size={18} /> Log Receipt
-                </button>
-              </div>
-
-              {receivingLog.length === 0 ? (
-                <p className="text-gray-400 text-sm">No receiving entries in the last 90 days.</p>
-              ) : (
-                <div className="overflow-x-auto rounded-lg border border-gray-700">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
-                      <tr>
-                        <th className="px-4 py-3 text-left">Received</th>
-                        <th className="px-4 py-3 text-left">Material Type</th>
-                        <th className="px-4 py-3 text-left">Bar Size</th>
-                        <th className="px-4 py-3 text-left">Lot #</th>
-                        <th className="px-4 py-3 text-left">Qty</th>
-                        <th className="px-4 py-3 text-left">Vendor</th>
-                        <th className="px-4 py-3 text-left">Received By</th>
-                        <th className="px-4 py-3 text-left">Notes</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-700">
-                      {receivingLog.map(r => (
-                        <tr key={r.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
-                          <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
-                            {new Date(r.received_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                          </td>
-                          <td className="px-4 py-3 text-white font-medium">{r.material_type}</td>
-                          <td className="px-4 py-3 text-gray-300">{r.bar_size || '—'}</td>
-                          <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{r.lot_number}</td>
-                          <td className="px-4 py-3 text-white font-semibold">{r.quantity}</td>
-                          <td className="px-4 py-3 text-gray-300">{r.vendor || '—'}</td>
-                          <td className="px-4 py-3 text-gray-300">{r.received_by_profile?.full_name || '—'}</td>
-                          <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{r.notes || '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+          </div>
+        )}
+        {/* Inventory Tab */}
+        {activeTab === 'inventory' && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-white">Raw Material Inventory</h2>
+            {/* Filters */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <select
+                value={invFilterMaterial}
+                onChange={e => setInvFilterMaterial(e.target.value)}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+              >
+                <option value="">All Materials</option>
+                {[...new Set(inventoryRows.map(r => r.material_type))].sort().map(mt => (
+                  <option key={mt} value={mt}>{mt}</option>
+                ))}
+              </select>
+              <select
+                value={invFilterRack}
+                onChange={e => setInvFilterRack(e.target.value)}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+              >
+                <option value="">All Racks</option>
+                <option value="Staging">Staging</option>
+                <option value="R1">R1</option>
+                <option value="R2">R2</option>
+                <option value="R3">R3</option>
+                <option value="R4">R4</option>
+              </select>
+              <select
+                value={invFilterVendor}
+                onChange={e => setInvFilterVendor(e.target.value)}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+              >
+                <option value="">All Vendors</option>
+                {[...new Set(inventoryRows.map(r => r.vendor))].sort().map(v => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
             </div>
+
+            {/* Summary strip */}
+            {(() => {
+              const totalLots = filteredInventoryRows.length
+              const stagingCount = filteredInventoryRows.filter(r => r.rack === null).length
+              const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars < 2).length
+              const outCount = filteredInventoryRows.filter(r => r.available_bars === 0).length
+              return (
+                <div className="flex items-center gap-3 text-xs text-gray-500">
+                  <span>{totalLots} Lots</span>
+                  <span className="text-gray-700">·</span>
+                  <span className={stagingCount > 0 ? 'text-blue-400' : ''}>{stagingCount} In Staging</span>
+                  <span className="text-gray-700">·</span>
+                  <span className={lowCount > 0 ? 'text-amber-400' : ''}>{lowCount} Low</span>
+                  <span className="text-gray-700">·</span>
+                  <span className={outCount > 0 ? 'text-red-400' : ''}>{outCount} Out of Stock</span>
+                </div>
+              )
+            })()}
+
+            {/* Table */}
+            {filteredInventoryRows.length === 0 ? (
+              <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
+                <p className="text-gray-400">No inventory records found.</p>
+                <p className="text-gray-600 text-sm mt-1">Log receipts in the Receiving tab to populate inventory.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-gray-700">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Rack</th>
+                      <th className="px-4 py-3 text-left">Material Type</th>
+                      <th className="px-4 py-3 text-left">Bar Size</th>
+                      <th className="px-4 py-3 text-left">Lot #</th>
+                      <th className="px-4 py-3 text-left">Vendor</th>
+                      <th className="px-4 py-3 text-right">Rec'd</th>
+                      <th className="px-4 py-3 text-right">Used</th>
+                      <th className="px-4 py-3 text-right">Avail (bars)</th>
+                      <th className="px-4 py-3 text-right">Avail (in)</th>
+                      <th className="px-4 py-3 text-center">Assign</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {filteredInventoryRows.map(row => {
+                      const isOut = row.available_bars === 0
+                      const isLow = row.available_bars > 0 && row.available_bars < 2
+                      const isStaging = row.rack === null
+                      const hasBarLength = row.bar_length_inches > 0
+                      return (
+                        <tr
+                          key={row.id}
+                          className={`transition-colors ${
+                            isOut ? 'bg-red-900/40' : isLow ? 'bg-amber-900/40' : 'bg-gray-900 hover:bg-gray-800'
+                          } ${isStaging ? 'border-l-2 border-l-amber-600' : ''}`}
+                        >
+                          <td className="px-4 py-3">
+                            {isStaging ? (
+                              <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>
+                            ) : (
+                              <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack}</span>
+                            )}
+                          </td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.bar_size}</td>
+                          <td className={`px-4 py-3 font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
+                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.received_bars}</td>
+                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.used_bars}</td>
+                          <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
+                            {hasBarLength ? row.available_bars.toFixed(1) : '—'}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
+                            {hasBarLength ? `${Math.round(row.available_inches).toLocaleString()}"` : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            {assigningRack === row.id ? (
+                              <div className="flex items-center gap-1 justify-center">
+                                <select
+                                  defaultValue={row.rack || ''}
+                                  onChange={e => handleAssignRack(row.id, e.target.value)}
+                                  className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs focus:outline-none"
+                                >
+                                  <option value="">Staging</option>
+                                  <option value="R1">R1</option>
+                                  <option value="R2">R2</option>
+                                  <option value="R3">R3</option>
+                                  <option value="R4">R4</option>
+                                </select>
+                                <button
+                                  onClick={() => setAssigningRack(null)}
+                                  className="text-gray-400 hover:text-white p-0.5"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setAssigningRack(row.id)}
+                                className="text-xs px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+                              >
+                                <Edit2 size={12} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Receiving Tab */}
+        {activeTab === 'receiving' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
+              <button
+                onClick={() => { setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', bar_length_inches: '', rack: '', notes: '' }); setShowReceivingModal(true) }}
+                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+              >
+                <Plus size={18} /> Log Receipt
+              </button>
+            </div>
+
+            {receivingLog.length === 0 ? (
+              <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                <PackageCheck size={48} className="mx-auto text-gray-600 mb-3" />
+                <p className="text-gray-400">No receipts logged yet.</p>
+                <p className="text-gray-600 text-sm mt-1">Click '+ Log Receipt' to record incoming raw material.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-gray-700">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Received</th>
+                      <th className="px-4 py-3 text-left">Material Type</th>
+                      <th className="px-4 py-3 text-left">Bar Size</th>
+                      <th className="px-4 py-3 text-left">Lot #</th>
+                      <th className="px-4 py-3 text-right">Qty</th>
+                      <th className="px-4 py-3 text-right">Bar Length</th>
+                      <th className="px-4 py-3 text-left">Rack</th>
+                      <th className="px-4 py-3 text-left">Vendor</th>
+                      <th className="px-4 py-3 text-left">Received By</th>
+                      <th className="px-4 py-3 text-left">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {receivingLog.map(r => (
+                      <tr key={r.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
+                        <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
+                          {new Date(r.received_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </td>
+                        <td className="px-4 py-3 text-white font-medium">{r.material_type}</td>
+                        <td className="px-4 py-3 text-gray-300">{r.bar_size || '—'}</td>
+                        <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{r.lot_number}</td>
+                        <td className="px-4 py-3 text-white font-semibold text-right">{r.quantity}</td>
+                        <td className="px-4 py-3 text-gray-300 text-right font-mono">
+                          {r.bar_length_inches ? `${r.bar_length_inches}"` : '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          {r.rack ? (
+                            <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{r.rack}</span>
+                          ) : (
+                            <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-gray-300">{r.vendor || '—'}</td>
+                        <td className="px-4 py-3 text-gray-300">{r.received_by_profile?.full_name || '—'}</td>
+                        <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{r.notes || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1294,8 +1557,8 @@ export default function MasterData({ profile }) {
             <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
               <h2 className="text-lg font-semibold text-white">
                 {editingPart ? 'Edit Part' : `New ${
-                  partForm.part_type === 'assembly' ? 'Assembly' :
-                  partForm.part_type === 'finished_good' ? 'Finished Good' : 'Component'
+                  partForm.part_type === 'assembly' ? 'Product (Assembly)' :
+                  partForm.part_type === 'finished_good' ? 'Product (Finished Good)' : 'Part'
                 }`}
               </h2>
               <button onClick={() => setShowPartModal(false)} className="text-gray-400 hover:text-white">
@@ -1334,10 +1597,24 @@ export default function MasterData({ profile }) {
                     onChange={(e) => setPartForm({ ...partForm, part_type: e.target.value })}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
                   >
-                    <option value="assembly">Assembly (has BOM)</option>
-                    <option value="finished_good">Finished Good (no assembly)</option>
-                    <option value="manufactured">Manufactured Component</option>
-                    <option value="purchased">Purchased Component</option>
+                    {editingPart ? (
+                      <>
+                        <option value="assembly">Product (Assembly)</option>
+                        <option value="finished_good">Product (Finished Good)</option>
+                        <option value="manufactured">Part (Manufactured)</option>
+                        <option value="purchased">Part (Purchased)</option>
+                      </>
+                    ) : activeTab === 'assemblies' ? (
+                      <>
+                        <option value="assembly">Product (Assembly)</option>
+                        <option value="finished_good">Product (Finished Good)</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="manufactured">Part (Manufactured)</option>
+                        <option value="purchased">Part (Purchased)</option>
+                      </>
+                    )}
                   </select>
                 </div>
                 <div>
@@ -1749,11 +2026,11 @@ export default function MasterData({ profile }) {
               {/* Current BOM */}
               <div>
                 <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
-                  Current Components ({bomComponents.length})
+                  Current Parts ({bomComponents.length})
                 </h3>
                 {bomComponents.length === 0 ? (
                   <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-6 text-center">
-                    <p className="text-gray-500">No components added yet</p>
+                    <p className="text-gray-500">No parts added yet</p>
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -1798,10 +2075,10 @@ export default function MasterData({ profile }) {
                 )}
               </div>
 
-              {/* Add Components */}
+              {/* Add Parts */}
               <div>
                 <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
-                  Add Components
+                  Add Parts
                 </h3>
                 <div className="space-y-1 max-h-60 overflow-y-auto">
                   {availableComponents
@@ -1826,7 +2103,7 @@ export default function MasterData({ profile }) {
                     ))}
                   {availableComponents.filter(c => !bomComponents.some(b => b.component?.id === c.id)).length === 0 && (
                     <p className="text-gray-500 text-sm text-center py-4">
-                      All available components have been added
+                      All available parts have been added
                     </p>
                   )}
                 </div>
@@ -2168,6 +2445,35 @@ export default function MasterData({ profile }) {
                 />
               </div>
 
+              {/* Bar Length */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Length (inches) *</label>
+                <input
+                  type="number" min="1" step="any"
+                  value={receivingForm.bar_length_inches}
+                  onChange={e => setReceivingForm(f => ({ ...f, bar_length_inches: e.target.value }))}
+                  placeholder="e.g. 144"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Rack */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Rack</label>
+                <select
+                  value={receivingForm.rack}
+                  onChange={e => setReceivingForm(f => ({ ...f, rack: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                >
+                  <option value="">Staging (unassigned)</option>
+                  <option value="R1">R1</option>
+                  <option value="R2">R2</option>
+                  <option value="R3">R3</option>
+                  <option value="R4">R4</option>
+                </select>
+                <p className="text-xs text-gray-600 mt-1">Leave as Staging if rack location is not yet known.</p>
+              </div>
+
               {/* Notes */}
               <div>
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
@@ -2186,7 +2492,7 @@ export default function MasterData({ profile }) {
               </button>
               <button
                 onClick={handleSaveReceiving}
-                disabled={saving || !receivingForm.vendor || !receivingForm.material_id || !receivingForm.lot_number || !receivingForm.quantity}
+                disabled={saving || !receivingForm.vendor || !receivingForm.material_id || !receivingForm.lot_number || !receivingForm.quantity || !receivingForm.bar_length_inches}
                 className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}

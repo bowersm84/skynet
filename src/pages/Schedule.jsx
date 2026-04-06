@@ -1538,11 +1538,11 @@ export default function Schedule({ user, profile, onNavigate }) {
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => onNavigate('dashboard')}
+            onClick={() => onNavigate('mainframe')}
             className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft size={20} />
-            <span>Back to Dashboard</span>
+            <span>Back to Mainframe</span>
           </button>
 
           {/* Global Schedule Search */}

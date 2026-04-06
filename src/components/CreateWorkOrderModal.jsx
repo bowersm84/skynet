@@ -790,11 +790,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                   <div className="text-center py-4 text-gray-500">Loading products...</div>
                 ) : assemblies.length === 0 ? (
                   <div className="text-center py-4 text-yellow-500 bg-yellow-900/20 rounded border border-yellow-800">
-                    No assemblies or finished goods found. Add them in Master Data first.
+                    No products or finished goods found. Add them in Master Data first.
                   </div>
                 ) : selectedAssemblies.length === 0 ? (
                   <div className="text-center py-8 text-gray-500 bg-gray-800/50 rounded border border-dashed border-gray-700">
-                    Click "Add Product" to select an assembly or finished good for this work order
+                    Click "Add Product" to select a product or finished good for this work order
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -810,7 +810,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
                               >
                                 <option value="">-- Select Product --</option>
-                                <optgroup label="Assemblies">
+                                <optgroup label="Products (Assembly)">
                                   {assemblies.filter(a => a.part_type === 'assembly').map(a => (
                                     <option key={a.id} value={a.id}>
                                       {a.part_number} - {a.description}
@@ -825,7 +825,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   ))}
                                 </optgroup>
                                 {orderType === 'make_to_stock' && (
-                                  <optgroup label="Components">
+                                  <optgroup label="Parts (Manufactured)">
                                     {assemblies.filter(a => a.part_type === 'manufactured').map(a => (
                                       <option key={a.id} value={a.id}>
                                         {a.part_number} - {a.description}
@@ -899,9 +899,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   {isFinishedGood ? (
                                     <span className="text-xs px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Finished Good</span>
                                   ) : (
-                                    <span className="text-xs px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded border border-blue-700/50">Component</span>
+                                    <span className="text-xs px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded border border-blue-700/50">Part</span>
                                   )}
-                                  <span className="text-gray-400 text-sm">{isFinishedGood ? 'No assembly required' : 'Single component for stock'}</span>
+                                  <span className="text-gray-400 text-sm">{isFinishedGood ? 'No assembly required' : 'Single part for stock'}</span>
                                 </div>
                                 <div className="bg-gray-900 rounded p-3">
                                   <div className="text-gray-400 text-xs mb-2">Job to Create:</div>
@@ -927,8 +927,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                           <div className="border-t border-gray-700 pt-3">
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
-                                <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Assembly</span>
-                                <span className="text-gray-400 text-sm">Select components to add jobs</span>
+                                <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>
+                                <span className="text-gray-400 text-sm">Select parts to add jobs</span>
                               </div>
                               {selected.jobs.length > 0 && (
                                 <span className="text-green-400 text-xs font-medium">
@@ -937,7 +937,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                               )}
                             </div>
                             
-                            {/* Available Components from BOM */}
+                            {/* Available Parts from BOM */}
                             <div className="space-y-1 mb-3">
                               {getAssemblyById(selected.assemblyId)?.assembly_bom
                                 ?.filter(bom => bom.component?.part_type !== 'assembly')
@@ -958,7 +958,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           <span className="text-gray-600">- {bom.component.description}</span>
                                         </div>
                                         <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
-                                          📦 Purchased
+                                          📦 Part (Purchased)
                                         </span>
                                       </div>
                                     )
@@ -971,8 +971,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                       onClick={() => !isAdded && addJobFromBOM(assemblyIndex, bom)}
                                       disabled={isAdded}
                                       className={`w-full flex items-center justify-between px-3 py-2 rounded text-sm transition-colors ${
-                                        isAdded 
-                                          ? 'bg-green-900/30 text-green-400 border border-green-700' 
+                                        isAdded
+                                          ? 'bg-green-900/30 text-green-400 border border-green-700'
                                           : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
                                       }`}
                                     >

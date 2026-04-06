@@ -740,7 +740,7 @@ export default function BOMUpload({ onComplete, onCancel }) {
                         {bomData.assembly.part_number}
                       </span>
                       <span className="text-xs px-1.5 py-0.5 rounded bg-skynet-accent/20 text-skynet-accent">
-                        ASSEMBLY
+                        PRODUCT
                       </span>
                       {bomData.assembly.isDuplicate && (
                         <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-900/50 text-yellow-400 border border-yellow-700">
@@ -787,11 +787,11 @@ export default function BOMUpload({ onComplete, onCancel }) {
               </div>
             </div>
 
-            {/* Components */}
+            {/* Parts */}
             <div className="space-y-1">
               <div className="flex items-center gap-2 mb-3">
                 <Wrench size={16} className="text-gray-400" />
-                <span className="text-gray-400 text-sm font-medium">Components ({bomData.components.length})</span>
+                <span className="text-gray-400 text-sm font-medium">Parts ({bomData.components.length})</span>
               </div>
               
               {bomData.components.map((comp, idx) => (

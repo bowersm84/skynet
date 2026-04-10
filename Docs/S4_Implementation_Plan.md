@@ -12,24 +12,35 @@ Sprint 4 is the final development sprint before the April go-live visit. The goa
 
 ## Action Items
 
-| # | Action Item | Lead | Type | Effort | Batch |
-|---|-------------|------|------|--------|-------|
-| — | Mainframe rename: Dashboard.jsx → Mainframe.jsx, `/dashboard` → `/mainframe`, dashboards folder created | All | Modify | S | A |
-| 11 | Quality control fields in TCO (tensile/shear, parts tested) — moved from post-mfg | Roger / Tom | Modify | M | A |
-| 12 | Align UI terminology: Parts (not Components), Products (not Assemblies) — UI labels only | April | Modify | M | A |
-| — | Assembly Pipeline Dashboard (TV display for Jody's area) | Jody | New | M | A |
-| 17 | "Now" button for time entry fields on kiosk | Patrick | New | S | B |
-| — | Inventory deduction: connect kiosk material entry to receiving log | Patrick | New | M | B |
-| T1 | End-to-end test: WO → compliance → schedule → kiosk → finishing → post-mfg → TCO | All | Test | L | C |
-| T2 | Purge test data and load production master data | Roger | Config | M | C |
-| T3 | User accounts: create PINs and profiles for all staff | All | Config | S | C |
-| 69 | Upgrade shop floor Wi-Fi (1 pod per room) | Harry | Infra | — | Parallel |
-| 35 | Procure tablets for pilot machines + finishing + spare | Patrick | Infra | — | Parallel |
-| 36 | Set up display screens on shop floor | April / Jody | Infra | — | Parallel |
-| — | Kiosk material dropdowns: lead with inventory-available materials | Patrick | Modify | S | B |
-| — | Outbound processes workflow (heat treat, cad plating, external ops) | Roger | New | L | B |
-| 48 | Schedule machine lineup view (list view toggle — per-machine job list, no timeline grid) | April | New | M | B |
-| — | Compliance inline with scheduling — pre-mfg compliance required before kiosk start, not before scheduling | April / Roger | Modify | M | B |
+| # | Action Item | Lead | Batch | Status |
+|---|-------------|------|-------|--------|
+| — | Mainframe rename + Dashboards folder | All | A | ✅ Done |
+| 11 | TCO QC fields (tensile/shear, parts tested) | Roger / Tom | A | ✅ Done |
+| 12 | Terminology alignment (Parts/Products, UI labels only) | April | A | ✅ Done |
+| — | Assembly Pipeline Dashboard (`/dashboards/assembly`) | Jody | A | ✅ Done |
+| — | Armory rename + Raw Material tab + tab count cleanup | All | A | ✅ Done |
+| 17 | "Now" button for kiosk time entry fields | Patrick | B | ✅ Done |
+| — | Inventory deduction via `material_usage` table | Patrick | B | ✅ Done |
+| — | Inventory View + Receiving tab in Armory | All | B | ✅ Done |
+| — | Rack assignment fix (RLS UPDATE policy + controlled select) | All | B | ✅ Done |
+| — | RLS UPDATE policies — 14 tables patched | All | B | ✅ Done |
+| 48 | Schedule list view toggle (per-machine lineup) | April | B | ✅ Done |
+| — | List view drag-and-drop (insert after, append, queue→machine) | April | B | ✅ Done |
+| — | Compliance inline with scheduling (pre-mfg gate → kiosk start) | April / Roger | B | ✅ Done |
+| — | Compliance Pending indicator — kiosk queue + Mainframe cards | Roger | B | ✅ Done |
+| — | Kiosk job documents (active job panel) | Patrick | B | ✅ Done |
+| — | Kiosk job documents (queued job selection panel) | Patrick | B | ✅ Done |
+| — | WO Lookup job documents dropdown | April | B | ✅ Done |
+| — | Kiosk material dropdowns — inventory-first with optgroups | Patrick | B | ✅ Done |
+| — | Kiosk material modal — sequential flow + availability banner | Patrick | B | ✅ Done |
+| — | Outbound processes workflow (heat treat, cad plating) | Roger | B | 🔲 Pending |
+| — | Schedule module rename (name TBD — Ops recommended) | All | B | 🔲 Pending |
+| T1 | End-to-end test: WO → compliance → schedule → kiosk → finishing → post-mfg → TCO | All | C | 🔲 Pending |
+| T2 | Purge test data and load production master data | Roger | C | 🔲 Pending |
+| T3 | User accounts: create PINs and profiles for all staff | All | C | 🔲 Pending |
+| 69 | Upgrade shop floor Wi-Fi (1 pod per room) | Harry | Parallel | 🔲 Pending |
+| 35 | Procure tablets for pilot machines + finishing + spare | Patrick | Parallel | 🔲 Pending |
+| 36 | Set up display screens on shop floor | April / Jody | Parallel | 🔲 Pending |
 
 > **Note on #50 — Cascade/Push Scheduling:** Confirmed already delivered. `Schedule.jsx` contains a full conflict resolution modal (`crashAction`, `cascadePreview`, push-back and return-to-queue options) that fires when a job is dropped into a conflict. No work needed.
 
@@ -460,6 +471,46 @@ Two displays are now in scope given the new Assembly Pipeline Dashboard.
 Both displays use a read-only account or locked admin session. Supabase realtime handles auto-refresh natively.
 
 ---
+
+## Sprint 4 Session 2 — Completed This Session
+
+The following items were designed, prompted, and confirmed working
+during the April 10, 2026 development session:
+
+**Schedule module**
+- List view toggle with per-machine job cards, group headers, empty states
+- List view drag-and-drop: insert-after zones, append-to-machine, queue→machine
+- loadAllScheduledJobs query fixed (status filter, component_id field)
+- ScheduleJobModal: machines loading fix, Return to Queue button
+- Compliance inline with scheduling: pending_compliance jobs schedulable immediately; kiosk blocks Start Setup if not approved; ComplianceReview sets status=assigned if machine already assigned on approval
+
+**Kiosk**
+- Compliance Pending indicator: amber banner in queue card, gray-out, non-clickable
+- Job documents section on active job panel (always visible, empty state)
+- Job documents section on queued job selection panel (on-demand load)
+- Material dropdowns: From Inventory / All Materials optgroups
+- Bar Size optgroups fixed (format mismatch resolved — raw inventory values used directly)
+- Lot Number: datalist suggestions, label renamed to "Lot Number"
+- Material modal sequential flow: Material Type → Bar Size → Lot Number → Availability Banner → Bar Length → Bars Loaded
+- Availability banner: shows cut-bar count based on entered bar length vs available inches
+- Over-inventory warning on Bars Loaded field
+
+**Mainframe / MachineCard**
+- Compliance Pending jobs shown in machine queue with amber "Compliance" badge
+- getJobsForMachine includes pending_compliance status
+
+**Armory**
+- Rack assignment fixed: uncontrolled select → controlled select, fires on change
+- RLS UPDATE policy added to material_receiving
+- materialMasterCount unused variable removed
+
+**Database / Infrastructure**
+- RLS UPDATE policies added to 14 tables that were missing them:
+  assembly_bom, document_types, finishing_sends, job_document_snapshots,
+  job_routing_steps, locations, machines, material_usage,
+  part_machine_durations, part_routing_steps, routing_template_steps,
+  routing_templates, tool_instances, tools
+- job_documents anon SELECT policy confirmed present
 
 ## Sprint 4 Success Criteria
 

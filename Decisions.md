@@ -523,3 +523,60 @@ Inventory tab via a dropdown in the Assign column.
 - Inventory — computed available stock view
 - Receiving — Raw Material Receiving Log + Log Receipt button
   (moved from Material Master; shows all records, no 90-day filter)
+
+---
+
+## Sprint 4 Session 2 — Decisions (April 10, 2026)
+
+### Schedule List View
+- List view is a toggle alongside the existing grid — same page, not a separate route
+- List view is per-machine cards in a 2-column grid, grouped by location/brand (same grouping toggle as grid)
+- List view is read-only for layout but drag-and-drop is supported for resequencing
+- Drag-drop in list view: dropped job snaps to next business-hours slot AFTER the preceding job ends — no forced conflict unless duration genuinely bleeds into the next job
+- "Insert after" zones visible as h-8 dashed strips during drag; expand to h-10 with label on hover
+- Unscheduled queue jobs draggable onto list view machine cards (opens ScheduleJobModal)
+- loadAllScheduledJobs is a separate query from the week-windowed scheduledJobs — status filter only, no date filter
+- Active/in-progress jobs stay on list view until manufacturing_complete status
+
+### Compliance Inline with Scheduling
+- WOs are schedulable immediately on creation regardless of compliance status
+- pending_compliance jobs appear in Schedule unscheduled pool with amber "Compliance Pending" badge
+- ScheduleJobModal saves pending_compliance jobs without promoting to assigned
+- On compliance approval: if job has assigned_machine_id → status = 'assigned'; otherwise → status = 'ready'
+- Kiosk loads pending_compliance jobs in queue but grays them out — non-clickable, amber banner
+- handleStartSetup has safety check blocking start if job.status === 'pending_compliance'
+- Unschedule handler preserves pending_compliance status (not promoted to ready)
+
+### Kiosk Job Documents
+- Documents section always visible on active job panel (not hidden when empty)
+- Queued job selection panel shows documents on-demand when job is tapped
+- WO Lookup: per-job collapsible document dropdown, loaded on demand, cached per session
+- All document views use getDocumentUrl from ../lib/s3 — opens signed URL in new tab
+- Machinists can view documents but cannot upload, delete, or approve
+
+### Kiosk Material Modal — Sequential Flow
+- Field order: Material Type → Bar Size → Lot Number → Availability Banner → Bar Length → Bars Loaded
+- Material Type change cascades: clears bar_size AND lot_number
+- Bar Size change cascades: clears lot_number only
+- Material Type and Bar Size dropdowns use optgroups: "From Inventory" first, "All Materials/Sizes" second
+- Bar Size "From Inventory" uses raw inventory values directly (not cross-referenced with bar_sizes table) — avoids format mismatch between "3/8" and "0.375 dia"
+- Lot Number uses HTML datalist for suggestions — free text always allowed
+- Pre-fill: single inventory match → auto-fill; multiple matches → clear field, show suggestions; no match → clear field
+- Availability banner: if bar length entered and inch data available → shows Math.floor(available_inches / entered_length); if no inch data → shows raw bar count; if no bar length → shows raw bars with hint
+- Over-inventory warning on Bars Loaded: amber border + message, never blocks submission
+- All inventory logic is non-blocking — machinists can always proceed regardless of inventory state
+
+### Armory Rack Assignment
+- Rack select must be controlled (value=) not uncontrolled (defaultValue=) — React onChange unreliable on uncontrolled selects
+- Fires handleAssignRack immediately on change — no confirm button
+- Root cause was missing RLS UPDATE policy on material_receiving
+
+### RLS Policy Audit
+- 14 tables were missing UPDATE policies — all patched April 10, 2026
+- Pattern going forward: every new table needs SELECT, INSERT, UPDATE, DELETE policies
+- Use USING (true) WITH CHECK (true) for authenticated role as baseline
+- Kiosk uses anon key (PIN auth, not Supabase Auth) — tables read by kiosk need anon SELECT policy
+
+### Schedule Module Rename
+- Name not yet decided — options: Ops, Command, Dispatch, Grid, Launchpad
+- Ops remains recommended (natural shop floor language)

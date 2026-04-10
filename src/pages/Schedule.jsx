@@ -27,7 +27,9 @@ import {
   Wrench,
   Layers,
   Plus,
-  Settings
+  Settings,
+  LayoutGrid,
+  List
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
@@ -107,6 +109,14 @@ export default function Schedule({ user, profile, onNavigate }) {
   
   // Maintenance modal state
   const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)
+
+  // View mode toggle: 'grid' = timeline (default), 'list' = per-machine lineup
+  const [viewMode, setViewMode] = useState('grid')
+  // Full future scheduled job list — used only in list view
+  const [allScheduledJobs, setAllScheduledJobs] = useState([])
+  // List view drag-and-drop hover target
+  // { type: 'after', jobId } | { type: 'machine', machineId } | null
+  const [listDropTarget, setListDropTarget] = useState(null)
 
   // Click-to-schedule modal state (unified: button, drag-drop, edit)
   const [scheduleClickJob, setScheduleClickJob] = useState(null)
@@ -191,7 +201,7 @@ export default function Schedule({ user, profile, onNavigate }) {
   const fetchData = async () => {
     setLoading(true)
     try {
-      // Fetch unassigned ready jobs
+      // Fetch unassigned ready jobs (and pending_compliance jobs not yet scheduled)
       const { data: unassignedData, error: unassignedError } = await supabase
         .from('jobs')
         .select(`
@@ -199,7 +209,7 @@ export default function Schedule({ user, profile, onNavigate }) {
           work_order:work_orders(id, wo_number, customer, priority, due_date, order_type),
           component:parts!component_id(id, part_number, description)
         `)
-        .eq('status', 'ready')
+        .in('status', ['ready', 'pending_compliance'])
         .is('assigned_machine_id', null)
         .order('created_at', { ascending: true })
 
@@ -307,10 +317,54 @@ export default function Schedule({ user, profile, onNavigate }) {
         setActiveMaintenanceJobs(activeMaintenanceData || [])
       }
 
+      // Fetch ALL future scheduled jobs (used by list view — independent of week window)
+      await loadAllScheduledJobs()
+
     } catch (error) {
       console.error('Unexpected error:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  // List view query — fetches every future scheduled job, regardless of week
+  const loadAllScheduledJobs = async () => {
+    const { data, error } = await supabase
+      .from('jobs')
+      .select(`
+        id,
+        job_number,
+        status,
+        quantity,
+        component_id,
+        scheduled_start,
+        scheduled_end,
+        estimated_minutes,
+        assigned_machine_id,
+        work_order:work_orders(
+          id, wo_number, customer, priority, due_date
+        ),
+        component:parts!component_id(
+          id, part_number, description
+        )
+      `)
+      .not('assigned_machine_id', 'is', null)
+      .not('scheduled_start', 'is', null)
+      .in('status', [
+        'ready',
+        'assigned',
+        'pending_compliance',
+        'in_setup',
+        'in_progress',
+        'pending_passivation',
+        'in_passivation'
+      ])
+      .order('scheduled_start', { ascending: true })
+
+    if (error) {
+      console.error('Error fetching all scheduled jobs:', error)
+    } else {
+      setAllScheduledJobs(data || [])
     }
   }
 
@@ -643,6 +697,83 @@ export default function Schedule({ user, profile, onNavigate }) {
     setDropTarget(null)
   }
 
+  // Snap to the next valid business-hours slot after a job ends
+  // (mirrors ScheduleJobModal's snapToBusinessHours logic)
+  const snapAfterJob = (job) => {
+    const start = new Date(job.scheduled_start)
+    const endMs = job.scheduled_end
+      ? new Date(job.scheduled_end).getTime()
+      : start.getTime() + (job.estimated_minutes || 60) * 60000
+    const end = new Date(endMs)
+
+    const SHIFT_START = 7
+    const SHIFT_END = 16
+    const h = end.getHours()
+    const m = end.getMinutes()
+
+    if (h < SHIFT_START) {
+      end.setHours(SHIFT_START, 0, 0, 0)
+    } else if (h > SHIFT_END || (h === SHIFT_END && m > 0)) {
+      end.setDate(end.getDate() + 1)
+      end.setHours(SHIFT_START, 0, 0, 0)
+    } else if (m % 15 !== 0) {
+      end.setMinutes(Math.ceil(m / 15) * 15, 0, 0)
+    }
+
+    const dateStr = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`
+    const timeStr = `${String(end.getHours()).padStart(2, '0')}:${String(end.getMinutes()).padStart(2, '0')}`
+    return { date: dateStr, startTime: timeStr }
+  }
+
+  // List view drop handler — insert after a specific job (resequence)
+  const handleListDropAfterJob = (e, precedingJob) => {
+    e.preventDefault()
+    setListDropTarget(null)
+
+    const job = draggedJob || draggedScheduledJob
+    if (!job) return
+
+    const { date, startTime } = snapAfterJob(precedingJob)
+
+    setScheduleClickJob(job)
+    setScheduleClickEditMode(!!draggedScheduledJob)
+    setScheduleClickDefaults({
+      date,
+      machineId: precedingJob.assigned_machine_id,
+      startTime
+    })
+    setDraggedJob(null)
+    setDraggedScheduledJob(null)
+  }
+
+  // List view drop handler — drop onto machine card (reassign or append)
+  const handleListDropOnMachine = (e, machineId) => {
+    e.preventDefault()
+    setListDropTarget(null)
+
+    const job = draggedJob || draggedScheduledJob
+    if (!job) return
+
+    const machineJobs = allScheduledByMachine[machineId] || []
+    const lastJob = machineJobs[machineJobs.length - 1]
+
+    let defaults
+    if (lastJob) {
+      const { date, startTime } = snapAfterJob(lastJob)
+      defaults = { date, machineId, startTime }
+    } else {
+      // Empty machine — let the modal auto-calc next available slot
+      const today = new Date().toISOString().split('T')[0]
+      defaults = { date: today, machineId }
+    }
+
+    setScheduleClickJob(job)
+    setScheduleClickEditMode(!!draggedScheduledJob)
+    setScheduleClickDefaults(defaults)
+    setDraggedJob(null)
+    setDraggedScheduledJob(null)
+  }
+
   const handleDragOver = (e, machineId, date, hour = null) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
@@ -682,6 +813,35 @@ export default function Schedule({ user, profile, onNavigate }) {
   }
 
   // Unschedule a job - return it to the pool
+  // Return a scheduled job to the unassigned pool from inside the reschedule modal
+  const handleReturnToQueue = async (job) => {
+    if (!job) return
+    try {
+      await supabase
+        .from('jobs')
+        .update({
+          assigned_machine_id: null,
+          scheduled_start: null,
+          scheduled_end: null,
+          status: job.status === 'pending_compliance'
+            ? 'pending_compliance'
+            : 'ready',
+          scheduled_by: null,
+          scheduled_at: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', job.id)
+
+      setScheduleClickJob(null)
+      setScheduleClickEditMode(false)
+      setScheduleClickDefaults(null)
+      fetchData()
+      loadAllScheduledJobs()
+    } catch (err) {
+      console.error('Failed to return job to queue:', err)
+    }
+  }
+
   const handleUnschedule = async () => {
     if (!unscheduleConfirm) return
     
@@ -694,7 +854,9 @@ export default function Schedule({ user, profile, onNavigate }) {
           assigned_machine_id: null,
           scheduled_start: null,
           scheduled_end: null,
-          status: 'ready',
+          status: unscheduleConfirm.status === 'pending_compliance'
+            ? 'pending_compliance'
+            : 'ready',
           scheduled_by: null,
           scheduled_at: null
         })
@@ -1030,7 +1192,12 @@ export default function Schedule({ user, profile, onNavigate }) {
     if (job.status === 'complete' || job.status === 'manufacturing_complete') {
       return 'bg-gray-700/50 border-gray-500 opacity-60'
     }
-    
+
+    // Pending pre-mfg compliance — amber so April can see it's not yet approved
+    if (job.status === 'pending_compliance') {
+      return 'bg-amber-700/80 border-amber-600'
+    }
+
     // In-setup jobs get a blue treatment
     if (job.status === 'in_setup') {
       return 'bg-blue-500 border-blue-400 ring-2 ring-blue-300 ring-offset-1 ring-offset-gray-900'
@@ -1295,6 +1462,20 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   // Get current grouping based on mode
   const machineGroups = groupingMode === 'location' ? machinesByLocation : machinesByType
+
+  // Group all future scheduled jobs by machine — used by list view
+  const allScheduledByMachine = useMemo(() => {
+    const grouped = {}
+    allScheduledJobs.forEach(job => {
+      if (!grouped[job.assigned_machine_id]) grouped[job.assigned_machine_id] = []
+      grouped[job.assigned_machine_id].push(job)
+    })
+    // Enforce ascending order on scheduled_start (query already sorted, this is a safety net)
+    Object.keys(grouped).forEach(mid => {
+      grouped[mid].sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
+    })
+    return grouped
+  }, [allScheduledJobs])
 
   // Toggle group collapse
   const toggleGroupCollapse = (groupName) => {
@@ -1642,6 +1823,37 @@ export default function Schedule({ user, profile, onNavigate }) {
             <span className="hidden sm:inline">Schedule Maintenance</span>
           </button>
 
+          {/* View mode toggle: Grid (timeline) vs List (per-machine lineup) */}
+          <div className="flex items-center bg-gray-800 rounded-lg p-0.5 mr-2">
+            <button
+              onClick={() => setViewMode('grid')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                viewMode === 'grid'
+                  ? 'bg-skynet-accent text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+              title="Timeline Grid View"
+            >
+              <LayoutGrid size={14} />
+              <span className="hidden sm:inline">Grid</span>
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('list')
+                loadAllScheduledJobs()
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                viewMode === 'list'
+                  ? 'bg-skynet-accent text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+              title="Machine Lineup List View"
+            >
+              <List size={14} />
+              <span className="hidden sm:inline">List</span>
+            </button>
+          </div>
+
           {/* Grouping mode toggle */}
           <div className="flex items-center bg-gray-800 rounded-lg p-0.5 mr-2">
             <button
@@ -1687,55 +1899,59 @@ export default function Schedule({ user, profile, onNavigate }) {
             </button>
           )}
           
-          <button
-            onClick={() => {
-              setWeekOffset(0)
-              if (zoomedDay) {
-                // If in day view, also set zoomed day to today
-                const today = new Date()
-                today.setHours(0, 0, 0, 0)
-                setZoomedDay(today)
-              }
-            }}
-            className={`px-3 py-1 text-sm rounded transition-colors ${
-              weekOffset === 0 && (!zoomedDay || isToday(zoomedDay))
-                ? 'bg-skynet-accent text-white' 
-                : 'text-gray-400 hover:text-white hover:bg-gray-800'
-            }`}
-          >
-            Today
-          </button>
-          <button
-            onClick={() => {
-              if (zoomedDay) {
-                const newDate = new Date(zoomedDay)
-                newDate.setDate(newDate.getDate() - 1)
-                setZoomedDay(newDate)
-              } else {
-                setWeekOffset(weekOffset - 1)
-              }
-            }}
-            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-          >
-            <ChevronLeft size={20} />
-          </button>
-          <span className="text-white font-medium min-w-[180px] text-center">
-            {zoomedDay ? formatFullDate(zoomedDay) : getWeekRangeLabel()}
-          </span>
-          <button
-            onClick={() => {
-              if (zoomedDay) {
-                const newDate = new Date(zoomedDay)
-                newDate.setDate(newDate.getDate() + 1)
-                setZoomedDay(newDate)
-              } else {
-                setWeekOffset(weekOffset + 1)
-              }
-            }}
-            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-          >
-            <ChevronRight size={20} />
-          </button>
+          {viewMode === 'grid' && (
+            <>
+              <button
+                onClick={() => {
+                  setWeekOffset(0)
+                  if (zoomedDay) {
+                    // If in day view, also set zoomed day to today
+                    const today = new Date()
+                    today.setHours(0, 0, 0, 0)
+                    setZoomedDay(today)
+                  }
+                }}
+                className={`px-3 py-1 text-sm rounded transition-colors ${
+                  weekOffset === 0 && (!zoomedDay || isToday(zoomedDay))
+                    ? 'bg-skynet-accent text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                }`}
+              >
+                Today
+              </button>
+              <button
+                onClick={() => {
+                  if (zoomedDay) {
+                    const newDate = new Date(zoomedDay)
+                    newDate.setDate(newDate.getDate() - 1)
+                    setZoomedDay(newDate)
+                  } else {
+                    setWeekOffset(weekOffset - 1)
+                  }
+                }}
+                className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <span className="text-white font-medium min-w-[180px] text-center">
+                {zoomedDay ? formatFullDate(zoomedDay) : getWeekRangeLabel()}
+              </span>
+              <button
+                onClick={() => {
+                  if (zoomedDay) {
+                    const newDate = new Date(zoomedDay)
+                    newDate.setDate(newDate.getDate() + 1)
+                    setZoomedDay(newDate)
+                  } else {
+                    setWeekOffset(weekOffset + 1)
+                  }
+                }}
+                className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
+              >
+                <ChevronRight size={20} />
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -1860,7 +2076,13 @@ export default function Schedule({ user, profile, onNavigate }) {
                         {job.work_order?.customer && (
                           <p className="text-gray-500 text-xs truncate">{job.work_order.customer}</p>
                         )}
-                        
+                        {job.status === 'pending_compliance' && (
+                          <span className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full bg-amber-900/50 text-amber-400 border border-amber-700/50 mt-1 w-fit">
+                            <Clock size={10} />
+                            Compliance Pending
+                          </span>
+                        )}
+
                         {/* Incomplete job details */}
                         {isIncomplete && (
                           <div className="mt-2 pt-2 border-t border-red-800/30 space-y-1">
@@ -1926,7 +2148,8 @@ export default function Schedule({ user, profile, onNavigate }) {
           </div>
         </div>
 
-        {/* Right Panel - Timeline */}
+        {/* Right Panel - Timeline (grid view) OR Machine Lineup (list view) */}
+        {viewMode === 'grid' ? (
         <div className="flex-1 flex flex-col bg-gray-900 rounded-lg border border-gray-700 overflow-hidden min-w-0">
           {/* Timeline Header */}
           <div className="flex border-b border-gray-700">
@@ -2393,6 +2616,280 @@ export default function Schedule({ user, profile, onNavigate }) {
             )}
           </div>
         </div>
+        ) : (
+          /* --- LIST VIEW: per-machine lineup of all future scheduled jobs --- */
+          <div className="flex-1 flex flex-col bg-gray-900 rounded-lg border border-gray-700 overflow-hidden min-w-0">
+            <div className="flex-1 overflow-y-auto">
+              <div className="space-y-6 px-4 py-4">
+                {machineGroups.map(group => (
+                  <div key={group.id}>
+                    {/* Group header — same style as grid */}
+                    <div className="flex items-center gap-2 mb-3 px-2 py-1.5 bg-gray-800 rounded-lg">
+                      {groupingMode === 'location'
+                        ? <MapPin size={14} className="text-skynet-accent" />
+                        : <Wrench size={14} className="text-purple-400" />}
+                      <span className="text-white font-medium text-sm">
+                        {group.shortName}
+                      </span>
+                      <span className="text-gray-500 text-xs">
+                        ({group.machines.length} machines)
+                      </span>
+                    </div>
+
+                    {/* Machine cards grid */}
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                      {group.machines.map(machine => {
+                        const jobs = allScheduledByMachine[machine.id] || []
+                        const isDown = isMachineDown(machine)
+                        const anyDragActive = !!(draggedJob || draggedScheduledJob)
+
+                        return (
+                          <div
+                            key={machine.id}
+                            onDragOver={(e) => {
+                              if (!anyDragActive) return
+                              e.preventDefault()
+                              // Use functional setState to read latest value synchronously —
+                              // avoids stale closure when child "after" zones update state.
+                              setListDropTarget(prev =>
+                                prev?.type === 'after'
+                                  ? prev
+                                  : { type: 'machine', machineId: machine.id }
+                              )
+                            }}
+                            onDragLeave={(e) => {
+                              if (!e.currentTarget.contains(e.relatedTarget)) {
+                                setListDropTarget(null)
+                              }
+                            }}
+                            onDrop={(e) => handleListDropOnMachine(e, machine.id)}
+                            className={`bg-gray-900 rounded-xl border transition-all duration-150 overflow-hidden ${
+                              listDropTarget?.type === 'machine' &&
+                              listDropTarget?.machineId === machine.id
+                                ? 'border-skynet-accent ring-1 ring-skynet-accent/30'
+                                : 'border-gray-800'
+                            }`}
+                          >
+                            {/* Machine header */}
+                            <div className={`flex items-center justify-between px-4 py-3 border-b border-gray-800 ${
+                              isDown ? 'bg-red-950/40' : 'bg-gray-850'
+                            }`}>
+                              <div className="flex items-center gap-2">
+                                <span className="text-white font-semibold">
+                                  {machine.name}
+                                </span>
+                                {isDown && (
+                                  <span className="px-1.5 py-0.5 bg-red-600 text-white text-[9px] font-bold rounded animate-pulse flex items-center gap-0.5">
+                                    <AlertTriangle size={8} />
+                                    DOWN
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-gray-500 text-xs">
+                                {jobs.length} job{jobs.length !== 1 ? 's' : ''} scheduled
+                              </span>
+                            </div>
+
+                            {/* Job rows */}
+                            {jobs.length === 0 ? (
+                              <div className={`px-4 py-6 text-center text-sm transition-all ${
+                                listDropTarget?.type === 'machine' &&
+                                listDropTarget?.machineId === machine.id
+                                  ? 'text-skynet-accent'
+                                  : anyDragActive
+                                    ? 'text-gray-500 border-2 border-dashed border-gray-700 rounded-lg mx-4 my-3 py-5'
+                                    : 'text-gray-600'
+                              }`}>
+                                {listDropTarget?.type === 'machine' &&
+                                 listDropTarget?.machineId === machine.id
+                                  ? 'Drop to schedule here'
+                                  : 'No jobs scheduled'}
+                              </div>
+                            ) : (
+                              <div>
+                                {/* Drop zone: insert before first job */}
+                                {anyDragActive && jobs.length > 0 && (
+                                  <div
+                                    onDragOver={(e) => {
+                                      e.stopPropagation()
+                                      if (!anyDragActive) return
+                                      if (draggedScheduledJob?.id === jobs[0].id) return
+                                      e.preventDefault()
+                                      setListDropTarget({ type: 'after', jobId: 'FIRST_' + machine.id })
+                                    }}
+                                    onDragLeave={(e) => {
+                                      if (!e.currentTarget.contains(e.relatedTarget)) {
+                                        setListDropTarget(null)
+                                      }
+                                    }}
+                                    onDrop={(e) => {
+                                      e.stopPropagation()
+                                      e.preventDefault()
+                                      const job = draggedJob || draggedScheduledJob
+                                      if (!job) return
+                                      setListDropTarget(null)
+                                      // Place at the start of this machine's schedule:
+                                      // use first job's date, no startTime so modal
+                                      // auto-calcs from beginning of that day
+                                      const firstDate = new Date(jobs[0].scheduled_start)
+                                      const dateStr = firstDate.toISOString().split('T')[0]
+                                      setScheduleClickJob(job)
+                                      setScheduleClickEditMode(!!draggedScheduledJob)
+                                      setScheduleClickDefaults({
+                                        date: dateStr,
+                                        machineId: machine.id
+                                      })
+                                      setDraggedJob(null)
+                                      setDraggedScheduledJob(null)
+                                    }}
+                                    className={`mx-2 rounded-md transition-all duration-100 flex items-center justify-center text-xs font-medium h-8 my-0.5 border-2 border-dashed ${
+                                      listDropTarget?.jobId === 'FIRST_' + machine.id
+                                        ? 'border-skynet-accent text-skynet-accent bg-skynet-accent/15 h-10 my-1'
+                                        : 'border-gray-700 text-gray-600'
+                                    }`}
+                                  >
+                                    {listDropTarget?.jobId === 'FIRST_' + machine.id
+                                      ? '↑ Insert first'
+                                      : '· · ·'}
+                                  </div>
+                                )}
+                                {jobs.map((job, idx) => {
+                                  const priority = job.work_order?.priority || 'normal'
+                                  const isOverdue = job.work_order?.due_date
+                                    && new Date(job.work_order.due_date) < new Date()
+                                  const isBeingDragged = draggedScheduledJob?.id === job.id
+
+                                  return (
+                                    <div key={job.id}>
+                                      <div
+                                        draggable
+                                        onDragStart={(e) => handleScheduledDragStart(e, job)}
+                                        onDragEnd={(e) => {
+                                          handleDragEnd(e)
+                                          setListDropTarget(null)
+                                        }}
+                                        onClick={() => {
+                                          setScheduleClickJob(job)
+                                          setScheduleClickEditMode(true)
+                                        }}
+                                        className={`flex items-center gap-3 px-4 py-3 hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-b-0 ${
+                                          isBeingDragged
+                                            ? 'opacity-40 cursor-grabbing'
+                                            : 'cursor-grab'
+                                        }`}
+                                      >
+                                        {/* Sequence number */}
+                                        <span className="text-gray-600 text-xs font-mono w-5 text-right flex-shrink-0">
+                                          {idx + 1}
+                                        </span>
+
+                                        {/* Priority indicator */}
+                                        <div className={`w-1.5 h-8 rounded-full flex-shrink-0 ${
+                                          priority === 'critical'
+                                            ? 'bg-red-500'
+                                            : priority === 'high'
+                                            ? 'bg-yellow-500'
+                                            : 'bg-gray-700'
+                                        }`} />
+
+                                        {/* Part + job info */}
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-skynet-accent font-mono text-sm font-medium truncate">
+                                              {job.component?.part_number}
+                                            </span>
+                                            <span className="text-gray-500 text-xs flex-shrink-0">
+                                              {job.job_number}
+                                            </span>
+                                            {job.status === 'pending_compliance' && (
+                                              <span className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full bg-amber-900/50 text-amber-400 border border-amber-700/50 flex-shrink-0">
+                                                <Clock size={10} />
+                                                Compliance Pending
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="text-gray-500 text-xs truncate">
+                                            {job.work_order?.wo_number}
+                                            {job.work_order?.customer
+                                              ? ` · ${job.work_order.customer}`
+                                              : ''}
+                                          </div>
+                                        </div>
+
+                                        {/* Qty */}
+                                        <div className="text-right flex-shrink-0">
+                                          <div className="text-white text-sm font-mono">
+                                            {job.quantity}
+                                          </div>
+                                          <div className="text-gray-600 text-xs">pcs</div>
+                                        </div>
+
+                                        {/* Scheduled start */}
+                                        <div className="text-right flex-shrink-0 min-w-[72px]">
+                                          <div className={`text-sm font-mono ${
+                                            isOverdue ? 'text-red-400' : 'text-gray-300'
+                                          }`}>
+                                            {new Date(job.scheduled_start).toLocaleDateString('en-US', {
+                                              month: 'short', day: 'numeric'
+                                            })}
+                                          </div>
+                                          <div className="text-gray-600 text-xs">
+                                            {job.estimated_minutes
+                                              ? job.estimated_minutes >= 60
+                                                ? `${Math.round(job.estimated_minutes / 60)}h`
+                                                : `${job.estimated_minutes}m`
+                                              : '—'}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Drop zone: insert after this job */}
+                                      <div
+                                        onDragOver={(e) => {
+                                          e.stopPropagation()
+                                          if (!anyDragActive) return
+                                          if (draggedScheduledJob?.id === job.id) return
+                                          e.preventDefault()
+                                          setListDropTarget({ type: 'after', jobId: job.id })
+                                        }}
+                                        onDragLeave={(e) => {
+                                          if (!e.currentTarget.contains(e.relatedTarget)) {
+                                            setListDropTarget(null)
+                                          }
+                                        }}
+                                        onDrop={(e) => {
+                                          e.stopPropagation()
+                                          handleListDropAfterJob(e, job)
+                                        }}
+                                        className={`mx-2 rounded-md transition-all duration-100 flex items-center justify-center select-none text-xs font-medium pointer-events-none ${anyDragActive ? 'pointer-events-auto' : ''} ${
+                                          anyDragActive
+                                            ? listDropTarget?.type === 'after' &&
+                                              listDropTarget?.jobId === job.id
+                                              ? 'h-10 my-1 bg-skynet-accent/15 border-2 border-skynet-accent text-skynet-accent'
+                                              : 'h-8 my-0.5 border-2 border-dashed border-gray-700 text-gray-600'
+                                            : 'h-0 overflow-hidden border-0'
+                                        }`}
+                                      >
+                                        {listDropTarget?.type === 'after' &&
+                                         listDropTarget?.jobId === job.id
+                                          ? '↓ Insert here'
+                                          : anyDragActive ? '· · ·' : null}
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Job Detail Popup */}
@@ -2878,6 +3375,7 @@ export default function Schedule({ user, profile, onNavigate }) {
             setScheduleClickEditMode(false)
             setScheduleClickDefaults(null)
             fetchData()
+            loadAllScheduledJobs()
           }}
           job={scheduleClickJob}
           machines={machines}
@@ -2886,6 +3384,11 @@ export default function Schedule({ user, profile, onNavigate }) {
           profile={profile}
           editMode={scheduleClickEditMode}
           defaults={scheduleClickDefaults}
+          onReturnToQueue={
+            scheduleClickEditMode
+              ? () => handleReturnToQueue(scheduleClickJob)
+              : null
+          }
         />
       )}
     </div>

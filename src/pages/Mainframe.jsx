@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink } from 'lucide-react'
+import { getDocumentUrl } from '../lib/s3'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
@@ -59,6 +60,12 @@ export default function Mainframe({ user, profile }) {
   const [cancelStep, setCancelStep] = useState(0) // 0=none, 1=first warning, 2=final confirmation
   const [cancelSaving, setCancelSaving] = useState(false)
   const [printPackageJob, setPrintPackageJob] = useState(null)
+
+  // WO Lookup — per-job document expansion
+  const [expandedJobDocs, setExpandedJobDocs] = useState({})
+  const [jobDocCache, setJobDocCache] = useState({})
+  const [loadingJobDocs, setLoadingJobDocs] = useState({})
+  const [viewingWODoc, setViewingWODoc] = useState(null)
 
   // Memoized fetch function
   const fetchData = useCallback(async (isAutoRefresh = false) => {
@@ -312,7 +319,7 @@ export default function Mainframe({ user, profile }) {
     }
     
     // Normal machines: show jobs assigned to this machine with active statuses
-    const activeStatuses = ['assigned', 'in_setup', 'in_progress']
+    const activeStatuses = ['pending_compliance', 'assigned', 'in_setup', 'in_progress']
     return jobs.filter(job => 
       job.assigned_machine_id === machineId && 
       activeStatuses.includes(job.status)
@@ -583,6 +590,46 @@ export default function Mainframe({ user, profile }) {
       console.error('Unexpected error:', err)
     } finally {
       setEditSaving(false)
+    }
+  }
+
+  // WO Lookup — toggle job documents dropdown (load on demand)
+  const handleToggleJobDocs = async (jobId) => {
+    if (expandedJobDocs[jobId]) {
+      setExpandedJobDocs(prev => ({ ...prev, [jobId]: false }))
+      return
+    }
+    setExpandedJobDocs(prev => ({ ...prev, [jobId]: true }))
+    if (jobDocCache[jobId]) return
+
+    setLoadingJobDocs(prev => ({ ...prev, [jobId]: true }))
+    try {
+      const { data, error } = await supabase
+        .from('job_documents')
+        .select('*, document_type:document_types(*)')
+        .eq('job_id', jobId)
+        .order('created_at', { ascending: true })
+      if (!error) {
+        setJobDocCache(prev => ({ ...prev, [jobId]: data || [] }))
+      }
+    } catch (err) {
+      console.error('Error loading job docs:', err)
+    } finally {
+      setLoadingJobDocs(prev => ({ ...prev, [jobId]: false }))
+    }
+  }
+
+  const handleViewWODoc = async (fileUrl) => {
+    if (!fileUrl || viewingWODoc) return
+    setViewingWODoc(fileUrl)
+    try {
+      const signedUrl = await getDocumentUrl(fileUrl)
+      window.open(signedUrl, '_blank')
+    } catch (err) {
+      console.error('Error opening document:', err)
+      alert('Could not open document.')
+    } finally {
+      setViewingWODoc(null)
     }
   }
 
@@ -1367,7 +1414,11 @@ export default function Mainframe({ user, profile }) {
                 </div>
               </div>
               <button 
-                onClick={() => setShowWOLookup(false)} 
+                onClick={() => {
+                  setShowWOLookup(false)
+                  setExpandedJobDocs({})
+                  setJobDocCache({})
+                }}
                 className="text-gray-400 hover:text-white p-2"
               >
                 <X size={24} />
@@ -1671,6 +1722,42 @@ export default function Mainframe({ user, profile }) {
                                                   }
                                                 </div>
                                               )}
+
+                                              {/* Documents toggle */}
+                                              <div className="mt-2 flex items-center gap-2 cursor-pointer select-none group" onClick={() => handleToggleJobDocs(job.id)}>
+                                                <ChevronRight size={13} className={`text-gray-600 transition-transform flex-shrink-0 ${expandedJobDocs[job.id] ? 'rotate-90' : ''}`} />
+                                                <FileText size={13} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
+                                                <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors">
+                                                  {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length})` : 'View documents'}
+                                                </span>
+                                                {loadingJobDocs[job.id] && <Loader2 size={11} className="animate-spin text-gray-600 ml-1" />}
+                                              </div>
+                                              {expandedJobDocs[job.id] && (
+                                                <div className="mt-2 pl-4 border-l-2 border-gray-800 space-y-1">
+                                                  {loadingJobDocs[job.id] ? (
+                                                    <div className="py-2 flex items-center gap-2">
+                                                      <Loader2 size={13} className="animate-spin text-gray-600" />
+                                                      <span className="text-xs text-gray-600">Loading...</span>
+                                                    </div>
+                                                  ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? (
+                                                    <p className="text-xs text-gray-600 italic py-1">No documents attached</p>
+                                                  ) : (
+                                                    jobDocCache[job.id].map(doc => (
+                                                      <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
+                                                        <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                                          {viewingWODoc === doc.file_url ? <Loader2 size={12} className="animate-spin text-gray-400" /> : <FileText size={12} className="text-gray-400" />}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                          <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors">{doc.file_name || 'Unnamed document'}</p>
+                                                          {doc.document_type?.name && <p className="text-gray-600 text-[10px] truncate">{doc.document_type.name}</p>}
+                                                        </div>
+                                                        {doc.status === 'approved' ? <CheckCircle size={11} className="text-green-500 flex-shrink-0" /> : <Clock size={11} className="text-yellow-500 flex-shrink-0" />}
+                                                        <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                                                      </button>
+                                                    ))
+                                                  )}
+                                                </div>
+                                              )}
                                             </div>
                                           )
                                         })}
@@ -1795,6 +1882,42 @@ export default function Mainframe({ user, profile }) {
                                               )
                                             })
                                           }
+                                        </div>
+                                      )}
+
+                                      {/* Documents toggle */}
+                                      <div className="mt-2 flex items-center gap-2 cursor-pointer select-none group" onClick={() => handleToggleJobDocs(job.id)}>
+                                        <ChevronRight size={13} className={`text-gray-600 transition-transform flex-shrink-0 ${expandedJobDocs[job.id] ? 'rotate-90' : ''}`} />
+                                        <FileText size={13} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
+                                        <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors">
+                                          {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length})` : 'View documents'}
+                                        </span>
+                                        {loadingJobDocs[job.id] && <Loader2 size={11} className="animate-spin text-gray-600 ml-1" />}
+                                      </div>
+                                      {expandedJobDocs[job.id] && (
+                                        <div className="mt-2 pl-4 border-l-2 border-gray-800 space-y-1">
+                                          {loadingJobDocs[job.id] ? (
+                                            <div className="py-2 flex items-center gap-2">
+                                              <Loader2 size={13} className="animate-spin text-gray-600" />
+                                              <span className="text-xs text-gray-600">Loading...</span>
+                                            </div>
+                                          ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? (
+                                            <p className="text-xs text-gray-600 italic py-1">No documents attached</p>
+                                          ) : (
+                                            jobDocCache[job.id].map(doc => (
+                                              <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
+                                                <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                                  {viewingWODoc === doc.file_url ? <Loader2 size={12} className="animate-spin text-gray-400" /> : <FileText size={12} className="text-gray-400" />}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                  <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors">{doc.file_name || 'Unnamed document'}</p>
+                                                  {doc.document_type?.name && <p className="text-gray-600 text-[10px] truncate">{doc.document_type.name}</p>}
+                                                </div>
+                                                {doc.status === 'approved' ? <CheckCircle size={11} className="text-green-500 flex-shrink-0" /> : <Clock size={11} className="text-yellow-500 flex-shrink-0" />}
+                                                <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                                              </button>
+                                            ))
+                                          )}
                                         </div>
                                       )}
                                     </div>

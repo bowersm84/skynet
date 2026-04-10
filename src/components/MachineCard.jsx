@@ -1,4 +1,4 @@
-import { Monitor, AlertTriangle, Wrench } from 'lucide-react'
+import { Monitor, AlertTriangle, Wrench, Clock } from 'lucide-react'
 
 export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDowntime, activeMaintenanceJob }) {
   const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
@@ -173,8 +173,21 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
             <div className="space-y-1">
               {queuedJobs.slice(0, 3).map(job => (
                 <div key={job.id} className="flex items-center justify-between text-sm">
-                  <span className="text-gray-400 font-mono">{job.job_number}</span>
-                  <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                  <span className={`font-mono ${
+                    job.status === 'pending_compliance'
+                      ? 'text-amber-400/70'
+                      : 'text-gray-400'
+                  }`}>
+                    {job.job_number}
+                  </span>
+                  {job.status === 'pending_compliance' ? (
+                    <span className="flex items-center gap-1 text-[9px] font-bold text-amber-400 bg-amber-900/50 border border-amber-700/50 px-1.5 py-0.5 rounded">
+                      <Clock size={8} />
+                      Compliance
+                    </span>
+                  ) : (
+                    <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
+                  )}
                 </div>
               ))}
               {queuedJobs.length > 3 && (

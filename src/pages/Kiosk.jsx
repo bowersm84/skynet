@@ -29,8 +29,10 @@ import {
   Layers,
   Edit3,
   Timer,
-  Beaker
+  Beaker,
+  ExternalLink
 } from 'lucide-react'
+import { getDocumentUrl } from '../lib/s3'
 
 export default function Kiosk() {
   const { machineCode } = useParams()
@@ -156,6 +158,7 @@ export default function Kiosk() {
   const [barSizes, setBarSizes] = useState([])
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
   const [lotMismatchModal, setLotMismatchModal] = useState(null) // { existingLot, newLot }
+  const [inventoryStock, setInventoryStock] = useState([]) // Available stock rows for dropdown grouping
 
   // Finishing send state
   const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
@@ -179,6 +182,11 @@ export default function Kiosk() {
   
   // Job activity log for active job
   const [jobActivities, setJobActivities] = useState([])
+  const [jobDocuments, setJobDocuments] = useState([])
+  const [loadingDocs, setLoadingDocs] = useState(false)
+  const [viewingDoc, setViewingDoc] = useState(null)
+  const [selectedJobDocuments, setSelectedJobDocuments] = useState([])
+  const [loadingSelectedJobDocs, setLoadingSelectedJobDocs] = useState(false)
   
   // Machine DOWN/Ready state (for orphaned downtimes)
   const [orphanedDowntimes, setOrphanedDowntimes] = useState([])
@@ -501,10 +509,30 @@ export default function Kiosk() {
   useEffect(() => {
     if (activeJob) {
       buildActivityLog(activeJob)
+      loadJobDocuments(activeJob.id)
     } else {
       setJobActivities([])
+      setJobDocuments([])
     }
   }, [activeJob?.id, activeJob?.status, activeJob?.setup_start, activeJob?.production_start, activeJob?.actual_end])
+
+  // Load documents for selected queued job (preview before starting)
+  useEffect(() => {
+    if (selectedJob?.id && !activeJob) {
+      setLoadingSelectedJobDocs(true)
+      supabase
+        .from('job_documents')
+        .select('*, document_type:document_types(*)')
+        .eq('job_id', selectedJob.id)
+        .order('created_at', { ascending: true })
+        .then(({ data, error }) => {
+          if (!error) setSelectedJobDocuments(data || [])
+          setLoadingSelectedJobDocs(false)
+        })
+    } else {
+      setSelectedJobDocuments([])
+    }
+  }, [selectedJob?.id, activeJob?.id])
 
   // Load job materials when active job changes
   useEffect(() => {
@@ -668,7 +696,7 @@ export default function Kiosk() {
         statusFilter = [secondaryConfig.pendingStatus, secondaryConfig.inProgressStatus]
       } else {
         // Normal production machines
-        statusFilter = ['assigned', 'in_setup', 'in_progress']
+        statusFilter = ['pending_compliance', 'assigned', 'in_setup', 'in_progress']
       }
       
       let query = supabase
@@ -823,6 +851,51 @@ export default function Kiosk() {
       setMaterialTypes(data || [])
     } catch (err) {
       console.error('Error loading material types:', err)
+    }
+  }
+
+  // Load available inventory stock for dropdown grouping
+  const loadInventoryStock = async () => {
+    try {
+      const { data: receiving } = await supabase
+        .from('material_receiving')
+        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity')
+
+      const { data: usage } = await supabase
+        .from('material_usage')
+        .select('material_receiving_id, quantity_used, quantity_used_inches')
+
+      const usageMap = {}
+      for (const u of (usage || [])) {
+        if (!u.material_receiving_id) continue
+        if (!usageMap[u.material_receiving_id]) {
+          usageMap[u.material_receiving_id] = { bars: 0, inches: 0 }
+        }
+        usageMap[u.material_receiving_id].bars += (u.quantity_used || 0)
+        usageMap[u.material_receiving_id].inches += (u.quantity_used_inches || 0)
+      }
+
+      const available = (receiving || [])
+        .map(r => {
+          const used = usageMap[r.id] || { bars: 0, inches: 0 }
+          const receivedInches = (r.quantity || 0) * (r.bar_length_inches || 0)
+          const availableInches = Math.max(0, receivedInches - used.inches)
+          const availableBars = Math.max(0, (r.quantity || 0) - used.bars)
+          return {
+            material_type: r.material_type,
+            bar_size: r.bar_size,
+            lot_number: r.lot_number,
+            bar_length_inches: r.bar_length_inches || 0,
+            available_bars: availableBars,
+            available_inches: availableInches,
+          }
+        })
+        .filter(r => r.available_bars > 0 || r.available_inches > 0)
+
+      setInventoryStock(available)
+    } catch (err) {
+      console.error('Error loading inventory stock:', err)
+      setInventoryStock([])
     }
   }
 
@@ -1034,6 +1107,40 @@ export default function Kiosk() {
       console.error('Error loading previous jobs:', err)
     } finally {
       setPreviousJobsLoading(false)
+    }
+  }
+
+  // Load documents attached to a job (read-only for machinists)
+  const loadJobDocuments = async (jobId) => {
+    if (!jobId) return
+    setLoadingDocs(true)
+    try {
+      const { data, error } = await supabase
+        .from('job_documents')
+        .select('*, document_type:document_types(*)')
+        .eq('job_id', jobId)
+        .order('created_at', { ascending: true })
+
+      if (!error) setJobDocuments(data || [])
+    } catch (err) {
+      console.error('Error loading job documents:', err)
+    } finally {
+      setLoadingDocs(false)
+    }
+  }
+
+  // Open a signed URL for a document in a new tab
+  const handleViewDocument = async (fileUrl) => {
+    if (!fileUrl || viewingDoc) return
+    setViewingDoc(fileUrl)
+    try {
+      const signedUrl = await getDocumentUrl(fileUrl)
+      window.open(signedUrl, '_blank')
+    } catch (err) {
+      console.error('Error opening document:', err)
+      alert('Could not open document. Please try again.')
+    } finally {
+      setViewingDoc(null)
     }
   }
 
@@ -1418,6 +1525,19 @@ export default function Kiosk() {
 
   const handleStartSetup = async (job) => {
     if (!canOperate || !job) return
+
+    // Safety: block if pre-mfg compliance not yet approved.
+    // Normally these jobs are filtered out by the kiosk's loadJobs query,
+    // but this catches any edge case where one slips through.
+    if (job.status === 'pending_compliance') {
+      alert(
+        'Pre-manufacturing compliance has not been approved ' +
+        'for this job. Please contact your compliance officer ' +
+        'before starting.\n\nJob: ' + job.job_number
+      )
+      return
+    }
+
     setActionLoading(true)
     try {
       const now = new Date().toISOString()
@@ -1951,6 +2071,7 @@ export default function Kiosk() {
     setShowMaterialModal(true)
     await loadMaterialTypes()
     await loadBarSizes()
+    await loadInventoryStock()
     await loadJobMaterials(activeJob.id)
     // Reset form
     setMaterialForm({
@@ -1961,6 +2082,22 @@ export default function Kiosk() {
       bars_loaded: 0
     })
   }
+
+  // Pre-fill lot number when a single inventory match exists
+  useEffect(() => {
+    if (!materialForm.material_type || !materialForm.bar_size) return
+    const matches = inventoryStock.filter(r =>
+      r.material_type === materialForm.material_type &&
+      r.bar_size === materialForm.bar_size
+    )
+    if (matches.length === 1) {
+      // Single match — pre-fill automatically
+      setMaterialForm(prev => ({ ...prev, lot_number: matches[0].lot_number || '' }))
+    } else {
+      // Multiple matches or no match — clear field so datalist suggestions appear fresh
+      setMaterialForm(prev => ({ ...prev, lot_number: '' }))
+    }
+  }, [materialForm.material_type, materialForm.bar_size])
 
   const isBlanks = materialForm.material_type?.toLowerCase().includes('blank')
 
@@ -3589,6 +3726,69 @@ export default function Kiosk() {
 						</button>
                     )}
 
+                    {/* Job Documents for Maintenance */}
+                    {activeJob && (
+                      <div className="mt-6 pt-6 border-t border-gray-700">
+                        <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                          <FileText size={16} />
+                          Job Documents
+                          <span className="ml-auto text-xs text-gray-600">
+                            {jobDocuments.length} file{jobDocuments.length !== 1 ? 's' : ''}
+                          </span>
+                        </h3>
+                        {loadingDocs ? (
+                          <div className="flex items-center justify-center py-4">
+                            <Loader2 size={18} className="animate-spin text-gray-600" />
+                          </div>
+                        ) : jobDocuments.length === 0 ? (
+                          <p className="text-gray-600 text-sm italic text-center py-3">
+                            No documents attached to this job
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            {jobDocuments.map(doc => (
+                              <button
+                                key={doc.id}
+                                onClick={() => handleViewDocument(doc.file_url)}
+                                disabled={!doc.file_url || viewingDoc === doc.file_url}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
+                              >
+                                <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                  {viewingDoc === doc.file_url ? (
+                                    <Loader2 size={16} className="animate-spin text-gray-400" />
+                                  ) : (
+                                    <FileText size={16} className="text-gray-400" />
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
+                                    {doc.file_name || 'Unnamed document'}
+                                  </p>
+                                  {doc.document_type?.name && (
+                                    <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
+                                  )}
+                                </div>
+                                <div className="flex-shrink-0">
+                                  {doc.status === 'approved' ? (
+                                    <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
+                                      <CheckCircle size={9} />
+                                      Approved
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
+                                      <Clock size={9} />
+                                      Pending
+                                    </span>
+                                  )}
+                                </div>
+                                <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Activity Log for Maintenance */}
                     {jobActivities.length > 0 && (
                       <div className="mt-6 pt-6 border-t border-gray-700">
@@ -3874,6 +4074,69 @@ export default function Kiosk() {
                     </div>
                   )}
 
+                  {/* Job Documents */}
+                  {activeJob && (
+                    <div className="mt-6 pt-6 border-t border-gray-700">
+                      <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                        <FileText size={16} />
+                        Job Documents
+                        <span className="ml-auto text-xs text-gray-600">
+                          {jobDocuments.length} file{jobDocuments.length !== 1 ? 's' : ''}
+                        </span>
+                      </h3>
+                      {loadingDocs ? (
+                        <div className="flex items-center justify-center py-4">
+                          <Loader2 size={18} className="animate-spin text-gray-600" />
+                        </div>
+                      ) : jobDocuments.length === 0 ? (
+                        <p className="text-gray-600 text-sm italic text-center py-3">
+                          No documents attached to this job
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {jobDocuments.map(doc => (
+                            <button
+                              key={doc.id}
+                              onClick={() => handleViewDocument(doc.file_url)}
+                              disabled={!doc.file_url || viewingDoc === doc.file_url}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
+                            >
+                              <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                {viewingDoc === doc.file_url ? (
+                                  <Loader2 size={16} className="animate-spin text-gray-400" />
+                                ) : (
+                                  <FileText size={16} className="text-gray-400" />
+                                )}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
+                                  {doc.file_name || 'Unnamed document'}
+                                </p>
+                                {doc.document_type?.name && (
+                                  <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
+                                )}
+                              </div>
+                              <div className="flex-shrink-0">
+                                {doc.status === 'approved' ? (
+                                  <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
+                                    <CheckCircle size={9} />
+                                    Approved
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
+                                    <Clock size={9} />
+                                    Pending
+                                  </span>
+                                )}
+                              </div>
+                              <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Activity Log */}
                   {jobActivities.length > 0 && (
                     <div className="mt-6 pt-6 border-t border-gray-700">
@@ -3883,8 +4146,8 @@ export default function Kiosk() {
                       </h3>
                       <div className="space-y-3">
                         {jobActivities.map((activity, index) => (
-                          <div 
-                            key={index} 
+                          <div
+                            key={index}
                             className={`flex items-start gap-3 ${
                               activity.type === 'downtime' && canOperate ? 'cursor-pointer hover:bg-gray-800/50 -mx-2 px-2 py-1 rounded-lg transition-colors' : ''
                             }`}
@@ -4027,22 +4290,27 @@ export default function Kiosk() {
                     const isFirstInQueue = queuedJobs.length > 0 && queuedJobs[0].id === job.id
                     const jobIsMaintenance = isMaintenance(job)
                     const maintColors = jobIsMaintenance ? getMaintenanceColor(job) : null
-                    
+                    const isCompliancePending = job.status === 'pending_compliance'
+
                     return (
                     <button
                       key={job.id}
-                      onClick={() => handleJobSelect(job)}
+                      onClick={() => { if (!isCompliancePending) handleJobSelect(job) }}
                       disabled={isViewOnly || (activeJob && job.id !== activeJob.id)}
                       className={`w-full p-4 text-left transition-colors ${
-                        activeJob?.id === job.id 
-                          ? jobIsMaintenance 
+                        activeJob?.id === job.id
+                          ? jobIsMaintenance
                             ? `${maintColors.bgLight} border-l-4 ${maintColors.border}`
-                            : 'bg-skynet-accent/10 border-l-4 border-skynet-accent' 
-                        : selectedJob?.id === job.id 
+                            : 'bg-skynet-accent/10 border-l-4 border-skynet-accent'
+                        : selectedJob?.id === job.id
                           ? jobIsMaintenance
                             ? `${maintColors.bgLight} border-l-4 ${maintColors.border}`
                             : 'bg-gray-800 border-l-4 border-yellow-500'
-                        : (activeJob || isViewOnly) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-800 cursor-pointer'
+                        : isCompliancePending
+                          ? 'opacity-40 cursor-not-allowed bg-gray-900'
+                          : (activeJob || isViewOnly)
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'hover:bg-gray-800 cursor-pointer'
                       }`}
                     >
                       <div className="flex items-center justify-between mb-2">
@@ -4068,7 +4336,12 @@ export default function Kiosk() {
                             </span>
                           )}
                         </div>
-                        {getStatusBadge(job.status)}
+                        {isCompliancePending ? (
+                          <span className="flex items-center gap-1 px-2 py-1 text-xs font-bold rounded bg-amber-500/20 text-amber-300 border border-amber-500/60 animate-pulse">
+                            <Clock size={11} />
+                            Compliance Pending
+                          </span>
+                        ) : getStatusBadge(job.status)}
                       </div>
                       {jobIsMaintenance ? (
                         <>
@@ -4088,10 +4361,83 @@ export default function Kiosk() {
                         )}
                         <span>{formatTime(job.scheduled_start)}</span>
                       </div>
+                      {isCompliancePending && (
+                        <div className="mt-2 -mx-4 -mb-4 px-4 py-2 bg-amber-900/40 border-t border-amber-700/50 flex items-center gap-2">
+                          <AlertTriangle size={12} className="text-amber-400 flex-shrink-0" />
+                          <span className="text-amber-300 text-xs font-medium">
+                            Awaiting compliance approval — cannot start
+                          </span>
+                        </div>
+                      )}
                     </button>
                   )})
                 )}
               </div>
+
+              {selectedJob && !activeJob && (
+                <div className="border-t border-gray-800">
+                  {/* Document list header */}
+                  <div className="px-4 pt-3 pb-2 flex items-center gap-2">
+                    <FileText size={14} className="text-gray-500" />
+                    <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                      Job Documents
+                    </span>
+                    {selectedJobDocuments.length > 0 && (
+                      <span className="ml-auto text-xs text-gray-600">
+                        {selectedJobDocuments.length} file{selectedJobDocuments.length !== 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Document list body */}
+                  <div className="px-3 pb-3">
+                    {loadingSelectedJobDocs ? (
+                      <div className="flex items-center justify-center py-3">
+                        <Loader2 size={16} className="animate-spin text-gray-600" />
+                      </div>
+                    ) : selectedJobDocuments.length === 0 ? (
+                      <p className="text-gray-600 text-xs italic text-center py-2">
+                        No documents attached
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {selectedJobDocuments.map(doc => (
+                          <button
+                            key={doc.id}
+                            onClick={() => handleViewDocument(doc.file_url)}
+                            disabled={!doc.file_url || viewingDoc === doc.file_url}
+                            className="w-full flex items-center gap-2.5 px-3 py-2 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
+                          >
+                            <div className="w-7 h-7 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                              {viewingDoc === doc.file_url ? (
+                                <Loader2 size={14} className="animate-spin text-gray-400" />
+                              ) : (
+                                <FileText size={14} className="text-gray-400" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors leading-tight">
+                                {doc.file_name || 'Unnamed document'}
+                              </p>
+                              {doc.document_type?.name && (
+                                <p className="text-gray-600 text-[10px] truncate leading-tight">
+                                  {doc.document_type.name}
+                                </p>
+                              )}
+                            </div>
+                            {doc.status === 'approved' ? (
+                              <CheckCircle size={12} className="text-green-500 flex-shrink-0" />
+                            ) : (
+                              <Clock size={12} className="text-yellow-500 flex-shrink-0" />
+                            )}
+                            <ExternalLink size={12} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {selectedJob && !activeJob && canOperate && (
                 <div className="p-4 border-t border-gray-800">
@@ -4343,82 +4689,229 @@ export default function Kiosk() {
                   <Plus size={18} className="text-green-400" />
                   Add Material
                 </h3>
-                
-                <div className={`grid ${isBlanks ? 'grid-cols-1' : 'grid-cols-2'} gap-4`}>
+
+                {/* STEP 1 — Material Type */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">Material Type *</label>
+                  <select
+                    value={materialForm.material_type}
+                    onChange={(e) => setMaterialForm({...materialForm, material_type: e.target.value, bar_size: '', bar_length: '', lot_number: ''})}
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
+                  >
+                    <option value="">Select material...</option>
+                    {(() => {
+                      const inventoryMaterialTypes = [...new Set(inventoryStock.map(r => r.material_type))]
+                      const filtered = materialTypes.filter(mt =>
+                        isBoltMaster ? mt.name.toLowerCase().includes('blank') : !mt.name.toLowerCase().includes('blank')
+                      )
+                      const invFiltered = filtered.filter(mt => inventoryMaterialTypes.includes(mt.name))
+                      return invFiltered.length > 0 ? (
+                        <>
+                          <optgroup label="── From Inventory ──">
+                            {invFiltered.map(mt => (
+                              <option key={'inv-' + mt.id} value={mt.name}>{mt.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="── All Materials ──">
+                            {filtered.map(mt => (
+                              <option key={mt.id} value={mt.name}>{mt.name}</option>
+                            ))}
+                          </optgroup>
+                        </>
+                      ) : filtered.map(mt => (
+                        <option key={mt.id} value={mt.name}>{mt.name}</option>
+                      ))
+                    })()}
+                  </select>
+                </div>
+
+                {/* STEP 2 — Bar Size (hidden for blanks) */}
+                {!isBlanks && (
                   <div>
-                    <label className="block text-gray-400 text-sm mb-2">Material Type *</label>
+                    <label className="block text-gray-400 text-sm mb-2">Bar Size *</label>
                     <select
-                      value={materialForm.material_type}
-                      onChange={(e) => setMaterialForm({...materialForm, material_type: e.target.value, bar_size: '', bar_length: ''})}
+                      value={materialForm.bar_size}
+                      onChange={(e) => setMaterialForm({...materialForm, bar_size: e.target.value, lot_number: ''})}
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
                     >
-                      <option value="">Select material...</option>
-                      {materialTypes
-                        .filter(mt => isBoltMaster
-                          ? mt.name.toLowerCase().includes('blank')
-                          : !mt.name.toLowerCase().includes('blank')
+                      <option value="">Select size...</option>
+                      {(() => {
+                        const invBarSizes = materialForm.material_type
+                          ? [...new Set(
+                              inventoryStock
+                                .filter(r => r.material_type === materialForm.material_type)
+                                .map(r => r.bar_size)
+                                .filter(Boolean)
+                            )]
+                          : []
+                        return (
+                          <>
+                            <optgroup label="── From Inventory ──">
+                              {invBarSizes.length === 0 ? (
+                                <option disabled value="">No inventory available</option>
+                              ) : (
+                                invBarSizes.map(size => (
+                                  <option key={'inv-' + size} value={size}>{size}</option>
+                                ))
+                              )}
+                            </optgroup>
+                            <optgroup label="── All Sizes ──">
+                              {barSizes.map(bs => (
+                                <option key={bs.id} value={bs.size}>{bs.size}</option>
+                              ))}
+                            </optgroup>
+                          </>
                         )
-                        .map(mt => (
-                          <option key={mt.id} value={mt.name}>{mt.name}</option>
-                        ))}
+                      })()}
                     </select>
                   </div>
-                  {!isBlanks && (
-                    <div>
-                      <label className="block text-gray-400 text-sm mb-2">Bar Size *</label>
-                      <select
-                        value={materialForm.bar_size}
-                        onChange={(e) => setMaterialForm({...materialForm, bar_size: e.target.value})}
-                        className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
-                      >
-                        <option value="">Select size...</option>
-                        {barSizes.map(bs => (
-                          <option key={bs.id} value={bs.size}>{bs.size}</option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
+                )}
+
+                {/* STEP 3 — Lot Number with datalist */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">Lot Number</label>
+                  <input
+                    type="text"
+                    list="lot-suggestions"
+                    value={materialForm.lot_number}
+                    onChange={(e) => setMaterialForm({...materialForm, lot_number: e.target.value})}
+                    placeholder="Lot #"
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
+                  />
+                  <datalist id="lot-suggestions">
+                    {inventoryStock
+                      .filter(r =>
+                        r.material_type === materialForm.material_type &&
+                        (isBlanks || r.bar_size === materialForm.bar_size) &&
+                        r.lot_number
+                      )
+                      .map(r => (
+                        <option key={r.lot_number} value={r.lot_number} />
+                      ))
+                    }
+                  </datalist>
                 </div>
 
-                <div className={`grid ${isBlanks ? 'grid-cols-2' : 'grid-cols-3'} gap-4`}>
-                  {!isBlanks && (
-                    <div>
-                      <label className="block text-gray-400 text-sm mb-2">Bar Length (in.)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.25"
-                        value={materialForm.bar_length}
-                        onChange={(e) => setMaterialForm({...materialForm, bar_length: e.target.value})}
-                        placeholder="144"
-                        className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
-                      />
-                    </div>
-                  )}
+                {/* STEP 4 — Bar Length (hidden for blanks) */}
+                {!isBlanks && (
                   <div>
-                    <label className="block text-gray-400 text-sm mb-2">Lot / Heat Number</label>
+                    <label className="block text-gray-400 text-sm mb-2">Bar Length (in.)</label>
                     <input
-                      type="text"
-                      value={materialForm.lot_number}
-                      onChange={(e) => setMaterialForm({...materialForm, lot_number: e.target.value})}
-                      placeholder="Lot #"
-                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none"
+                      type="number"
+                      min="0"
+                      step="0.25"
+                      value={materialForm.bar_length}
+                      onChange={(e) => setMaterialForm({...materialForm, bar_length: e.target.value})}
+                      placeholder="144"
+                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                     />
                   </div>
-                  <div>
-                    <label className="block text-gray-400 text-sm mb-2">{isBlanks ? 'Blanks Loaded *' : 'Bars Loaded *'}</label>
-                    <input 
-                      type="number" 
-                      min="1"
-                      value={materialForm.bars_loaded} 
-                      onChange={(e) => setMaterialForm({...materialForm, bars_loaded: e.target.value})}
-                      placeholder="0"
-                      className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-skynet-accent focus:outline-none"
-                    />
-                  </div>
+                )}
+
+                {/* STEP 5 — Availability banner (after lot + bar length chosen) */}
+                {materialForm.material_type &&
+                 (isBlanks || materialForm.bar_size) &&
+                 materialForm.lot_number && (() => {
+                  const match = inventoryStock.find(r =>
+                    r.material_type === materialForm.material_type &&
+                    (isBlanks || r.bar_size === materialForm.bar_size) &&
+                    r.lot_number === materialForm.lot_number
+                  )
+
+                  if (!match) {
+                    return (
+                      <div className="flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg">
+                        <AlertCircle size={15} className="text-gray-500 flex-shrink-0" />
+                        <span className="text-gray-400 text-sm">
+                          No inventory record — entry logged without deduction
+                        </span>
+                      </div>
+                    )
+                  }
+
+                  const enteredLength = parseFloat(materialForm.bar_length)
+                  const hasLength = enteredLength > 0
+
+                  let displayCount, displayLabel, displaySub
+
+                  if (hasLength && match.available_inches > 0) {
+                    displayCount = Math.floor(match.available_inches / enteredLength)
+                    displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available at ${enteredLength}"`
+                    displaySub = `${Math.round(match.available_inches)}" total · cuts to ${enteredLength}" each`
+                  } else if (hasLength && match.available_inches === 0) {
+                    displayCount = match.available_bars
+                    displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available`
+                    displaySub = `Bar length data not recorded for this lot`
+                  } else {
+                    displayCount = match.available_bars
+                    displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available in inventory`
+                    displaySub = `Enter bar length above to see cut count`
+                  }
+
+                  const isZero = displayCount === 0
+                  return (
+                    <div className={`flex items-start gap-2 px-3 py-2 rounded-lg border ${
+                      isZero
+                        ? 'bg-red-900/20 border-red-800/50'
+                        : 'bg-green-900/20 border-green-800/50'
+                    }`}>
+                      <Package size={15} className={`flex-shrink-0 mt-0.5 ${
+                        isZero ? 'text-red-400' : 'text-green-400'
+                      }`} />
+                      <div>
+                        <p className={`text-sm font-semibold ${
+                          isZero ? 'text-red-300' : 'text-green-300'
+                        }`}>
+                          {displayLabel}
+                        </p>
+                        {displaySub && (
+                          <p className="text-xs text-gray-500 mt-0.5">{displaySub}</p>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* STEP 6 — Bars Loaded with over-inventory warning */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">{isBlanks ? 'Blanks Loaded *' : 'Bars Loaded *'}</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={materialForm.bars_loaded}
+                    onChange={(e) => setMaterialForm({...materialForm, bars_loaded: e.target.value})}
+                    placeholder="0"
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-skynet-accent focus:outline-none"
+                  />
+                  {(() => {
+                    if (!materialForm.bars_loaded || !materialForm.lot_number) return null
+                    const match = inventoryStock.find(r =>
+                      r.material_type === materialForm.material_type &&
+                      (isBlanks || r.bar_size === materialForm.bar_size) &&
+                      r.lot_number === materialForm.lot_number
+                    )
+                    if (!match) return null
+                    const enteredLength = parseFloat(materialForm.bar_length)
+                    const effectiveAvailable =
+                      enteredLength > 0 && match.available_inches > 0
+                        ? Math.floor(match.available_inches / enteredLength)
+                        : match.available_bars
+                    if (parseInt(materialForm.bars_loaded) > effectiveAvailable) {
+                      const over = parseInt(materialForm.bars_loaded) - effectiveAvailable
+                      return (
+                        <div className="flex items-center gap-2 mt-2 text-amber-400 text-sm">
+                          <AlertTriangle size={14} className="flex-shrink-0" />
+                          <span>
+                            {over} bar{over !== 1 ? 's' : ''} over recorded inventory. Entry will still be logged.
+                          </span>
+                        </div>
+                      )
+                    }
+                    return null
+                  })()}
                 </div>
 
-                <button 
+                <button
                   onClick={handleAddMaterial}
                   disabled={actionLoading || !materialForm.material_type || (!isBlanks && !materialForm.bar_size) || !materialForm.bars_loaded}
                   className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"

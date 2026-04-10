@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(npx eslint:*)",
-      "Bash(npx vite build)"
+      "Bash(npx vite build)",
+      "Bash(npx --no-install eslint src/pages/Schedule.jsx)",
+      "Bash(npx --no-install eslint src/pages/Schedule.jsx src/components/ScheduleJobModal.jsx src/components/ComplianceReview.jsx src/pages/Kiosk.jsx)",
+      "Bash(npx --no-install eslint src/pages/Schedule.jsx src/components/ScheduleJobModal.jsx)"
     ]
   }
 }

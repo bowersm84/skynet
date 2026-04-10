@@ -694,7 +694,15 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     try {
       // Determine next status based on current status
       let nextStatus = 'ready'
-      if (currentStatus === 'pending_post_manufacturing') {
+      if (currentStatus === 'pending_compliance') {
+        // If April already scheduled this job to a machine, jump straight to
+        // 'assigned' so it appears on the kiosk immediately. Otherwise stay
+        // 'ready' so April can pick it up from the unassigned pool.
+        const job = jobs.find(j => j.id === jobId)
+        if (job?.assigned_machine_id) {
+          nextStatus = 'assigned'
+        }
+      } else if (currentStatus === 'pending_post_manufacturing') {
         // Check if this job's part is a finished good — skip assembly, go to TCO
         const job = jobs.find(j => j.id === jobId)
         const partType = job?.component?.part_type
@@ -742,7 +750,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
     try {
       let nextStatus = 'ready'
-      if (job.status === 'pending_post_manufacturing') {
+      if (job.status === 'pending_compliance') {
+        // If April already scheduled this job to a machine, jump straight to
+        // 'assigned' so it appears on the kiosk immediately.
+        if (job.assigned_machine_id) {
+          nextStatus = 'assigned'
+        }
+      } else if (job.status === 'pending_post_manufacturing') {
         const partType = job.component?.part_type
         if (partType === 'finished_good') {
           nextStatus = 'pending_tco'

@@ -28,6 +28,8 @@ Sprint 4 is the final development sprint before the April go-live visit. The goa
 | 36 | Set up display screens on shop floor | April / Jody | Infra | — | Parallel |
 | — | Kiosk material dropdowns: lead with inventory-available materials | Patrick | Modify | S | B |
 | — | Outbound processes workflow (heat treat, cad plating, external ops) | Roger | New | L | B |
+| 48 | Schedule machine lineup view (list view toggle — per-machine job list, no timeline grid) | April | New | M | B |
+| — | Compliance inline with scheduling — pre-mfg compliance required before kiosk start, not before scheduling | April / Roger | Modify | M | B |
 
 > **Note on #50 — Cascade/Push Scheduling:** Confirmed already delivered. `Schedule.jsx` contains a full conflict resolution modal (`crashAction`, `cascadePreview`, push-back and return-to-queue options) that fires when a job is dropped into a conflict. No work needed.
 
@@ -273,6 +275,68 @@ Jobs advance through the routing normally — outbound operations do not block c
 
 ---
 
+### #48 — Schedule Machine Lineup View
+
+**Lead:** April | **Type:** New | **Effort:** M | **File:** `Schedule.jsx`
+
+**Why this was added:**
+Action item #48 from the original action list captures April's request from the February 12 CS & Scheduling session: a simple list view showing what's in the lineup for each machine by part number, regardless of dates. The timeline grid is powerful for scheduling new jobs, but when April just wants to check the queue on a machine — what's on deck, in what order — the grid requires scrolling and zooming to find the answer. A list view toggle gives her that at a glance.
+
+This came up again on-site at Skybolt during the Sprint 4 visit: the timeline grid is the right tool for building and adjusting the schedule, but a simple machine-by-machine list is more useful for daily floor communication and answering "what's next on Machine X?" questions.
+
+**What to build:**
+Add a **List View** toggle button to the Schedule module header, alongside any existing view controls. When activated, the timeline grid is replaced by a per-machine list layout:
+
+- Each machine gets its own card or section, showing its scheduled jobs in sequence order (by start date ascending)
+- Each job row shows: Part number, Job number, WO number, Customer, Quantity, Scheduled start date, Estimated duration
+- Jobs are grouped by machine, with the machine name as a section header
+- Unscheduled jobs are not shown in list view (they remain in the unscheduled pool accessible via grid view)
+- If a machine has no scheduled jobs, show a muted "No jobs scheduled" state for that machine rather than hiding it entirely — April needs to see which machines are empty
+- Clicking a job row in list view should navigate to or highlight that job (same behaviour as clicking a block in grid view)
+- The toggle state should persist while the user is in the Schedule module (use local state, not a URL param)
+
+**Design:** Per-machine cards, dark theme consistent with the rest of SkyNet. Machine name as a bold header, jobs as compact rows beneath. No drag-and-drop in list view — it is read-only status/reference mode. Scheduling actions happen in grid view.
+
+---
+
+### Compliance Inline with Scheduling — Pre-Mfg Gate Moved to Kiosk Start
+
+**Lead:** April / Roger | **Type:** Modify | **Effort:** M | **Files:** `Schedule.jsx`, `Kiosk.jsx`, `ComplianceReview.jsx`, status flow logic
+
+**Why this was added:**
+The current workflow requires pre-manufacturing compliance to be completed before a job can be scheduled. In practice at Skybolt, April needs to schedule jobs the moment a work order is created — she is building the production schedule while Roger is simultaneously doing his compliance review. Tying scheduling to compliance completion creates a bottleneck that doesn't reflect how the team actually works.
+
+The correct flow is:
+1. WO created → job immediately schedulable
+2. April schedules the job to a machine and date
+3. Roger completes pre-mfg compliance review in parallel (his own timeline)
+4. When the machinist tries to start setup on the kiosk → **the system checks whether pre-mfg compliance is approved**
+5. If compliance is not yet approved → kiosk shows a clear block: *"Pre-manufacturing compliance must be approved before this job can begin. Contact Roger."*
+6. If compliance is approved → setup proceeds normally
+
+This preserves the compliance gate where it matters (before machining begins) while removing the artificial block on scheduling.
+
+**What to build:**
+
+**Schedule.jsx — remove compliance gate:**
+- Currently jobs may be filtered or blocked from appearing in the schedulable pool if pre-mfg compliance is not complete. Remove this filter. Jobs should be schedulable from the moment they are created, regardless of compliance status.
+- If the schedule block or job card currently shows a compliance warning that prevents scheduling, convert it to an **informational indicator only** (e.g. a small amber icon indicating compliance is pending) rather than a blocker.
+
+**Kiosk.jsx — add compliance check at setup start:**
+- When a machinist selects a job and attempts to start setup (the "Start Setup" action), add a compliance status check before proceeding.
+- Query the job's compliance status (or the associated work order's pre-mfg compliance record).
+- If pre-mfg compliance is **not yet approved**: block the Start Setup action and display a clear message: *"Pre-manufacturing compliance has not been approved for this job. Please contact your compliance officer before starting."*
+- If pre-mfg compliance **is approved**: proceed as normal — no change to the existing setup flow.
+- This check should be non-intrusive — a single DB query on the job's compliance state. Never block a machinist with a vague error; always give a clear, actionable message.
+
+**ComplianceReview.jsx — no structural changes:**
+- The pre-mfg compliance review workflow itself does not change. Roger still reviews and approves in the same way.
+- The only difference is that compliance no longer gates scheduling — it gates kiosk start instead.
+
+> **Important:** Review the current job status flow carefully before implementing. Identify the exact status value(s) that currently gate scheduling and the exact compliance check that gates kiosk access, to ensure the change is surgical and does not introduce regressions in the status state machine.
+
+---
+
 ## Batch C: Testing & Go-Live Preparation
 
 ---
@@ -413,6 +477,8 @@ Both displays use a read-only account or locked admin session. Supabase realtime
 - [ ] No blocking bugs on the end-to-end path
 - [ ] Kiosk material dropdowns show inventory-available options first; lot pre-fill works when a matching receiving record exists
 - [ ] Outbound Sends table exists in DB; send-out and receive-back workflow functional in ComplianceReview; cert PDF attachment works
+- [ ] Schedule list view toggle works; per-machine job list shows correct sequence; empty machines visible; no drag-and-drop in list view
+- [ ] Jobs are schedulable immediately after WO creation regardless of compliance status; kiosk blocks setup start if pre-mfg compliance not approved; clear message shown to machinist
 
 ---
 
@@ -422,6 +488,7 @@ Both displays use a read-only account or locked admin session. Supabase realtime
 |------|-------------|
 | #31 — Fishbowl bulk import | Needs Fishbowl data confidence first (MB Decision) |
 | #14 — Day-block scheduling mode | Click-to-schedule with days input (S2) covers Day 1 needs |
+| #48 — Machine lineup view | Pulled from Phase 2 into Sprint 4; delivered as list view toggle in Schedule |
 | #23 — Incremental qty tracking through finishing stages | P2 after go-live data collected |
 | #26 — Virtual machine centers (heat treat, cad plating) | Major new module; Phase 2 |
 | Assembly module (#27–#28, #73–#75, P2a) | Full Phase 2; Jody tracking stays in Fishbowl for now |

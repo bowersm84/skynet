@@ -118,7 +118,6 @@ export default function Armory({ profile }) {
   const [invFilterRack, setInvFilterRack] = useState('')
   const [invFilterVendor, setInvFilterVendor] = useState('')
   const [assigningRack, setAssigningRack] = useState(null)
-  const materialMasterCount = materials.filter(m => m.is_active).length
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor).map(m => m.vendor)
   )].sort()
@@ -1445,7 +1444,7 @@ export default function Armory({ profile }) {
                             {assigningRack === row.id ? (
                               <div className="flex items-center gap-1 justify-center">
                                 <select
-                                  defaultValue={row.rack || ''}
+                                  value={row.rack || ''}
                                   onChange={e => handleAssignRack(row.id, e.target.value)}
                                   className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs focus:outline-none"
                                 >
@@ -1458,6 +1457,7 @@ export default function Armory({ profile }) {
                                 <button
                                   onClick={() => setAssigningRack(null)}
                                   className="text-gray-400 hover:text-white p-0.5"
+                                  title="Cancel"
                                 >
                                   <X size={12} />
                                 </button>

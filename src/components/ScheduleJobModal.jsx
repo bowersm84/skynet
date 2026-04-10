@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   X, Save, Loader2, Clock, Star, Database, AlertTriangle,
-  Info, Calendar as CalendarIcon, ArrowRight, RotateCcw, ChevronRight
+  Info, Calendar as CalendarIcon, ArrowRight, ArrowLeft, RotateCcw, ChevronRight
 } from 'lucide-react'
 
 const SHIFT_START = 7     // 7:00 AM
@@ -21,7 +21,8 @@ export default function ScheduleJobModal({
   scheduledJobs,
   profile,
   editMode = false, // true when rescheduling an already-scheduled job
-  defaults = null   // optional { date, machineId, startTime } from drag-and-drop
+  defaults = null,  // optional { date, machineId, startTime } from drag-and-drop
+  onReturnToQueue = null // callback to return job to unscheduled pool (edit mode only)
 }) {
   const [selectedDate, setSelectedDate] = useState('')
   const [selectedMachineId, setSelectedMachineId] = useState('')
@@ -544,7 +545,9 @@ export default function ScheduleJobModal({
         const { error } = await supabase
           .from('jobs')
           .update({
-            status: 'ready',
+            status: rj.status === 'pending_compliance'
+              ? 'pending_compliance'
+              : 'ready',
             assigned_machine_id: null,
             scheduled_start: null,
             scheduled_end: null,
@@ -587,7 +590,9 @@ export default function ScheduleJobModal({
           scheduled_start: scheduledStart.toISOString(),
           scheduled_end: scheduledEnd.toISOString(),
           estimated_minutes: totalMinutes,
-          status: 'assigned',
+          status: job.status === 'pending_compliance'
+            ? 'pending_compliance'
+            : 'assigned',
           scheduled_by: profile?.id,
           scheduled_at: new Date().toISOString()
         })
@@ -989,37 +994,52 @@ export default function ScheduleJobModal({
           )}
 
           {/* Actions */}
-          <div className="flex items-center justify-end gap-3 pt-2">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={
-                saving ||
-                !selectedMachineId ||
-                !selectedDate ||
-                totalMinutes <= 0 ||
-                !!timeValidation ||
-                !allConflictsResolved
-              }
-              className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  {editMode ? 'Updating...' : 'Scheduling...'}
-                </>
-              ) : (
-                <>
-                  <Save size={18} />
-                  {editMode ? 'Update Schedule' : 'Schedule Job'}
-                </>
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <div>
+              {onReturnToQueue && (
+                <button
+                  type="button"
+                  onClick={onReturnToQueue}
+                  disabled={saving}
+                  className="flex items-center gap-2 px-4 py-2 text-sm text-amber-400 hover:text-amber-300 hover:bg-amber-900/20 rounded-lg border border-amber-700/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <ArrowLeft size={16} />
+                  Return to Queue
+                </button>
               )}
-            </button>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={onClose}
+                className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={
+                  saving ||
+                  !selectedMachineId ||
+                  !selectedDate ||
+                  totalMinutes <= 0 ||
+                  !!timeValidation ||
+                  !allConflictsResolved
+                }
+                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {saving ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    {editMode ? 'Updating...' : 'Scheduling...'}
+                  </>
+                ) : (
+                  <>
+                    <Save size={18} />
+                    {editMode ? 'Update Schedule' : 'Schedule Job'}
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>

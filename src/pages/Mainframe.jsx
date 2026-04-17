@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
@@ -8,6 +8,7 @@ import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ComplianceReview from '../components/ComplianceReview'
 import Assembly from '../components/Assembly'
 import TCOReview from '../components/TCOReview'
+import OutsourcedJobs from '../components/OutsourcedJobs'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
 
@@ -30,6 +31,7 @@ export default function Mainframe({ user, profile }) {
   // Finishing queue count
   const [finishingSends, setFinishingSends] = useState([])
   const [pendingBatchComplianceCount, setPendingBatchComplianceCount] = useState(0)
+  const [outsourcedCount, setOutsourcedCount] = useState(0)
   
   // Auto-refresh state
   const [autoRefresh, setAutoRefresh] = useState(true) // Enabled by default
@@ -227,6 +229,13 @@ export default function Mainframe({ user, profile }) {
         setActiveMaintenanceJobs(activeMaintenanceData || [])
       }
 
+      // Outsourced — count jobs ready for outsourcing or at external vendor
+      const { count: outsourcedActive } = await supabase
+        .from('jobs')
+        .select('*', { count: 'exact', head: true })
+        .in('status', ['ready_for_outsourcing', 'at_external_vendor'])
+      setOutsourcedCount(outsourcedActive || 0)
+
       setLastUpdated(new Date())
       console.log('✅ fetchData complete!')
     } catch (error) {
@@ -370,6 +379,7 @@ export default function Mainframe({ user, profile }) {
             job_number,
             status,
             quantity,
+            production_lot_number,
             good_pieces,
             bad_pieces,
             assigned_machine_id,
@@ -381,6 +391,19 @@ export default function Mainframe({ user, profile }) {
               id, quantity, status, compliance_status, is_partial_send,
               finishing_lot_number, sent_at, finishing_completed_at,
               compliance_approved_at
+            ),
+            job_routing_steps (
+              id, step_order, step_name, step_type, status,
+              lot_number, completed_at
+            ),
+            outbound_sends (
+              id, operation_type, vendor_name, quantity, sent_at,
+              expected_return_at, returned_at, vendor_lot_number,
+              quantity_returned, cert_document_path
+            ),
+            job_materials (
+              lot_number,
+              created_at
             )
           )
         `)
@@ -439,6 +462,8 @@ export default function Mainframe({ user, profile }) {
       pending_passivation: { label: 'Pending Finishing (Legacy)', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
       in_passivation: { label: 'In Finishing (Legacy)', color: 'bg-cyan-900/50 text-cyan-300 border-cyan-700' },
       pending_post_manufacturing: { label: 'Post-Mfg Review', color: 'bg-orange-900/50 text-orange-300 border-orange-700' },
+      ready_for_outsourcing: { label: 'Ready for Outsourcing', color: 'bg-orange-900/30 text-orange-400 border-orange-700' },
+      at_external_vendor: { label: 'At External Vendor', color: 'bg-blue-900/30 text-blue-400 border-blue-700' },
       ready_for_assembly: { label: 'Ready for Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
       in_assembly: { label: 'In Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
       pending_tco: { label: 'Pending TCO', color: 'bg-amber-900/50 text-amber-300 border-amber-700' },
@@ -815,7 +840,7 @@ export default function Mainframe({ user, profile }) {
       </div>
 
       {/* Stats Bar - ordered to follow process flow */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
         <StatCard
           id="lineup"
           label="Machine Lineup"
@@ -838,6 +863,14 @@ export default function Mainframe({ user, profile }) {
           borderClass={incompleteJobs.length > 0 ? 'border-red-800' : (unassignedJobs.length > 0 ? 'border-yellow-800' : 'border-gray-800')}
           onClick={setSelectedView}
           alert={incompleteJobs.length > 0}
+        />
+        <StatCard
+          id="outsourced"
+          label="Outsourced"
+          value={outsourcedCount}
+          colorClass="text-orange-400"
+          borderClass={outsourcedCount > 0 ? 'border-orange-800' : 'border-gray-800'}
+          onClick={setSelectedView}
         />
         <StatCard
           id="active"
@@ -1400,6 +1433,11 @@ export default function Mainframe({ user, profile }) {
         <TCOReview profile={profile} onUpdate={fetchData} />
       )}
 
+      {/* Outsourced Operations View */}
+      {selectedView === 'outsourced' && (
+        <OutsourcedJobs profile={profile} />
+      )}
+
       {/* Work Order Lookup Modal */}
       {showWOLookup && (
         <div className="fixed inset-0 bg-black/70 flex items-start justify-center z-50 p-4 overflow-y-auto">
@@ -1723,6 +1761,97 @@ export default function Mainframe({ user, profile }) {
                                                 </div>
                                               )}
 
+                                              {/* Routing steps */}
+                                              {job.job_routing_steps?.length > 0 && (() => {
+                                                const pln = job.production_lot_number
+                                                || [...(job.job_materials || [])]
+                                                    .filter(m => m.lot_number)
+                                                    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0]
+                                                    ?.lot_number
+                                                const fln = [...(job.finishing_sends || [])]
+                                                  .filter(s => s.finishing_lot_number)
+                                                  .sort((a, b) => new Date(b.finishing_completed_at || b.sent_at) - new Date(a.finishing_completed_at || a.sent_at))[0]
+                                                  ?.finishing_lot_number
+                                                const sortedSteps = [...job.job_routing_steps].sort((a, b) => a.step_order - b.step_order)
+                                                const finishingSteps = sortedSteps.filter(s => s.step_type !== 'external' && !s.step_name.toLowerCase().includes('machine'))
+                                                const middleFinishingIdx = finishingSteps.length > 0 ? Math.floor(finishingSteps.length / 2) : -1
+                                                const middleFinishingStepId = finishingSteps[middleFinishingIdx]?.id
+                                                return (
+                                                <div className="mt-2 space-y-1">
+                                                  <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Routing</span>
+                                                  {sortedSteps.map(step => (
+                                                      <div key={step.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
+                                                        <span className="text-gray-500 font-mono">{step.step_order}.</span>
+                                                        <span className={`text-gray-300 ${(step.status === 'removed' || step.status === 'skipped') ? 'line-through' : ''}`}>{step.step_name}</span>
+                                                        {step.step_type === 'external' && (
+                                                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-orange-900/30 text-orange-400 border border-orange-800">External</span>
+                                                        )}
+                                                        {step.status === 'in_progress' && (
+                                                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">At Vendor</span>
+                                                        )}
+                                                        {step.status === 'complete' && (
+                                                          <span className="flex items-center gap-1 text-green-400"><CheckCircle size={10} />{step.lot_number || ''}</span>
+                                                        )}
+                                                        {step.status === 'removed' && (
+                                                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Removed</span>
+                                                        )}
+                                                        {step.status === 'skipped' && (
+                                                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Skipped</span>
+                                                        )}
+                                                        {step.step_name.toLowerCase().includes('machine') && pln && (
+                                                          <span className="flex items-center gap-1 text-cyan-400">
+                                                            <CheckCircle size={10} className="text-green-400" />
+                                                            {pln}
+                                                          </span>
+                                                        )}
+                                                        {step.id === middleFinishingStepId && fln && (
+                                                          <span className="flex items-center gap-1 text-cyan-400">
+                                                            <CheckCircle size={10} className="text-green-400" />
+                                                            {fln}
+                                                          </span>
+                                                        )}
+                                                      </div>
+                                                    ))
+                                                  }
+                                                </div>
+                                                )
+                                              })()}
+
+                                              {/* Outsourcing sends */}
+                                              {job.outbound_sends?.length > 0 && (
+                                                <div className="mt-2 space-y-1">
+                                                  <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Outsourcing</span>
+                                                  {job.outbound_sends.map(send => {
+                                                    const opLabel = { heat_treat: 'Heat Treatment', cad_plating: 'Cad Plating', black_oxide: 'Black Oxide', painting: 'Painting', priming: 'Priming' }[send.operation_type] || send.operation_type
+                                                    const overdue = send.expected_return_at && !send.returned_at && new Date(send.expected_return_at) < new Date(new Date().toDateString())
+                                                    return (
+                                                      <div key={send.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700 flex-wrap">
+                                                        <Truck size={10} className="text-gray-500 flex-shrink-0" />
+                                                        <span className="text-gray-300">{send.vendor_name}</span>
+                                                        <span className="text-gray-600">&middot;</span>
+                                                        <span className="text-gray-400">{opLabel}</span>
+                                                        <span className="text-gray-600">&middot;</span>
+                                                        <span className="text-gray-400">{send.quantity} pcs</span>
+                                                        <span className="text-gray-600">&middot;</span>
+                                                        {send.returned_at ? (
+                                                          <span className="text-green-400">
+                                                            Returned {new Date(send.returned_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                            {send.vendor_lot_number ? ` | Lot: ${send.vendor_lot_number}` : ''}
+                                                            {send.quantity_returned ? ` | Qty: ${send.quantity_returned}` : ''}
+                                                          </span>
+                                                        ) : (
+                                                          <span className={overdue ? 'text-red-400 font-medium' : 'text-gray-400'}>
+                                                            {overdue && '⚠ '}
+                                                            Sent {send.sent_at ? new Date(send.sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
+                                                            {send.expected_return_at ? ` · Due ${new Date(send.expected_return_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
+                                                          </span>
+                                                        )}
+                                                      </div>
+                                                    )
+                                                  })}
+                                                </div>
+                                              )}
+
                                               {/* Documents toggle */}
                                               <div className="mt-2 flex items-center gap-2 cursor-pointer select-none group" onClick={() => handleToggleJobDocs(job.id)}>
                                                 <ChevronRight size={13} className={`text-gray-600 transition-transform flex-shrink-0 ${expandedJobDocs[job.id] ? 'rotate-90' : ''}`} />
@@ -1882,6 +2011,97 @@ export default function Mainframe({ user, profile }) {
                                               )
                                             })
                                           }
+                                        </div>
+                                      )}
+
+                                      {/* Routing steps */}
+                                      {job.job_routing_steps?.length > 0 && (() => {
+                                        const pln = job.production_lot_number
+                                                || [...(job.job_materials || [])]
+                                                    .filter(m => m.lot_number)
+                                                    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0]
+                                                    ?.lot_number
+                                        const fln = [...(job.finishing_sends || [])]
+                                          .filter(s => s.finishing_lot_number)
+                                          .sort((a, b) => new Date(b.finishing_completed_at || b.sent_at) - new Date(a.finishing_completed_at || a.sent_at))[0]
+                                          ?.finishing_lot_number
+                                        const sortedSteps = [...job.job_routing_steps].sort((a, b) => a.step_order - b.step_order)
+                                        const finishingSteps = sortedSteps.filter(s => s.step_type !== 'external' && !s.step_name.toLowerCase().includes('machine'))
+                                        const middleFinishingIdx = finishingSteps.length > 0 ? Math.floor(finishingSteps.length / 2) : -1
+                                        const middleFinishingStepId = finishingSteps[middleFinishingIdx]?.id
+                                        return (
+                                        <div className="mt-2 space-y-1">
+                                          <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Routing</span>
+                                          {sortedSteps.map(step => (
+                                              <div key={step.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
+                                                <span className="text-gray-500 font-mono">{step.step_order}.</span>
+                                                <span className={`text-gray-300 ${(step.status === 'removed' || step.status === 'skipped') ? 'line-through' : ''}`}>{step.step_name}</span>
+                                                {step.step_type === 'external' && (
+                                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-orange-900/30 text-orange-400 border border-orange-800">External</span>
+                                                )}
+                                                {step.status === 'in_progress' && (
+                                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">At Vendor</span>
+                                                )}
+                                                {step.status === 'complete' && (
+                                                  <span className="flex items-center gap-1 text-green-400"><CheckCircle size={10} />{step.lot_number || ''}</span>
+                                                )}
+                                                {step.status === 'removed' && (
+                                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Removed</span>
+                                                )}
+                                                {step.status === 'skipped' && (
+                                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Skipped</span>
+                                                )}
+                                                {step.step_name.toLowerCase().includes('machine') && pln && (
+                                                  <span className="flex items-center gap-1 text-cyan-400">
+                                                    <CheckCircle size={10} className="text-green-400" />
+                                                    {pln}
+                                                  </span>
+                                                )}
+                                                {step.id === middleFinishingStepId && fln && (
+                                                  <span className="flex items-center gap-1 text-cyan-400">
+                                                    <CheckCircle size={10} className="text-green-400" />
+                                                    {fln}
+                                                  </span>
+                                                )}
+                                              </div>
+                                            ))
+                                          }
+                                        </div>
+                                        )
+                                      })()}
+
+                                      {/* Outsourcing sends */}
+                                      {job.outbound_sends?.length > 0 && (
+                                        <div className="mt-2 space-y-1">
+                                          <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Outsourcing</span>
+                                          {job.outbound_sends.map(send => {
+                                            const opLabel = { heat_treat: 'Heat Treatment', cad_plating: 'Cad Plating', black_oxide: 'Black Oxide', painting: 'Painting', priming: 'Priming' }[send.operation_type] || send.operation_type
+                                            const overdue = send.expected_return_at && !send.returned_at && new Date(send.expected_return_at) < new Date(new Date().toDateString())
+                                            return (
+                                              <div key={send.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700 flex-wrap">
+                                                <Truck size={10} className="text-gray-500 flex-shrink-0" />
+                                                <span className="text-gray-300">{send.vendor_name}</span>
+                                                <span className="text-gray-600">&middot;</span>
+                                                <span className="text-gray-400">{opLabel}</span>
+                                                <span className="text-gray-600">&middot;</span>
+                                                <span className="text-gray-400">{send.quantity} pcs</span>
+                                                <span className="text-gray-600">&middot;</span>
+                                                {send.returned_at ? (
+                                                  <span className="text-green-400">
+                                                    Returned {new Date(send.returned_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                    {send.vendor_lot_number ? ` | Lot: ${send.vendor_lot_number}` : ''}
+                                                    {send.quantity_returned ? ` | Qty: ${send.quantity_returned}` : ''}
+                                                  </span>
+                                                ) : (
+                                                  <span className={overdue ? 'text-red-400 font-medium' : 'text-gray-400'}>
+                                                    {overdue && '⚠ '}
+                                                    Sent {send.sent_at ? new Date(send.sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
+                                                    {send.expected_return_at ? ` · Due ${new Date(send.expected_return_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
+                                                  </span>
+                                                )}
+                                              </div>
+                                            )
+                                          })}
                                         </div>
                                       )}
 

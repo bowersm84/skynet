@@ -1797,7 +1797,7 @@ export default function Schedule({ user, profile, onNavigate }) {
         <div className="flex items-center gap-4">
           <h2 className="text-xl font-semibold text-white flex items-center gap-2">
             <Calendar size={24} className="text-skynet-accent" />
-            {zoomedDay ? 'Day View' : 'Schedule View'}
+            {zoomedDay ? 'Day View' : 'Command View'}
           </h2>
           {scheduledJobs.length > 0 && (
             <span className="text-sm text-gray-400">

@@ -20,7 +20,8 @@ import {
   Upload,
   Route,
   BarChart2,
-  PackageCheck
+  PackageCheck,
+  GripVertical
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
@@ -85,6 +86,8 @@ export default function Armory({ profile }) {
 
   // Routing steps for part modal
   const [routingSteps, setRoutingSteps] = useState([])
+  const [draggedStepIdx, setDraggedStepIdx] = useState(null)
+  const [dragOverIdx, setDragOverIdx] = useState(null)
 
   // Document requirements for part modal
   const [documentTypes, setDocumentTypes] = useState([])
@@ -393,6 +396,14 @@ export default function Armory({ profile }) {
     const updated = [...routingSteps]
     const [moved] = updated.splice(index, 1)
     updated.splice(newIndex, 0, moved)
+    setRoutingSteps(updated)
+  }
+
+  const reorderRoutingSteps = (fromIdx, toIdx) => {
+    if (fromIdx === toIdx) return
+    const updated = [...routingSteps]
+    const [moved] = updated.splice(fromIdx, 1)
+    updated.splice(toIdx, 0, moved)
     setRoutingSteps(updated)
   }
 
@@ -1736,8 +1747,22 @@ export default function Armory({ profile }) {
                   ) : (
                     <div className="space-y-2">
                       {routingSteps.map((step, idx) => (
-                        <div key={idx} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+                        <div
+                          key={idx}
+                          draggable
+                          onDragStart={() => setDraggedStepIdx(idx)}
+                          onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
+                          onDrop={(e) => {
+                            e.preventDefault()
+                            if (draggedStepIdx !== null) reorderRoutingSteps(draggedStepIdx, idx)
+                            setDraggedStepIdx(null)
+                            setDragOverIdx(null)
+                          }}
+                          onDragEnd={() => { setDraggedStepIdx(null); setDragOverIdx(null) }}
+                          className={`bg-gray-800 rounded-lg p-3 border border-gray-700 ${dragOverIdx === idx ? 'border-t-2 border-t-skynet-accent' : ''} ${draggedStepIdx === idx ? 'opacity-50' : ''}`}
+                        >
                           <div className="flex items-center gap-2">
+                            <GripVertical size={14} className="text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing flex-shrink-0" />
                             <span className="text-gray-500 text-xs font-mono w-5 text-center">{idx + 1}</span>
                             <input
                               type="text"

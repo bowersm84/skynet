@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
-import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench } from 'lucide-react'
+import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical } from 'lucide-react'
 
 export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile }) {
   const [loading, setLoading] = useState(false)
@@ -34,6 +34,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   const [addingStepFor, setAddingStepFor] = useState(null)          // partId currently adding to
   const [newStepName, setNewStepName] = useState('')
   const [newStepType, setNewStepType] = useState('internal')
+  const [dragRoutingFrom, setDragRoutingFrom] = useState(null)     // { partId, idx }
+  const [dragRoutingOver, setDragRoutingOver] = useState(null)     // { partId, idx }
 
   const fetchComponentRouting = useCallback(async (partId) => {
     if (!partId) return
@@ -434,127 +436,191 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 
   const totalJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
 
+  const reorderPartRouting = (partId, fromIdx, toIdx) => {
+    if (fromIdx === toIdx) return
+    const baseSteps = routingCache[partId] || []
+    const addedSteps = routingAdditions[partId] || []
+    const combined = [
+      ...baseSteps.map(s => ({ type: 'base', data: s })),
+      ...addedSteps.map(s => ({ type: 'added', data: s }))
+    ]
+    const [moved] = combined.splice(fromIdx, 1)
+    combined.splice(toIdx, 0, moved)
+    const newBase = combined.filter(i => i.type === 'base').map(i => i.data)
+    const newAdded = combined.filter(i => i.type === 'added').map(i => i.data)
+    setRoutingCache(prev => ({ ...prev, [partId]: newBase }))
+    setRoutingAdditions(prev => ({ ...prev, [partId]: newAdded }))
+  }
+
   // Shared routing step renderer with removal/addition UI
   const renderRoutingSteps = (partId) => {
     const steps = routingCache[partId]
     const additions = routingAdditions[partId] || []
     if (!steps?.length && !additions.length) return null
 
+    const unified = [
+      ...(steps || []).map(s => ({ type: 'base', data: s })),
+      ...additions.map(s => ({ type: 'added', data: s }))
+    ]
+
     return (
       <div className="mt-2 pl-4 border-l-2 border-gray-700">
         <div className="text-xs text-gray-500 mb-1">Routing:</div>
-        {(steps || []).map((step) => {
-          const isMarkedForRemoval = routingRemovals[step.id] !== undefined
-          const isEditingRemoval = removalInput === step.id
-          return (
-            <div key={step.id} className="py-0.5">
-              <div className={`flex items-center gap-2 text-sm ${isMarkedForRemoval ? 'line-through text-red-400/60' : 'text-gray-400'}`}>
-                <span className="text-gray-600">{step.step_order}.</span>
-                <span>{step.step_name}</span>
-                {step.default_station && (
-                  <span className="text-gray-600">({step.default_station})</span>
+        {unified.map((item, idx) => {
+          const isDragging = dragRoutingFrom?.partId === partId && dragRoutingFrom?.idx === idx
+          const isDropTarget = dragRoutingOver?.partId === partId && dragRoutingOver?.idx === idx
+
+          if (item.type === 'base') {
+            const step = item.data
+            const isMarkedForRemoval = routingRemovals[step.id] !== undefined
+            const isEditingRemoval = removalInput === step.id
+            return (
+              <div
+                key={step.id}
+                draggable
+                onDragStart={() => setDragRoutingFrom({ partId, idx })}
+                onDragOver={(e) => { e.preventDefault(); setDragRoutingOver({ partId, idx }) }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragRoutingFrom && dragRoutingFrom.partId === partId) {
+                    reorderPartRouting(partId, dragRoutingFrom.idx, idx)
+                  }
+                  setDragRoutingFrom(null)
+                  setDragRoutingOver(null)
+                }}
+                onDragEnd={() => { setDragRoutingFrom(null); setDragRoutingOver(null) }}
+                className={`py-0.5 ${isDragging ? 'opacity-40' : ''} ${isDropTarget ? 'border-t border-skynet-accent' : ''}`}
+              >
+                <div className={`flex items-center gap-2 text-sm ${isMarkedForRemoval ? 'line-through text-red-400/60' : 'text-gray-400'}`}>
+                  <GripVertical size={12} className="text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing flex-shrink-0" />
+                  <span className="text-gray-600">{idx + 1}.</span>
+                  <span>{step.step_name}</span>
+                  {step.default_station && (
+                    <span className="text-gray-600">({step.default_station})</span>
+                  )}
+                  {step.step_type === 'external' && (
+                    <span className={`text-xs px-1 rounded ${isMarkedForRemoval ? 'bg-orange-900/20 text-orange-400/50' : 'bg-orange-900/30 text-orange-400'}`}>External</span>
+                  )}
+                  {isMarkedForRemoval ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRoutingRemovals(prev => {
+                          const next = { ...prev }
+                          delete next[step.id]
+                          return next
+                        })
+                      }}
+                      className="ml-auto text-xs px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
+                    >
+                      Undo
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRemovalInput(step.id)
+                        setRemovalReason('')
+                      }}
+                      className="ml-auto text-xs text-red-500/50 hover:text-red-400"
+                      title="Request step removal"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                {isMarkedForRemoval && (
+                  <div className="text-xs text-red-400/70 ml-6">Removal reason: {routingRemovals[step.id]}</div>
                 )}
-                {step.step_type === 'external' && (
-                  <span className={`text-xs px-1 rounded ${isMarkedForRemoval ? 'bg-orange-900/20 text-orange-400/50' : 'bg-orange-900/30 text-orange-400'}`}>External</span>
-                )}
-                {isMarkedForRemoval ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRoutingRemovals(prev => {
-                        const next = { ...prev }
-                        delete next[step.id]
-                        return next
-                      })
-                    }}
-                    className="ml-auto text-xs px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
-                  >
-                    Undo
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRemovalInput(step.id)
-                      setRemovalReason('')
-                    }}
-                    className="ml-auto text-xs text-red-500/50 hover:text-red-400"
-                    title="Request step removal"
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-              {isMarkedForRemoval && (
-                <div className="text-xs text-red-400/70 ml-6">Removal reason: {routingRemovals[step.id]}</div>
-              )}
-              {isEditingRemoval && (
-                <div className="flex items-center gap-2 ml-6 mt-1">
-                  <input
-                    type="text"
-                    value={removalReason}
-                    onChange={(e) => setRemovalReason(e.target.value)}
-                    placeholder="Reason for removal (required)"
-                    className="flex-1 px-2 py-1 bg-gray-700 border border-red-700/50 rounded text-sm text-white focus:outline-none focus:border-red-600"
-                    autoFocus
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && removalReason.trim()) {
+                {isEditingRemoval && (
+                  <div className="flex items-center gap-2 ml-6 mt-1">
+                    <input
+                      type="text"
+                      value={removalReason}
+                      onChange={(e) => setRemovalReason(e.target.value)}
+                      placeholder="Reason for removal (required)"
+                      className="flex-1 px-2 py-1 bg-gray-700 border border-red-700/50 rounded text-sm text-white focus:outline-none focus:border-red-600"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && removalReason.trim()) {
+                          setRoutingRemovals(prev => ({ ...prev, [step.id]: removalReason.trim() }))
+                          setRemovalInput(null)
+                          setRemovalReason('')
+                        } else if (e.key === 'Escape') {
+                          setRemovalInput(null)
+                          setRemovalReason('')
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!removalReason.trim()}
+                      onClick={() => {
                         setRoutingRemovals(prev => ({ ...prev, [step.id]: removalReason.trim() }))
                         setRemovalInput(null)
                         setRemovalReason('')
-                      } else if (e.key === 'Escape') {
-                        setRemovalInput(null)
-                        setRemovalReason('')
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={!removalReason.trim()}
-                    onClick={() => {
-                      setRoutingRemovals(prev => ({ ...prev, [step.id]: removalReason.trim() }))
-                      setRemovalInput(null)
-                      setRemovalReason('')
-                    }}
-                    className="px-2 py-1 bg-red-900/50 text-red-300 rounded text-xs hover:bg-red-900 disabled:opacity-50"
-                  >
-                    Confirm
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setRemovalInput(null); setRemovalReason('') }}
-                    className="px-2 py-1 text-gray-400 text-xs hover:text-white"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              )}
+                      }}
+                      className="px-2 py-1 bg-red-900/50 text-red-300 rounded text-xs hover:bg-red-900 disabled:opacity-50"
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setRemovalInput(null); setRemovalReason('') }}
+                      className="px-2 py-1 text-gray-400 text-xs hover:text-white"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          }
+
+          // item.type === 'added'
+          const added = item.data
+          const addedOrigIdx = additions.indexOf(added)
+          return (
+            <div
+              key={`added-${addedOrigIdx}`}
+              draggable
+              onDragStart={() => setDragRoutingFrom({ partId, idx })}
+              onDragOver={(e) => { e.preventDefault(); setDragRoutingOver({ partId, idx }) }}
+              onDrop={(e) => {
+                e.preventDefault()
+                if (dragRoutingFrom && dragRoutingFrom.partId === partId) {
+                  reorderPartRouting(partId, dragRoutingFrom.idx, idx)
+                }
+                setDragRoutingFrom(null)
+                setDragRoutingOver(null)
+              }}
+              onDragEnd={() => { setDragRoutingFrom(null); setDragRoutingOver(null) }}
+              className={`py-0.5 ${isDragging ? 'opacity-40' : ''} ${isDropTarget ? 'border-t border-skynet-accent' : ''}`}
+            >
+              <div className="flex items-center gap-2 text-sm text-green-400">
+                <GripVertical size={12} className="text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing flex-shrink-0" />
+                <span className="text-gray-600">{idx + 1}.</span>
+                <span>{added.stepName}</span>
+                {added.stepType === 'external' && (
+                  <span className="text-xs px-1 bg-orange-900/30 text-orange-400 rounded">External</span>
+                )}
+                <span className="text-xs px-1 bg-green-900/30 text-green-400 rounded">Added</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRoutingAdditions(prev => ({
+                      ...prev,
+                      [partId]: prev[partId].filter((_, i) => i !== addedOrigIdx)
+                    }))
+                  }}
+                  className="ml-auto text-xs text-red-500/50 hover:text-red-400"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           )
         })}
-        {/* Added steps */}
-        {additions.map((added, i) => (
-          <div key={`added-${i}`} className="flex items-center gap-2 text-sm text-green-400 py-0.5">
-            <span className="text-gray-600">{(steps?.length || 0) + i + 1}.</span>
-            <span>{added.stepName}</span>
-            {added.stepType === 'external' && (
-              <span className="text-xs px-1 bg-orange-900/30 text-orange-400 rounded">External</span>
-            )}
-            <span className="text-xs px-1 bg-green-900/30 text-green-400 rounded">Added</span>
-            <button
-              type="button"
-              onClick={() => {
-                setRoutingAdditions(prev => ({
-                  ...prev,
-                  [partId]: prev[partId].filter((_, idx) => idx !== i)
-                }))
-              }}
-              className="ml-auto text-xs text-red-500/50 hover:text-red-400"
-            >
-              ✕
-            </button>
-          </div>
-        ))}
         {/* Add Step */}
         {addingStepFor === partId ? (
           <div className="flex items-center gap-2 mt-1">

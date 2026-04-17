@@ -232,8 +232,23 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       const canAdvance = allQtySent && ['in_progress', 'manufacturing_complete'].includes(parentJob?.status)
 
       if (canAdvance) {
-        const partType = parentJob?.component?.part_type
-        const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+        // Check if this job has any external routing steps not yet complete
+        const { data: externalSteps } = await supabase
+          .from('job_routing_steps')
+          .select('id, step_name, status')
+          .eq('job_id', jobId)
+          .eq('step_type', 'external')
+          .in('status', ['pending', 'in_progress'])
+
+        let nextStatus
+        if (externalSteps && externalSteps.length > 0) {
+          // Has pending external steps — route to outsourcing queue
+          nextStatus = 'ready_for_outsourcing'
+        } else {
+          // No external steps — existing logic
+          const partType = parentJob?.component?.part_type
+          nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+        }
 
         const { error: jobError } = await supabase
           .from('jobs')
@@ -579,6 +594,37 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
   }
 
+  const handleAdditionalUpload = async (jobId, file) => {
+    const uploadKey = jobId + '-additional'
+    setUploading(uploadKey)
+    try {
+      const s3Path = `jobs/${jobId}`
+      const { filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
+
+      const { error: dbError } = await supabase
+        .from('job_documents')
+        .insert({
+          job_id: jobId,
+          document_type_id: null,
+          file_name: file.name,
+          file_url: filePath,
+          file_size: fileSize,
+          mime_type: mimeType,
+          uploaded_by: profile.id,
+          status: 'approved'
+        })
+
+      if (dbError) throw dbError
+
+      const freshDetails = await fetchJobDetails(jobId)
+      setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+    } catch (err) {
+      console.error('Additional upload error:', err)
+      alert('Failed to upload document: ' + err.message)
+    }
+    setUploading(null)
+  }
+
   const handleFileUpload = async (jobId, documentTypeId, documentTypeCode, file) => {
     const uploadKey = jobId + '-' + documentTypeId
     setUploading(uploadKey)
@@ -703,13 +749,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           nextStatus = 'assigned'
         }
       } else if (currentStatus === 'pending_post_manufacturing') {
-        // Check if this job's part is a finished good — skip assembly, go to TCO
-        const job = jobs.find(j => j.id === jobId)
-        const partType = job?.component?.part_type
-        if (partType === 'finished_good') {
-          nextStatus = 'pending_tco'
+        // Check if this job has any external routing steps that are not yet complete
+        const { data: externalSteps } = await supabase
+          .from('job_routing_steps')
+          .select('id, step_name, status')
+          .eq('job_id', jobId)
+          .eq('step_type', 'external')
+          .in('status', ['pending', 'in_progress'])
+
+        if (externalSteps && externalSteps.length > 0) {
+          // Has pending external steps — route to outsourcing queue
+          nextStatus = 'ready_for_outsourcing'
         } else {
-          nextStatus = 'ready_for_assembly'
+          // No external steps — follow existing logic
+          const job = jobs.find(j => j.id === jobId)
+          const partType = job?.component?.part_type
+          if (partType === 'finished_good') {
+            nextStatus = 'pending_tco'
+          } else {
+            nextStatus = 'ready_for_assembly'
+          }
         }
       }
 
@@ -757,11 +816,25 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           nextStatus = 'assigned'
         }
       } else if (job.status === 'pending_post_manufacturing') {
-        const partType = job.component?.part_type
-        if (partType === 'finished_good') {
-          nextStatus = 'pending_tco'
+        // Check if this job has any external routing steps that are not yet complete
+        const { data: externalSteps } = await supabase
+          .from('job_routing_steps')
+          .select('id, step_name, status')
+          .eq('job_id', job.id)
+          .eq('step_type', 'external')
+          .in('status', ['pending', 'in_progress'])
+
+        if (externalSteps && externalSteps.length > 0) {
+          // Has pending external steps — route to outsourcing queue
+          nextStatus = 'ready_for_outsourcing'
         } else {
-          nextStatus = 'ready_for_assembly'
+          // No external steps — follow existing logic
+          const partType = job.component?.part_type
+          if (partType === 'finished_good') {
+            nextStatus = 'pending_tco'
+          } else {
+            nextStatus = 'ready_for_assembly'
+          }
         }
       }
 
@@ -890,6 +963,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       'manufacturing_complete': { label: 'Mfg Complete', color: 'bg-purple-600' },
       'pending_post_manufacturing': { label: 'Post-Mfg Review', color: 'bg-purple-500' },
       'ready_for_assembly': { label: 'Ready for Assembly', color: 'bg-green-500' },
+      'ready_for_outsourcing': { label: 'Ready for Outsourcing', color: 'bg-orange-500' },
+      'at_external_vendor': { label: 'At External Vendor', color: 'bg-blue-500' },
       'complete': { label: 'Complete', color: 'bg-gray-600' }
     }
     const config = statusConfig[status] || { label: status, color: 'bg-gray-600' }
@@ -1384,6 +1459,45 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                             </div>
                           )
                         })}
+                      </div>
+                    )}
+
+                    {/* Additional Documents */}
+                    {isComplianceUser && (
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-gray-400 text-sm font-medium">Additional Documents</h4>
+                          <label className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded cursor-pointer transition-colors">
+                            {uploading === job.id + '-additional' ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <Upload size={12} />
+                            )}
+                            {uploading === job.id + '-additional' ? 'Uploading...' : 'Upload Document'}
+                            <input
+                              type="file"
+                              className="hidden"
+                              disabled={uploading === job.id + '-additional'}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0]
+                                if (file) handleAdditionalUpload(job.id, file)
+                                e.target.value = ''
+                              }}
+                            />
+                          </label>
+                        </div>
+                        {(details?.jobDocs || [])
+                          .filter(d => !d.document_type_id)
+                          .map(doc => (
+                            <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800 mb-2">
+                              <div className="flex items-center gap-3">
+                                <FileText size={16} className="text-gray-400" />
+                                <span className="text-xs text-gray-400">{doc.file_name}</span>
+                              </div>
+                              <ViewButton filePath={doc.file_url} />
+                            </div>
+                          ))
+                        }
                       </div>
                     )}
 
@@ -1885,6 +1999,48 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                   </div>
                                 )}
 
+                                {/* Additional Documents */}
+                                {isComplianceUser && (
+                                  <div className="mt-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <h4 className="text-gray-400 text-sm font-medium">Additional Documents</h4>
+                                      <label className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded cursor-pointer transition-colors">
+                                        {uploading === send.job_id + '-additional' ? (
+                                          <Loader2 size={12} className="animate-spin" />
+                                        ) : (
+                                          <Upload size={12} />
+                                        )}
+                                        {uploading === send.job_id + '-additional' ? 'Uploading...' : 'Upload Document'}
+                                        <input
+                                          type="file"
+                                          className="hidden"
+                                          disabled={uploading === send.job_id + '-additional'}
+                                          onChange={(e) => {
+                                            const file = e.target.files?.[0]
+                                            if (file) {
+                                              handleAdditionalUpload(send.job_id, file)
+                                                .then(() => fetchBatchDetails(send))
+                                            }
+                                            e.target.value = ''
+                                          }}
+                                        />
+                                      </label>
+                                    </div>
+                                    {allJobDocs
+                                      .filter(d => !d.document_type_id)
+                                      .map(doc => (
+                                        <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800 mb-2">
+                                          <div className="flex items-center gap-3">
+                                            <FileText size={16} className="text-gray-400" />
+                                            <span className="text-xs text-gray-400">{doc.file_name}</span>
+                                          </div>
+                                          <ViewButton filePath={doc.file_url} />
+                                        </div>
+                                      ))
+                                    }
+                                  </div>
+                                )}
+
                                 {/* Group 2 — Documents from Pre-Manufacturing (read-only) */}
                                 {preMfgReqs.length > 0 && (
                                   <>
@@ -2284,6 +2440,45 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                       </div>
                                     )
                                   })}
+                                </div>
+                              )}
+
+                              {/* Additional Documents */}
+                              {isComplianceUser && (
+                                <div className="mt-4">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-gray-400 text-sm font-medium">Additional Documents</h4>
+                                    <label className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded cursor-pointer transition-colors">
+                                      {uploading === job.id + '-additional' ? (
+                                        <Loader2 size={12} className="animate-spin" />
+                                      ) : (
+                                        <Upload size={12} />
+                                      )}
+                                      {uploading === job.id + '-additional' ? 'Uploading...' : 'Upload Document'}
+                                      <input
+                                        type="file"
+                                        className="hidden"
+                                        disabled={uploading === job.id + '-additional'}
+                                        onChange={(e) => {
+                                          const file = e.target.files?.[0]
+                                          if (file) handleAdditionalUpload(job.id, file)
+                                          e.target.value = ''
+                                        }}
+                                      />
+                                    </label>
+                                  </div>
+                                  {(details?.jobDocs || [])
+                                    .filter(d => !d.document_type_id)
+                                    .map(doc => (
+                                      <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800 mb-2">
+                                        <div className="flex items-center gap-3">
+                                          <FileText size={16} className="text-gray-400" />
+                                          <span className="text-xs text-gray-400">{doc.file_name}</span>
+                                        </div>
+                                        <ViewButton filePath={doc.file_url} />
+                                      </div>
+                                    ))
+                                  }
                                 </div>
                               )}
 

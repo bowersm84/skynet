@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   Plus, Edit2, Trash2, X, Loader2, Check,
-  ChevronUp, ChevronDown, Route
+  ChevronUp, ChevronDown, Route, GripVertical
 } from 'lucide-react'
 
 export default function RoutingTemplatesTab({ onDataChange }) {
@@ -16,6 +16,8 @@ export default function RoutingTemplatesTab({ onDataChange }) {
   const [editingTemplate, setEditingTemplate] = useState(null)
   const [form, setForm] = useState({ name: '', description: '', material_category: '' })
   const [steps, setSteps] = useState([])
+  const [draggedStepIdx, setDraggedStepIdx] = useState(null)
+  const [dragOverIdx, setDragOverIdx] = useState(null)
 
   const fetchTemplates = useCallback(async () => {
     setLoading(true)
@@ -83,6 +85,14 @@ export default function RoutingTemplatesTab({ onDataChange }) {
     const updated = [...steps]
     const [moved] = updated.splice(index, 1)
     updated.splice(newIndex, 0, moved)
+    setSteps(updated)
+  }
+
+  const reorderSteps = (fromIdx, toIdx) => {
+    if (fromIdx === toIdx) return
+    const updated = [...steps]
+    const [moved] = updated.splice(fromIdx, 1)
+    updated.splice(toIdx, 0, moved)
     setSteps(updated)
   }
 
@@ -358,8 +368,22 @@ export default function RoutingTemplatesTab({ onDataChange }) {
                 ) : (
                   <div className="space-y-2">
                     {steps.map((step, idx) => (
-                      <div key={idx} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+                      <div
+                        key={idx}
+                        draggable
+                        onDragStart={() => setDraggedStepIdx(idx)}
+                        onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          if (draggedStepIdx !== null) reorderSteps(draggedStepIdx, idx)
+                          setDraggedStepIdx(null)
+                          setDragOverIdx(null)
+                        }}
+                        onDragEnd={() => { setDraggedStepIdx(null); setDragOverIdx(null) }}
+                        className={`bg-gray-800 rounded-lg p-3 border border-gray-700 ${dragOverIdx === idx ? 'border-t-2 border-t-skynet-accent' : ''} ${draggedStepIdx === idx ? 'opacity-50' : ''}`}
+                      >
                         <div className="flex items-center gap-2 mb-2">
+                          <GripVertical size={14} className="text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing flex-shrink-0" />
                           <span className="text-gray-500 text-xs font-mono w-5 text-center">{idx + 1}</span>
                           <input
                             type="text"

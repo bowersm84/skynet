@@ -212,7 +212,7 @@ CREATE TABLE public.jobs (
   job_number character varying NOT NULL,
   quantity integer NOT NULL DEFAULT 1,
   priority character varying DEFAULT 'normal'::character varying CHECK (priority::text = ANY (ARRAY['critical'::character varying, 'high'::character varying, 'normal'::character varying, 'low'::character varying]::text[])),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending_compliance'::character varying, 'ready'::character varying, 'assigned'::character varying, 'in_setup'::character varying, 'in_progress'::character varying, 'manufacturing_complete'::character varying, 'pending_passivation'::character varying, 'in_passivation'::character varying, 'pending_post_manufacturing'::character varying, 'ready_for_assembly'::character varying, 'in_assembly'::character varying, 'pending_tco'::character varying, 'complete'::character varying, 'incomplete'::character varying, 'cancelled'::character varying]::text[])),
+  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending_compliance'::text, 'ready'::text, 'assigned'::text, 'in_setup'::text, 'in_progress'::text, 'manufacturing_complete'::text, 'pending_passivation'::text, 'in_passivation'::text, 'pending_post_manufacturing'::text, 'ready_for_outsourcing'::text, 'at_external_vendor'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'pending_tco'::text, 'complete'::text, 'incomplete'::text, 'cancelled'::text])),
   assigned_machine_id uuid,
   assigned_user_id uuid,
   checked_in_at timestamp with time zone,
@@ -357,6 +357,24 @@ CREATE TABLE public.machines (
   CONSTRAINT machines_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id),
   CONSTRAINT machines_status_updated_by_fkey FOREIGN KEY (status_updated_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.material_receiving (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  material_id uuid,
+  material_type text NOT NULL,
+  bar_size text,
+  bar_length_inches numeric,
+  lot_number text NOT NULL,
+  quantity integer NOT NULL,
+  received_by uuid,
+  received_at timestamp with time zone DEFAULT now(),
+  vendor text,
+  notes text,
+  created_at timestamp with time zone DEFAULT now(),
+  rack text,
+  CONSTRAINT material_receiving_pkey PRIMARY KEY (id),
+  CONSTRAINT material_receiving_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
+  CONSTRAINT material_receiving_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id)
+);
 CREATE TABLE public.material_types (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   name text NOT NULL UNIQUE,
@@ -365,6 +383,63 @@ CREATE TABLE public.material_types (
   is_active boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
   CONSTRAINT material_types_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.material_usage (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  material_receiving_id uuid,
+  material_id uuid,
+  lot_number text,
+  job_id uuid,
+  quantity_used integer NOT NULL,
+  used_by uuid,
+  used_at timestamp with time zone DEFAULT now(),
+  notes text,
+  created_at timestamp with time zone DEFAULT now(),
+  quantity_used_inches numeric,
+  CONSTRAINT material_usage_pkey PRIMARY KEY (id),
+  CONSTRAINT material_usage_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
+  CONSTRAINT material_usage_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
+  CONSTRAINT material_usage_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT material_usage_used_by_fkey FOREIGN KEY (used_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.materials (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  material_type_id uuid NOT NULL,
+  bar_size_inches numeric NOT NULL,
+  density_lbs_per_cubic_inch numeric,
+  vendor text,
+  notes text,
+  is_active boolean DEFAULT true,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT materials_pkey PRIMARY KEY (id),
+  CONSTRAINT materials_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
+);
+CREATE TABLE public.outbound_sends (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  job_id uuid,
+  work_order_id uuid,
+  operation_type text NOT NULL CHECK (operation_type = ANY (ARRAY['heat_treat'::text, 'cad_plating'::text, 'black_oxide'::text, 'painting'::text, 'priming'::text, 'other'::text])),
+  vendor_name text,
+  quantity integer NOT NULL,
+  sent_at timestamp with time zone,
+  sent_by uuid,
+  expected_return_at date,
+  returned_at timestamp with time zone,
+  returned_by uuid,
+  vendor_lot_number text,
+  cert_document_path text,
+  notes text,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  job_routing_step_id uuid,
+  quantity_returned integer,
+  CONSTRAINT outbound_sends_pkey PRIMARY KEY (id),
+  CONSTRAINT outbound_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT outbound_sends_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
+  CONSTRAINT outbound_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id),
+  CONSTRAINT outbound_sends_returned_by_fkey FOREIGN KEY (returned_by) REFERENCES public.profiles(id),
+  CONSTRAINT outbound_sends_job_routing_step_id_fkey FOREIGN KEY (job_routing_step_id) REFERENCES public.job_routing_steps(id)
 );
 CREATE TABLE public.part_document_requirements (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -550,6 +625,9 @@ CREATE TABLE public.work_orders (
   machine_id uuid,
   stock_quantity integer,
   order_quantity integer,
+  tco_parts_tested integer,
+  tco_tensile_pass boolean,
+  tco_shear_pass boolean,
   CONSTRAINT work_orders_pkey PRIMARY KEY (id),
   CONSTRAINT work_orders_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
   CONSTRAINT work_orders_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES public.profiles(id),

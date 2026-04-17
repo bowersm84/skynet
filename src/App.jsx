@@ -149,7 +149,7 @@ function MainApp() {
   // Get page title for header
   const getPageTitle = () => {
     switch (currentPage) {
-      case 'schedule': return 'Schedule'
+      case 'schedule': return 'Command'
       case 'armory': return 'Armory'
       default: return 'Mainframe'
     }
@@ -224,7 +224,7 @@ function MainApp() {
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
               >
                 <Calendar size={18} />
-                <span className="text-sm font-medium">Schedule</span>
+                <span className="text-sm font-medium">Command</span>
               </button>
             )}
             

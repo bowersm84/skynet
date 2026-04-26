@@ -32,9 +32,42 @@ function formatDate(dateStr) {
   return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// Convert a 'YYYY-MM-DD' date-picker value into a UTC timestamp anchored at LOCAL noon.
+// Storing at noon (rather than midnight) prevents the date from drifting in either
+// direction when displayed across timezones.
+const localDateToISO = (yyyymmdd) => {
+  if (!yyyymmdd) return null
+  const [y, m, d] = yyyymmdd.split('-').map(Number)
+  const localNoon = new Date(y, m - 1, d, 12, 0, 0)
+  return localNoon.toISOString()
+}
+
+// Format a stored timestamp in the user's LOCAL timezone (not UTC).
+const formatDateLocal = (iso) => {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric'
+  })
+}
+
+// Format a 'date' column value (no time component) as a local-tz calendar date.
+// Reading 'YYYY-MM-DD' as a Date directly causes UTC interpretation, so split & rebuild.
+const formatDateOnly = (dateStr) => {
+  if (!dateStr) return '—'
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const localDate = new Date(y, m - 1, d)
+  return localDate.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric'
+  })
+}
+
 function isPastToday(dateStr) {
   if (!dateStr) return false
-  return new Date(dateStr) < new Date(new Date().toDateString())
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const target = new Date(y, m - 1, d)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return target < today
 }
 
 export default function OutsourcedJobs({ profile }) {
@@ -43,9 +76,7 @@ export default function OutsourcedJobs({ profile }) {
   const [returned, setReturned] = useState([])
   const [loading, setLoading] = useState(true)
   const [showReturned, setShowReturned] = useState(false)
-  const [approvedQtyMap, setApprovedQtyMap] = useState({})
 
-  // Inline form states keyed by step id or send id
   const [sendFormOpen, setSendFormOpen] = useState(null)
   const [sendForm, setSendForm] = useState({})
   const [returnFormOpen, setReturnFormOpen] = useState(null)
@@ -55,57 +86,122 @@ export default function OutsourcedJobs({ profile }) {
 
   const canEdit = profile?.can_approve_compliance === true || profile?.role === 'admin'
 
-  const getApprovedQty = (job) => {
-    if (!job?.id) return job?.quantity
-    const mapped = approvedQtyMap[job.id]
-    return (mapped && mapped > 0) ? mapped : job?.quantity
-  }
-
-  const fetchApprovedQtys = async () => {
+  const computeBatchLetters = async (jobIds) => {
+    if (!jobIds.length) return {}
     const { data, error } = await supabase
       .from('finishing_sends')
-      .select('job_id, compliance_good_qty, compliance_status, quantity')
+      .select('id, job_id, compliance_approved_at')
+      .in('job_id', jobIds)
       .eq('compliance_status', 'approved')
-
-    if (error || !data) return
-
+      .order('compliance_approved_at', { ascending: true })
+    if (error || !data) return {}
+    const byJob = {}
+    for (const b of data) {
+      if (!byJob[b.job_id]) byJob[b.job_id] = []
+      byJob[b.job_id].push(b)
+    }
     const map = {}
-    data.forEach(s => {
-      const qty = s.compliance_good_qty || s.quantity || 0
-      map[s.job_id] = (map[s.job_id] || 0) + qty
-    })
-    setApprovedQtyMap(map)
+    for (const jobId in byJob) {
+      byJob[jobId].forEach((b, i) => { map[b.id] = String.fromCharCode(65 + i) })
+    }
+    return map
+  }
+
+  // Per-batch qty: compliance_good_qty -> (verified - bad) -> verified_count -> quantity
+  const getBatchQty = (batch) => {
+    if (!batch) return 0
+    if (batch.compliance_good_qty != null) return batch.compliance_good_qty
+    if (batch.compliance_bad_qty != null && batch.verified_count != null) {
+      return Math.max(0, batch.verified_count - batch.compliance_bad_qty)
+    }
+    if (batch.verified_count != null) return batch.verified_count
+    return batch.quantity || 0
   }
 
   const fetchAll = async () => {
     try {
-      await Promise.all([fetchReadyToSend(), fetchAtVendor(), fetchReturned(), fetchApprovedQtys()])
+      await Promise.all([fetchReadyToSend(), fetchAtVendor(), fetchReturned()])
     } finally {
       setLoading(false)
     }
   }
 
   const fetchReadyToSend = async () => {
-    const { data, error } = await supabase
-      .from('job_routing_steps')
+    // Strategy: find approved finishing_sends that have an external routing step
+    // for the same job and DON'T already have an outbound_sends row linking them.
+
+    // 1. Pull approved finishing batches with their job + external steps
+    const { data: batches, error: batchErr } = await supabase
+      .from('finishing_sends')
       .select(`
-        id, step_name, step_order, step_type, status,
+        id, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+        finishing_lot_number, compliance_approved_at, finishing_completed_at,
         job:jobs!inner(
           id, job_number, quantity, status,
           part:parts!component_id(part_number, description, part_type),
-          work_order:work_orders(id, wo_number, customer)
+          work_order:work_orders(id, wo_number, customer),
+          job_routing_steps(id, step_name, step_order, step_type, status)
         )
       `)
-      .eq('step_type', 'external')
-      .in('status', ['pending', 'in_progress'])
-      .eq('job.status', 'ready_for_outsourcing')
-      .order('step_order', { ascending: true })
+      .eq('compliance_status', 'approved')
+      .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled,incomplete)')
+      .order('compliance_approved_at', { ascending: true })
 
-    if (error) {
-      console.error('Error fetching ready steps:', error)
+    if (batchErr) {
+      console.error('Error fetching approved batches:', batchErr)
       return
     }
-    setReadySteps(data || [])
+
+    // 2. Pull existing outbound_sends to know which batch+step combos are already sent
+    const { data: existingSends, error: sendErr } = await supabase
+      .from('outbound_sends')
+      .select('finishing_send_id, job_routing_step_id')
+      .not('finishing_send_id', 'is', null)
+    if (sendErr) {
+      console.error('Error fetching existing sends:', sendErr)
+      return
+    }
+    const sentSet = new Set(
+      (existingSends || []).map(s => `${s.finishing_send_id}|${s.job_routing_step_id}`)
+    )
+
+    // Build per-job batch letter map: oldest approved = A, next = B, etc.
+    const batchLetterMap = {}
+    const batchesByJob = {}
+    for (const b of batches || []) {
+      if (!b.job?.id) continue
+      if (!batchesByJob[b.job.id]) batchesByJob[b.job.id] = []
+      batchesByJob[b.job.id].push(b)
+    }
+    for (const jobId in batchesByJob) {
+      const sorted = batchesByJob[jobId].sort((a, b) =>
+        new Date(a.compliance_approved_at || 0) - new Date(b.compliance_approved_at || 0)
+      )
+      sorted.forEach((b, i) => {
+        batchLetterMap[b.id] = String.fromCharCode(65 + i)
+      })
+    }
+
+    // 3. Build the Ready to Send list — one row per (batch × pending external step)
+    const rows = []
+    for (const batch of batches || []) {
+      const externalSteps = (batch.job?.job_routing_steps || [])
+        .filter(s => s.step_type === 'external')
+        .sort((a, b) => a.step_order - b.step_order)
+
+      for (const step of externalSteps) {
+        const key = `${batch.id}|${step.id}`
+        if (sentSet.has(key)) continue
+        rows.push({
+          rowKey: key,
+          step,
+          batch,
+          job: batch.job,
+          batchLetter: batchLetterMap[batch.id] || '',
+        })
+      }
+    }
+    setReadySteps(rows)
   }
 
   const fetchAtVendor = async () => {
@@ -119,6 +215,7 @@ export default function OutsourcedJobs({ profile }) {
           work_order:work_orders(id, wo_number, customer)
         ),
         job_routing_step:job_routing_steps(id, step_name, step_order),
+        finishing_send:finishing_sends!finishing_send_id(id, finishing_lot_number, quantity, verified_count, compliance_good_qty),
         sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name)
       `)
       .not('sent_at', 'is', null)
@@ -129,7 +226,13 @@ export default function OutsourcedJobs({ profile }) {
       console.error('Error fetching at-vendor sends:', error)
       return
     }
-    setAtVendor(data || [])
+    const jobIds = [...new Set((data || []).map(s => s.job?.id).filter(Boolean))]
+    const letterMap = await computeBatchLetters(jobIds)
+    const enriched = (data || []).map(s => ({
+      ...s,
+      batchLetter: s.finishing_send_id ? (letterMap[s.finishing_send_id] || '') : ''
+    }))
+    setAtVendor(enriched)
   }
 
   const fetchReturned = async () => {
@@ -143,6 +246,7 @@ export default function OutsourcedJobs({ profile }) {
           work_order:work_orders(id, wo_number, customer)
         ),
         job_routing_step:job_routing_steps(id, step_name, step_order),
+        finishing_send:finishing_sends!finishing_send_id(id, finishing_lot_number, quantity, verified_count, compliance_good_qty),
         sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name),
         returned_by_profile:profiles!outbound_sends_returned_by_fkey(full_name)
       `)
@@ -154,7 +258,13 @@ export default function OutsourcedJobs({ profile }) {
       console.error('Error fetching returned sends:', error)
       return
     }
-    setReturned(data || [])
+    const jobIds = [...new Set((data || []).map(s => s.job?.id).filter(Boolean))]
+    const letterMap = await computeBatchLetters(jobIds)
+    const enriched = (data || []).map(s => ({
+      ...s,
+      batchLetter: s.finishing_send_id ? (letterMap[s.finishing_send_id] || '') : ''
+    }))
+    setReturned(enriched)
   }
 
   useEffect(() => {
@@ -162,7 +272,8 @@ export default function OutsourcedJobs({ profile }) {
 
     const channel = supabase.channel('outsourced-channel')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'outbound_sends' }, fetchAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs', filter: 'status=eq.ready_for_outsourcing' }, fetchAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'finishing_sends' }, fetchAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, fetchAll)
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
@@ -170,41 +281,34 @@ export default function OutsourcedJobs({ profile }) {
 
   // --- ACTIONS ---
 
-  const handleLogSendOut = async (step) => {
-    const form = sendForm[step.id] || {}
+  const handleLogSendOut = async (row) => {
+    const form = sendForm[row.rowKey] || {}
     if (!form.vendor_name?.trim() || !form.quantity) return
     setSaving(true)
     try {
-      const jobId = step.job.id
-      const workOrderId = step.job.work_order?.id || null
+      const jobId = row.job.id
+      const workOrderId = row.job.work_order?.id || null
 
       const { error: insertErr } = await supabase
         .from('outbound_sends')
         .insert({
           job_id: jobId,
           work_order_id: workOrderId,
-          job_routing_step_id: step.id,
-          operation_type: deriveOperationType(step.step_name),
+          job_routing_step_id: row.step.id,
+          finishing_send_id: row.batch.id,
+          operation_type: deriveOperationType(row.step.step_name),
           vendor_name: form.vendor_name.trim(),
           quantity: parseInt(form.quantity),
-          sent_at: form.sent_date ? `${form.sent_date}T00:00:00Z` : new Date().toISOString(),
+          sent_at: form.sent_date ? localDateToISO(form.sent_date) : new Date().toISOString(),
           sent_by: profile.id,
           expected_return_at: form.expected_return || null,
           notes: form.notes?.trim() || null,
         })
       if (insertErr) throw insertErr
 
-      const { error: stepErr } = await supabase
-        .from('job_routing_steps')
-        .update({ status: 'in_progress' })
-        .eq('id', step.id)
-      if (stepErr) throw stepErr
-
-      const { error: jobErr } = await supabase
-        .from('jobs')
-        .update({ status: 'at_external_vendor', updated_at: new Date().toISOString() })
-        .eq('id', jobId)
-      if (jobErr) throw jobErr
+      // Note: we no longer flip the routing step status or the job status.
+      // Step status will be marked 'complete' when ALL batches at this step have returned.
+      // Job status logic for `at_external_vendor` is decoupled from this flow.
 
       setSendFormOpen(null)
       setSendForm({})
@@ -226,7 +330,7 @@ export default function OutsourcedJobs({ profile }) {
     setSaving(true)
     try {
       const quantityReturned = parseInt(form.quantity_returned || send.quantity)
-      const returnDate = form.return_date ? `${form.return_date}T00:00:00Z` : new Date().toISOString()
+      const returnDate = form.return_date ? localDateToISO(form.return_date) : new Date().toISOString()
 
       // a. Update outbound_sends
       const { error: sendErr } = await supabase
@@ -241,42 +345,72 @@ export default function OutsourcedJobs({ profile }) {
         .eq('id', send.id)
       if (sendErr) throw sendErr
 
-      // b. Complete the routing step
+      // b. Check if all sends for THIS step have returned
       if (send.job_routing_step_id) {
-        const { error: stepErr } = await supabase
-          .from('job_routing_steps')
-          .update({
-            status: 'complete',
-            completed_at: new Date().toISOString(),
-            completed_by: profile.id,
-            lot_number: form.vendor_lot_number.trim(),
-          })
-          .eq('id', send.job_routing_step_id)
-        if (stepErr) throw stepErr
+        const { data: stepSends, error: stepSendsErr } = await supabase
+          .from('outbound_sends')
+          .select('id, returned_at')
+          .eq('job_routing_step_id', send.job_routing_step_id)
+        if (stepSendsErr) throw stepSendsErr
+
+        const allStepReturned = stepSends && stepSends.length > 0
+          && stepSends.every(s => s.returned_at != null)
+
+        // Determine whether the routing step + job-level status should advance.
+        // Both gates require: (a) every existing outbound_send for this step has returned,
+        // AND (b) machining is fully complete (job.actual_end IS NOT NULL).
+        // Without (b), more batches may still be coming through the machine and will need
+        // to traverse this external step.
+        if (allStepReturned) {
+          const jobId = send.job?.id || send.job_id
+          const { data: jobRow, error: jobFetchErr } = await supabase
+            .from('jobs')
+            .select('id, actual_end')
+            .eq('id', jobId)
+            .single()
+          if (jobFetchErr) throw jobFetchErr
+
+          const machiningDone = jobRow?.actual_end != null
+
+          if (machiningDone) {
+            const { error: stepErr } = await supabase
+              .from('job_routing_steps')
+              .update({
+                status: 'complete',
+                completed_at: new Date().toISOString(),
+                completed_by: profile.id,
+                lot_number: form.vendor_lot_number.trim(),
+              })
+              .eq('id', send.job_routing_step_id)
+            if (stepErr) throw stepErr
+
+            // Check if ALL external steps on the job are complete (job-level rollup)
+            const { data: allSteps, error: allStepsErr } = await supabase
+              .from('job_routing_steps')
+              .select('id, step_type, status')
+              .eq('job_id', jobId)
+              .eq('step_type', 'external')
+            if (allStepsErr) throw allStepsErr
+
+            const allExternalComplete = allSteps && allSteps.length > 0
+              && allSteps.every(s => s.status === 'complete')
+
+            if (allExternalComplete) {
+              const partType = send.job?.part?.part_type
+              const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+              const { error: jobErr } = await supabase
+                .from('jobs')
+                .update({ status: nextStatus, updated_at: new Date().toISOString() })
+                .eq('id', jobId)
+              if (jobErr) throw jobErr
+            }
+          }
+          // If !machiningDone: leave step status and job status as-is.
+          // When the final batch lands and machining completes, the next return logged
+          // (or a separate trigger) will advance status. For S4 this means status advance
+          // happens naturally on the LAST batch's return after machining is done.
+        }
       }
-
-      // c. Check remaining external steps to determine next job status
-      const jobId = send.job?.id || send.job_id
-      const { data: remaining } = await supabase
-        .from('job_routing_steps')
-        .select('id')
-        .eq('job_id', jobId)
-        .eq('step_type', 'external')
-        .not('status', 'in', '("complete","removed","skipped")')
-
-      let nextStatus
-      if (remaining && remaining.length > 0) {
-        nextStatus = 'ready_for_outsourcing'
-      } else {
-        const partType = send.job?.part?.part_type
-        nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
-      }
-
-      const { error: jobErr } = await supabase
-        .from('jobs')
-        .update({ status: nextStatus, updated_at: new Date().toISOString() })
-        .eq('id', jobId)
-      if (jobErr) throw jobErr
 
       setReturnFormOpen(null)
       setReturnForm({})
@@ -361,18 +495,19 @@ export default function OutsourcedJobs({ profile }) {
         </div>
 
         {readySteps.length === 0 ? (
-          <p className="text-gray-600 text-sm italic text-center py-6">No jobs waiting to be sent out</p>
+          <p className="text-gray-600 text-sm italic text-center py-6">No batches waiting to be sent out</p>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {readySteps.map(step => {
-              const job = step.job
-              const isOpen = sendFormOpen === step.id
-              const form = sendForm[step.id] || {}
+            {readySteps.map(row => {
+              const { step, batch, job, rowKey } = row
+              const isOpen = sendFormOpen === rowKey
+              const form = sendForm[rowKey] || {}
               const suggestions = getVendorSuggestions(step.step_name)
-              const datalistId = `vendor-${step.id}`
+              const datalistId = `vendor-${rowKey}`
+              const batchQty = getBatchQty(batch)
 
               return (
-                <div key={step.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+                <div key={rowKey} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
                     {getStepBadge(step.step_name)}
                     <span className="text-xs px-2 py-0.5 rounded bg-amber-900/30 text-amber-400 flex-shrink-0">
@@ -386,23 +521,32 @@ export default function OutsourcedJobs({ profile }) {
                       <span className="text-gray-500 truncate">{job.part.description}</span>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-gray-500">
-                    <span className="text-white font-mono">{job?.job_number}</span>
-                    {job?.work_order?.wo_number && <span>· {job.work_order.wo_number}</span>}
-                    {job?.work_order?.customer && <span>· {job.work_order.customer}</span>}
-                    <span>· Qty: {getApprovedQty(job)}</span>
+                  <div className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
+                    <span className="font-mono text-white">{job?.job_number}</span>
+                    {row.batchLetter && (
+                      <>
+                        <span>·</span>
+                        <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {row.batchLetter}</span>
+                      </>
+                    )}
+                    <span>·</span>
+                    <span className="text-cyan-400 font-mono">{batch.finishing_lot_number || 'No FLN'}</span>
+                    <span>·</span>
+                    <span>{batchQty} pcs</span>
+                    {job?.work_order?.wo_number && <><span>·</span><span>{job.work_order.wo_number}</span></>}
+                    {job?.work_order?.customer && <><span>·</span><span>{job.work_order.customer}</span></>}
                   </div>
 
                   {canEdit && !isOpen && (
                     <div className="pt-2 border-t border-gray-800">
                       <button
                         onClick={() => {
-                          setSendFormOpen(step.id)
+                          setSendFormOpen(rowKey)
                           setSendForm(prev => ({
                             ...prev,
-                            [step.id]: {
+                            [rowKey]: {
                               vendor_name: suggestions[0] || '',
-                              quantity: String(getApprovedQty(job) || ''),
+                              quantity: String(batchQty || ''),
                               sent_date: new Date().toISOString().split('T')[0],
                               expected_return: '',
                               notes: '',
@@ -426,7 +570,7 @@ export default function OutsourcedJobs({ profile }) {
                             type="text"
                             list={datalistId}
                             value={form.vendor_name || ''}
-                            onChange={e => setSendForm(prev => ({ ...prev, [step.id]: { ...form, vendor_name: e.target.value } }))}
+                            onChange={e => setSendForm(prev => ({ ...prev, [rowKey]: { ...form, vendor_name: e.target.value } }))}
                             placeholder="Vendor"
                             className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
                           />
@@ -435,12 +579,17 @@ export default function OutsourcedJobs({ profile }) {
                           </datalist>
                         </div>
                         <div>
-                          <label className="block text-gray-500 text-[10px] mb-1">Quantity Sent *</label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block text-gray-500 text-[10px]">Quantity Sent *</label>
+                            <span className="text-[10px] text-gray-600">
+                              Batch: {batchQty} · Job order: {job.quantity}
+                            </span>
+                          </div>
                           <input
                             type="number"
                             min="1"
                             value={form.quantity || ''}
-                            onChange={e => setSendForm(prev => ({ ...prev, [step.id]: { ...form, quantity: e.target.value } }))}
+                            onChange={e => setSendForm(prev => ({ ...prev, [rowKey]: { ...form, quantity: e.target.value } }))}
                             className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs text-center focus:border-skynet-accent focus:outline-none"
                           />
                         </div>
@@ -451,7 +600,7 @@ export default function OutsourcedJobs({ profile }) {
                           <input
                             type="date"
                             value={form.sent_date || ''}
-                            onChange={e => setSendForm(prev => ({ ...prev, [step.id]: { ...form, sent_date: e.target.value } }))}
+                            onChange={e => setSendForm(prev => ({ ...prev, [rowKey]: { ...form, sent_date: e.target.value } }))}
                             className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
                           />
                         </div>
@@ -460,7 +609,7 @@ export default function OutsourcedJobs({ profile }) {
                           <input
                             type="date"
                             value={form.expected_return || ''}
-                            onChange={e => setSendForm(prev => ({ ...prev, [step.id]: { ...form, expected_return: e.target.value } }))}
+                            onChange={e => setSendForm(prev => ({ ...prev, [rowKey]: { ...form, expected_return: e.target.value } }))}
                             className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
                           />
                         </div>
@@ -469,7 +618,7 @@ export default function OutsourcedJobs({ profile }) {
                         <label className="block text-gray-500 text-[10px] mb-1">Notes</label>
                         <textarea
                           value={form.notes || ''}
-                          onChange={e => setSendForm(prev => ({ ...prev, [step.id]: { ...form, notes: e.target.value } }))}
+                          onChange={e => setSendForm(prev => ({ ...prev, [rowKey]: { ...form, notes: e.target.value } }))}
                           placeholder="Optional notes..."
                           rows={2}
                           className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none resize-none"
@@ -477,7 +626,7 @@ export default function OutsourcedJobs({ profile }) {
                       </div>
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => handleLogSendOut(step)}
+                          onClick={() => handleLogSendOut(row)}
                           disabled={saving || !form.vendor_name?.trim() || !form.quantity}
                           className="flex items-center gap-1.5 px-3 py-1.5 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
                         >
@@ -538,8 +687,14 @@ export default function OutsourcedJobs({ profile }) {
                       <span className="text-gray-500 truncate">{send.job.part.description}</span>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                  <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
                     <span className="text-white font-mono">{send.job?.job_number}</span>
+                    {send.batchLetter && (
+                      <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {send.batchLetter}</span>
+                    )}
+                    {send.finishing_send?.finishing_lot_number && (
+                      <span className="text-cyan-400 font-mono">{send.finishing_send.finishing_lot_number}</span>
+                    )}
                     {send.job?.work_order?.wo_number && <span>· {send.job.work_order.wo_number}</span>}
                     {send.job?.work_order?.customer && <span>· {send.job.work_order.customer}</span>}
                     <span>· Qty: {send.quantity}</span>
@@ -547,7 +702,7 @@ export default function OutsourcedJobs({ profile }) {
 
                   <div className="flex items-center gap-4 text-xs flex-wrap">
                     <span className="text-gray-400">
-                      Sent: <span className="text-gray-300">{formatDate(send.sent_at)}</span>
+                      Sent: <span className="text-gray-300">{formatDateLocal(send.sent_at)}</span>
                       {send.sent_by_profile?.full_name && (
                         <span className="text-gray-600"> by {send.sent_by_profile.full_name}</span>
                       )}
@@ -555,7 +710,7 @@ export default function OutsourcedJobs({ profile }) {
                     {send.expected_return_at && (
                       <span className={`flex items-center gap-1 ${overdue ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
                         {overdue && <AlertCircle size={12} />}
-                        Expected: <span className={overdue ? '' : 'text-gray-300'}>{formatDate(send.expected_return_at)}</span>
+                        Expected: <span className={overdue ? '' : 'text-gray-300'}>{formatDateOnly(send.expected_return_at)}</span>
                       </span>
                     )}
                   </div>
@@ -704,8 +859,14 @@ export default function OutsourcedJobs({ profile }) {
                       <span className="text-gray-500 truncate">{send.job.part.description}</span>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                  <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
                     <span className="text-white font-mono">{send.job?.job_number}</span>
+                    {send.batchLetter && (
+                      <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {send.batchLetter}</span>
+                    )}
+                    {send.finishing_send?.finishing_lot_number && (
+                      <span className="text-cyan-400 font-mono">{send.finishing_send.finishing_lot_number}</span>
+                    )}
                     {send.job?.work_order?.wo_number && <span>· {send.job.work_order.wo_number}</span>}
                     {send.job?.work_order?.customer && <span>· {send.job.work_order.customer}</span>}
                   </div>
@@ -717,7 +878,7 @@ export default function OutsourcedJobs({ profile }) {
                   )}
                   <div className="flex items-center gap-4 text-xs text-gray-400">
                     <span>Qty: {send.quantity_returned ?? send.quantity}</span>
-                    <span>Returned: <span className="text-green-300">{formatDate(send.returned_at)}</span></span>
+                    <span>Returned: <span className="text-green-300">{formatDateLocal(send.returned_at)}</span></span>
                     {send.returned_by_profile?.full_name && (
                       <span className="text-gray-600">by {send.returned_by_profile.full_name}</span>
                     )}

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
+import { buildTravelerHTML } from '../lib/traveler'
 import PrintPackageModal from './PrintPackageModal'
 import { 
   ChevronDown, 
@@ -21,8 +22,13 @@ import {
   ArrowUp,
   ArrowDown,
   Printer,
-  ClipboardCheck
+  ClipboardCheck,
+  Pause,
+  Flag,
+  Package,
+  ExternalLink
 } from 'lucide-react'
+
 
 export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [expandedJob, setExpandedJob] = useState(null)
@@ -76,6 +82,20 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       ...prev,
       [send.id]: { requirements: requirements || [], jobDocs: jobDocs || [] }
     }))
+
+    // Pre-fill good_qty with verified_count so Roger sees an actual default value,
+    // not just a placeholder. Only set if Roger hasn't already typed something.
+    setBatchReviewData(prev => {
+      const existing = prev[send.id] || {}
+      if (existing.good_qty != null && existing.good_qty !== '') return prev
+      const defaultGood = send.verified_count != null
+        ? String(send.verified_count)
+        : (send.quantity != null ? String(send.quantity) : '')
+      return {
+        ...prev,
+        [send.id]: { ...existing, good_qty: defaultGood }
+      }
+    })
   }
 
   const fetchPendingBatches = async () => {
@@ -85,9 +105,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         *,
         job:jobs(
           id, job_number, quantity, production_lot_number, status,
-          work_order_assembly_id,
+          work_order_assembly_id, is_standalone_finishing, source_description,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type),
-          component:parts!component_id(id, part_number, description, part_type)
+          component:parts!component_id(id, part_number, description, customer, part_type),
+          assigned_machine:machines!assigned_machine_id(name)
         ),
         sent_by_profile:profiles!sent_by(full_name),
         finishing_operator:profiles!finishing_operator_id(full_name)
@@ -124,9 +145,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       .select(`
         *,
         job:jobs(
-          id, job_number, quantity,
+          id, job_number, quantity, is_standalone_finishing, source_description,
           work_order:work_orders(wo_number, customer),
-          component:parts!component_id(part_number, description)
+          component:parts!component_id(part_number, description, customer),
+          assigned_machine:machines!assigned_machine_id(name)
         )
       `)
       .eq('compliance_status', 'approved')
@@ -165,34 +187,283 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     return String.fromCharCode(65 + idx) // A, B, C...
   }
 
-  const handleApproveBatch = async (send) => {
+  // Shared UI helper for the outcome selector used in all compliance cards.
+  // `variant` switches the available outcomes: pre-mfg (accept/hold/flag) vs
+  // post-mfg (accept/rework/reject). Parent supplies value + note plus setters
+  // so the helper stays state-agnostic.
+  const renderOutcomeSelector = ({ variant = 'post-mfg', outcome, onOutcomeChange, noteValue, onNoteChange, disabled }) => {
+    const preMfgOptions = [
+      { value: 'accepted', label: 'Accept', icon: CheckCircle, activeClass: 'bg-green-600 border-green-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-green-600 hover:text-green-400' },
+      { value: 'hold',     label: 'Hold',   icon: Pause,       activeClass: 'bg-slate-600 border-slate-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-slate-500 hover:text-slate-300' },
+      { value: 'flag',     label: 'Flag',   icon: Flag,        activeClass: 'bg-amber-600 border-amber-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-amber-600 hover:text-amber-400' },
+    ]
+    const preMfgHeldOptions = [
+      { value: 'accepted', label: 'Accept', icon: CheckCircle, activeClass: 'bg-green-600 border-green-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-green-600 hover:text-green-400' },
+      { value: 'flag',     label: 'Flag',   icon: Flag,        activeClass: 'bg-amber-600 border-amber-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-amber-600 hover:text-amber-400' },
+    ]
+    const postMfgOptions = [
+      { value: 'accepted', label: 'Accept', icon: CheckCircle, activeClass: 'bg-green-600 border-green-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-green-600 hover:text-green-400' },
+      { value: 'rework',   label: 'Rework', icon: AlertCircle, activeClass: 'bg-amber-600 border-amber-500 text-white', inactiveClass: 'border-gray-700 text-gray-400 hover:border-amber-600 hover:text-amber-400' },
+      { value: 'rejected', label: 'Reject', icon: X,           activeClass: 'bg-red-600 border-red-500 text-white',     inactiveClass: 'border-gray-700 text-gray-400 hover:border-red-600 hover:text-red-400' },
+    ]
+    const options = variant === 'pre-mfg' ? preMfgOptions
+      : variant === 'pre-mfg-held' ? preMfgHeldOptions
+      : postMfgOptions
+
+    return (
+      <div className="p-3 bg-gray-800/50 rounded-lg border border-gray-700 space-y-3">
+        <h4 className="text-gray-300 font-medium text-sm">Compliance Outcome</h4>
+        <div className={options.length === 2 ? 'grid grid-cols-2 gap-2' : 'grid grid-cols-3 gap-2'}>
+          {options.map(opt => {
+            const Icon = opt.icon
+            const isSelected = outcome === opt.value
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => onOutcomeChange(opt.value)}
+                disabled={disabled}
+                className={`flex items-center justify-center gap-2 px-3 py-2 rounded border-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${isSelected ? opt.activeClass : opt.inactiveClass}`}
+              >
+                <Icon size={16} />
+                {opt.label}
+              </button>
+            )
+          })}
+        </div>
+        {outcome === 'rework' && (
+          <div>
+            <label className="block text-amber-400 text-xs mb-1">
+              Rework Instructions <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              value={noteValue ?? ''}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="Describe what needs rework before assembly can proceed..."
+              rows={3}
+              className="w-full bg-gray-800 border border-amber-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-amber-500 focus:outline-none"
+            />
+          </div>
+        )}
+        {outcome === 'rejected' && (
+          <div>
+            <label className="block text-red-400 text-xs mb-1">
+              Rejection Reason <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              value={noteValue ?? ''}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="Reason for rejection — will be visible to April in WO Lookup..."
+              rows={3}
+              className="w-full bg-gray-800 border border-red-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-red-500 focus:outline-none"
+            />
+          </div>
+        )}
+        {outcome === 'hold' && (
+          <div>
+            <label className="block text-slate-300 text-xs mb-1">
+              Hold Reason <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              value={noteValue ?? ''}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="Why is this on hold? What are you working on? April will see this in WO Lookup..."
+              rows={3}
+              className="w-full bg-gray-800 border border-slate-600 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-slate-400 focus:outline-none"
+            />
+          </div>
+        )}
+        {outcome === 'flag' && (
+          <div>
+            <label className="block text-amber-400 text-xs mb-1">
+              Flag Note <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              value={noteValue ?? ''}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="What needs attention later? Who should handle it?..."
+              rows={3}
+              className="w-full bg-gray-800 border border-amber-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-amber-500 focus:outline-none"
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const handleViewTraveler = async (jobId) => {
+    if (!jobId) return
+    try {
+      const { data: fullJob, error: jobError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status,
+          production_lot_number, good_pieces, actual_end,
+          work_order:work_orders ( wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+          component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
+          assigned_machine:machines!assigned_machine_id ( name ),
+          assigned_user:profiles!assigned_user_id ( full_name )
+        `)
+        .eq('id', jobId)
+        .single()
+      if (jobError) throw jobError
+
+      const { data: steps, error: stepsError } = await supabase
+        .from('job_routing_steps')
+        .select(`*, completed_by_profile:profiles!completed_by(full_name)`)
+        .eq('job_id', jobId)
+        .neq('status', 'removed')
+        .order('step_order')
+      if (stepsError) throw stepsError
+
+      const { data: finishingBatches, error: fsError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          id, finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+          material_lot_number, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+          finishing_completed_at, compliance_approved_at,
+          finishing_operator:profiles!finishing_operator_id(full_name)
+        `)
+        .eq('job_id', jobId)
+        .not('finishing_completed_at', 'is', null)
+        .neq('compliance_status', 'rejected')
+        .order('finishing_completed_at', { ascending: false })
+      if (fsError) throw fsError
+
+      const { data: outboundSends, error: osError } = await supabase
+        .from('outbound_sends')
+        .select(`
+          id, operation_type, vendor_name, vendor_lot_number,
+          quantity, quantity_returned, sent_at, returned_at,
+          job_routing_step_id, finishing_send_id,
+          finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
+        `)
+        .eq('job_id', jobId)
+        .order('sent_at', { ascending: true })
+      if (osError) throw osError
+
+      const html = buildTravelerHTML({
+        job: fullJob,
+        steps: steps || [],
+        finishingBatches: finishingBatches || [],
+        outboundSends: outboundSends || [],
+      })
+      const win = window.open('', '_blank')
+      if (!win) {
+        alert('Pop-up blocked. Allow pop-ups for this site to view the traveler.')
+        return
+      }
+      win.document.open()
+      win.document.write(html)
+      win.document.close()
+    } catch (err) {
+      console.error('Failed to open traveler:', err)
+      alert('Failed to open traveler: ' + err.message)
+    }
+  }
+
+  const handleApproveBatch = async (send, outcome) => {
     setApprovingBatch(send.id)
     const now = new Date().toISOString()
     const reviewData = batchReviewData[send.id] || {}
 
+    // Validation
+    if (!outcome) {
+      alert('Select an outcome (Accept, Rework, or Reject) before submitting.')
+      setApprovingBatch(null)
+      return
+    }
+    const outcomeNote = reviewData.notes?.trim() || null
+    if (outcome === 'rework' && !outcomeNote) {
+      alert('Rework Instructions are required.')
+      setApprovingBatch(null)
+      return
+    }
+    if (outcome === 'rejected' && !outcomeNote) {
+      alert('Rejection Reason is required.')
+      setApprovingBatch(null)
+      return
+    }
+
+    // Reject doesn't require qty (the rejection reason captures the action).
+    // Accept and Rework both require explicit qty acknowledgment.
+    if (outcome === 'accepted' || outcome === 'rework') {
+      const goodStr = (reviewData.good_qty ?? '').toString().trim()
+      const badStr = (reviewData.bad_qty ?? '').toString().trim()
+      const goodNum = goodStr === '' ? null : parseInt(goodStr)
+      const badNum = badStr === '' ? null : parseInt(badStr)
+
+      if (goodNum == null && badNum == null) {
+        alert('Enter a Good Quantity (and Bad Quantity if any) before accepting or sending to rework.')
+        setApprovingBatch(null)
+        return
+      }
+      if (goodNum != null && (Number.isNaN(goodNum) || goodNum < 0)) {
+        alert('Good Quantity must be a non-negative number.')
+        setApprovingBatch(null)
+        return
+      }
+      if (badNum != null && (Number.isNaN(badNum) || badNum < 0)) {
+        alert('Bad Quantity must be a non-negative number.')
+        setApprovingBatch(null)
+        return
+      }
+
+      const baseQty = send.verified_count ?? send.quantity ?? 0
+      const totalEntered = (goodNum ?? 0) + (badNum ?? 0)
+      if (totalEntered > baseQty) {
+        if (!window.confirm(
+          `Good (${goodNum ?? 0}) + Bad (${badNum ?? 0}) = ${totalEntered}, which is more than the verified count (${baseQty}). Continue anyway?`
+        )) {
+          setApprovingBatch(null)
+          return
+        }
+      }
+    }
+
     try {
-      // 1. Approve this finishing_send
+      const isReject = outcome === 'rejected'
+
+      // Auto-derive good_qty from bad_qty when good is unspecified, so reviewers
+      // who only enter "5 bad" don't end up with a NULL good count.
+      const enteredGood = reviewData.good_qty !== '' && reviewData.good_qty != null
+        ? parseInt(reviewData.good_qty) : null
+      const enteredBad = reviewData.bad_qty !== '' && reviewData.bad_qty != null
+        ? parseInt(reviewData.bad_qty) : null
+      const baseQty = send.verified_count ?? send.quantity
+      const derivedGood = enteredGood != null
+        ? enteredGood
+        : (enteredBad != null ? Math.max(0, baseQty - enteredBad) : null)
+
+      // 1. Update the finishing_send
+      const sendUpdate = {
+        compliance_status: isReject ? 'rejected' : 'approved',
+        compliance_outcome: outcome,
+        compliance_approved_by: profile.id,
+        compliance_approved_at: now,
+        compliance_notes: outcomeNote,
+        compliance_good_qty: derivedGood,
+        compliance_bad_qty: enteredBad,
+        updated_at: now,
+      }
       const { error: sendError } = await supabase
         .from('finishing_sends')
-        .update({
-          compliance_status: 'approved',
-          compliance_approved_by: profile.id,
-          compliance_approved_at: now,
-          compliance_notes: reviewData.notes?.trim() || null,
-          compliance_good_qty: reviewData.good_qty ? parseInt(reviewData.good_qty) : null,
-          compliance_bad_qty: reviewData.bad_qty ? parseInt(reviewData.bad_qty) : null,
-          updated_at: now
-        })
+        .update(sendUpdate)
         .eq('id', send.id)
-
       if (sendError) throw sendError
+
+      // Short-circuit rejected: do not check in parts, do not advance job
+      if (isReject) {
+        await fetchPendingBatches()
+        await fetchRecentlyApprovedBatches()
+        onUpdate()
+        return
+      }
 
       // 1b. Create assembly_component_checkins record if job belongs to an assembly
       const woaId = send.job?.work_order_assembly_id
       if (woaId) {
-        const checkinQty = reviewData.good_qty
-          ? parseInt(reviewData.good_qty)
-          : send.quantity
+        const checkinQty = derivedGood ?? send.quantity
         const { error: checkinError } = await supabase
           .from('assembly_component_checkins')
           .insert({
@@ -201,15 +472,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
             quantity_received: checkinQty,
             checked_in_by: profile.id,
             checked_in_at: now,
-            condition_notes: reviewData.notes?.trim() || null
+            condition_notes: outcomeNote,
           })
-        if (checkinError) {
-          // Non-fatal — log but don't block the approval
-          console.error('Check-in insert failed (non-fatal):', checkinError)
-        }
+        if (checkinError) console.error('Check-in insert failed (non-fatal):', checkinError)
       }
 
-      // 2. Check if job should advance
+      // 2. Advance job if applicable (same logic for accepted and rework)
       const jobId = send.job_id
       const { data: parentJob } = await supabase
         .from('jobs')
@@ -217,22 +485,20 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         .eq('id', jobId)
         .single()
 
-      // Get all sends for this job to check if full quantity has been sent
       const { data: allSends } = await supabase
         .from('finishing_sends')
-        .select('id, quantity, status')
+        .select('id, quantity, status, compliance_status')
         .eq('job_id', jobId)
 
-      const totalSentQty = allSends?.reduce((sum, s) => sum + (s.quantity || 0), 0) || 0
+      // Only count sends that were NOT rejected toward total
+      const totalSentQty = allSends
+        ?.filter(s => s.compliance_status !== 'rejected')
+        .reduce((sum, s) => sum + (s.quantity || 0), 0) || 0
       const jobQty = parentJob?.quantity || send.job?.quantity || 0
       const allQtySent = totalSentQty >= jobQty
-
-      // Only advance job status if ALL quantity has been sent to finishing
-      // AND machining is complete (not still in_progress with remaining qty)
       const canAdvance = allQtySent && ['in_progress', 'manufacturing_complete'].includes(parentJob?.status)
 
       if (canAdvance) {
-        // Check if this job has any external routing steps not yet complete
         const { data: externalSteps } = await supabase
           .from('job_routing_steps')
           .select('id, step_name, status')
@@ -242,31 +508,31 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
         let nextStatus
         if (externalSteps && externalSteps.length > 0) {
-          // Has pending external steps — route to outsourcing queue
           nextStatus = 'ready_for_outsourcing'
         } else {
-          // No external steps — existing logic
           const partType = parentJob?.component?.part_type
           nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
         }
 
+        // Propagate rework outcome up to the job so WO Lookup can flag it
+        const jobUpdate = { status: nextStatus, updated_at: now }
+        if (outcome === 'rework') {
+          jobUpdate.compliance_outcome = 'rework'
+        }
+
         const { error: jobError } = await supabase
           .from('jobs')
-          .update({ status: nextStatus, updated_at: now })
+          .update(jobUpdate)
           .eq('id', jobId)
-
         if (jobError) throw jobError
       }
-      // If totalSentQty < jobQty — remaining quantity still on the machine
-      // Leave job at in_progress so machinist kiosk stays intact
 
       await fetchPendingBatches()
       await fetchRecentlyApprovedBatches()
-      onUpdate() // refresh parent dashboard
-
+      onUpdate()
     } catch (err) {
       console.error('Batch approval error:', err)
-      alert('Failed to approve batch: ' + err.message)
+      alert('Failed to submit batch: ' + err.message)
     } finally {
       setApprovingBatch(null)
     }
@@ -495,7 +761,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
   // Filter jobs by category
-  const pendingMachiningJobs = jobs.filter(job => job.status === 'pending_compliance')
+  const pendingMachiningJobs = jobs.filter(job =>
+    job.status === 'pending_compliance' && job.compliance_outcome !== 'hold'
+  )
+  const heldMachiningJobs = jobs.filter(job =>
+    job.status === 'pending_compliance' && job.compliance_outcome === 'hold'
+  )
   const pendingPostMfgJobs = jobs.filter(job => job.status === 'pending_post_manufacturing')
   const approvedUnassignedJobs = jobs.filter(job => job.status === 'ready' && !job.assigned_machine_id)
   
@@ -559,7 +830,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
     const { data: latestSend } = await supabase
       .from('finishing_sends')
-      .select('production_lot_number, finishing_lot_number, material_lot_number, chemical_lot_number, incoming_count, verified_count, count_discrepancy')
+      .select('production_lot_number, finishing_lot_number, material_lot_number, chemical_lot_number, chemical_lot_number_2, incoming_count, verified_count, count_discrepancy')
       .eq('job_id', jobId)
       .eq('status', 'finishing_complete')
       .order('finishing_completed_at', { ascending: false })
@@ -623,6 +894,37 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
       alert('Failed to upload document: ' + err.message)
     }
     setUploading(null)
+  }
+
+  const handleDeleteDocument = async (doc, contextJobId, contextSend) => {
+    if (!doc?.id) return
+    if (!window.confirm(`Delete "${doc.file_name}"? This cannot be undone.`)) return
+
+    setUploading('delete-' + doc.id)
+    try {
+      const { error } = await supabase
+        .from('job_documents')
+        .delete()
+        .eq('id', doc.id)
+      if (error) throw error
+
+      // Refresh whichever context the doc lives in
+      if (contextSend) {
+        await fetchBatchDetails(contextSend)
+      }
+      if (contextJobId) {
+        const fresh = await fetchJobDetails(contextJobId)
+        setJobDetails(prev => ({ ...prev, [contextJobId]: fresh }))
+      }
+      // Also refresh the broader job-doc lists
+      await fetchPendingBatches()
+      await fetchRecentlyApprovedBatches()
+    } catch (err) {
+      console.error('Delete failed:', err)
+      alert('Failed to delete document: ' + err.message)
+    } finally {
+      setUploading(null)
+    }
   }
 
   const handleFileUpload = async (jobId, documentTypeId, documentTypeCode, file) => {
@@ -734,22 +1036,80 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     setApproving(null)
   }
 
-  const handleApproveJob = async (jobId, currentStatus) => {
+  const handleApproveJob = async (jobId, currentStatus, outcome) => {
     setApproving(jobId)
+    const pmData = postMfgData[jobId] || {}
+
+    // Validation
+    if (!outcome) {
+      alert('Select an outcome (Accept, Rework, or Reject) before submitting.')
+      setApproving(null)
+      return
+    }
+    const outcomeNote = pmData.notes?.trim() || null
+    if (outcome === 'rework' && !outcomeNote) {
+      alert('Rework Instructions are required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'rejected' && !outcomeNote) {
+      alert('Rejection Reason is required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'hold' && !outcomeNote) {
+      alert('Hold Reason is required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'flag' && !outcomeNote) {
+      alert('Flag Note is required.')
+      setApproving(null)
+      return
+    }
 
     try {
-      // Determine next status based on current status
+      const now = new Date().toISOString()
+
+      // Hold path: job does NOT advance. Just record outcome + reason.
+      if (outcome === 'hold') {
+        const { error } = await supabase
+          .from('jobs')
+          .update({
+            compliance_outcome: 'hold',
+            compliance_notes: outcomeNote,
+            updated_at: now,
+          })
+          .eq('id', jobId)
+        if (error) throw error
+        onUpdate()
+        return
+      }
+
+      // Reject path: cancel the job, record outcome + reason
+      if (outcome === 'rejected') {
+        const { error } = await supabase
+          .from('jobs')
+          .update({
+            status: 'cancelled',
+            compliance_outcome: 'rejected',
+            compliance_notes: outcomeNote,
+            updated_at: now,
+          })
+          .eq('id', jobId)
+        if (error) throw error
+        onUpdate()
+        return
+      }
+
+      // Accept / Rework path: determine next status (same logic either way)
       let nextStatus = 'ready'
       if (currentStatus === 'pending_compliance') {
-        // If April already scheduled this job to a machine, jump straight to
-        // 'assigned' so it appears on the kiosk immediately. Otherwise stay
-        // 'ready' so April can pick it up from the unassigned pool.
         const job = jobs.find(j => j.id === jobId)
         if (job?.assigned_machine_id) {
           nextStatus = 'assigned'
         }
       } else if (currentStatus === 'pending_post_manufacturing') {
-        // Check if this job has any external routing steps that are not yet complete
         const { data: externalSteps } = await supabase
           .from('job_routing_steps')
           .select('id, step_name, status')
@@ -758,65 +1118,117 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           .in('status', ['pending', 'in_progress'])
 
         if (externalSteps && externalSteps.length > 0) {
-          // Has pending external steps — route to outsourcing queue
           nextStatus = 'ready_for_outsourcing'
         } else {
-          // No external steps — follow existing logic
           const job = jobs.find(j => j.id === jobId)
           const partType = job?.component?.part_type
-          if (partType === 'finished_good') {
-            nextStatus = 'pending_tco'
-          } else {
-            nextStatus = 'ready_for_assembly'
-          }
+          nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
         }
       }
 
-      const pmData = postMfgData[jobId] || {}
       const updatePayload = {
         status: nextStatus,
-        updated_at: new Date().toISOString(),
+        compliance_outcome: outcome,
+        updated_at: now,
+      }
+      if (outcome === 'rework' || outcome === 'flag') {
+        updatePayload.compliance_notes = outcomeNote
+      } else if (outcome === 'accepted') {
+        updatePayload.compliance_notes = null
       }
       if (currentStatus === 'pending_post_manufacturing') {
         if (pmData.good_qty !== undefined && pmData.good_qty !== '')
           updatePayload.post_mfg_good_qty = parseInt(pmData.good_qty)
         if (pmData.bad_qty !== undefined && pmData.bad_qty !== '')
           updatePayload.post_mfg_bad_qty = parseInt(pmData.bad_qty)
-        if (pmData.notes?.trim())
-          updatePayload.post_mfg_notes = pmData.notes.trim()
+        if (outcomeNote) updatePayload.post_mfg_notes = outcomeNote
         updatePayload.post_mfg_reviewed_by = profile.id
-        updatePayload.post_mfg_reviewed_at = new Date().toISOString()
+        updatePayload.post_mfg_reviewed_at = now
       }
 
       const { error } = await supabase
         .from('jobs')
         .update(updatePayload)
         .eq('id', jobId)
-
       if (error) throw error
       onUpdate()
-
     } catch (err) {
       console.error('Approve job error:', err)
-      alert('Failed to approve job')
+      alert('Failed to submit job review')
+    } finally {
+      setApproving(null)
     }
-
-    setApproving(null)
   }
 
-  const handleApproveAndPrint = async (job) => {
+  const handleApproveAndPrint = async (job, outcome) => {
     setApproving(job.id)
+    const pmData = postMfgData[job.id] || {}
+
+    if (!outcome) {
+      alert('Select an outcome (Accept, Rework, or Reject) before submitting.')
+      setApproving(null)
+      return
+    }
+    const outcomeNote = pmData.notes?.trim() || null
+    if (outcome === 'rework' && !outcomeNote) {
+      alert('Rework Instructions are required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'rejected' && !outcomeNote) {
+      alert('Rejection Reason is required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'hold' && !outcomeNote) {
+      alert('Hold Reason is required.')
+      setApproving(null)
+      return
+    }
+    if (outcome === 'flag' && !outcomeNote) {
+      alert('Flag Note is required.')
+      setApproving(null)
+      return
+    }
 
     try {
+      const now = new Date().toISOString()
+
+      // Hold path: no status change, no print, just record.
+      if (outcome === 'hold') {
+        const { error } = await supabase
+          .from('jobs')
+          .update({
+            compliance_outcome: 'hold',
+            compliance_notes: outcomeNote,
+            updated_at: now,
+          })
+          .eq('id', job.id)
+        if (error) throw error
+        onUpdate()
+        return
+      }
+
+      if (outcome === 'rejected') {
+        const { error } = await supabase
+          .from('jobs')
+          .update({
+            status: 'cancelled',
+            compliance_outcome: 'rejected',
+            compliance_notes: outcomeNote,
+            updated_at: now,
+          })
+          .eq('id', job.id)
+        if (error) throw error
+        onUpdate()
+        return
+        // No print for rejected jobs.
+      }
+
       let nextStatus = 'ready'
       if (job.status === 'pending_compliance') {
-        // If April already scheduled this job to a machine, jump straight to
-        // 'assigned' so it appears on the kiosk immediately.
-        if (job.assigned_machine_id) {
-          nextStatus = 'assigned'
-        }
+        if (job.assigned_machine_id) nextStatus = 'assigned'
       } else if (job.status === 'pending_post_manufacturing') {
-        // Check if this job has any external routing steps that are not yet complete
         const { data: externalSteps } = await supabase
           .from('job_routing_steps')
           .select('id, step_name, status')
@@ -825,51 +1237,46 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           .in('status', ['pending', 'in_progress'])
 
         if (externalSteps && externalSteps.length > 0) {
-          // Has pending external steps — route to outsourcing queue
           nextStatus = 'ready_for_outsourcing'
         } else {
-          // No external steps — follow existing logic
           const partType = job.component?.part_type
-          if (partType === 'finished_good') {
-            nextStatus = 'pending_tco'
-          } else {
-            nextStatus = 'ready_for_assembly'
-          }
+          nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
         }
       }
 
-      const pmData = postMfgData[job.id] || {}
       const updatePayload = {
         status: nextStatus,
-        updated_at: new Date().toISOString(),
+        compliance_outcome: outcome,
+        updated_at: now,
+      }
+      if (outcome === 'rework' || outcome === 'flag') {
+        updatePayload.compliance_notes = outcomeNote
+      } else if (outcome === 'accepted') {
+        updatePayload.compliance_notes = null
       }
       if (job.status === 'pending_post_manufacturing') {
         if (pmData.good_qty !== undefined && pmData.good_qty !== '')
           updatePayload.post_mfg_good_qty = parseInt(pmData.good_qty)
         if (pmData.bad_qty !== undefined && pmData.bad_qty !== '')
           updatePayload.post_mfg_bad_qty = parseInt(pmData.bad_qty)
-        if (pmData.notes?.trim())
-          updatePayload.post_mfg_notes = pmData.notes.trim()
+        if (outcomeNote) updatePayload.post_mfg_notes = outcomeNote
         updatePayload.post_mfg_reviewed_by = profile.id
-        updatePayload.post_mfg_reviewed_at = new Date().toISOString()
+        updatePayload.post_mfg_reviewed_at = now
       }
 
       const { error } = await supabase
         .from('jobs')
         .update(updatePayload)
         .eq('id', job.id)
-
       if (error) throw error
       onUpdate()
-      // Open print package modal after successful approval
       setPrintPackageJob(job)
-
     } catch (err) {
       console.error('Approve job error:', err)
-      alert('Failed to approve job')
+      alert('Failed to submit job review')
+    } finally {
+      setApproving(null)
     }
-
-    setApproving(null)
   }
 
   const handleRecallJob = async (jobId) => {
@@ -987,7 +1394,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const ViewButton = ({ filePath }) => {
     if (!filePath) return null
     const isLoading = viewingDoc === filePath
-    
+
     return (
       <button
         onClick={() => handleViewDocument(filePath)}
@@ -1000,15 +1407,34 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     )
   }
 
+  const DeleteButton = ({ doc, contextJobId, contextSend, disabled }) => {
+    if (!isComplianceUser) return null
+    const isDeleting = uploading === 'delete-' + doc.id
+    return (
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          handleDeleteDocument(doc, contextJobId, contextSend)
+        }}
+        disabled={disabled || isDeleting}
+        title="Delete document"
+        className="flex items-center gap-1 px-2 py-1 text-xs bg-red-900/40 hover:bg-red-900/70 text-red-400 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {isDeleting ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+        Delete
+      </button>
+    )
+  }
+
   // Render a pending review section (shared for machining and post-mfg)
-  const renderPendingSection = (sectionJobs, title, borderColor, requiredStage, showPhaseLabel = false) => {
+  const renderPendingSection = (sectionJobs, title, borderColor, requiredStage, showPhaseLabel = false, isHeldSection = false) => {
     if (sectionJobs.length === 0) return null
 
     return (
       <div className={`bg-gray-900 rounded-lg border ${borderColor} p-4`}>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-purple-400 font-semibold flex items-center gap-2">
-            <Clock size={18} />
+          <h3 className={`font-semibold flex items-center gap-2 ${isHeldSection ? 'text-slate-400' : 'text-purple-400'}`}>
+            {isHeldSection ? <Pause size={18} /> : <Clock size={18} />}
             {title} ({sectionJobs.length})
           </h3>
         </div>
@@ -1058,9 +1484,15 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                           <span className="mx-2">• {job.work_order.customer}</span>
                         )}
                       </div>
+                      {isHeldSection && job.compliance_notes && (
+                        <div className="mt-1 text-xs text-slate-400 italic flex items-center gap-1">
+                          <Pause size={12} />
+                          <span className="truncate">{job.compliance_notes}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
-                  
+
                 </div>
 
                 {isExpanded && (() => {
@@ -1073,6 +1505,19 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
                   return (
                   <div className="border-t border-gray-700 p-4">
+                    {/* On-Hold banner — shown at the top of the expanded card when
+                        a previous compliance review placed this job on hold. */}
+                    {job.compliance_outcome === 'hold' && (
+                      <div className="mb-4 p-3 bg-slate-800/60 border border-slate-600 rounded flex items-start gap-2">
+                        <Pause size={18} className="text-slate-300 mt-0.5 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-slate-200 text-sm font-semibold">Currently on Hold</div>
+                          {job.compliance_notes && (
+                            <div className="text-slate-400 text-xs mt-1 whitespace-pre-wrap">{job.compliance_notes}</div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {/* Full Routing Display — only for pre-mfg compliance review */}
                     {requiredStage === 'compliance_review' && hasRouting && (
                       <div className="mb-4 pb-4 border-b border-gray-700">
@@ -1414,6 +1859,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
                                     <div className="flex items-center gap-2">
                                       <ViewButton filePath={doc.file_url} />
+                                      <DeleteButton doc={doc} contextJobId={job.id} />
 
                                       {isComplianceUser && (
                                         <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
@@ -1494,7 +1940,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                 <FileText size={16} className="text-gray-400" />
                                 <span className="text-xs text-gray-400">{doc.file_name}</span>
                               </div>
-                              <ViewButton filePath={doc.file_url} />
+                              <div className="flex items-center gap-1.5">
+                                <ViewButton filePath={doc.file_url} />
+                                <DeleteButton doc={doc} contextJobId={job.id} />
+                              </div>
                             </div>
                           ))
                         }
@@ -1543,73 +1992,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       </div>
                     )}
 
-                    {/* Post-Mfg Review Fields — only for post-mfg jobs */}
-                    {job.status === 'pending_post_manufacturing' && (
-                      <div className="mt-4 p-4 bg-gray-800/50 rounded-lg border border-indigo-800/30 space-y-4">
-                        <h4 className="text-indigo-400 font-medium text-sm flex items-center gap-2">
-                          <ClipboardCheck size={16} />
-                          Post-Manufacturing Review
-                        </h4>
-
-                        {/* Good/Bad quantity row */}
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-gray-400 text-xs mb-1">
-                              Good Quantity
-                            </label>
-                            <input
-                              type="number"
-                              min="0"
-                              value={postMfgData[job.id]?.good_qty ?? ''}
-                              onChange={(e) => setPostMfgData(prev => ({
-                                ...prev,
-                                [job.id]: { ...prev[job.id], good_qty: e.target.value }
-                              }))}
-                              placeholder={String(job.quantity)}
-                              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
-                                         text-sm focus:border-indigo-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-gray-400 text-xs mb-1">
-                              Bad Quantity
-                            </label>
-                            <input
-                              type="number"
-                              min="0"
-                              value={postMfgData[job.id]?.bad_qty ?? ''}
-                              onChange={(e) => setPostMfgData(prev => ({
-                                ...prev,
-                                [job.id]: { ...prev[job.id], bad_qty: e.target.value }
-                              }))}
-                              placeholder="0"
-                              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
-                                         text-sm focus:border-indigo-500 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        {/* Notes */}
-                        <div>
-                          <label className="block text-gray-400 text-xs mb-1">
-                            Review Notes (Optional)
-                          </label>
-                          <textarea
-                            value={postMfgData[job.id]?.notes ?? ''}
-                            onChange={(e) => setPostMfgData(prev => ({
-                              ...prev,
-                              [job.id]: { ...prev[job.id], notes: e.target.value }
-                            }))}
-                            placeholder="Any observations, quality issues, or notes for this job..."
-                            rows={3}
-                            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white
-                                       placeholder-gray-500 text-sm focus:border-indigo-500 focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Footer */}
+                    {/* Footer — outcome selector + submit actions */}
                     <div className="mt-4 pt-4 border-t border-gray-700">
                       <div className="space-y-2 mb-3">
                         {jobCanApprove ? (
@@ -1636,35 +2019,72 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                           </span>
                         )}
                       </div>
-                      <div className="flex justify-end gap-2">
-                        <button
-                          onClick={() => handleApproveJob(job.id, job.status)}
-                          disabled={!canApproveFull || approving === job.id}
-                          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {approving === job.id ? (
-                            <Loader2 size={16} className="animate-spin" />
-                          ) : (
-                            <CheckCircle size={16} />
-                          )}
-                          {approving === job.id ? 'Approving...' : 'Approve Job'}
-                        </button>
-                        <button
-                          onClick={() => handleApproveAndPrint(job)}
-                          disabled={!canApproveFull || approving === job.id}
-                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {approving === job.id ? (
-                            <Loader2 size={16} className="animate-spin" />
-                          ) : (
-                            <>
-                              <CheckCircle size={16} />
-                              <Printer size={16} />
-                            </>
-                          )}
-                          {approving === job.id ? 'Approving...' : 'Approve & Print'}
-                        </button>
+
+                      {/* Outcome selector */}
+                      <div className="mb-4">
+                        {renderOutcomeSelector({
+                          variant: isHeldSection ? 'pre-mfg-held' : 'pre-mfg',
+                          outcome: postMfgData[job.id]?.outcome,
+                          onOutcomeChange: (v) => setPostMfgData(prev => ({
+                            ...prev,
+                            [job.id]: { ...prev[job.id], outcome: v }
+                          })),
+                          noteValue: postMfgData[job.id]?.notes,
+                          onNoteChange: (v) => setPostMfgData(prev => ({
+                            ...prev,
+                            [job.id]: { ...prev[job.id], notes: v }
+                          })),
+                          disabled: approving === job.id,
+                        })}
                       </div>
+
+                      {(() => {
+                        const outcome = postMfgData[job.id]?.outcome
+                        const outcomeNote = (postMfgData[job.id]?.notes || '').trim()
+                        // Pre-mfg outcomes: accepted, hold, flag
+                        // Hold bypasses doc guard; accepted and flag require it.
+                        const needsDocGuard = outcome === 'accepted' || outcome === 'flag'
+                        const outcomeValid = outcome === 'accepted'
+                          || (outcome === 'hold' && outcomeNote.length > 0)
+                          || (outcome === 'flag' && outcomeNote.length > 0)
+                        const submitEnabled = outcomeValid
+                          && (!needsDocGuard || canApproveFull)
+                          && approving !== job.id
+                        const printAllowed = outcome === 'accepted' || outcome === 'flag'
+                        const submitLabel = outcome === 'hold' ? 'Place on Hold'
+                          : outcome === 'flag' ? 'Submit with Flag'
+                          : 'Submit Acceptance'
+                        const submitColor = outcome === 'hold' ? 'bg-slate-600 hover:bg-slate-500'
+                          : outcome === 'flag' ? 'bg-amber-600 hover:bg-amber-500'
+                          : 'bg-green-600 hover:bg-green-500'
+
+                        return (
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => handleApproveJob(job.id, job.status, outcome)}
+                              disabled={!submitEnabled}
+                              className={`flex items-center gap-2 px-4 py-2 ${submitColor} text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+                            >
+                              {approving === job.id ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
+                              {approving === job.id ? 'Submitting...' : submitLabel}
+                            </button>
+                            {printAllowed && (
+                              <button
+                                onClick={() => handleApproveAndPrint(job, outcome)}
+                                disabled={!submitEnabled}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {approving === job.id ? (
+                                  <Loader2 size={16} className="animate-spin" />
+                                ) : (
+                                  <><CheckCircle size={16} /><Printer size={16} /></>
+                                )}
+                                {approving === job.id ? 'Submitting...' : `${submitLabel} & Print`}
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                   )
@@ -1679,6 +2099,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
   // If no compliance-related jobs at all, don't render anything
   const hasAnyContent = pendingMachiningJobs.length > 0 ||
+                        heldMachiningJobs.length > 0 ||
                         pendingPostMfgJobs.length > 0 ||
                         pendingBatches.length > 0 ||
                         approvedUnassignedJobs.length > 0 ||
@@ -1690,10 +2111,20 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     <div className="space-y-4">
       {/* Pending Review - Machining */}
       {renderPendingSection(
-        pendingMachiningJobs, 
+        pendingMachiningJobs,
         'Pending Review - Pre-Manufacturing',
         'border-purple-800',
         'compliance_review'
+      )}
+
+      {/* On Hold - Machining (pre-mfg jobs marked compliance_outcome='hold') */}
+      {heldMachiningJobs.length > 0 && renderPendingSection(
+        heldMachiningJobs,
+        'On Hold - Pre-Manufacturing',
+        'border-slate-500',
+        'compliance_review',
+        false,
+        true  // isHeldSection
       )}
 
       {/* Pending Review - Post-Manufacturing (merged batches + legacy jobs) */}
@@ -1742,6 +2173,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="text-white font-mono">{send.job?.job_number}</span>
+                              {send.job?.is_standalone_finishing && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
+                                  <Package size={10} />
+                                  Standalone
+                                </span>
+                              )}
                               {batchLabel && (
                                 <span className="text-xs px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400
                                                  border border-cyan-700 rounded font-mono">
@@ -1749,16 +2186,22 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                 </span>
                               )}
                               <span className="text-gray-500">&middot;</span>
-                              <span className="text-gray-400">{send.job?.work_order?.wo_number}</span>
+                              <span className="text-gray-400">{send.job?.work_order?.wo_number || (send.job?.is_standalone_finishing ? 'Standalone' : '—')}</span>
                             </div>
                             <div className="text-sm text-gray-500">
                               <span className="text-skynet-accent">{send.job?.component?.part_number}</span>
                               <span className="mx-2">&middot;</span>
                               <span>Qty: {send.quantity}</span>
-                              {send.job?.work_order?.customer && (
-                                <span className="mx-2">&middot; {send.job.work_order.customer}</span>
+                              {(send.job?.work_order?.customer || send.job?.component?.customer) && (
+                                <span className="mx-2">&middot; {send.job?.work_order?.customer || send.job?.component?.customer}</span>
                               )}
                             </div>
+                            {send.job?.is_standalone_finishing && (
+                              <div className="text-xs text-gray-500 mt-1">
+                                Source: {send.job?.assigned_machine?.name
+                                  || (send.job?.source_description ? `Received (${send.job.source_description})` : 'Received')}
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1794,8 +2237,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               <p className="text-white">{send.material_lot_number || '—'}</p>
                             </div>
                             <div>
-                              <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                              <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
                               <p className="text-white">{send.chemical_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                              <p className="text-white">{send.chemical_lot_number_2 || '—'}</p>
                             </div>
                             <div>
                               <p className="text-gray-500 text-xs">Incoming Count</p>
@@ -1829,7 +2276,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                     ...prev,
                                     [send.id]: { ...prev[send.id], good_qty: e.target.value }
                                   }))}
-                                  placeholder={String(send.verified_count ?? send.quantity)}
                                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2
                                              text-white text-sm focus:border-indigo-500 focus:outline-none"
                                 />
@@ -1852,7 +2298,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                             </div>
                             <div>
                               <label className="block text-gray-400 text-xs mb-1">
-                                Review Notes (Optional)
+                                {batchReviewData[send.id]?.outcome === 'rework'
+                                  ? 'Rework Instructions *'
+                                  : batchReviewData[send.id]?.outcome === 'rejected'
+                                  ? 'Rejection Reason *'
+                                  : 'Review Notes (Optional)'}
                               </label>
                               <textarea
                                 value={reviewData.notes ?? ''}
@@ -1951,6 +2401,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                   <ViewButton filePath={doc.file_url} />
+                                                  <DeleteButton doc={doc} contextSend={send} />
                                                   {isComplianceUser && (
                                                     <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
                                                       {isReplacing ? (
@@ -1999,6 +2450,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                   </div>
                                 )}
 
+                                {/* Job Traveler — live, generated on demand */}
+                                <div className="mt-4">
+                                  <h4 className="text-gray-400 text-sm font-medium mb-2">Job Traveler</h4>
+                                  <button
+                                    onClick={() => handleViewTraveler(send.job_id)}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-700/50 rounded-lg transition-colors text-left group"
+                                  >
+                                    <div className="w-8 h-8 rounded bg-cyan-800/50 flex items-center justify-center flex-shrink-0">
+                                      <FileText size={16} className="text-cyan-300" />
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-white text-sm truncate group-hover:text-cyan-300 transition-colors">
+                                        Job Traveler
+                                      </p>
+                                      <p className="text-gray-400 text-xs truncate">Live — reflects current routing & job data</p>
+                                    </div>
+                                    <ExternalLink size={14} className="text-gray-500 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                                  </button>
+                                </div>
+
                                 {/* Additional Documents */}
                                 {isComplianceUser && (
                                   <div className="mt-4">
@@ -2034,7 +2505,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                             <FileText size={16} className="text-gray-400" />
                                             <span className="text-xs text-gray-400">{doc.file_name}</span>
                                           </div>
-                                          <ViewButton filePath={doc.file_url} />
+                                          <div className="flex items-center gap-1.5">
+                                            <ViewButton filePath={doc.file_url} />
+                                            <DeleteButton doc={doc} contextSend={send} />
+                                          </div>
                                         </div>
                                       ))
                                     }
@@ -2074,7 +2548,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                                   }
                                                   <span className="text-xs text-gray-400">{doc.file_name}</span>
                                                 </div>
-                                                <ViewButton filePath={doc.file_url} />
+                                                <div className="flex items-center gap-1.5">
+                                                  <ViewButton filePath={doc.file_url} />
+                                                  <DeleteButton doc={doc} contextSend={send} />
+                                                </div>
                                               </div>
                                             ))
                                           )}
@@ -2129,6 +2606,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                                   ))}
                                                 </select>
                                                 <ViewButton filePath={doc.file_url} />
+                                                <DeleteButton doc={doc} contextSend={send} />
                                                 {doc.status === 'pending' && (
                                                   <button
                                                     onClick={async () => {
@@ -2154,19 +2632,49 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                             )
                           })()}
 
-                          {/* Approve button */}
-                          <button
-                            onClick={() => handleApproveBatch(send)}
-                            disabled={isApproving}
-                            className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700
-                                       text-white font-semibold rounded-lg transition-colors
-                                       flex items-center justify-center gap-2"
-                          >
-                            {isApproving
-                              ? <><Loader2 size={18} className="animate-spin" /> Approving...</>
-                              : <><CheckCircle size={18} /> Approve Batch {batchLabel || ''}</>
-                            }
-                          </button>
+                          {/* Outcome selector + submit */}
+                          <div className="pt-2">
+                            {renderOutcomeSelector({
+                              outcome: batchReviewData[send.id]?.outcome,
+                              onOutcomeChange: (v) => setBatchReviewData(prev => ({
+                                ...prev,
+                                [send.id]: { ...prev[send.id], outcome: v }
+                              })),
+                              noteValue: batchReviewData[send.id]?.notes,
+                              onNoteChange: (v) => setBatchReviewData(prev => ({
+                                ...prev,
+                                [send.id]: { ...prev[send.id], notes: v }
+                              })),
+                              disabled: isApproving,
+                            })}
+                          </div>
+                          {(() => {
+                            const outcome = batchReviewData[send.id]?.outcome
+                            const outcomeNote = (batchReviewData[send.id]?.notes || '').trim()
+                            const outcomeValid = outcome === 'accepted'
+                              || (outcome === 'rework' && outcomeNote.length > 0)
+                              || (outcome === 'rejected' && outcomeNote.length > 0)
+                            const submitEnabled = outcomeValid && !isApproving
+                            const submitLabel = outcome === 'rejected' ? `Submit Rejection ${batchLabel || ''}`.trim()
+                              : outcome === 'rework' ? `Submit Rework ${batchLabel || ''}`.trim()
+                              : `Submit Batch ${batchLabel || ''}`.trim()
+                            const submitColor = outcome === 'rejected' ? 'bg-red-600 hover:bg-red-500'
+                              : outcome === 'rework' ? 'bg-amber-600 hover:bg-amber-500'
+                              : 'bg-green-600 hover:bg-green-500 disabled:bg-gray-700'
+                            return (
+                              <button
+                                onClick={() => handleApproveBatch(send, outcome)}
+                                disabled={!submitEnabled}
+                                className={`w-full py-3 ${submitColor} text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+                              >
+                                {isApproving ? (
+                                  <><Loader2 size={18} className="animate-spin" /> Submitting...</>
+                                ) : (
+                                  <><CheckCircle size={18} /> {submitLabel}</>
+                                )}
+                              </button>
+                            )
+                          })()}
                         </div>
                       )}
                     </div>
@@ -2246,8 +2754,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               <p className="text-white">{details.latestSend.material_lot_number || '—'}</p>
                             </div>
                             <div>
-                              <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                              <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
                               <p className="text-white">{details.latestSend.chemical_lot_number || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                              <p className="text-white">{details.latestSend.chemical_lot_number_2 || '—'}</p>
                             </div>
                             <div>
                               <p className="text-gray-500 text-xs">Incoming Count</p>
@@ -2308,7 +2820,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               </div>
                             </div>
                             <div>
-                              <label className="block text-gray-400 text-xs mb-1">Review Notes (Optional)</label>
+                              <label className="block text-gray-400 text-xs mb-1">
+                                {postMfgData[job.id]?.outcome === 'rework'
+                                  ? 'Rework Instructions *'
+                                  : postMfgData[job.id]?.outcome === 'rejected'
+                                  ? 'Rejection Reason *'
+                                  : 'Review Notes (Optional)'}
+                              </label>
                               <textarea
                                 value={postMfgData[job.id]?.notes ?? ''}
                                 onChange={(e) => setPostMfgData(prev => ({
@@ -2401,6 +2919,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                               </div>
                                               <div className="flex items-center gap-2">
                                                 <ViewButton filePath={doc.file_url} />
+                                                <DeleteButton doc={doc} contextJobId={job.id} />
                                                 {isComplianceUser && (
                                                   <label className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded cursor-pointer">
                                                     {isReplacing ? (
@@ -2475,7 +2994,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                           <FileText size={16} className="text-gray-400" />
                                           <span className="text-xs text-gray-400">{doc.file_name}</span>
                                         </div>
-                                        <ViewButton filePath={doc.file_url} />
+                                        <div className="flex items-center gap-1.5">
+                                          <ViewButton filePath={doc.file_url} />
+                                          <DeleteButton doc={doc} contextJobId={job.id} />
+                                        </div>
                                       </div>
                                     ))
                                   }
@@ -2515,7 +3037,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                                 }
                                                 <span className="text-xs text-gray-400">{doc.file_name}</span>
                                               </div>
-                                              <ViewButton filePath={doc.file_url} />
+                                              <div className="flex items-center gap-1.5">
+                                                <ViewButton filePath={doc.file_url} />
+                                                <DeleteButton doc={doc} contextJobId={job.id} />
+                                              </div>
                                             </div>
                                           ))
                                         )}
@@ -2528,36 +3053,62 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                           )
                         })()}
 
-                        {/* Approve buttons */}
-                        <div className="flex justify-end gap-2">
-                          <button
-                            onClick={() => handleApproveJob(job.id, job.status)}
-                            disabled={approving === job.id}
-                            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {approving === job.id ? (
-                              <Loader2 size={16} className="animate-spin" />
-                            ) : (
-                              <CheckCircle size={16} />
-                            )}
-                            {approving === job.id ? 'Approving...' : 'Approve Job'}
-                          </button>
-                          <button
-                            onClick={() => handleApproveAndPrint(job)}
-                            disabled={approving === job.id}
-                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {approving === job.id ? (
-                              <Loader2 size={16} className="animate-spin" />
-                            ) : (
-                              <>
-                                <CheckCircle size={16} />
-                                <Printer size={16} />
-                              </>
-                            )}
-                            {approving === job.id ? 'Approving...' : 'Approve & Print'}
-                          </button>
+                        {/* Outcome selector + submit actions */}
+                        <div className="mb-4">
+                          {renderOutcomeSelector({
+                            outcome: postMfgData[job.id]?.outcome,
+                            onOutcomeChange: (v) => setPostMfgData(prev => ({
+                              ...prev,
+                              [job.id]: { ...prev[job.id], outcome: v }
+                            })),
+                            noteValue: postMfgData[job.id]?.notes,
+                            onNoteChange: (v) => setPostMfgData(prev => ({
+                              ...prev,
+                              [job.id]: { ...prev[job.id], notes: v }
+                            })),
+                            disabled: approving === job.id,
+                          })}
                         </div>
+                        {(() => {
+                          const outcome = postMfgData[job.id]?.outcome
+                          const outcomeNote = (postMfgData[job.id]?.notes || '').trim()
+                          const outcomeValid = outcome === 'accepted'
+                            || (outcome === 'rework' && outcomeNote.length > 0)
+                            || (outcome === 'rejected' && outcomeNote.length > 0)
+                          const submitEnabled = outcomeValid && approving !== job.id
+                          const printAllowed = outcome === 'accepted' || outcome === 'rework'
+                          const submitLabel = outcome === 'rejected' ? 'Submit Rejection'
+                            : outcome === 'rework' ? 'Submit Rework' : 'Submit Acceptance'
+                          const submitColor = outcome === 'rejected' ? 'bg-red-600 hover:bg-red-500'
+                            : outcome === 'rework' ? 'bg-amber-600 hover:bg-amber-500'
+                            : 'bg-green-600 hover:bg-green-500'
+                          return (
+                            <div className="flex justify-end gap-2">
+                              <button
+                                onClick={() => handleApproveJob(job.id, job.status, outcome)}
+                                disabled={!submitEnabled}
+                                className={`flex items-center gap-2 px-4 py-2 ${submitColor} text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+                              >
+                                {approving === job.id ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
+                                {approving === job.id ? 'Submitting...' : submitLabel}
+                              </button>
+                              {printAllowed && (
+                                <button
+                                  onClick={() => handleApproveAndPrint(job, outcome)}
+                                  disabled={!submitEnabled}
+                                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {approving === job.id ? (
+                                    <Loader2 size={16} className="animate-spin" />
+                                  ) : (
+                                    <><CheckCircle size={16} /><Printer size={16} /></>
+                                  )}
+                                  {approving === job.id ? 'Submitting...' : `${submitLabel} & Print`}
+                                </button>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </div>
                     )}
                   </div>
@@ -2697,7 +3248,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       <span className="text-gray-400">
                         {new Date(send.compliance_approved_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                       </span>
-                      <span className="text-gray-400 truncate">{send.job?.work_order?.customer || '—'}</span>
+                      <span className="text-gray-400 truncate">{send.job?.work_order?.customer || send.job?.component?.customer || '—'}</span>
                     </div>
                   )
                 })}

@@ -23,7 +23,7 @@ function formatDate(dateStr) {
 }
 
 function buildTravelerHTML(travelerData) {
-  const { job, steps } = travelerData
+  const { job, steps, finishingBatch } = travelerData
   const wo = job.work_order
   const comp = job.component
 
@@ -37,18 +37,68 @@ function buildTravelerHTML(travelerData) {
 
   const customerDisplay = wo?.order_type === 'make_to_stock' ? 'STOCK' : esc(wo?.customer) || '&mdash;'
 
-  const stepsHTML = steps.map(step => `
+  // Helper: derive last-name initials from a full_name like "James Smith" -> "JS"
+  const initials = (name) => {
+    if (!name) return ''
+    return name.split(/\s+/).map(p => p[0]).filter(Boolean).join('').toUpperCase().slice(0, 3)
+  }
+
+  // Helper: short date format for the routing table
+  const shortDate = (iso) => {
+    if (!iso) return ''
+    return new Date(iso).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit' })
+  }
+
+  // Only use finishing data if the job has actually progressed past manufacturing.
+  // Without this guard, stale finishing_sends rows (from earlier testing or from a
+  // reset job) would falsely populate finishing rows.
+  // Source of truth: an approved finishing batch must actually exist.
+  // Job status is unreliable as a guard because compliance-pending and other
+  // transient states aren't in any clean enumeration.
+  const fb = (finishingBatch && finishingBatch.compliance_approved_at) ? finishingBatch : null
+  const finishingQty = fb ? (fb.compliance_good_qty ?? fb.verified_count ?? '') : ''
+  const finishingDate = fb ? shortDate(fb.compliance_approved_at || fb.finishing_completed_at) : ''
+  const finishingOp = fb ? initials(fb.finishing_operator?.full_name) : ''
+
+  const stepsHTML = steps.map(step => {
+    const stepName = (step.step_name || '').toLowerCase()
+    const isWash = stepName === 'wash'
+    const isTreatment = stepName === 'treatment' || stepName === 'passivation'
+    const isDry = stepName === 'dry'
+
+    let rowLot = step.lot_number || ''
+    if (!rowLot && (isWash || isTreatment || isDry) && fb?.finishing_lot_number) {
+      rowLot = fb.finishing_lot_number
+    }
+
+    let rowQty = step.quantity != null ? String(step.quantity) : ''
+    if (!rowQty && (isWash || isTreatment || isDry) && finishingQty !== '') {
+      rowQty = String(finishingQty)
+    }
+
+    let rowDate = shortDate(step.completed_at)
+    if (!rowDate && (isWash || isTreatment || isDry)) {
+      rowDate = finishingDate
+    }
+
+    let rowOp = step.operator_initials || initials(step.completed_by_profile?.full_name) || ''
+    if (!rowOp && (isWash || isTreatment || isDry)) {
+      rowOp = finishingOp
+    }
+
+    return `
     <tr>
       <td style="${routingCellCSS} text-align:center; width:40px;">${step.step_order}</td>
       <td style="${routingCellCSS}">${esc(step.step_name)}${step.is_added_step ? ' *' : ''}</td>
       <td style="${routingCellCSS} width:90px;">${esc(step.station) || ''}</td>
       <td style="${routingCellCSS} text-align:center; width:45px;">${step.step_type === 'external' ? 'EXT' : 'INT'}</td>
-      <td style="${routingCellCSS} width:90px;"></td>
-      <td style="${routingCellCSS} width:55px;"></td>
-      <td style="${routingCellCSS} width:80px;"></td>
-      <td style="${routingCellCSS} width:90px;"></td>
+      <td style="${routingCellCSS} width:90px;">${esc(rowLot)}</td>
+      <td style="${routingCellCSS} width:55px; text-align:center;">${esc(rowQty)}</td>
+      <td style="${routingCellCSS} width:80px;">${esc(rowDate)}</td>
+      <td style="${routingCellCSS} width:90px; text-align:center;">${esc(rowOp)}</td>
     </tr>
-  `).join('')
+  `
+  }).join('')
 
   const blankRows = Array.from({ length: 3 }).map(() =>
     `<tr>${Array.from({ length: 8 }).map(() => `<td style="${routingCellCSS}">&nbsp;</td>`).join('')}</tr>`
@@ -248,13 +298,35 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
         // Fetch routing steps
         const { data: steps, error: stepsError } = await supabase
           .from('job_routing_steps')
-          .select('*')
+          .select(`
+            *,
+            completed_by_profile:profiles!completed_by(full_name)
+          `)
           .eq('job_id', job.id)
           .neq('status', 'removed')
           .order('step_order')
         if (stepsError) throw stepsError
 
-        setTravelerData({ job: fullJob, steps: steps || [] })
+        // Fetch approved finishing batches for Wash/Treatment/Dry routing rows
+        const { data: finishingBatches, error: fsError } = await supabase
+          .from('finishing_sends')
+          .select(`
+            finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+            material_lot_number, verified_count, compliance_good_qty,
+            finishing_completed_at, compliance_approved_at,
+            finishing_operator:profiles!finishing_operator_id(full_name)
+          `)
+          .eq('job_id', job.id)
+          .eq('compliance_status', 'approved')
+          .order('finishing_completed_at', { ascending: false })
+          .limit(1)
+        if (fsError) throw fsError
+
+        setTravelerData({
+          job: fullJob,
+          steps: steps || [],
+          finishingBatch: finishingBatches?.[0] || null,
+        })
 
         // Fetch part documents (master docs for this component)
         let pDocs = []

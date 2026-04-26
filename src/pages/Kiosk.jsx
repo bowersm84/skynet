@@ -33,6 +33,8 @@ import {
   ExternalLink
 } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
+import { buildTravelerHTML } from '../lib/traveler'
+
 
 export default function Kiosk() {
   const { machineCode } = useParams()
@@ -1141,6 +1143,88 @@ export default function Kiosk() {
       alert('Could not open document. Please try again.')
     } finally {
       setViewingDoc(null)
+    }
+  }
+
+  const handleViewTraveler = async (jobId) => {
+    const targetId = jobId || activeJob?.id
+    if (!targetId) return
+    try {
+      const { data: fullJob, error: jobError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status,
+          production_lot_number, good_pieces, actual_end,
+          work_order:work_orders (
+            wo_number, customer, po_number, due_date,
+            order_type, order_quantity, stock_quantity
+          ),
+          component:parts!component_id (
+            id, part_number, description, drawing_revision,
+            requires_passivation,
+            material_type:material_types ( name )
+          ),
+          assigned_machine:machines!assigned_machine_id ( name ),
+          assigned_user:profiles!assigned_user_id ( full_name )
+        `)
+        .eq('id', targetId)
+        .single()
+      if (jobError) throw jobError
+
+      const { data: steps, error: stepsError } = await supabase
+        .from('job_routing_steps')
+        .select(`
+          *,
+          completed_by_profile:profiles!completed_by(full_name)
+        `)
+        .eq('job_id', targetId)
+        .neq('status', 'removed')
+        .order('step_order')
+      if (stepsError) throw stepsError
+
+      const { data: finishingBatches, error: fsError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          id, finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+          material_lot_number, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+          finishing_completed_at, compliance_approved_at,
+          finishing_operator:profiles!finishing_operator_id(full_name)
+        `)
+        .eq('job_id', targetId)
+        .not('finishing_completed_at', 'is', null)
+        .neq('compliance_status', 'rejected')
+        .order('finishing_completed_at', { ascending: false })
+      if (fsError) throw fsError
+
+      const { data: outboundSends, error: osError } = await supabase
+        .from('outbound_sends')
+        .select(`
+          id, operation_type, vendor_name, vendor_lot_number,
+          quantity, quantity_returned, sent_at, returned_at,
+          job_routing_step_id, finishing_send_id,
+          finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
+        `)
+        .eq('job_id', targetId)
+        .order('sent_at', { ascending: true })
+      if (osError) throw osError
+
+      const html = buildTravelerHTML({
+        job: fullJob,
+        steps: steps || [],
+        finishingBatches: finishingBatches || [],
+        outboundSends: outboundSends || [],
+      })
+      const win = window.open('', '_blank')
+      if (!win) {
+        alert('Pop-up blocked. Allow pop-ups for this site to view the traveler.')
+        return
+      }
+      win.document.open()
+      win.document.write(html)
+      win.document.close()
+    } catch (err) {
+      console.error('Failed to open traveler:', err)
+      alert('Failed to open traveler: ' + err.message)
     }
   }
 
@@ -3733,59 +3817,73 @@ export default function Kiosk() {
                           <FileText size={16} />
                           Job Documents
                           <span className="ml-auto text-xs text-gray-600">
-                            {jobDocuments.length} file{jobDocuments.length !== 1 ? 's' : ''}
+                            {jobDocuments.length + 1} file{jobDocuments.length + 1 !== 1 ? 's' : ''}
                           </span>
                         </h3>
-                        {loadingDocs ? (
-                          <div className="flex items-center justify-center py-4">
-                            <Loader2 size={18} className="animate-spin text-gray-600" />
-                          </div>
-                        ) : jobDocuments.length === 0 ? (
-                          <p className="text-gray-600 text-sm italic text-center py-3">
-                            No documents attached to this job
-                          </p>
-                        ) : (
-                          <div className="space-y-2">
-                            {jobDocuments.map(doc => (
-                              <button
-                                key={doc.id}
-                                onClick={() => handleViewDocument(doc.file_url)}
-                                disabled={!doc.file_url || viewingDoc === doc.file_url}
-                                className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
-                              >
-                                <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
-                                  {viewingDoc === doc.file_url ? (
-                                    <Loader2 size={16} className="animate-spin text-gray-400" />
-                                  ) : (
-                                    <FileText size={16} className="text-gray-400" />
-                                  )}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
-                                    {doc.file_name || 'Unnamed document'}
-                                  </p>
-                                  {doc.document_type?.name && (
-                                    <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
-                                  )}
-                                </div>
-                                <div className="flex-shrink-0">
-                                  {doc.status === 'approved' ? (
-                                    <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
-                                      <CheckCircle size={9} />
-                                      Approved
-                                    </span>
-                                  ) : (
-                                    <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
-                                      <Clock size={9} />
-                                      Pending
-                                    </span>
-                                  )}
-                                </div>
-                                <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                        <div className="space-y-2">
+                          <button
+                            onClick={() => handleViewTraveler(activeJob?.id)}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-700/50 rounded-lg transition-colors text-left group"
+                          >
+                            <div className="w-8 h-8 rounded bg-cyan-800/50 flex items-center justify-center flex-shrink-0">
+                              <FileText size={16} className="text-cyan-300" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-white text-sm truncate group-hover:text-cyan-300 transition-colors">
+                                Job Traveler
+                              </p>
+                              <p className="text-gray-400 text-xs truncate">Live — reflects current routing & job data</p>
+                            </div>
+                            <ExternalLink size={14} className="text-gray-500 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                          </button>
+
+                          {loadingDocs ? (
+                            <div className="flex items-center justify-center py-4">
+                              <Loader2 size={18} className="animate-spin text-gray-600" />
+                            </div>
+                          ) : jobDocuments.length === 0 ? null : (
+                            <>
+                              {jobDocuments.map(doc => (
+                                <button
+                                  key={doc.id}
+                                  onClick={() => handleViewDocument(doc.file_url)}
+                                  disabled={!doc.file_url || viewingDoc === doc.file_url}
+                                  className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
+                                >
+                                  <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                    {viewingDoc === doc.file_url ? (
+                                      <Loader2 size={16} className="animate-spin text-gray-400" />
+                                    ) : (
+                                      <FileText size={16} className="text-gray-400" />
+                                    )}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
+                                      {doc.file_name || 'Unnamed document'}
+                                    </p>
+                                    {doc.document_type?.name && (
+                                      <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
+                                    )}
+                                  </div>
+                                  <div className="flex-shrink-0">
+                                    {doc.status === 'approved' ? (
+                                      <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
+                                        <CheckCircle size={9} />
+                                        Approved
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
+                                        <Clock size={9} />
+                                        Pending
+                                      </span>
+                                    )}
+                                  </div>
+                                  <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                                </button>
+                              ))}
+                            </>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -4081,59 +4179,73 @@ export default function Kiosk() {
                         <FileText size={16} />
                         Job Documents
                         <span className="ml-auto text-xs text-gray-600">
-                          {jobDocuments.length} file{jobDocuments.length !== 1 ? 's' : ''}
+                          {jobDocuments.length + 1} file{jobDocuments.length + 1 !== 1 ? 's' : ''}
                         </span>
                       </h3>
-                      {loadingDocs ? (
-                        <div className="flex items-center justify-center py-4">
-                          <Loader2 size={18} className="animate-spin text-gray-600" />
-                        </div>
-                      ) : jobDocuments.length === 0 ? (
-                        <p className="text-gray-600 text-sm italic text-center py-3">
-                          No documents attached to this job
-                        </p>
-                      ) : (
-                        <div className="space-y-2">
-                          {jobDocuments.map(doc => (
-                            <button
-                              key={doc.id}
-                              onClick={() => handleViewDocument(doc.file_url)}
-                              disabled={!doc.file_url || viewingDoc === doc.file_url}
-                              className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
-                            >
-                              <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
-                                {viewingDoc === doc.file_url ? (
-                                  <Loader2 size={16} className="animate-spin text-gray-400" />
-                                ) : (
-                                  <FileText size={16} className="text-gray-400" />
-                                )}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
-                                  {doc.file_name || 'Unnamed document'}
-                                </p>
-                                {doc.document_type?.name && (
-                                  <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
-                                )}
-                              </div>
-                              <div className="flex-shrink-0">
-                                {doc.status === 'approved' ? (
-                                  <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
-                                    <CheckCircle size={9} />
-                                    Approved
-                                  </span>
-                                ) : (
-                                  <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
-                                    <Clock size={9} />
-                                    Pending
-                                  </span>
-                                )}
-                              </div>
-                              <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                      <div className="space-y-2">
+                        <button
+                          onClick={() => handleViewTraveler(activeJob?.id)}
+                          className="w-full flex items-center gap-3 px-3 py-2.5 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-700/50 rounded-lg transition-colors text-left group"
+                        >
+                          <div className="w-8 h-8 rounded bg-cyan-800/50 flex items-center justify-center flex-shrink-0">
+                            <FileText size={16} className="text-cyan-300" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-white text-sm truncate group-hover:text-cyan-300 transition-colors">
+                              Job Traveler
+                            </p>
+                            <p className="text-gray-400 text-xs truncate">Live — reflects current routing & job data</p>
+                          </div>
+                          <ExternalLink size={14} className="text-gray-500 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                        </button>
+
+                        {loadingDocs ? (
+                          <div className="flex items-center justify-center py-4">
+                            <Loader2 size={18} className="animate-spin text-gray-600" />
+                          </div>
+                        ) : jobDocuments.length === 0 ? null : (
+                          <>
+                            {jobDocuments.map(doc => (
+                              <button
+                                key={doc.id}
+                                onClick={() => handleViewDocument(doc.file_url)}
+                                disabled={!doc.file_url || viewingDoc === doc.file_url}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 bg-gray-800 hover:bg-gray-750 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-left group"
+                              >
+                                <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+                                  {viewingDoc === doc.file_url ? (
+                                    <Loader2 size={16} className="animate-spin text-gray-400" />
+                                  ) : (
+                                    <FileText size={16} className="text-gray-400" />
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-white text-sm truncate group-hover:text-skynet-accent transition-colors">
+                                    {doc.file_name || 'Unnamed document'}
+                                  </p>
+                                  {doc.document_type?.name && (
+                                    <p className="text-gray-500 text-xs truncate">{doc.document_type.name}</p>
+                                  )}
+                                </div>
+                                <div className="flex-shrink-0">
+                                  {doc.status === 'approved' ? (
+                                    <span className="flex items-center gap-1 text-[10px] font-medium text-green-400 bg-green-900/40 border border-green-700/50 px-1.5 py-0.5 rounded">
+                                      <CheckCircle size={9} />
+                                      Approved
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400 bg-yellow-900/40 border border-yellow-700/50 px-1.5 py-0.5 rounded">
+                                      <Clock size={9} />
+                                      Pending
+                                    </span>
+                                  )}
+                                </div>
+                                <ExternalLink size={14} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+                              </button>
+                            ))}
+                          </>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -4307,7 +4419,7 @@ export default function Kiosk() {
                             ? `${maintColors.bgLight} border-l-4 ${maintColors.border}`
                             : 'bg-gray-800 border-l-4 border-yellow-500'
                         : isCompliancePending
-                          ? 'opacity-40 cursor-not-allowed bg-gray-900'
+                          ? 'cursor-not-allowed bg-gray-900/80'
                           : (activeJob || isViewOnly)
                             ? 'opacity-50 cursor-not-allowed'
                             : 'hover:bg-gray-800 cursor-pointer'
@@ -4337,9 +4449,9 @@ export default function Kiosk() {
                           )}
                         </div>
                         {isCompliancePending ? (
-                          <span className="flex items-center gap-1 px-2 py-1 text-xs font-bold rounded bg-amber-500/20 text-amber-300 border border-amber-500/60 animate-pulse">
-                            <Clock size={11} />
-                            Compliance Pending
+                          <span className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold rounded bg-amber-500 text-gray-900 border-2 border-amber-300 shadow-lg animate-pulse">
+                            <Clock size={14} />
+                            COMPLIANCE PENDING
                           </span>
                         ) : getStatusBadge(job.status)}
                       </div>
@@ -4382,26 +4494,38 @@ export default function Kiosk() {
                     <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
                       Job Documents
                     </span>
-                    {selectedJobDocuments.length > 0 && (
-                      <span className="ml-auto text-xs text-gray-600">
-                        {selectedJobDocuments.length} file{selectedJobDocuments.length !== 1 ? 's' : ''}
-                      </span>
-                    )}
+                    <span className="ml-auto text-xs text-gray-600">
+                      {selectedJobDocuments.length + 1} file{selectedJobDocuments.length + 1 !== 1 ? 's' : ''}
+                    </span>
                   </div>
 
                   {/* Document list body */}
                   <div className="px-3 pb-3">
-                    {loadingSelectedJobDocs ? (
-                      <div className="flex items-center justify-center py-3">
-                        <Loader2 size={16} className="animate-spin text-gray-600" />
-                      </div>
-                    ) : selectedJobDocuments.length === 0 ? (
-                      <p className="text-gray-600 text-xs italic text-center py-2">
-                        No documents attached
-                      </p>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {selectedJobDocuments.map(doc => (
+                    <div className="space-y-1.5">
+                      <button
+                        onClick={() => handleViewTraveler(selectedJob.id)}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-700/50 rounded-lg transition-colors text-left group"
+                      >
+                        <div className="w-7 h-7 rounded bg-cyan-800/50 flex items-center justify-center flex-shrink-0">
+                          <FileText size={14} className="text-cyan-300" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-white text-xs truncate group-hover:text-cyan-300 transition-colors leading-tight">
+                            Job Traveler
+                          </p>
+                          <p className="text-gray-400 text-[10px] truncate leading-tight">
+                            Live — reflects current routing & job data
+                          </p>
+                        </div>
+                        <ExternalLink size={12} className="text-gray-500 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                      </button>
+
+                      {loadingSelectedJobDocs ? (
+                        <div className="flex items-center justify-center py-3">
+                          <Loader2 size={16} className="animate-spin text-gray-600" />
+                        </div>
+                      ) : selectedJobDocuments.length === 0 ? null : (
+                        selectedJobDocuments.map(doc => (
                           <button
                             key={doc.id}
                             onClick={() => handleViewDocument(doc.file_url)}
@@ -4432,9 +4556,9 @@ export default function Kiosk() {
                             )}
                             <ExternalLink size={12} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
                           </button>
-                        ))}
-                      </div>
-                    )}
+                        ))
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

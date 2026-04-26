@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
+import { buildTravelerHTML } from '../lib/traveler'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
@@ -49,7 +50,13 @@ export default function Mainframe({ user, profile }) {
   
   // Work Order Lookup state
   const [showWOLookup, setShowWOLookup] = useState(false)
+  const [overrideJob, setOverrideJob] = useState(null)
+  const [overrideValue, setOverrideValue] = useState('')
+  const [overrideReason, setOverrideReason] = useState('')
+  const [overrideSaving, setOverrideSaving] = useState(false)
   const [woLookupData, setWOLookupData] = useState([])
+  const [standaloneJobs, setStandaloneJobs] = useState([])
+  const [showStandaloneSection, setShowStandaloneSection] = useState(false)
   const [woLookupLoading, setWOLookupLoading] = useState(false)
   const [woLookupSearch, setWOLookupSearch] = useState('')
   const [expandedWOs, setExpandedWOs] = useState({})
@@ -229,12 +236,51 @@ export default function Mainframe({ user, profile }) {
         setActiveMaintenanceJobs(activeMaintenanceData || [])
       }
 
-      // Outsourced — count jobs ready for outsourcing or at external vendor
-      const { count: outsourcedActive } = await supabase
-        .from('jobs')
-        .select('*', { count: 'exact', head: true })
-        .in('status', ['ready_for_outsourcing', 'at_external_vendor'])
-      setOutsourcedCount(outsourcedActive || 0)
+      // Outsourced count — sum of:
+      //  (a) outbound_sends still at vendor (sent but not returned)
+      //  (b) approved batches with a pending external step (ready to send)
+      const [{ count: atVendorCount }, { data: readyBatches }, { data: existingSends }] = await Promise.all([
+        supabase
+          .from('outbound_sends')
+          .select('*', { count: 'exact', head: true })
+          .not('sent_at', 'is', null)
+          .is('returned_at', null),
+        supabase
+          .from('finishing_sends')
+          .select(`
+            id,
+            job:jobs!inner(
+              id, status,
+              job_routing_steps(id, step_type, status)
+            )
+          `)
+          .eq('compliance_status', 'approved')
+          .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled,incomplete)'),
+        supabase
+          .from('outbound_sends')
+          .select('finishing_send_id, job_routing_step_id')
+          .not('finishing_send_id', 'is', null)
+      ])
+
+      // Build a set of (batch, step) combos that already have an outbound_send
+      const sentSet = new Set(
+        (existingSends || []).map(s => `${s.finishing_send_id}|${s.job_routing_step_id}`)
+      )
+
+      // Count: batches with at least one pending external step that DOESN'T already have a send
+      const readyToSendCount = (() => {
+        if (!readyBatches) return 0
+        let total = 0
+        for (const batch of readyBatches) {
+          const externalSteps = (batch.job?.job_routing_steps || [])
+            .filter(s => s.step_type === 'external' && ['pending', 'in_progress'].includes(s.status))
+          const unsent = externalSteps.filter(step => !sentSet.has(`${batch.id}|${step.id}`))
+          if (unsent.length > 0) total += 1
+        }
+        return total
+      })()
+
+      setOutsourcedCount((atVendorCount || 0) + readyToSendCount)
 
       setLastUpdated(new Date())
       console.log('✅ fetchData complete!')
@@ -385,11 +431,18 @@ export default function Mainframe({ user, profile }) {
             assigned_machine_id,
             scheduled_start,
             work_order_assembly_id,
+            compliance_outcome,
+            compliance_notes,
+            qty_override,
+            qty_override_reason,
+            qty_override_at,
+            qty_override_by_profile:profiles!qty_override_by(full_name),
             component:parts!component_id(part_number, description),
             machine:assigned_machine_id(name),
             finishing_sends (
-              id, quantity, status, compliance_status, is_partial_send,
-              finishing_lot_number, sent_at, finishing_completed_at,
+              id, quantity, status, compliance_status, compliance_outcome, compliance_notes,
+              compliance_good_qty, compliance_bad_qty, incoming_count, verified_count,
+              is_partial_send, finishing_lot_number, sent_at, finishing_completed_at,
               compliance_approved_at
             ),
             job_routing_steps (
@@ -399,7 +452,7 @@ export default function Mainframe({ user, profile }) {
             outbound_sends (
               id, operation_type, vendor_name, quantity, sent_at,
               expected_return_at, returned_at, vendor_lot_number,
-              quantity_returned, cert_document_path
+              quantity_returned, cert_document_path, finishing_send_id
             ),
             job_materials (
               lot_number,
@@ -435,6 +488,41 @@ export default function Mainframe({ user, profile }) {
       }) || []
 
       setWOLookupData([...activeWOs, ...completedWOs])
+
+      // Standalone J-FIN jobs have no work order; fetch separately
+      const { data: standaloneJobsData, error: standaloneError } = await supabase
+        .from('jobs')
+        .select(`
+          id,
+          job_number,
+          status,
+          quantity,
+          production_lot_number,
+          good_pieces,
+          bad_pieces,
+          assigned_machine_id,
+          is_standalone_finishing,
+          source_description,
+          notes,
+          created_at,
+          component:parts!component_id(part_number, description, customer),
+          machine:assigned_machine_id(name),
+          finishing_sends (
+            id, quantity, status, compliance_status, compliance_outcome, compliance_notes,
+            compliance_good_qty, compliance_bad_qty, incoming_count, verified_count,
+            is_partial_send, finishing_lot_number, sent_at, finishing_completed_at,
+            compliance_approved_at
+          )
+        `)
+        .eq('is_standalone_finishing', true)
+        .is('work_order_id', null)
+        .order('created_at', { ascending: false })
+
+      if (standaloneError) {
+        console.error('Failed to load standalone jobs:', standaloneError)
+      }
+
+      setStandaloneJobs(standaloneJobsData || [])
     } catch (err) {
       console.error('Error fetching WO lookup data:', err)
     } finally {
@@ -474,6 +562,163 @@ export default function Mainframe({ user, profile }) {
     return statusConfig[status] || { label: status, color: 'bg-gray-800 text-gray-400 border-gray-700' }
   }
 
+  // Small icon-name lookup for badge rendering
+  const renderBadgeIcon = (iconName) => {
+    switch (iconName) {
+      case 'pause':       return <Pause size={10} />
+      case 'flag':        return <Flag size={10} />
+      case 'alertcircle': return <AlertCircle size={10} />
+      case 'x':           return <X size={10} />
+      case 'truck':       return <Truck size={10} />
+      case 'clock':       return <Clock size={10} className="animate-pulse" />
+      case 'checkcircle': return <CheckCircle size={10} />
+      case 'beaker':      return <Beaker size={10} />
+      default:            return null
+    }
+  }
+
+  // Return an array of badges for a job: primary status (or state override),
+  // followed by any supplemental compliance-outcome badge (Flag/Rework/Rejected).
+  const getJobBadges = (job) => {
+    const badges = []
+
+    // Primary badge: Hold overrides pending_compliance; Out-for-[Vendor] overrides at_external_vendor.
+    if (job.compliance_outcome === 'hold' && job.status === 'pending_compliance') {
+      badges.push({
+        label: 'On Hold',
+        color: 'bg-slate-800 text-slate-300 border-slate-600',
+        icon: 'pause',
+      })
+    } else if (job.status === 'at_external_vendor') {
+      const activeOutbound = job.outbound_sends?.find(s => s.sent_at && !s.returned_at)
+      if (activeOutbound?.vendor_name) {
+        badges.push({
+          label: `Out for ${activeOutbound.vendor_name}`,
+          color: 'bg-blue-900/30 text-blue-300 border-blue-700',
+          icon: 'truck',
+        })
+      } else {
+        badges.push({ ...getStatusBadge(job.status), icon: 'truck' })
+      }
+    } else {
+      const iconByStatus = {
+        in_progress: 'clock',
+        complete: 'checkcircle',
+        pending_passivation: 'beaker',
+        in_passivation: 'beaker',
+      }
+      badges.push({ ...getStatusBadge(job.status), icon: iconByStatus[job.status] })
+    }
+
+    // Supplemental compliance-outcome badge
+    if (job.compliance_outcome === 'flag') {
+      badges.push({
+        label: 'Flagged',
+        color: 'bg-amber-900/40 text-amber-300 border-amber-700',
+        icon: 'flag',
+      })
+    } else if (job.compliance_outcome === 'rework') {
+      badges.push({
+        label: 'Rework',
+        color: 'bg-amber-900/40 text-amber-300 border-amber-700',
+        icon: 'alertcircle',
+      })
+    } else if (job.compliance_outcome === 'rejected') {
+      badges.push({
+        label: 'Rejected',
+        color: 'bg-red-900/40 text-red-300 border-red-700',
+        icon: 'x',
+      })
+    }
+
+    return badges
+  }
+
+  // Derive effective quantity for a job. Precedence:
+  //   1. Sum of compliance_good_qty across APPROVED batches (verified at post-mfg compliance;
+  //      includes rework outcomes because those parts still advance; excludes rejected batches).
+  //   2. job.good_pieces (machinist's count — pre-verification but trustworthy).
+  //   3. job.quantity (original order — fallback).
+  // Returns { qty, verified } where verified=true means qty comes from a post-production source.
+  // Derive effective quantity for a job. Precedence (most authoritative → least):
+  //   1. Sum of returned qty from completed outsourcing sends, IF outsourcing
+  //      happened after compliance (vendor may lose/scrap pieces).
+  //   2. Sum of compliance_good_qty across approved batches (with bad_qty fallback).
+  //   3. job.good_pieces (machinist's count).
+  //   4. job.quantity (original order).
+  // Returns { qty, verified } where verified=true means qty comes from a post-production source.
+  const getEffectiveQty = (job) => {
+    // 0. Manual admin override — wins over everything.
+    if (job.qty_override != null) {
+      return { qty: job.qty_override, verified: true, overridden: true }
+    }
+
+    // 1. Outsourcing returns — check if any outbound_sends have returned values
+    if (job.outbound_sends?.length) {
+      const completedReturns = job.outbound_sends.filter(s =>
+        s.returned_at && s.quantity_returned != null
+      )
+      if (completedReturns.length > 0) {
+        // Sum across all returned sends. If multiple operations, the last
+        // one is the most authoritative since it was the last touch.
+        const sortedReturns = [...completedReturns].sort(
+          (a, b) => new Date(b.returned_at) - new Date(a.returned_at)
+        )
+        return { qty: sortedReturns[0].quantity_returned, verified: true, overridden: false }
+      }
+    }
+
+    // 2. Compliance-approved batches
+    if (job.finishing_sends?.length) {
+      const approvedBatches = job.finishing_sends.filter(s => s.compliance_status === 'approved')
+      if (approvedBatches.length > 0) {
+        const sum = approvedBatches.reduce((acc, s) => {
+          if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
+          if (s.compliance_bad_qty != null) {
+            const base = s.verified_count ?? s.quantity
+            return acc + Math.max(0, base - s.compliance_bad_qty)
+          }
+          if (s.verified_count != null) return acc + s.verified_count
+          return acc + s.quantity
+        }, 0)
+        return { qty: sum, verified: true, overridden: false }
+      }
+    }
+
+    // 3. Machinist's count
+    if (job.good_pieces != null && job.good_pieces > 0) {
+      return { qty: job.good_pieces, verified: true, overridden: false }
+    }
+
+    // 4. Original order
+    return { qty: job.quantity, verified: false, overridden: false }
+  }
+
+  // Return the best available count for a single finishing_send batch.
+  // Precedence (most authoritative → least):
+  //   compliance_good_qty (Roger approved, explicit) →
+  //   (verified_count or quantity) - compliance_bad_qty (derived when only bad was entered) →
+  //   verified_count      (James's post-finishing verify) →
+  //   incoming_count      (James's on-receipt count) →
+  //   quantity            (machinist's original send count)
+  const getBatchQty = (send) => {
+    if (send.compliance_good_qty != null) {
+      return { qty: send.compliance_good_qty, annotate: send.quantity !== send.compliance_good_qty ? send.quantity : null }
+    }
+    if (send.compliance_status === 'approved' && send.compliance_bad_qty != null) {
+      const base = send.verified_count ?? send.quantity
+      const derived = Math.max(0, base - send.compliance_bad_qty)
+      return { qty: derived, annotate: send.quantity !== derived ? send.quantity : null }
+    }
+    if (send.verified_count != null) {
+      return { qty: send.verified_count, annotate: send.quantity !== send.verified_count ? send.quantity : null }
+    }
+    if (send.incoming_count != null) {
+      return { qty: send.incoming_count, annotate: send.quantity !== send.incoming_count ? send.quantity : null }
+    }
+    return { qty: send.quantity, annotate: null }
+  }
+
   // Filter WOs based on search
   const filteredWOLookup = woLookupData.filter(wo => {
     if (!woLookupSearch.trim()) return true
@@ -489,9 +734,19 @@ export default function Mainframe({ user, profile }) {
     )) return true
     
     // Search job numbers and component part numbers
-    return wo.jobs?.some(job => 
+    return wo.jobs?.some(job =>
       job.job_number?.toLowerCase().includes(search) ||
       job.component?.part_number?.toLowerCase().includes(search)
+    )
+  })
+
+  const filteredStandaloneJobs = standaloneJobs.filter(job => {
+    if (!woLookupSearch.trim()) return true
+    const search = woLookupSearch.toLowerCase()
+    return (
+      job.job_number?.toLowerCase().includes(search) ||
+      job.component?.part_number?.toLowerCase().includes(search) ||
+      job.component?.customer?.toLowerCase().includes(search)
     )
   })
 
@@ -658,6 +913,77 @@ export default function Mainframe({ user, profile }) {
     }
   }
 
+  const handleViewTraveler = async (jobId) => {
+    if (!jobId) return
+    try {
+      const { data: fullJob, error: jobError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status,
+          production_lot_number, good_pieces, actual_end,
+          work_order:work_orders ( wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+          component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
+          assigned_machine:machines!assigned_machine_id ( name ),
+          assigned_user:profiles!assigned_user_id ( full_name )
+        `)
+        .eq('id', jobId)
+        .single()
+      if (jobError) throw jobError
+
+      const { data: steps, error: stepsError } = await supabase
+        .from('job_routing_steps')
+        .select(`*, completed_by_profile:profiles!completed_by(full_name)`)
+        .eq('job_id', jobId)
+        .neq('status', 'removed')
+        .order('step_order')
+      if (stepsError) throw stepsError
+
+      const { data: finishingBatches, error: fsError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          id, finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+          material_lot_number, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+          finishing_completed_at, compliance_approved_at,
+          finishing_operator:profiles!finishing_operator_id(full_name)
+        `)
+        .eq('job_id', jobId)
+        .not('finishing_completed_at', 'is', null)
+        .neq('compliance_status', 'rejected')
+        .order('finishing_completed_at', { ascending: false })
+      if (fsError) throw fsError
+
+      const { data: outboundSends, error: osError } = await supabase
+        .from('outbound_sends')
+        .select(`
+          id, operation_type, vendor_name, vendor_lot_number,
+          quantity, quantity_returned, sent_at, returned_at,
+          job_routing_step_id, finishing_send_id,
+          finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
+        `)
+        .eq('job_id', jobId)
+        .order('sent_at', { ascending: true })
+      if (osError) throw osError
+
+      const html = buildTravelerHTML({
+        job: fullJob,
+        steps: steps || [],
+        finishingBatches: finishingBatches || [],
+        outboundSends: outboundSends || [],
+      })
+      const win = window.open('', '_blank')
+      if (!win) {
+        alert('Pop-up blocked. Allow pop-ups for this site to view the traveler.')
+        return
+      }
+      win.document.open()
+      win.document.write(html)
+      win.document.close()
+    } catch (err) {
+      console.error('Failed to open traveler:', err)
+      alert('Failed to open traveler: ' + err.message)
+    }
+  }
+
   const handleCancelJob = async () => {
     if (!editingJob) return
     
@@ -684,6 +1010,86 @@ export default function Mainframe({ user, profile }) {
       console.error('Unexpected error:', err)
     } finally {
       setCancelling(false)
+    }
+  }
+
+  const handleOverrideStart = (job) => {
+    const eq = getEffectiveQty(job)
+    setOverrideJob(job)
+    setOverrideValue(String(eq.qty))
+    setOverrideReason('')
+  }
+
+  const handleOverrideCancel = () => {
+    setOverrideJob(null)
+    setOverrideValue('')
+    setOverrideReason('')
+    setOverrideSaving(false)
+  }
+
+  const handleOverrideSubmit = async () => {
+    if (!overrideJob) return
+    const trimmedReason = overrideReason.trim()
+    const parsedValue = parseInt(overrideValue, 10)
+
+    if (Number.isNaN(parsedValue) || parsedValue < 0) {
+      alert('Override quantity must be a non-negative number.')
+      return
+    }
+    if (!trimmedReason) {
+      alert('A reason is required for any qty override.')
+      return
+    }
+
+    setOverrideSaving(true)
+    try {
+      const now = new Date().toISOString()
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          qty_override: parsedValue,
+          qty_override_reason: trimmedReason,
+          qty_override_by: profile.id,
+          qty_override_at: now,
+          updated_at: now,
+        })
+        .eq('id', overrideJob.id)
+      if (error) throw error
+
+      handleOverrideCancel()
+      fetchWOLookup()
+    } catch (err) {
+      console.error('Override save failed:', err)
+      alert('Failed to save override: ' + err.message)
+      setOverrideSaving(false)
+    }
+  }
+
+  const handleOverrideClear = async () => {
+    if (!overrideJob) return
+    if (!window.confirm('Clear the qty override for this job? The displayed qty will revert to the calculated value.')) return
+
+    setOverrideSaving(true)
+    try {
+      const now = new Date().toISOString()
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          qty_override: null,
+          qty_override_reason: null,
+          qty_override_by: null,
+          qty_override_at: null,
+          updated_at: now,
+        })
+        .eq('id', overrideJob.id)
+      if (error) throw error
+
+      handleOverrideCancel()
+      fetchWOLookup()
+    } catch (err) {
+      console.error('Override clear failed:', err)
+      alert('Failed to clear override: ' + err.message)
+      setOverrideSaving(false)
     }
   }
 
@@ -1116,15 +1522,30 @@ export default function Mainframe({ user, profile }) {
                             <>
                               <span className="text-skynet-accent">{job.component?.part_number}</span>
                               <span className="mx-2">•</span>
-                              <span>Qty: {job.quantity}</span>
+                              {(() => {
+                                const eq = getEffectiveQty(job)
+                                return eq.verified && eq.qty !== job.quantity
+                                  ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
+                                  : <span>Qty: {job.quantity}</span>
+                              })()}
                             </>
                           )}
                         </div>
                       </div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right flex flex-col items-end gap-1">
                       <span className="text-skynet-accent text-sm">{job.assigned_machine?.name}</span>
                       <p className={`text-xs ${statusDisplay.color}`}>{statusDisplay.text}</p>
+                      {job.compliance_outcome === 'flag' && (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                          <Flag size={10} /> Flagged
+                        </span>
+                      )}
+                      {job.compliance_outcome === 'rework' && (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                          <AlertCircle size={10} /> Rework
+                        </span>
+                      )}
                     </div>
                   </div>
                 )
@@ -1197,7 +1618,12 @@ export default function Mainframe({ user, profile }) {
                           <div className="text-sm text-gray-500">
                             <span className="text-skynet-accent">{job.component?.part_number}</span>
                             <span className="mx-2">•</span>
-                            <span>Qty: {job.quantity}</span>
+                            {(() => {
+                              const eq = getEffectiveQty(job)
+                              return eq.verified && eq.qty !== job.quantity
+                                ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
+                                : <span>Qty: {job.quantity}</span>
+                            })()}
                           </div>
                           {/* Incomplete job details */}
                           {isIncomplete && job.incomplete_reason && (
@@ -1223,7 +1649,19 @@ export default function Mainframe({ user, profile }) {
                             </div>
                           </>
                         ) : (
-                          <span className="text-yellow-500 text-sm">Needs Assignment</span>
+                          <>
+                            <span className="text-yellow-500 text-sm">Needs Assignment</span>
+                            {job.compliance_outcome === 'flag' && (
+                              <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                                <Flag size={10} /> Flagged
+                              </span>
+                            )}
+                            {job.compliance_outcome === 'rework' && (
+                              <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                                <AlertCircle size={10} /> Rework
+                              </span>
+                            )}
+                          </>
                         )}
                         {/* Edit button - only for ready jobs, not incomplete */}
                         {!isIncomplete && (
@@ -1492,7 +1930,7 @@ export default function Mainframe({ user, profile }) {
                 <div className="flex items-center justify-center py-12">
                   <Loader2 size={32} className="animate-spin text-skynet-accent" />
                 </div>
-              ) : filteredWOLookup.length === 0 ? (
+              ) : filteredWOLookup.length === 0 && filteredStandaloneJobs.length === 0 ? (
                 <div className="text-center py-12">
                   <ClipboardList size={48} className="mx-auto text-gray-600 mb-4" />
                   <p className="text-gray-500">
@@ -1501,6 +1939,77 @@ export default function Mainframe({ user, profile }) {
                 </div>
               ) : (
                 <div className="space-y-3">
+                  {filteredStandaloneJobs.length > 0 && (
+                    <div className="border border-cyan-700/40 rounded-lg overflow-hidden bg-cyan-900/10">
+                      <button
+                        onClick={() => setShowStandaloneSection(prev => !prev)}
+                        className="w-full px-4 py-3 flex items-center justify-between hover:bg-cyan-900/20 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <ChevronRight
+                            size={20}
+                            className={`text-cyan-400 transition-transform ${showStandaloneSection ? 'rotate-90' : ''}`}
+                          />
+                          <Package size={18} className="text-cyan-400" />
+                          <span className="text-cyan-200 font-medium">Standalone Finishing Jobs</span>
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-900/40 text-cyan-300 border border-cyan-700">
+                            {filteredStandaloneJobs.length}
+                          </span>
+                        </div>
+                        <span className="text-xs text-cyan-400">
+                          {showStandaloneSection ? 'Hide' : 'Show'}
+                        </span>
+                      </button>
+                      {showStandaloneSection && (
+                        <div className="border-t border-cyan-700/40 bg-gray-800/30">
+                          <div className="grid grid-cols-12 px-4 py-2 text-xs text-gray-500 border-b border-gray-700/50">
+                            <div className="col-span-2">Job #</div>
+                            <div className="col-span-3">Part</div>
+                            <div className="col-span-2">Customer</div>
+                            <div className="col-span-1 text-center">Qty</div>
+                            <div className="col-span-2">Source</div>
+                            <div className="col-span-2">Status</div>
+                          </div>
+                          {filteredStandaloneJobs.map(job => {
+                            const eq = getEffectiveQty(job)
+                            const badges = getJobBadges(job)
+                            return (
+                              <div key={job.id} className="grid grid-cols-12 px-4 py-3 border-b border-gray-800/50 last:border-0 hover:bg-gray-800/30">
+                                <div className="col-span-2 text-white font-mono text-sm">{job.job_number}</div>
+                                <div className="col-span-3 text-sm">
+                                  <div className="text-cyan-400">{job.component?.part_number || '—'}</div>
+                                  <div className="text-gray-500 text-xs truncate">{job.component?.description}</div>
+                                </div>
+                                <div className="col-span-2 text-sm text-gray-300">{job.component?.customer || '—'}</div>
+                                <div className="col-span-1 text-center">
+                                  {eq.verified && eq.qty !== job.quantity ? (
+                                    <span className="text-sm">
+                                      <span className="text-white font-medium">{eq.qty}</span>
+                                      <span className="text-gray-500">/{job.quantity}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-white text-sm">{job.quantity}</span>
+                                  )}
+                                </div>
+                                <div className="col-span-2 text-sm text-gray-400 truncate" title={job.source_description || job.machine?.name || ''}>
+                                  {job.machine?.name || (job.source_description ? `Received (${job.source_description})` : 'Received')}
+                                </div>
+                                <div className="col-span-2 flex flex-wrap gap-1">
+                                  {badges.map((badge, idx) => (
+                                    <span key={idx}
+                                      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${badge.color}`}>
+                                      {renderBadgeIcon(badge.icon)}
+                                      {badge.label}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {filteredWOLookup.map(wo => {
                     const isExpanded = expandedWOs[wo.id]
                     const allJobsComplete = wo.jobs?.every(j => ['complete', 'cancelled'].includes(j.status))
@@ -1661,7 +2170,6 @@ export default function Mainframe({ user, profile }) {
                                           </div>
                                         </div>
                                         {assemblyJobs.map(job => {
-                                          const statusBadge = getStatusBadge(job.status)
                                           const canCancel = !['complete', 'cancelled'].includes(job.status)
                                           return (
                                             <div 
@@ -1682,22 +2190,52 @@ export default function Mainframe({ user, profile }) {
                                                   </div>
                                                 </div>
                                                 <div className="col-span-1 text-center">
-                                                  <span className="text-white text-sm">{job.quantity}</span>
+                                                  {(() => {
+                                                    const eq = getEffectiveQty(job)
+                                                    const isAdmin = profile?.role === 'admin'
+                                                    return (
+                                                      <div className="flex flex-col items-center gap-0.5">
+                                                        {eq.overridden ? (
+                                                          <span className="text-sm" title={`Override by ${job.qty_override_by_profile?.full_name || 'admin'}: ${job.qty_override_reason}`}>
+                                                            <span className="text-amber-300 font-medium">{eq.qty}</span>
+                                                            <span className="text-gray-500">/{job.quantity}</span>
+                                                            <span className="text-amber-400 ml-1">*</span>
+                                                          </span>
+                                                        ) : eq.verified && eq.qty !== job.quantity ? (
+                                                          <span className="text-sm">
+                                                            <span className="text-white font-medium">{eq.qty}</span>
+                                                            <span className="text-gray-500">/{job.quantity}</span>
+                                                          </span>
+                                                        ) : (
+                                                          <span className="text-white text-sm">{job.quantity}</span>
+                                                        )}
+                                                        {isAdmin && (
+                                                          <button
+                                                            onClick={() => handleOverrideStart(job)}
+                                                            className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"
+                                                          >
+                                                            override
+                                                          </button>
+                                                        )}
+                                                      </div>
+                                                    )
+                                                  })()}
                                                 </div>
                                                 <div className="col-span-2">
                                                   <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
                                                 </div>
-                                                <div className="col-span-2">
-                                                  <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
-                                                    {job.status === 'in_progress' && <Clock size={10} className="animate-pulse" />}
-                                                    {job.status === 'complete' && <CheckCircle size={10} />}
-                                                    {(job.status === 'pending_passivation' || job.status === 'in_passivation') && <Beaker size={10} />}
-                                                    {statusBadge.label}
-                                                  </span>
+                                                <div className="col-span-2 flex flex-wrap gap-1">
+                                                  {getJobBadges(job).map((badge, idx) => (
+                                                    <span key={idx}
+                                                      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${badge.color}`}>
+                                                      {renderBadgeIcon(badge.icon)}
+                                                      {badge.label}
+                                                    </span>
+                                                  ))}
                                                 </div>
                                                 <div className="col-span-1 text-sm text-gray-400">
-                                                  {job.status === 'complete' && job.good_pieces !== null && (
-                                                    <span>{job.good_pieces}/{job.quantity}</span>
+                                                  {job.status === 'complete' && (
+                                                    <span>{getEffectiveQty(job).qty}/{job.quantity}</span>
                                                   )}
                                                   {['in_setup', 'in_progress'].includes(job.status) && (
                                                     <span className="text-green-400">Active</span>
@@ -1724,36 +2262,59 @@ export default function Mainframe({ user, profile }) {
                                                   )}
                                                 </div>
                                               </div>
+                                              {['hold', 'flag', 'rework', 'rejected'].includes(job.compliance_outcome) && job.compliance_notes && (
+                                                <div className="mt-2 pl-6 flex items-start gap-1.5 text-xs italic text-gray-400">
+                                                  {renderBadgeIcon(
+                                                    job.compliance_outcome === 'hold' ? 'pause'
+                                                    : job.compliance_outcome === 'rejected' ? 'x'
+                                                    : job.compliance_outcome === 'rework' ? 'alertcircle'
+                                                    : 'flag'
+                                                  )}
+                                                  <span className="whitespace-pre-wrap">{job.compliance_notes}</span>
+                                                </div>
+                                              )}
                                               {(job.finishing_sends?.some(s => s.is_partial_send) || job.finishing_sends?.length > 1) && (
                                                 <div className="mt-2 space-y-1">
                                                   {[...job.finishing_sends]
                                                     .sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
                                                     .map((send, idx) => {
                                                       const label = `Batch ${String.fromCharCode(65 + idx)}`
-                                                      const statusLabel = {
-                                                        'pending_finishing': 'Pending Finishing',
-                                                        'in_finishing': 'In Finishing',
-                                                        'finishing_complete': send.compliance_status === 'pending_compliance'
-                                                          ? 'Awaiting Compliance'
-                                                          : send.compliance_status === 'approved'
-                                                          ? 'Compliance Approved'
-                                                          : 'Finishing Complete',
-                                                      }[send.status] || send.status
-                                                      const statusColor = {
-                                                        'pending_finishing': 'text-gray-400',
-                                                        'in_finishing': 'text-cyan-400',
-                                                        'finishing_complete': send.compliance_status === 'approved'
-                                                          ? 'text-green-400'
-                                                          : 'text-yellow-400',
-                                                      }[send.status] || 'text-gray-400'
                                                       return (
                                                         <div key={send.id}
                                                              className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
                                                           <span className="text-gray-500 font-mono">{label}</span>
                                                           <span className="text-gray-600">&middot;</span>
-                                                          <span className="text-gray-400">{send.quantity} pcs</span>
+                                                          {(() => {
+                                                            const bq = getBatchQty(send)
+                                                            return (
+                                                              <span className="text-gray-400">
+                                                                {bq.qty} pcs
+                                                                {bq.annotate != null && (
+                                                                  <span className="text-gray-600 ml-1">(sent: {bq.annotate})</span>
+                                                                )}
+                                                              </span>
+                                                            )
+                                                          })()}
                                                           <span className="text-gray-600">&middot;</span>
-                                                          <span className={statusColor}>{statusLabel}</span>
+                                                          {(() => {
+                                                            if (send.status === 'pending_finishing') return <span className="text-gray-400">Pending Finishing</span>
+                                                            if (send.status === 'in_finishing') return <span className="text-cyan-400">In Finishing</span>
+                                                            const cs = send.compliance_status
+                                                            if (cs === 'rejected') return <span className="text-red-400">Compliance Rejected</span>
+                                                            if (cs === 'pending_compliance') return <span className="text-yellow-400">Awaiting Compliance</span>
+                                                            if (cs !== 'approved') return <span className="text-gray-400">{send.status}</span>
+
+                                                            const linkedOutbound = job.outbound_sends?.find(os => os.finishing_send_id === send.id)
+                                                            if (linkedOutbound) {
+                                                              if (linkedOutbound.returned_at) return <span className="text-emerald-400">Returned · {linkedOutbound.vendor_name}</span>
+                                                              return <span className="text-blue-400">At Vendor · {linkedOutbound.vendor_name}</span>
+                                                            }
+                                                            const hasPendingExternal = job.job_routing_steps?.some(
+                                                              s => s.step_type === 'external' && ['pending', 'in_progress'].includes(s.status)
+                                                            )
+                                                            if (hasPendingExternal) return <span className="text-amber-400">Ready for Outsource</span>
+                                                            return <span className="text-emerald-400">Compliance Approved</span>
+                                                          })()}
                                                         </div>
                                                       )
                                                     })
@@ -1790,7 +2351,10 @@ export default function Mainframe({ user, profile }) {
                                                           <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">At Vendor</span>
                                                         )}
                                                         {step.status === 'complete' && (
-                                                          <span className="flex items-center gap-1 text-green-400"><CheckCircle size={10} />{step.lot_number || ''}</span>
+                                                          <span className="flex items-center gap-1 text-green-400">
+                                                            <CheckCircle size={10} />
+                                                            {step.step_type !== 'external' && (step.lot_number || '')}
+                                                          </span>
                                                         )}
                                                         {step.status === 'removed' && (
                                                           <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Removed</span>
@@ -1857,20 +2421,31 @@ export default function Mainframe({ user, profile }) {
                                                 <ChevronRight size={13} className={`text-gray-600 transition-transform flex-shrink-0 ${expandedJobDocs[job.id] ? 'rotate-90' : ''}`} />
                                                 <FileText size={13} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
                                                 <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors">
-                                                  {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length})` : 'View documents'}
+                                                  {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length + 1})` : 'View documents'}
                                                 </span>
                                                 {loadingJobDocs[job.id] && <Loader2 size={11} className="animate-spin text-gray-600 ml-1" />}
                                               </div>
                                               {expandedJobDocs[job.id] && (
                                                 <div className="mt-2 pl-4 border-l-2 border-gray-800 space-y-1">
+                                                  <button
+                                                    onClick={() => handleViewTraveler(job.id)}
+                                                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-cyan-900/20 transition-colors text-left group"
+                                                  >
+                                                    <div className="w-6 h-6 rounded bg-cyan-800/40 flex items-center justify-center flex-shrink-0">
+                                                      <FileText size={12} className="text-cyan-300" />
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                      <p className="text-white text-xs truncate group-hover:text-cyan-300 transition-colors">Job Traveler</p>
+                                                      <p className="text-gray-500 text-[10px] truncate">Live — reflects current routing & job data</p>
+                                                    </div>
+                                                    <ExternalLink size={11} className="text-gray-600 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                                                  </button>
                                                   {loadingJobDocs[job.id] ? (
                                                     <div className="py-2 flex items-center gap-2">
                                                       <Loader2 size={13} className="animate-spin text-gray-600" />
                                                       <span className="text-xs text-gray-600">Loading...</span>
                                                     </div>
-                                                  ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? (
-                                                    <p className="text-xs text-gray-600 italic py-1">No documents attached</p>
-                                                  ) : (
+                                                  ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? null : (
                                                     jobDocCache[job.id].map(doc => (
                                                       <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
                                                         <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
@@ -1935,7 +2510,36 @@ export default function Mainframe({ user, profile }) {
                                           </div>
                                         </div>
                                         <div className="col-span-1 text-center">
-                                          <span className="text-white text-sm">{job.quantity}</span>
+                                          {(() => {
+                                            const eq = getEffectiveQty(job)
+                                            const isAdmin = profile?.role === 'admin'
+                                            return (
+                                              <div className="flex flex-col items-center gap-0.5">
+                                                {eq.overridden ? (
+                                                  <span className="text-sm" title={`Override by ${job.qty_override_by_profile?.full_name || 'admin'}: ${job.qty_override_reason}`}>
+                                                    <span className="text-amber-300 font-medium">{eq.qty}</span>
+                                                    <span className="text-gray-500">/{job.quantity}</span>
+                                                    <span className="text-amber-400 ml-1">*</span>
+                                                  </span>
+                                                ) : eq.verified && eq.qty !== job.quantity ? (
+                                                  <span className="text-sm">
+                                                    <span className="text-white font-medium">{eq.qty}</span>
+                                                    <span className="text-gray-500">/{job.quantity}</span>
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-white text-sm">{job.quantity}</span>
+                                                )}
+                                                {isAdmin && (
+                                                  <button
+                                                    onClick={() => handleOverrideStart(job)}
+                                                    className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"
+                                                  >
+                                                    override
+                                                  </button>
+                                                )}
+                                              </div>
+                                            )
+                                          })()}
                                         </div>
                                         <div className="col-span-2">
                                           <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
@@ -1983,30 +2587,42 @@ export default function Mainframe({ user, profile }) {
                                             .sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at))
                                             .map((send, idx) => {
                                               const label = `Batch ${String.fromCharCode(65 + idx)}`
-                                              const statusLabel = {
-                                                'pending_finishing': 'Pending Finishing',
-                                                'in_finishing': 'In Finishing',
-                                                'finishing_complete': send.compliance_status === 'pending_compliance'
-                                                  ? 'Awaiting Compliance'
-                                                  : send.compliance_status === 'approved'
-                                                  ? 'Compliance Approved'
-                                                  : 'Finishing Complete',
-                                              }[send.status] || send.status
-                                              const statusColor = {
-                                                'pending_finishing': 'text-gray-400',
-                                                'in_finishing': 'text-cyan-400',
-                                                'finishing_complete': send.compliance_status === 'approved'
-                                                  ? 'text-green-400'
-                                                  : 'text-yellow-400',
-                                              }[send.status] || 'text-gray-400'
                                               return (
                                                 <div key={send.id}
                                                      className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700">
                                                   <span className="text-gray-500 font-mono">{label}</span>
                                                   <span className="text-gray-600">&middot;</span>
-                                                  <span className="text-gray-400">{send.quantity} pcs</span>
+                                                  {(() => {
+                                                    const bq = getBatchQty(send)
+                                                    return (
+                                                      <span className="text-gray-400">
+                                                        {bq.qty} pcs
+                                                        {bq.annotate != null && (
+                                                          <span className="text-gray-600 ml-1">(sent: {bq.annotate})</span>
+                                                        )}
+                                                      </span>
+                                                    )
+                                                  })()}
                                                   <span className="text-gray-600">&middot;</span>
-                                                  <span className={statusColor}>{statusLabel}</span>
+                                                  {(() => {
+                                                    if (send.status === 'pending_finishing') return <span className="text-gray-400">Pending Finishing</span>
+                                                    if (send.status === 'in_finishing') return <span className="text-cyan-400">In Finishing</span>
+                                                    const cs = send.compliance_status
+                                                    if (cs === 'rejected') return <span className="text-red-400">Compliance Rejected</span>
+                                                    if (cs === 'pending_compliance') return <span className="text-yellow-400">Awaiting Compliance</span>
+                                                    if (cs !== 'approved') return <span className="text-gray-400">{send.status}</span>
+
+                                                    const linkedOutbound = job.outbound_sends?.find(os => os.finishing_send_id === send.id)
+                                                    if (linkedOutbound) {
+                                                      if (linkedOutbound.returned_at) return <span className="text-emerald-400">Returned · {linkedOutbound.vendor_name}</span>
+                                                      return <span className="text-blue-400">At Vendor · {linkedOutbound.vendor_name}</span>
+                                                    }
+                                                    const hasPendingExternal = job.job_routing_steps?.some(
+                                                      s => s.step_type === 'external' && ['pending', 'in_progress'].includes(s.status)
+                                                    )
+                                                    if (hasPendingExternal) return <span className="text-amber-400">Ready for Outsource</span>
+                                                    return <span className="text-emerald-400">Compliance Approved</span>
+                                                  })()}
                                                 </div>
                                               )
                                             })
@@ -2043,7 +2659,10 @@ export default function Mainframe({ user, profile }) {
                                                   <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">At Vendor</span>
                                                 )}
                                                 {step.status === 'complete' && (
-                                                  <span className="flex items-center gap-1 text-green-400"><CheckCircle size={10} />{step.lot_number || ''}</span>
+                                                  <span className="flex items-center gap-1 text-green-400">
+                                                            <CheckCircle size={10} />
+                                                            {step.step_type !== 'external' && (step.lot_number || '')}
+                                                          </span>
                                                 )}
                                                 {step.status === 'removed' && (
                                                   <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Removed</span>
@@ -2110,20 +2729,31 @@ export default function Mainframe({ user, profile }) {
                                         <ChevronRight size={13} className={`text-gray-600 transition-transform flex-shrink-0 ${expandedJobDocs[job.id] ? 'rotate-90' : ''}`} />
                                         <FileText size={13} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
                                         <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors">
-                                          {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length})` : 'View documents'}
+                                          {expandedJobDocs[job.id] ? 'Hide documents' : jobDocCache[job.id] ? `Documents (${jobDocCache[job.id].length + 1})` : 'View documents'}
                                         </span>
                                         {loadingJobDocs[job.id] && <Loader2 size={11} className="animate-spin text-gray-600 ml-1" />}
                                       </div>
                                       {expandedJobDocs[job.id] && (
                                         <div className="mt-2 pl-4 border-l-2 border-gray-800 space-y-1">
+                                          <button
+                                            onClick={() => handleViewTraveler(job.id)}
+                                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-cyan-900/20 transition-colors text-left group"
+                                          >
+                                            <div className="w-6 h-6 rounded bg-cyan-800/40 flex items-center justify-center flex-shrink-0">
+                                              <FileText size={12} className="text-cyan-300" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                              <p className="text-white text-xs truncate group-hover:text-cyan-300 transition-colors">Job Traveler</p>
+                                              <p className="text-gray-500 text-[10px] truncate">Live — reflects current routing & job data</p>
+                                            </div>
+                                            <ExternalLink size={11} className="text-gray-600 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                                          </button>
                                           {loadingJobDocs[job.id] ? (
                                             <div className="py-2 flex items-center gap-2">
                                               <Loader2 size={13} className="animate-spin text-gray-600" />
                                               <span className="text-xs text-gray-600">Loading...</span>
                                             </div>
-                                          ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? (
-                                            <p className="text-xs text-gray-600 italic py-1">No documents attached</p>
-                                          ) : (
+                                          ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? null : (
                                             jobDocCache[job.id].map(doc => (
                                               <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
                                                 <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
@@ -2171,6 +2801,107 @@ export default function Mainframe({ user, profile }) {
                 <RefreshCw size={16} className={woLookupLoading ? 'animate-spin' : ''} />
                 Refresh
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Qty Override Modal */}
+      {overrideJob && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]"
+          onClick={() => !overrideSaving && handleOverrideCancel()}
+        >
+          <div
+            className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-xl font-bold text-white">Override Quantity</h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  {overrideJob.job_number} · {overrideJob.component?.part_number}
+                </p>
+              </div>
+              <button
+                onClick={handleOverrideCancel}
+                disabled={overrideSaving}
+                className="text-gray-500 hover:text-white disabled:opacity-50"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="mb-4 p-3 bg-gray-800 rounded border border-gray-700 text-sm">
+              <div className="text-gray-400">Order qty: <span className="text-white">{overrideJob.quantity}</span></div>
+              <div className="text-gray-400">Calculated effective qty: <span className="text-white">{(() => {
+                const stripped = { ...overrideJob, qty_override: null }
+                return getEffectiveQty(stripped).qty
+              })()}</span></div>
+              {overrideJob.qty_override != null && (
+                <div className="text-amber-400 mt-1">
+                  Currently overridden to {overrideJob.qty_override}
+                  {overrideJob.qty_override_reason && (
+                    <div className="text-xs text-gray-500 italic mt-1">"{overrideJob.qty_override_reason}"</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 mb-4">
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">New Quantity</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={overrideValue}
+                  onChange={(e) => setOverrideValue(e.target.value)}
+                  disabled={overrideSaving}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white focus:border-amber-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  Reason <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  disabled={overrideSaving}
+                  placeholder="Explain why this override is necessary (e.g., '5 pieces lost in transit', 'recount confirmed 615 not 620')..."
+                  rows={3}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-amber-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center gap-2">
+              {overrideJob.qty_override != null ? (
+                <button
+                  onClick={handleOverrideClear}
+                  disabled={overrideSaving}
+                  className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
+                >
+                  Clear override
+                </button>
+              ) : <div />}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleOverrideCancel}
+                  disabled={overrideSaving}
+                  className="px-4 py-2 text-gray-400 hover:text-white disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleOverrideSubmit}
+                  disabled={overrideSaving || !overrideValue || !overrideReason.trim()}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {overrideSaving ? <Loader2 size={16} className="animate-spin" /> : null}
+                  {overrideSaving ? 'Saving...' : 'Save Override'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

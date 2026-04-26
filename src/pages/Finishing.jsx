@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
+import { buildTravelerHTML } from '../lib/traveler'
 import {
   Lock,
   Unlock,
@@ -30,7 +31,8 @@ import {
   Search,
   Paperclip,
   Upload,
-  Eye
+  Eye,
+  ExternalLink
 } from 'lucide-react'
 
 // Stage definitions
@@ -72,8 +74,29 @@ export default function Finishing() {
   const [startModalSend, setStartModalSend] = useState(null)
   const [startLotNumber, setStartLotNumber] = useState('')
   const [startChemicalLot, setStartChemicalLot] = useState('')
+  const [startChemicalLot2, setStartChemicalLot2] = useState('')
   const [startIncomingCount, setStartIncomingCount] = useState('')
   const [generatingLot, setGeneratingLot] = useState(false)
+
+  // Start New Job (standalone batch) modal state
+  const [showNewJobModal, setShowNewJobModal] = useState(false)
+  const [newJobParts, setNewJobParts] = useState([])
+  const [newJobMachines, setNewJobMachines] = useState([])
+  const [newJobLoadingRefs, setNewJobLoadingRefs] = useState(false)
+  const [newJobPartSearch, setNewJobPartSearch] = useState('')
+  const [newJobForm, setNewJobForm] = useState({
+    part_id: '',
+    source_type: 'machine',
+    source_machine_id: '',
+    source_description: '',
+    quantity: '',
+    material_lot_number: '',
+    production_lot_number: '',
+    customer: '',
+    operation_type: 'full_finishing',
+    notes: '',
+  })
+  const [newJobSubmitting, setNewJobSubmitting] = useState(false)
 
   // Collapsed state per batch
   const [collapsedBatches, setCollapsedBatches] = useState({})
@@ -95,6 +118,8 @@ export default function Finishing() {
   // Duration timer
   const [, setTick] = useState(0)
   const timerRef = useRef(null)
+
+  const canStartNewJob = operator?.role === 'admin' || operator?.role === 'finishing'
 
   // Set browser tab title
   useEffect(() => {
@@ -189,6 +214,197 @@ export default function Finishing() {
     }
   }
 
+  // Get most recent second chemical lot number (alkaline mix) — persistence rule
+  const getCurrentChemicalLot2 = async () => {
+    try {
+      const { data } = await supabase
+        .from('finishing_sends')
+        .select('chemical_lot_number_2')
+        .not('chemical_lot_number_2', 'is', null)
+        .order('finishing_started_at', { ascending: false })
+        .limit(1)
+
+      if (data && data.length > 0 && data[0].chemical_lot_number_2) {
+        return data[0].chemical_lot_number_2
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  // Load parts and machines for the New Job modal — fired when modal opens.
+  const loadNewJobReferences = async () => {
+    setNewJobLoadingRefs(true)
+    try {
+      const [partsRes, machinesRes] = await Promise.all([
+        supabase
+          .from('parts')
+          .select('id, part_number, description, customer, part_type')
+          .eq('is_active', true)
+          .order('part_number'),
+        supabase
+          .from('machines')
+          .select('id, name, code')
+          .eq('is_active', true)
+          .order('name'),
+      ])
+      if (partsRes.error) throw partsRes.error
+      if (machinesRes.error) throw machinesRes.error
+      setNewJobParts(partsRes.data || [])
+      setNewJobMachines(machinesRes.data || [])
+    } catch (err) {
+      console.error('Failed to load New Job references:', err)
+      alert('Failed to load parts/machines list: ' + err.message)
+    } finally {
+      setNewJobLoadingRefs(false)
+    }
+  }
+
+  const handleOpenNewJob = () => {
+    setNewJobForm({
+      part_id: '',
+      source_type: 'machine',
+      source_machine_id: '',
+      source_description: '',
+      quantity: '',
+      material_lot_number: '',
+      production_lot_number: '',
+      customer: '',
+      operation_type: 'full_finishing',
+      notes: '',
+    })
+    setNewJobPartSearch('')
+    setShowNewJobModal(true)
+    loadNewJobReferences()
+  }
+
+  const handleCloseNewJob = () => {
+    if (newJobSubmitting) return
+    setShowNewJobModal(false)
+  }
+
+  const handleSubmitNewJob = async () => {
+    if (!newJobForm.part_id) {
+      alert('Select a part number.')
+      return
+    }
+    if (newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) {
+      alert('Select a machine.')
+      return
+    }
+    if (newJobForm.source_type === 'received' && !newJobForm.source_description.trim()) {
+      alert('Enter a source description for received parts.')
+      return
+    }
+    const qty = parseInt(newJobForm.quantity, 10)
+    if (Number.isNaN(qty) || qty <= 0) {
+      alert('Enter a valid quantity (must be > 0).')
+      return
+    }
+    if (!['full_finishing', 'passivation_only'].includes(newJobForm.operation_type)) {
+      alert('Select an operation type.')
+      return
+    }
+
+    setNewJobSubmitting(true)
+    try {
+      const now = new Date().toISOString()
+
+      // Universal FLN — no exceptions
+      const fln = await generateFinishingLotNumber()
+
+      // Generate the next J-FIN-XXXXXX number via DB function
+      const { data: jobNumberRow, error: numberError } = await supabase
+        .rpc('next_standalone_finishing_job_number')
+      if (numberError) throw numberError
+      const jobNumber = jobNumberRow
+
+      // Customer override note — if James edited the customer field, capture in notes
+      const customerOverride = newJobForm.customer.trim() || null
+      let combinedNotes = newJobForm.notes.trim() || ''
+      if (customerOverride) {
+        const selectedPart = newJobParts.find(p => p.id === newJobForm.part_id)
+        if (customerOverride !== (selectedPart?.customer || '')) {
+          combinedNotes = combinedNotes
+            ? `${combinedNotes}\n[Customer override: ${customerOverride}]`
+            : `[Customer override: ${customerOverride}]`
+        }
+      }
+
+      // Step 1 — create the J-FIN job
+      const { data: createdJob, error: jobError } = await supabase
+        .from('jobs')
+        .insert({
+          work_order_id: null,
+          job_number: jobNumber,
+          part_id: newJobForm.part_id,
+          component_id: newJobForm.part_id,
+          quantity: qty,
+          good_pieces: qty,
+          status: 'in_progress',
+          is_standalone_finishing: true,
+          notes: combinedNotes || null,
+          production_lot_number: newJobForm.production_lot_number.trim() || null,
+          assigned_machine_id: newJobForm.source_type === 'machine' ? newJobForm.source_machine_id : null,
+          source_description: newJobForm.source_type === 'received' ? newJobForm.source_description.trim() : null,
+          created_at: now,
+          updated_at: now,
+        })
+        .select('id, job_number')
+        .single()
+      if (jobError) throw jobError
+
+      // Determine starting stage
+      const initialStage = newJobForm.operation_type === 'passivation_only' ? 'treatment' : 'wash'
+
+      // Pre-fill chemical lots from persistence
+      const [currentChem, currentChem2] = await Promise.all([
+        getCurrentChemicalLot(),
+        getCurrentChemicalLot2(),
+      ])
+
+      // Step 2 — create the finishing_send linked to the new job
+      const { error: sendError } = await supabase
+        .from('finishing_sends')
+        .insert({
+          is_standalone: true,
+          standalone_operation_type: newJobForm.operation_type,
+          job_id: createdJob.id,
+          machine_id: newJobForm.source_type === 'machine' ? newJobForm.source_machine_id : null,
+          sent_by: operator.id,
+          quantity: qty,
+          material_lot_number: newJobForm.material_lot_number.trim() || null,
+          notes: combinedNotes || null,
+          status: 'in_finishing',
+          finishing_stage: initialStage,
+          stage_started_at: now,
+          finishing_operator_id: operator.id,
+          finishing_started_at: now,
+          finishing_lot_number: fln,
+          chemical_lot_number: currentChem || null,
+          chemical_lot_number_2: currentChem2 || null,
+          incoming_count: qty,
+          sent_at: now,
+          created_at: now,
+          updated_at: now,
+        })
+      if (sendError) {
+        // Roll back the job we just created if the send insert fails
+        await supabase.from('jobs').delete().eq('id', createdJob.id)
+        throw sendError
+      }
+
+      setShowNewJobModal(false)
+      await loadData()
+    } catch (err) {
+      console.error('Failed to create standalone batch:', err)
+      alert('Failed to create batch: ' + err.message)
+    } finally {
+      setNewJobSubmitting(false)
+    }
+  }
+
   // Load queue and active batch
   const loadData = useCallback(async () => {
     try {
@@ -198,9 +414,11 @@ export default function Finishing() {
         .select(`
           *,
           job:jobs(
-            id, job_number, quantity, production_lot_number,
-            work_order:work_orders(wo_number, customer, priority, due_date),
-            component:parts!component_id(id, part_number, description)
+            id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
+            is_standalone_finishing, source_description,
+            work_order:work_orders(wo_number, customer, priority, due_date, order_type, notes),
+            component:parts!component_id(id, part_number, description, customer, part_type),
+            assigned_machine:machines!assigned_machine_id(name)
           ),
           sent_by_profile:profiles!sent_by(full_name)
         `)
@@ -216,12 +434,14 @@ export default function Finishing() {
         .select(`
           *,
           job:jobs(
-            id, job_number, quantity, production_lot_number,
-            work_order:work_orders(wo_number, customer, priority, due_date),
-            component:parts!component_id(id, part_number, description)
+            id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
+            is_standalone_finishing, source_description,
+            work_order:work_orders(wo_number, customer, priority, due_date, order_type, notes),
+            component:parts!component_id(id, part_number, description, customer, part_type),
+            assigned_machine:machines!assigned_machine_id(name)
           ),
           sent_by_profile:profiles!sent_by(full_name),
-          machine:machines(id, name, code)
+          machine:machines!machine_id(id, name, code)
         `)
         .eq('status', 'in_finishing')
         .order('finishing_started_at', { ascending: true })
@@ -236,9 +456,10 @@ export default function Finishing() {
         .select(`
           *,
           job:jobs(
-            id, job_number,
+            id, job_number, is_standalone_finishing, source_description,
             work_order:work_orders(wo_number, customer),
-            component:parts!component_id(part_number, description)
+            component:parts!component_id(part_number, description, customer),
+            assigned_machine:machines!assigned_machine_id(name)
           )
         `)
         .eq('status', 'finishing_complete')
@@ -514,9 +735,10 @@ export default function Finishing() {
     setShowStartModal(true)
 
     // Pre-fill lot numbers in parallel
-    const [currentLot, currentChemicalLot] = await Promise.all([
+    const [currentLot, currentChemicalLot, currentChemicalLot2] = await Promise.all([
       getCurrentFinishingLot(),
-      getCurrentChemicalLot()
+      getCurrentChemicalLot(),
+      getCurrentChemicalLot2()
     ])
 
     if (currentLot) {
@@ -526,6 +748,7 @@ export default function Finishing() {
       setStartLotNumber(newLot)
     }
     setStartChemicalLot(currentChemicalLot || '')
+    setStartChemicalLot2(currentChemicalLot2 || '')
     setGeneratingLot(false)
   }
 
@@ -586,6 +809,77 @@ export default function Finishing() {
       window.open(signedUrl, '_blank')
     } catch (err) {
       alert('Failed to open document')
+    }
+  }
+
+  const handleViewTraveler = async (jobId) => {
+    if (!jobId) return
+    try {
+      const { data: fullJob, error: jobError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status,
+          production_lot_number, good_pieces, actual_end,
+          work_order:work_orders ( wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+          component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
+          assigned_machine:machines!assigned_machine_id ( name ),
+          assigned_user:profiles!assigned_user_id ( full_name )
+        `)
+        .eq('id', jobId)
+        .single()
+      if (jobError) throw jobError
+
+      const { data: steps, error: stepsError } = await supabase
+        .from('job_routing_steps')
+        .select(`*, completed_by_profile:profiles!completed_by(full_name)`)
+        .eq('job_id', jobId)
+        .neq('status', 'removed')
+        .order('step_order')
+      if (stepsError) throw stepsError
+
+      const { data: finishingBatches, error: fsError } = await supabase
+        .from('finishing_sends')
+        .select(`
+          id, finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+          material_lot_number, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+          finishing_completed_at, compliance_approved_at,
+          finishing_operator:profiles!finishing_operator_id(full_name)
+        `)
+        .eq('job_id', jobId)
+        .not('finishing_completed_at', 'is', null)
+        .neq('compliance_status', 'rejected')
+        .order('finishing_completed_at', { ascending: false })
+      if (fsError) throw fsError
+
+      const { data: outboundSends, error: osError } = await supabase
+        .from('outbound_sends')
+        .select(`
+          id, operation_type, vendor_name, vendor_lot_number,
+          quantity, quantity_returned, sent_at, returned_at,
+          job_routing_step_id, finishing_send_id,
+          finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
+        `)
+        .eq('job_id', jobId)
+        .order('sent_at', { ascending: true })
+      if (osError) throw osError
+
+      const html = buildTravelerHTML({
+        job: fullJob,
+        steps: steps || [],
+        finishingBatches: finishingBatches || [],
+        outboundSends: outboundSends || [],
+      })
+      const win = window.open('', '_blank')
+      if (!win) {
+        alert('Pop-up blocked. Allow pop-ups for this site to view the traveler.')
+        return
+      }
+      win.document.open()
+      win.document.write(html)
+      win.document.close()
+    } catch (err) {
+      console.error('Failed to open traveler:', err)
+      alert('Failed to open traveler: ' + err.message)
     }
   }
 
@@ -655,6 +949,7 @@ export default function Finishing() {
           finishing_started_at: now,
           finishing_lot_number: startLotNumber || null,
           chemical_lot_number: startChemicalLot.trim() || null,
+          chemical_lot_number_2: startChemicalLot2.trim() || null,
           incoming_count: incomingCount,
           updated_at: now
         })
@@ -665,6 +960,7 @@ export default function Finishing() {
       setStartModalSend(null)
       setStartLotNumber('')
       setStartChemicalLot('')
+      setStartChemicalLot2('')
       setStartIncomingCount('')
       await loadData()
     } catch (err) {
@@ -989,6 +1285,15 @@ export default function Finishing() {
           </div>
 
           <div className="flex items-center gap-4">
+            {canStartNewJob && (
+              <button
+                onClick={handleOpenNewJob}
+                className="flex items-center gap-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-medium text-sm transition-colors"
+              >
+                <Package size={16} />
+                + Start New Job
+              </button>
+            )}
             {lastUpdated && (
               <span className="text-gray-500 text-xs flex items-center gap-1">
                 <RefreshCw size={12} />
@@ -1070,7 +1375,13 @@ export default function Finishing() {
                           className={`w-full flex items-center gap-3 px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}
                         >
                           <ChevronDown size={16} className={`text-gray-500 flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : 'rotate-0'}`} />
-                          <span className="text-white font-mono">{batch.job?.job_number}</span>
+                          <span className="text-white font-mono">{batch.job?.job_number || 'No Job #'}</span>
+                          {batch.is_standalone && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
+                              <Package size={10} />
+                              Standalone
+                            </span>
+                          )}
                           {batchLabels[batch.id] && (
                             <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
                           )}
@@ -1097,13 +1408,28 @@ export default function Finishing() {
                             <div className={`bg-gray-800 rounded-lg p-4 border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
                               <div className="flex items-start justify-between mb-2">
                                 <div>
-                                  <p className="text-white font-mono text-lg">
-                                    {batch.job?.job_number}
+                                  <p className="text-white font-mono text-lg flex items-center gap-2">
+                                    {batch.job?.job_number || 'No Job #'}
+                                    {batch.is_standalone && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
+                                        <Package size={10} />
+                                        Standalone
+                                      </span>
+                                    )}
                                     {batchLabels[batch.id] && (
                                       <span className="ml-2 px-2 py-0.5 rounded text-sm font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
                                     )}
                                   </p>
-                                  <p className="text-gray-400 text-sm">{batch.job?.work_order?.wo_number}</p>
+                                  <p className="text-gray-400 text-sm">
+                                    {batch.job?.work_order?.wo_number || (batch.is_standalone
+                                      ? (() => {
+                                          const machine = batch.machine?.name || batch.job?.assigned_machine?.name
+                                          if (machine) return `Source: ${machine}`
+                                          if (batch.job?.source_description) return `Source: Received (${batch.job.source_description})`
+                                          return 'Source: Received'
+                                        })()
+                                      : '')}
+                                  </p>
                                 </div>
                                 <div className={`w-3 h-3 rounded-full ${getPriorityColor(batch.job?.work_order?.priority)}`}
                                      title={batch.job?.work_order?.priority} />
@@ -1117,7 +1443,7 @@ export default function Finishing() {
                                 </div>
                                 <div>
                                   <p className="text-gray-500 text-xs">Customer</p>
-                                  <p className="text-white">{batch.job?.work_order?.customer || '-'}</p>
+                                  <p className="text-white">{batch.job?.work_order?.customer || batch.job?.component?.customer || '-'}</p>
                                 </div>
                               </div>
 
@@ -1139,7 +1465,7 @@ export default function Finishing() {
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
                                   <p className="text-gray-500 text-xs">Production Lot #</p>
-                                  <p className="text-white font-mono text-sm">{batch.production_lot_number || '-'}</p>
+                                  <p className="text-white font-mono text-sm">{batch.production_lot_number || batch.job?.production_lot_number || '-'}</p>
                                 </div>
                                 <div>
                                   <p className="text-gray-500 text-xs">Finishing Lot #</p>
@@ -1149,9 +1475,15 @@ export default function Finishing() {
 
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
-                                  <p className="text-gray-500 text-xs">Chemical Lot #</p>
+                                  <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
                                   <p className="text-white font-mono text-sm">{batch.chemical_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
                                 </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                                  <p className="text-white font-mono text-sm">{batch.chemical_lot_number_2 || <span className="text-gray-600">&mdash;</span>}</p>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
                                   <p className="text-gray-500 text-xs">Material Lot #</p>
                                   <p className="text-white font-mono text-sm">{batch.material_lot_number || '-'}</p>
@@ -1234,6 +1566,29 @@ export default function Finishing() {
                                   {formatDuration(batch.finishing_started_at)}
                                 </p>
                               </div>
+                            </div>
+
+                            {/* Job Traveler — live, generated on demand */}
+                            <div className="bg-gray-800 rounded-lg p-4 mb-3">
+                              <p className="text-gray-400 text-sm flex items-center gap-1.5 mb-2">
+                                <FileText size={14} />
+                                Job Traveler
+                              </p>
+                              <button
+                                onClick={() => handleViewTraveler(batch.job_id || batch.job?.id)}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-700/50 rounded-lg transition-colors text-left group"
+                              >
+                                <div className="w-8 h-8 rounded bg-cyan-800/50 flex items-center justify-center flex-shrink-0">
+                                  <FileText size={16} className="text-cyan-300" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-white text-sm truncate group-hover:text-cyan-300 transition-colors">
+                                    Job Traveler
+                                  </p>
+                                  <p className="text-gray-400 text-xs truncate">Live — reflects current routing & job data</p>
+                                </div>
+                                <ExternalLink size={14} className="text-gray-500 group-hover:text-cyan-300 transition-colors flex-shrink-0" />
+                              </button>
                             </div>
 
                             {/* Documents Section */}
@@ -1387,8 +1742,13 @@ export default function Finishing() {
 
                   const renderBatchCard = (batch) => (
                     <div key={batch.id} className={`bg-gray-900 rounded p-3 border-l-2 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
-                      <p className="text-white font-mono text-sm">
-                        {batch.job?.job_number}
+                      <p className="text-white font-mono text-sm flex items-center gap-1">
+                        {batch.job?.job_number || 'No Job #'}
+                        {batch.is_standalone && (
+                          <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-[10px]">
+                            <Package size={8} />
+                          </span>
+                        )}
                         {batchLabels[batch.id] && (
                           <span className="ml-1 px-1 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">{batchLabels[batch.id]}</span>
                         )}
@@ -1709,23 +2069,48 @@ export default function Finishing() {
                 </div>
               </div>
 
-              {/* Chemical Lot # */}
-              <div>
-                <label className="block text-gray-400 text-sm mb-1">
-                  <Beaker size={14} className="inline mr-1" />
-                  Chemical Lot #
-                </label>
-                <p className="text-gray-600 text-xs mb-2">Lot number from treatment chemicals in tank</p>
-                <input
-                  type="text"
-                  value={startChemicalLot}
-                  onChange={(e) => setStartChemicalLot(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
-                  placeholder="Enter chemical lot number"
-                />
-                {!startChemicalLot.trim() && (
-                  <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
-                )}
+              {/* Chemical Lots — citric acid + alkaline mix */}
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    <Beaker size={14} className="inline mr-1" />
+                    Citric Acid Lot #
+                  </label>
+                  <p className="text-gray-600 text-xs mb-2">Lot from citric acid container</p>
+                  <input
+                    type="text"
+                    value={startChemicalLot}
+                    onChange={(e) => setStartChemicalLot(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                    placeholder="Enter citric acid lot"
+                  />
+                  {!startChemicalLot.trim() && (
+                    <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    <Beaker size={14} className="inline mr-1" />
+                    Alkaline Mix Lot #
+                  </label>
+                  <p className="text-gray-600 text-xs mb-2">Lot from alkaline mix container</p>
+                  <input
+                    type="text"
+                    value={startChemicalLot2}
+                    onChange={(e) => setStartChemicalLot2(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                    placeholder="Enter alkaline mix lot"
+                  />
+                  {!startChemicalLot2.trim() && (
+                    <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
+                  )}
+                </div>
+
+                <div className="text-xs text-gray-500 italic flex items-start gap-1.5 pt-1">
+                  <AlertTriangle size={12} className="mt-0.5 flex-shrink-0 text-cyan-400" />
+                  <span>If either chemical lot has changed since the last batch, click "New" above to generate a fresh Finishing Lot #.</span>
+                </div>
               </div>
 
               {/* Incoming Count */}
@@ -1771,6 +2156,258 @@ export default function Finishing() {
                 Start Batch
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Start New Job (Standalone Batch) Modal */}
+      {showNewJobModal && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4"
+          onClick={handleCloseNewJob}
+        >
+          <div
+            className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                  <Package size={20} className="text-cyan-400" />
+                  Start New Finishing Batch
+                </h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  Manually log a batch arriving at finishing without a SkyNet kiosk send (purchased parts from Betty, parts from non-Mazak-5 machines, etc.)
+                </p>
+              </div>
+              <button
+                onClick={handleCloseNewJob}
+                disabled={newJobSubmitting}
+                className="text-gray-500 hover:text-white disabled:opacity-50"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {newJobLoadingRefs ? (
+              <div className="flex items-center justify-center py-12 text-gray-400">
+                <Loader2 size={20} className="animate-spin mr-2" />
+                Loading parts and machines...
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Part Number <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newJobPartSearch}
+                    onChange={(e) => setNewJobPartSearch(e.target.value)}
+                    placeholder="Type to search parts..."
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                  {newJobPartSearch.trim().length > 0 && (
+                    <div className="mt-1 max-h-48 overflow-y-auto bg-gray-800 border border-gray-700 rounded">
+                      {newJobParts
+                        .filter(p => {
+                          const q = newJobPartSearch.toLowerCase()
+                          return (
+                            p.part_number.toLowerCase().includes(q) ||
+                            (p.description || '').toLowerCase().includes(q) ||
+                            (p.customer || '').toLowerCase().includes(q)
+                          )
+                        })
+                        .slice(0, 50)
+                        .map(p => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              // Auto-populate customer from the part record. James can still override if needed.
+                              setNewJobForm(f => ({ ...f, part_id: p.id, customer: p.customer || f.customer }))
+                              setNewJobPartSearch(`${p.part_number} — ${p.description || ''}`)
+                            }}
+                            className={`w-full text-left px-3 py-2 hover:bg-gray-700 border-b border-gray-700 last:border-0 ${
+                              newJobForm.part_id === p.id ? 'bg-cyan-900/40' : ''
+                            }`}
+                          >
+                            <div className="text-white text-sm font-mono">{p.part_number}</div>
+                            <div className="text-gray-400 text-xs">{p.description}{p.customer ? ` · ${p.customer}` : ''}</div>
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                  {newJobForm.part_id && (
+                    <p className="text-xs text-cyan-400 mt-1">✓ Selected</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Source <span className="text-red-400">*</span>
+                  </label>
+                  <select
+                    value={newJobForm.source_type === 'received' ? '__received__' : newJobForm.source_machine_id}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      if (v === '__received__') {
+                        setNewJobForm(f => ({ ...f, source_type: 'received', source_machine_id: '' }))
+                      } else if (v === '') {
+                        setNewJobForm(f => ({ ...f, source_type: 'machine', source_machine_id: '' }))
+                      } else {
+                        setNewJobForm(f => ({ ...f, source_type: 'machine', source_machine_id: v, source_description: '' }))
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  >
+                    <option value="">— Select source —</option>
+                    {newJobMachines.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}{m.code ? ` (${m.code})` : ''}</option>
+                    ))}
+                    <option disabled>──────────</option>
+                    <option value="__received__">Received (no machine)</option>
+                  </select>
+                  {newJobForm.source_type === 'received' && (
+                    <div className="mt-3">
+                      <label className="block text-gray-400 text-sm mb-1">
+                        Source Description <span className="text-red-400">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={newJobForm.source_description}
+                        onChange={(e) => setNewJobForm(f => ({ ...f, source_description: e.target.value }))}
+                        placeholder='e.g. "Betty - SS springs lot 47", "Heat treat return from Braddock", "Customer supplied"'
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      <p className="text-gray-600 text-xs mt-1">Where the parts came from. Helps with traceability when no SkyNet machine was involved.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Quantity <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newJobForm.quantity}
+                    onChange={(e) => setNewJobForm(f => ({ ...f, quantity: e.target.value }))}
+                    placeholder="Count the parts in front of you"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Material Lot # <span className="text-gray-600 text-xs">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newJobForm.material_lot_number}
+                    onChange={(e) => setNewJobForm(f => ({ ...f, material_lot_number: e.target.value }))}
+                    placeholder="If on the traveler or part bag"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Production Lot # <span className="text-gray-600 text-xs">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newJobForm.production_lot_number}
+                    onChange={(e) => setNewJobForm(f => ({ ...f, production_lot_number: e.target.value }))}
+                    placeholder="If hand-written on the traveler"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                  />
+                  <p className="text-gray-600 text-xs mt-1">For batches arriving from non-Mazak-5 machines where the machinist wrote a PLN on the paper traveler.</p>
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Customer <span className="text-gray-600 text-xs">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newJobForm.customer}
+                    onChange={(e) => setNewJobForm(f => ({ ...f, customer: e.target.value }))}
+                    placeholder="Auto-populated from the part record — editable"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">
+                    Operation Type <span className="text-red-400">*</span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'full_finishing' }))}
+                      className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
+                        newJobForm.operation_type === 'full_finishing'
+                          ? 'bg-cyan-600 border-cyan-500 text-white'
+                          : 'border-gray-700 text-gray-400 hover:border-cyan-600 hover:text-cyan-400'
+                      }`}
+                    >
+                      Full Finishing
+                      <div className="text-xs font-normal opacity-75 mt-0.5">Wash → Treatment → Dry</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'passivation_only' }))}
+                      className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
+                        newJobForm.operation_type === 'passivation_only'
+                          ? 'bg-cyan-600 border-cyan-500 text-white'
+                          : 'border-gray-700 text-gray-400 hover:border-cyan-600 hover:text-cyan-400'
+                      }`}
+                    >
+                      Passivation Only
+                      <div className="text-xs font-normal opacity-75 mt-0.5">Treatment → Dry (skip Wash)</div>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Notes <span className="text-gray-600 text-xs">(optional)</span>
+                  </label>
+                  <textarea
+                    value={newJobForm.notes}
+                    onChange={(e) => setNewJobForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={2}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={handleCloseNewJob}
+                    disabled={newJobSubmitting}
+                    className="px-4 py-2 text-gray-400 hover:text-white disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSubmitNewJob}
+                    disabled={
+                      newJobSubmitting ||
+                      !newJobForm.part_id ||
+                      !newJobForm.quantity ||
+                      (newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) ||
+                      (newJobForm.source_type === 'received' && !newJobForm.source_description.trim())
+                    }
+                    className="flex items-center gap-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {newJobSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                    {newJobSubmitting ? 'Creating...' : 'Start Batch'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -181,6 +181,11 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-skynet-dark">
+      {import.meta.env.VITE_ENV_LABEL === 'test' && (
+        <div className="w-full bg-amber-500 text-black text-center text-xs font-bold py-1 tracking-widest">
+          TEST ENVIRONMENT — NOT LIVE DATA
+        </div>
+      )}
       <header className="bg-gray-900 border-b border-gray-800 px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">

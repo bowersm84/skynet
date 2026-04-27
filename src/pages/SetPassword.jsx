@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -11,35 +11,48 @@ export default function SetPassword() {
   const [sessionReady, setSessionReady] = useState(false)
   const [userEmail, setUserEmail] = useState('')
 
+  // Mutable ref tracks session readiness for the timeout closure
+  // (state value would be captured stale and never updated inside the timer)
+  const sessionReadyRef = useRef(false)
+
   // On mount, Supabase auto-handles the magic link in the URL hash and creates a session.
-  // We just need to detect when the session is ready.
+  // Detect when the session is ready, with a 5-second fallback for invalid/expired links.
   useEffect(() => {
+    let subscription = null
+
+    const markReady = (session) => {
+      sessionReadyRef.current = true
+      setSessionReady(true)
+      setUserEmail(session.user.email || '')
+    }
+
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession()
       if (session) {
-        setSessionReady(true)
-        setUserEmail(session.user.email || '')
-      } else {
-        // No session yet — listen for the auth state change that fires when the magic link is processed
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-          if (event === 'SIGNED_IN' && session) {
-            setSessionReady(true)
-            setUserEmail(session.user.email || '')
-          }
-        })
-        return () => subscription.unsubscribe()
+        markReady(session)
+        return
       }
+      // No session yet — wait for auth state change from magic link processing
+      const result = supabase.auth.onAuthStateChange((event, session) => {
+        if (event === 'SIGNED_IN' && session) {
+          markReady(session)
+        }
+      })
+      subscription = result.data.subscription
     }
     checkSession()
 
-    // Show error if no session arrives within 5 seconds (broken/expired link)
+    // Fallback: if no session within 5 seconds, the link is invalid/expired
     const timeout = setTimeout(() => {
-      if (!sessionReady) {
+      if (!sessionReadyRef.current) {
         setError('This invitation link is invalid or has expired. Contact your SkyNet administrator for a new one.')
       }
     }, 5000)
-    return () => clearTimeout(timeout)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    return () => {
+      clearTimeout(timeout)
+      if (subscription) subscription.unsubscribe()
+    }
   }, [])
 
   const handleSetPassword = async (e) => {

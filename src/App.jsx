@@ -315,6 +315,19 @@ function MainApp() {
 
 // Root App component with routing
 function App() {
+  // Detect invite/recovery magic links arriving at Site URL (/) with token in hash
+  // Supabase Dashboard invites land at SiteURL; we route them to /set-password instead
+  if (typeof window !== 'undefined') {
+    const hash = window.location.hash || ''
+    const isInviteOrRecovery = hash.includes('type=invite') || hash.includes('type=recovery')
+    const isAtRoot = window.location.pathname === '/' || window.location.pathname === ''
+    if (isInviteOrRecovery && isAtRoot) {
+      // Preserve the hash so /set-password can process the token
+      window.location.replace('/set-password' + hash)
+      return null  // bail out of render while redirect happens
+    }
+  }
+
   return (
     <BrowserRouter>
       <Routes>

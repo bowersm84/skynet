@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 
+const SKYBOLT_DOMAIN = '@skybolt.com'
+
 export default function Login({ onLogin }) {
-  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -12,13 +14,18 @@ export default function Login({ onLogin }) {
     setLoading(true)
     setError(null)
 
+    // Allow user to type either "mbowers" or "mbowers@skybolt.com" — handle both gracefully
+    const trimmed = username.trim().toLowerCase()
+    const email = trimmed.includes('@') ? trimmed : `${trimmed}${SKYBOLT_DOMAIN}`
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     })
 
     if (error) {
-      setError(error.message)
+      // Don't echo the email back in the error — keep the username abstraction clean
+      setError(error.message.includes('Invalid') ? 'Invalid username or password' : error.message)
       setLoading(false)
     } else {
       onLogin(data.user)
@@ -45,7 +52,7 @@ export default function Login({ onLogin }) {
         {/* Login Form */}
         <form onSubmit={handleLogin} className="bg-gray-900 rounded-lg p-6 shadow-xl border border-gray-800">
           <h2 className="text-xl font-semibold text-white mb-6">Neural Net Access</h2>
-          
+
           {error && (
             <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded text-red-300 text-sm">
               {error}
@@ -53,15 +60,24 @@ export default function Login({ onLogin }) {
           )}
 
           <div className="mb-4">
-            <label className="block text-gray-400 text-sm mb-2">Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
-              placeholder="operator@skybolt.com"
-              required
-            />
+            <label className="block text-gray-400 text-sm mb-2">Username</label>
+            <div className="flex items-stretch">
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-l text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                placeholder="mbowers"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck="false"
+                required
+              />
+              <span className="px-3 py-3 bg-gray-800 border border-l-0 border-gray-700 rounded-r text-gray-500 text-sm font-mono flex items-center">
+                @skybolt.com
+              </span>
+            </div>
           </div>
 
           <div className="mb-6">
@@ -72,6 +88,7 @@ export default function Login({ onLogin }) {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
               placeholder="••••••••"
+              autoComplete="current-password"
               required
             />
           </div>

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown } from 'lucide-react'
 import Login from './pages/Login'
+import SetPassword from './pages/SetPassword'
 import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
@@ -317,6 +318,9 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Set password route - lands here from welcome email magic link */}
+        <Route path="/set-password" element={<SetPassword />} />
+
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />
 

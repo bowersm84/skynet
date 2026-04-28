@@ -143,9 +143,13 @@ function MainApp() {
 
   // Check if user can access scheduling
   const canAccessSchedule = profile?.role === 'admin' || profile?.role === 'scheduler'
-  
-  // Check if user can access master data (admin only)
-  const canAccessMasterData = profile?.role === 'admin'
+
+  // Check if user can access the Armory module (any role with at least one visible Armory tab)
+  // Sub-tab visibility is enforced inside Armory.jsx itself
+  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist'].includes(profile?.role)
+
+  // Dashboards menu remains admin-only (distinct from Armory)
+  const canAccessDashboards = profile?.role === 'admin'
 
   // Get page title for header
   const getPageTitle = () => {
@@ -234,8 +238,8 @@ function MainApp() {
               </button>
             )}
             
-            {/* Armory button - shown when on Mainframe and user is admin */}
-            {currentPage === 'mainframe' && canAccessMasterData && (
+            {/* Armory button - shown when on Mainframe and user has at least one Armory tab */}
+            {currentPage === 'mainframe' && canAccessArmory && (
               <button
                 onClick={() => setCurrentPage('armory')}
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
@@ -246,7 +250,7 @@ function MainApp() {
             )}
 
             {/* Dashboards dropdown - admin only */}
-            {currentPage === 'mainframe' && canAccessMasterData && (
+            {currentPage === 'mainframe' && canAccessDashboards && (
               <div className="relative" ref={dashboardsMenuRef}>
                 <button
                   onClick={() => setShowDashboardsMenu(prev => !prev)}
@@ -297,7 +301,7 @@ function MainApp() {
         {currentPage === 'schedule' && canAccessSchedule && (
           <Schedule user={user} profile={profile} onNavigate={setCurrentPage} />
         )}
-        {currentPage === 'armory' && canAccessMasterData && (
+        {currentPage === 'armory' && canAccessArmory && (
           <Armory profile={profile} />
         )}
       </main>

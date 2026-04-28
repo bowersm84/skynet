@@ -29,7 +29,19 @@ import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 
 export default function Armory({ profile }) {
-  const [activeTab, setActiveTab] = useState('assemblies')
+  // Per-role tab visibility. Single source of truth.
+  // Order in each array determines the default tab for that role (first item).
+  const TAB_ACCESS_BY_ROLE = {
+    admin:      ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving', 'users'],
+    compliance: ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving'],
+    finishing:  ['inventory', 'receiving'],
+    machinist:  ['inventory'],
+  }
+  const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
+  const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
+
+  // Default to first visible tab for this role (falls back to 'assemblies' for admin)
+  const [activeTab, setActiveTab] = useState(visibleTabIds[0] || 'assemblies')
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   
@@ -971,7 +983,7 @@ export default function Armory({ profile }) {
               { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
               { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
               { id: 'users', label: 'Users', icon: Users, count: null }
-            ].map(tab => (
+            ].filter(tab => canSeeTab(tab.id)).map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
@@ -1276,7 +1288,7 @@ export default function Armory({ profile }) {
             <div>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold text-white">Material Definitions</h2>
-                {profile?.role === 'admin' && (
+                {canSeeTab('material_master') && (
                   <button
                     onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setShowMaterialMasterModal(true) }}
                     className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
@@ -1298,7 +1310,7 @@ export default function Armory({ profile }) {
                         <th className="px-4 py-3 text-left">Density (lb/in³)</th>
                         <th className="px-4 py-3 text-left">Vendor</th>
                         <th className="px-4 py-3 text-left">Notes</th>
-                        {profile?.role === 'admin' && <th className="px-4 py-3 text-left">Actions</th>}
+                        {canSeeTab('material_master') && <th className="px-4 py-3 text-left">Actions</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-700">
@@ -1309,7 +1321,7 @@ export default function Armory({ profile }) {
                           <td className="px-4 py-3 text-gray-300">{m.density_lbs_per_cubic_inch ?? '—'}</td>
                           <td className="px-4 py-3 text-gray-300">{m.vendor || '—'}</td>
                           <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{m.notes || '—'}</td>
-                          {profile?.role === 'admin' && (
+                          {canSeeTab('material_master') && (
                             <td className="px-4 py-3">
                               <button
                                 onClick={() => {

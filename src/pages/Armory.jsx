@@ -166,6 +166,7 @@ export default function Armory({ profile }) {
               part_number,
               description,
               part_type,
+              is_active,
               requires_passivation
             )
           )
@@ -630,6 +631,17 @@ export default function Armory({ profile }) {
     setAvailableComponents(parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && p.id !== assembly.id))
     setShowBOMModal(true)
   }
+
+  // Keep the BOM modal in sync with the latest parts data so component edits
+  // (especially is_active flips) are reflected without closing the modal.
+  useEffect(() => {
+    if (!showBOMModal || !selectedAssembly) return
+    const refreshed = parts.find(p => p.id === selectedAssembly.id)
+    if (refreshed) {
+      setSelectedAssembly(refreshed)
+      setBomComponents(refreshed.assembly_bom || [])
+    }
+  }, [parts, showBOMModal, selectedAssembly?.id])
 
   // Add component to BOM
   const addToBOM = async (componentId) => {
@@ -2131,6 +2143,11 @@ export default function Armory({ profile }) {
                 <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                   <Layers className="text-purple-400" size={20} />
                   Bill of Materials
+                  {selectedAssembly.is_active ? (
+                    <span className="text-xs font-normal px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Active</span>
+                  ) : (
+                    <span className="text-xs font-normal px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                  )}
                 </h2>
                 <p className="text-gray-500 text-sm">{selectedAssembly.part_number} - {selectedAssembly.description}</p>
               </div>
@@ -2142,52 +2159,99 @@ export default function Armory({ profile }) {
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {/* Current BOM */}
               <div>
-                <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
-                  Current Parts ({bomComponents.length})
-                </h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide">
+                    Current Parts ({bomComponents.length})
+                  </h3>
+                  {bomComponents.length > 0 && (() => {
+                    const total = bomComponents.length
+                    const activeCount = bomComponents.filter(b => b.component?.is_active !== false).length
+                    const allActive = activeCount === total
+                    return (
+                      <span className={`text-xs px-2 py-0.5 rounded border ${
+                        allActive
+                          ? 'bg-emerald-900/30 text-emerald-300 border-emerald-800/50'
+                          : 'bg-amber-900/30 text-amber-300 border-amber-800/50'
+                      }`}>
+                        {activeCount} of {total} component{total === 1 ? '' : 's'} active
+                      </span>
+                    )
+                  })()}
+                </div>
                 {bomComponents.length === 0 ? (
                   <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-6 text-center">
                     <p className="text-gray-500">No parts added yet</p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {bomComponents.map(bom => (
-                      <div
-                        key={bom.id}
-                        className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
-                      >
-                        <div className="flex items-center gap-3">
-                          <Wrench size={16} className="text-gray-500" />
-                          <div>
-                            <span className="text-skynet-accent font-mono">{bom.component?.part_number}</span>
-                            <span className="text-gray-500 ml-2">{bom.component?.description}</span>
-                            {bom.component?.requires_passivation && (
-                              <span className="ml-2 text-xs text-cyan-400">
-                                <Beaker size={10} className="inline" /> Finishing
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <div className="flex items-center gap-2">
-                            <span className="text-gray-500 text-sm">Qty:</span>
-                            <input
-                              type="number"
-                              min="1"
-                              value={bom.quantity}
-                              onChange={(e) => updateBOMQuantity(bom.id, e.target.value)}
-                              className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-center text-sm"
-                            />
-                          </div>
-                          <button
-                            onClick={() => removeFromBOM(bom.id)}
-                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded"
+                    {[...bomComponents]
+                      .sort((a, b) => {
+                        // Inactive first; then by sort_order
+                        const aActive = a.component?.is_active !== false ? 1 : 0
+                        const bActive = b.component?.is_active !== false ? 1 : 0
+                        if (aActive !== bActive) return aActive - bActive
+                        return (a.sort_order || 0) - (b.sort_order || 0)
+                      })
+                      .map(bom => {
+                        const isInactive = bom.component?.is_active === false
+                        return (
+                          <div
+                            key={bom.id}
+                            className={`border rounded-lg p-3 flex items-center justify-between ${
+                              isInactive
+                                ? 'bg-gray-900/40 border-amber-900/40'
+                                : 'bg-gray-800 border-gray-700'
+                            }`}
                           >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                              <Wrench size={16} className="text-gray-500 flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-skynet-accent font-mono">{bom.component?.part_number}</span>
+                                  <span className="text-gray-500">{bom.component?.description}</span>
+                                  {isInactive && (
+                                    <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                                  )}
+                                  {bom.component?.requires_passivation && (
+                                    <span className="text-xs text-cyan-400">
+                                      <Beaker size={10} className="inline" /> Finishing
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 flex-shrink-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500 text-sm">Qty:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={bom.quantity}
+                                  onChange={(e) => updateBOMQuantity(bom.id, e.target.value)}
+                                  className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-center text-sm"
+                                />
+                              </div>
+                              <button
+                                onClick={() => {
+                                  // Find the full part record from `parts` so the edit modal has all fields
+                                  const fullPart = parts.find(p => p.id === bom.component?.id)
+                                  if (fullPart) openPartModal(fullPart)
+                                }}
+                                title={isInactive ? 'Edit & activate this component' : 'Edit this component'}
+                                className="p-1.5 text-skynet-accent hover:text-blue-300 hover:bg-blue-900/20 rounded"
+                              >
+                                <Edit2 size={16} />
+                              </button>
+                              <button
+                                onClick={() => removeFromBOM(bom.id)}
+                                className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
                   </div>
                 )}
               </div>

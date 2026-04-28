@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
+import ConfirmInvite from './pages/ConfirmInvite'
 import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
@@ -342,6 +343,9 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Invite confirmation route - intermediate page that shields tokens from email link scanners */}
+        <Route path="/confirm-invite" element={<ConfirmInvite />} />
+
         {/* Set password route - lands here from welcome email magic link */}
         <Route path="/set-password" element={<SetPassword />} />
 

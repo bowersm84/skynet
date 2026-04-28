@@ -1430,7 +1430,7 @@ export default function Kiosk() {
         return
       }
 
-      if (!['machinist', 'admin', 'display'].includes(data.role)) {
+      if (!['machinist', 'admin', 'finishing', 'display'].includes(data.role)) {
         setAuthError('Unauthorized role for kiosk access')
         return
       }

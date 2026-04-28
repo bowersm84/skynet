@@ -12,12 +12,17 @@ import TCOReview from '../components/TCOReview'
 import OutsourcedJobs from '../components/OutsourcedJobs'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
+import CreatePinPromptModal from '../components/CreatePinPromptModal'
+import ChangePinModal from '../components/ChangePinModal'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showPinPrompt, setShowPinPrompt] = useState(false)
+  const [showPinModal, setShowPinModal] = useState(false)
+  const [pinPromptDismissed, setPinPromptDismissed] = useState(false)
   const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)
   const [expandedLocations, setExpandedLocations] = useState({})
   const [selectedView, setSelectedView] = useState('lineup')
@@ -291,6 +296,17 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       setIsRefreshing(false)
     }
   }, [])
+
+  // Soft-prompt the user to create their kiosk PIN if their role needs one and pin_code is null.
+  // Reappears each new session until they create a PIN.
+  useEffect(() => {
+    if (!profile) return
+    const PIN_REQUIRED_ROLES = ['machinist', 'admin', 'finishing']
+    const needsPinNow = PIN_REQUIRED_ROLES.includes(profile.role) && !profile.pin_code
+    if (needsPinNow && !pinPromptDismissed) {
+      setShowPinPrompt(true)
+    }
+  }, [profile, pinPromptDismissed])
 
   // Initial fetch and real-time subscription
   useEffect(() => {
@@ -3019,6 +3035,24 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         job={printPackageJob}
         onClose={() => setPrintPackageJob(null)}
       />
+
+      {showPinPrompt && (
+        <CreatePinPromptModal
+          onCreatePin={() => { setShowPinPrompt(false); setShowPinModal(true) }}
+          onDismiss={() => { setShowPinPrompt(false); setPinPromptDismissed(true) }}
+        />
+      )}
+
+      {showPinModal && profile && (
+        <ChangePinModal
+          profile={profile}
+          onClose={() => setShowPinModal(false)}
+          onSuccess={() => {
+            // Force a profile refresh so the dropdown reflects the new state
+            window.location.reload()
+          }}
+        />
+      )}
     </div>
   )
 }

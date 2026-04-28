@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
@@ -14,6 +14,7 @@ import Armory from './pages/Armory'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
+import ChangePinModal from './components/ChangePinModal'
 
 const DASHBOARDS = [
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
@@ -27,7 +28,10 @@ function MainApp() {
   const [showLoadingScreen, setShowLoadingScreen] = useState(false)
   const [currentPage, setCurrentPage] = useState('mainframe')
   const [showDashboardsMenu, setShowDashboardsMenu] = useState(false)
+  const [showUserMenu, setShowUserMenu] = useState(false)
+  const [showChangePinModal, setShowChangePinModal] = useState(false)
   const dashboardsMenuRef = useRef(null)
+  const userMenuRef = useRef(null)
 
   // Track if we've already initialized to prevent duplicate fetches
   const initializedRef = useRef(false)
@@ -95,11 +99,14 @@ function MainApp() {
     return () => subscription.unsubscribe()
   }, [])
 
-  // Close dashboards dropdown on outside click
+  // Close dropdowns on outside click
   useEffect(() => {
     const handleMouseDown = (e) => {
       if (dashboardsMenuRef.current && !dashboardsMenuRef.current.contains(e.target)) {
         setShowDashboardsMenu(false)
+      }
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+        setShowUserMenu(false)
       }
     }
     document.addEventListener('mousedown', handleMouseDown)
@@ -156,6 +163,9 @@ function MainApp() {
 
   // Dashboards menu remains admin-only (distinct from Armory)
   const canAccessDashboards = profile?.role === 'admin'
+
+  // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
+  const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
 
   // Get page title for header
   const getPageTitle = () => {
@@ -286,16 +296,41 @@ function MainApp() {
               </div>
             )}
             
-            <div className="text-right ml-2">
-              <p className="text-white text-sm">{profile?.full_name || user.email}</p>
-              <p className="text-gray-500 text-xs capitalize">{profile?.role?.replace('_', ' ') || 'User'}</p>
+            <div className="relative ml-2" ref={userMenuRef}>
+              <button
+                onClick={() => setShowUserMenu(prev => !prev)}
+                className="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 transition-colors"
+              >
+                <div className="text-right">
+                  <p className="text-white text-sm">{profile?.full_name || user.email}</p>
+                  <p className="text-gray-500 text-xs capitalize">{profile?.role?.replace('_', ' ') || 'User'}</p>
+                </div>
+                <ChevronDown size={14} className={`text-gray-500 transition-transform ${showUserMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showUserMenu && (
+                <div className="absolute right-0 top-full mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 py-1">
+                  {hasKioskPin && (
+                    <button
+                      onClick={() => { setShowUserMenu(false); setShowChangePinModal(true) }}
+                      className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 transition-colors text-left"
+                    >
+                      <KeyRound size={14} />
+                      {profile?.pin_code ? 'Change Kiosk PIN' : 'Create Kiosk PIN'}
+                    </button>
+                  )}
+                  {hasKioskPin && (
+                    <div className="border-t border-gray-700 my-1"></div>
+                  )}
+                  <button
+                    onClick={() => { setShowUserMenu(false); handleLogout() }}
+                    className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 transition-colors text-left"
+                  >
+                    <LogOut size={14} />
+                    Logout
+                  </button>
+                </div>
+              )}
             </div>
-            <button
-              onClick={handleLogout}
-              className="px-4 py-2 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors"
-            >
-              Logout
-            </button>
           </div>
         </div>
       </header>
@@ -318,6 +353,17 @@ function MainApp() {
             "Don't worry, this one just schedules fasteners." - SkyNet MES v0.1
           </p>
         </footer>
+      )}
+
+      {showChangePinModal && profile && (
+        <ChangePinModal
+          profile={profile}
+          onClose={() => setShowChangePinModal(false)}
+          onSuccess={(newPin) => {
+            // Update local profile state so subsequent dropdown reflects "Change" not "Create"
+            setProfile(prev => prev ? { ...prev, pin_code: newPin } : prev)
+          }}
+        />
       )}
     </div>
   )

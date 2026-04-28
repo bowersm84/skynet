@@ -323,16 +323,19 @@ function MainApp() {
 
 // Root App component with routing
 function App() {
-  // Detect invite/recovery magic links arriving at Site URL (/) with token in hash
-  // Supabase Dashboard invites land at SiteURL; we route them to /set-password instead
+  // Detect invite/recovery magic links landing at Site URL (/).
+  // PKCE flow produces ?code= in the query string; we route those to /set-password.
+  // Also catch error-state hashes (otp_expired etc.) so SetPassword can show a friendly message.
   if (typeof window !== 'undefined') {
+    const search = window.location.search || ''
     const hash = window.location.hash || ''
-    const isInviteOrRecovery = hash.includes('type=invite') || hash.includes('type=recovery')
+    const hasPkceCode = search.includes('code=')
+    const hasAuthError = hash.includes('error=') || hash.includes('error_code=')
     const isAtRoot = window.location.pathname === '/' || window.location.pathname === ''
-    if (isInviteOrRecovery && isAtRoot) {
-      // Preserve the hash so /set-password can process the token
-      window.location.replace('/set-password' + hash)
-      return null  // bail out of render while redirect happens
+    if ((hasPkceCode || hasAuthError) && isAtRoot) {
+      // Preserve the query string and hash so /set-password can process them
+      window.location.replace('/set-password' + search + hash)
+      return null
     }
   }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -11,46 +11,60 @@ export default function SetPassword() {
   const [sessionReady, setSessionReady] = useState(false)
   const [userEmail, setUserEmail] = useState('')
 
-  // Mutable ref tracks session readiness for the timeout closure
-  // (state value would be captured stale and never updated inside the timer)
-  const sessionReadyRef = useRef(false)
-
-  // On mount, Supabase auto-handles the magic link in the URL hash and creates a session.
-  // Detect when the session is ready, with a 5-second fallback for invalid/expired links.
+  // Mount: handle PKCE code exchange or detect existing session.
+  // PKCE flow URL: https://skynet.skybolt.com/set-password?code=abc123
+  // We exchange the code for a session, then show the password form.
   useEffect(() => {
     let subscription = null
 
     const markReady = (session) => {
-      sessionReadyRef.current = true
-      setSessionReady(true)
       setUserEmail(session.user.email || '')
+      setSessionReady(true)
     }
 
-    const checkSession = async () => {
+    const init = async () => {
+      // First, check the URL for an auth error (e.g. otp_expired) in the hash
+      const hash = window.location.hash || ''
+      if (hash.includes('error=') || hash.includes('error_code=')) {
+        const params = new URLSearchParams(hash.replace(/^#/, ''))
+        const desc = params.get('error_description') || params.get('error') || 'Invitation link is invalid or has expired'
+        setError(decodeURIComponent(desc.replace(/\+/g, ' ')) + '. Contact your SkyNet administrator for a new invitation.')
+        return
+      }
+
+      // Check the URL for a PKCE code to exchange
+      const search = window.location.search || ''
+      const params = new URLSearchParams(search)
+      const code = params.get('code')
+
+      if (code) {
+        // Exchange the code for a session. The code-verifier is in localStorage from the original sign-in attempt.
+        const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
+        if (exchangeError) {
+          setError(`Could not validate invitation: ${exchangeError.message}. Contact your SkyNet administrator for a new invitation.`)
+          return
+        }
+        if (data.session) {
+          // Clean the code from the URL so refreshing doesn't re-attempt the exchange
+          window.history.replaceState({}, '', '/set-password')
+          markReady(data.session)
+          return
+        }
+      }
+
+      // No code in URL — check for existing session (user already exchanged in a previous tab)
       const { data: { session } } = await supabase.auth.getSession()
       if (session) {
         markReady(session)
         return
       }
-      // No session yet — wait for auth state change from magic link processing
-      const result = supabase.auth.onAuthStateChange((event, session) => {
-        if (event === 'SIGNED_IN' && session) {
-          markReady(session)
-        }
-      })
-      subscription = result.data.subscription
-    }
-    checkSession()
 
-    // Fallback: if no session within 5 seconds, the link is invalid/expired
-    const timeout = setTimeout(() => {
-      if (!sessionReadyRef.current) {
-        setError('This invitation link is invalid or has expired. Contact your SkyNet administrator for a new one.')
-      }
-    }, 5000)
+      // No code, no session — link is missing or already used
+      setError('This invitation link is invalid or has expired. Contact your SkyNet administrator for a new invitation.')
+    }
+    init()
 
     return () => {
-      clearTimeout(timeout)
       if (subscription) subscription.unsubscribe()
     }
   }, [])

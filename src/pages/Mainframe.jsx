@@ -13,7 +13,7 @@ import OutsourcedJobs from '../components/OutsourcedJobs'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
 
-export default function Mainframe({ user, profile }) {
+export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1228,20 +1228,24 @@ export default function Mainframe({ user, profile }) {
             <ClipboardList size={20} />
             <span className="hidden sm:inline">Work Orders</span>
           </button>
-          <button
-            onClick={() => setShowMaintenanceModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded transition-colors"
-          >
-            <Wrench size={20} />
-            <span className="hidden sm:inline">Maintenance Order</span>
-          </button>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
-          >
-            <Plus size={20} />
-            New Work Order
-          </button>
+          {canCreateWorkOrders && (
+            <>
+              <button
+                onClick={() => setShowMaintenanceModal(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded transition-colors"
+              >
+                <Wrench size={20} />
+                <span className="hidden sm:inline">Maintenance Order</span>
+              </button>
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
+              >
+                <Plus size={20} />
+                New Work Order
+              </button>
+            </>
+          )}
         </div>
       </div>
 

@@ -34,7 +34,7 @@ import {
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
 
-export default function Schedule({ user, profile, onNavigate }) {
+export default function Schedule({ user, profile, onNavigate, canEdit = false }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
   const [incompleteJobs, setIncompleteJobs] = useState([]) // Jobs sent back from kiosk
   const [scheduledJobs, setScheduledJobs] = useState([])
@@ -669,6 +669,10 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   // Drag handlers for unassigned jobs
   const handleDragStart = (e, job) => {
+    if (!canEdit) {
+      e.preventDefault()
+      return
+    }
     setDraggedJob(job)
     setDraggedScheduledJob(null)
     e.dataTransfer.effectAllowed = 'move'
@@ -680,6 +684,10 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   // Drag handlers for scheduled jobs (reschedule)
   const handleScheduledDragStart = (e, job) => {
+    if (!canEdit) {
+      e.preventDefault()
+      return
+    }
     setDraggedScheduledJob(job)
     setDraggedJob(null)
     e.dataTransfer.effectAllowed = 'move'
@@ -727,6 +735,7 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   // List view drop handler — insert after a specific job (resequence)
   const handleListDropAfterJob = (e, precedingJob) => {
+    if (!canEdit) return
     e.preventDefault()
     setListDropTarget(null)
 
@@ -748,6 +757,7 @@ export default function Schedule({ user, profile, onNavigate }) {
 
   // List view drop handler — drop onto machine card (reassign or append)
   const handleListDropOnMachine = (e, machineId) => {
+    if (!canEdit) return
     e.preventDefault()
     setListDropTarget(null)
 
@@ -787,6 +797,7 @@ export default function Schedule({ user, profile, onNavigate }) {
   }
 
   const handleDrop = (e, machineId, date, hour = null) => {
+    if (!canEdit) return
     e.preventDefault()
     setDropTarget(null)
 
@@ -1814,14 +1825,16 @@ export default function Schedule({ user, profile, onNavigate }) {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Schedule Maintenance Button */}
-          <button
-            onClick={() => setShowMaintenanceModal(true)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-colors mr-2"
-          >
-            <Settings size={16} />
-            <span className="hidden sm:inline">Schedule Maintenance</span>
-          </button>
+          {/* Schedule Maintenance Button — admin/scheduler only */}
+          {canEdit && (
+            <button
+              onClick={() => setShowMaintenanceModal(true)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-colors mr-2"
+            >
+              <Settings size={16} />
+              <span className="hidden sm:inline">Schedule Maintenance</span>
+            </button>
+          )}
 
           {/* View mode toggle: Grid (timeline) vs List (per-machine lineup) */}
           <div className="flex items-center bg-gray-800 rounded-lg p-0.5 mr-2">

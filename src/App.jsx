@@ -141,8 +141,12 @@ function MainApp() {
     await supabase.auth.signOut()
   }
 
-  // Check if user can access scheduling
-  const canAccessSchedule = profile?.role === 'admin' || profile?.role === 'scheduler'
+  // Roles that can VIEW the Command/Schedule page
+  const canAccessSchedule = ['admin', 'scheduler', 'compliance', 'finishing', 'machinist'].includes(profile?.role)
+
+  // Roles that can EDIT the schedule (drag jobs, schedule maintenance, reschedule)
+  // Also gates work order creation buttons in Mainframe
+  const canEditSchedule = ['admin', 'scheduler'].includes(profile?.role)
 
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
@@ -296,10 +300,10 @@ function MainApp() {
 
       <main className={currentPage === 'armory' ? '' : 'p-6'}>
         {currentPage === 'mainframe' && (
-          <Mainframe user={user} profile={profile} />
+          <Mainframe user={user} profile={profile} canCreateWorkOrders={canEditSchedule} />
         )}
         {currentPage === 'schedule' && canAccessSchedule && (
-          <Schedule user={user} profile={profile} onNavigate={setCurrentPage} />
+          <Schedule user={user} profile={profile} onNavigate={setCurrentPage} canEdit={canEditSchedule} />
         )}
         {currentPage === 'armory' && canAccessArmory && (
           <Armory profile={profile} />

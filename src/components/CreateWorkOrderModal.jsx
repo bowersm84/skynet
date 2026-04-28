@@ -95,6 +95,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         description,
         specification,
         part_type,
+        is_active,
         assembly_bom!assembly_bom_assembly_id_fkey(
           id,
           quantity,
@@ -109,7 +110,6 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         )
       `)
       .in('part_type', ['assembly', 'finished_good', 'manufactured'])
-      .eq('is_active', true)
       .order('part_number')
 
     if (error) {
@@ -878,23 +878,23 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 <option value="">-- Select Product --</option>
                                 <optgroup label="Products (Assembly)">
                                   {assemblies.filter(a => a.part_type === 'assembly').map(a => (
-                                    <option key={a.id} value={a.id}>
-                                      {a.part_number} - {a.description}
+                                    <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
+                                      {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
                                     </option>
                                   ))}
                                 </optgroup>
                                 <optgroup label="Finished Goods">
                                   {assemblies.filter(a => a.part_type === 'finished_good').map(a => (
-                                    <option key={a.id} value={a.id}>
-                                      {a.part_number} - {a.description}
+                                    <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
+                                      {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
                                     </option>
                                   ))}
                                 </optgroup>
                                 {orderType === 'make_to_stock' && (
                                   <optgroup label="Parts (Manufactured)">
                                     {assemblies.filter(a => a.part_type === 'manufactured').map(a => (
-                                      <option key={a.id} value={a.id}>
-                                        {a.part_number} - {a.description}
+                                      <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
+                                        {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
                                       </option>
                                     ))}
                                   </optgroup>

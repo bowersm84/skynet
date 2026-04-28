@@ -44,7 +44,8 @@ export default function Armory({ profile }) {
   const [activeTab, setActiveTab] = useState(visibleTabIds[0] || 'assemblies')
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
-  
+  const [activeFilter, setActiveFilter] = useState('active') // 'active' | 'inactive' | 'all'
+
   // Data
   const [parts, setParts] = useState([])
   const [materialTypes, setMaterialTypes] = useState([])
@@ -74,7 +75,8 @@ export default function Armory({ profile }) {
     requires_passivation: false,
     unit_cost: 0,
     material_type_id: null,
-    drawing_revision: ''
+    drawing_revision: '',
+    is_active: true
   })
   
   const [materialForm, setMaterialForm] = useState({
@@ -168,7 +170,6 @@ export default function Armory({ profile }) {
             )
           )
         `)
-        .eq('is_active', true)
         .order('part_number')
 
       if (partsError) throw partsError
@@ -300,12 +301,19 @@ export default function Armory({ profile }) {
     if (activeTab === 'inventory') loadInventory()
   }, [activeTab, loadInventory])
 
-  // Filter parts based on search and tab
+  // Filter parts based on search, tab, and active state
   const filteredParts = parts.filter(p => {
-    const matchesSearch = 
+    const matchesSearch =
       p.part_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (p.description || '').toLowerCase().includes(searchQuery.toLowerCase())
-    
+
+    const matchesActive =
+      activeFilter === 'all' ? true :
+      activeFilter === 'active' ? p.is_active === true :
+      p.is_active === false
+
+    if (!matchesActive) return false
+
     if (activeTab === 'assemblies') {
       return matchesSearch && (p.part_type === 'assembly' || p.part_type === 'finished_good')
     } else if (activeTab === 'components') {
@@ -327,7 +335,8 @@ export default function Armory({ profile }) {
         requires_passivation: part.requires_passivation || false,
         unit_cost: part.unit_cost || 0,
         material_type_id: part.material_type_id || null,
-        drawing_revision: part.drawing_revision || ''
+        drawing_revision: part.drawing_revision || '',
+        is_active: part.is_active !== false
       })
 
       // Load existing routing steps
@@ -384,7 +393,8 @@ export default function Armory({ profile }) {
         requires_passivation: false,
         unit_cost: 0,
         material_type_id: null,
-        drawing_revision: ''
+        drawing_revision: '',
+        is_active: true
       })
       setRoutingSteps([])
       setDocRequirements([])
@@ -479,6 +489,7 @@ export default function Armory({ profile }) {
             unit_cost: parseFloat(partForm.unit_cost) || 0,
             material_type_id: partForm.material_type_id || null,
             drawing_revision: partForm.drawing_revision?.trim() || null,
+            is_active: partForm.is_active,
             updated_at: new Date().toISOString()
           })
           .eq('id', editingPart.id)
@@ -497,7 +508,8 @@ export default function Armory({ profile }) {
             requires_passivation: partForm.requires_passivation,
             unit_cost: parseFloat(partForm.unit_cost) || 0,
             material_type_id: partForm.material_type_id || null,
-            drawing_revision: partForm.drawing_revision?.trim() || null
+            drawing_revision: partForm.drawing_revision?.trim() || null,
+            is_active: partForm.is_active
           })
           .select()
           .single()
@@ -974,8 +986,8 @@ export default function Armory({ profile }) {
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex gap-1">
             {[
-              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => p.part_type === 'assembly' || p.part_type === 'finished_good').length },
-              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
+              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
+              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
               { id: 'materials', label: 'Materials', icon: Layers, count: null },
               { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
               { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
@@ -1025,6 +1037,34 @@ export default function Armory({ profile }) {
                   className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
                 />
               </div>
+              <div className="flex items-center gap-1 bg-gray-800 border border-gray-700 rounded-lg p-1">
+                {[
+                  { value: 'active', label: 'Active' },
+                  { value: 'inactive', label: 'Inactive', countKey: 'inactive' },
+                  { value: 'all', label: 'All' }
+                ].map(opt => {
+                  const inactiveCount = parts.filter(p => !p.is_active).length
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setActiveFilter(opt.value)}
+                      className={`px-3 py-1 text-sm rounded transition-colors ${
+                        activeFilter === opt.value
+                          ? 'bg-skynet-accent text-white'
+                          : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                      }`}
+                    >
+                      {opt.label}
+                      {opt.value === 'inactive' && inactiveCount > 0 && (
+                        <span className={`ml-1.5 px-1.5 py-0.5 text-xs rounded ${
+                          activeFilter === opt.value ? 'bg-blue-700' : 'bg-amber-900/50 text-amber-300'
+                        }`}>{inactiveCount}</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
               <div className="flex items-center gap-2">
                 {activeTab === 'assemblies' && (
                   <button
@@ -1057,12 +1097,19 @@ export default function Armory({ profile }) {
                 {filteredParts.map(part => (
                   <div
                     key={part.id}
-                    className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors"
+                    className={`border rounded-lg p-4 transition-colors ${
+                      part.is_active
+                        ? 'bg-gray-800/50 border-gray-700 hover:border-gray-600'
+                        : 'bg-gray-900/40 border-amber-900/30 hover:border-amber-800/50 opacity-75'
+                    }`}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-skynet-accent font-mono font-medium">{part.part_number}</span>
+                          {!part.is_active && (
+                            <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                          )}
                           {part.part_type === 'assembly' && (
                             <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>
                           )}
@@ -1724,6 +1771,33 @@ export default function Armory({ profile }) {
                     <span className="text-white">Requires Finishing</span>
                   </div>
                 </label>
+              )}
+
+              {editingPart && (
+                <div className={`flex items-center gap-3 p-3 rounded-lg border ${
+                  partForm.is_active
+                    ? 'bg-emerald-900/20 border-emerald-800/50'
+                    : 'bg-amber-900/20 border-amber-800/50'
+                }`}>
+                  <label className="flex items-center gap-2 cursor-pointer flex-1">
+                    <input
+                      type="checkbox"
+                      checked={partForm.is_active}
+                      onChange={(e) => setPartForm({ ...partForm, is_active: e.target.checked })}
+                      className="w-4 h-4 rounded"
+                    />
+                    <div>
+                      <div className="text-white text-sm font-medium">
+                        {partForm.is_active ? 'Active' : 'Inactive — Pending Master Data'}
+                      </div>
+                      <div className="text-gray-400 text-xs">
+                        {partForm.is_active
+                          ? 'Visible to schedulers, customer service, and operators.'
+                          : 'Hidden from schedule/WO creation. Visible to schedulers as a "needs activation" flag.'}
+                      </div>
+                    </div>
+                  </label>
+                </div>
               )}
 
               {/* Routing Steps — for manufactured/finished_good */}

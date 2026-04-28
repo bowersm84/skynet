@@ -240,8 +240,7 @@ export default function Finishing() {
       const [partsRes, machinesRes] = await Promise.all([
         supabase
           .from('parts')
-          .select('id, part_number, description, customer, part_type')
-          .eq('is_active', true)
+          .select('id, part_number, description, customer, part_type, is_active')
           .order('part_number'),
         supabase
           .from('machines')
@@ -2223,17 +2222,27 @@ export default function Finishing() {
                           <button
                             key={p.id}
                             type="button"
+                            disabled={!p.is_active}
+                            title={!p.is_active ? 'Pending master data — needs compliance to activate before scheduling' : undefined}
                             onClick={() => {
+                              if (!p.is_active) return
                               // Auto-populate customer from the part record. James can still override if needed.
                               setNewJobForm(f => ({ ...f, part_id: p.id, customer: p.customer || f.customer }))
                               setNewJobPartSearch(`${p.part_number} — ${p.description || ''}`)
                             }}
-                            className={`w-full text-left px-3 py-2 hover:bg-gray-700 border-b border-gray-700 last:border-0 ${
-                              newJobForm.part_id === p.id ? 'bg-cyan-900/40' : ''
+                            className={`w-full text-left px-3 py-2 border-b border-gray-700 last:border-0 ${
+                              !p.is_active
+                                ? 'opacity-50 cursor-not-allowed bg-amber-900/10'
+                                : `hover:bg-gray-700 ${newJobForm.part_id === p.id ? 'bg-cyan-900/40' : ''}`
                             }`}
                           >
-                            <div className="text-white text-sm font-mono">{p.part_number}</div>
-                            <div className="text-gray-400 text-xs">{p.description}{p.customer ? ` · ${p.customer}` : ''}</div>
+                            <div className={`text-sm font-mono ${p.is_active ? 'text-white' : 'text-gray-400'}`}>
+                              {p.part_number}
+                              {!p.is_active && (
+                                <span className="ml-2 text-xs px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded">Pending Master Data</span>
+                              )}
+                            </div>
+                            <div className="text-gray-500 text-xs">{p.description}{p.customer ? ` · ${p.customer}` : ''}</div>
                           </button>
                         ))}
                     </div>

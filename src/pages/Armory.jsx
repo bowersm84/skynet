@@ -21,10 +21,12 @@ import {
   Route,
   BarChart2,
   PackageCheck,
-  GripVertical
+  GripVertical,
+  Users
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
+import UsersTab from './UsersTab'
 
 export default function Armory({ profile }) {
   const [activeTab, setActiveTab] = useState('assemblies')
@@ -967,7 +969,8 @@ export default function Armory({ profile }) {
               { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
               { id: 'material_master', label: 'Raw Material', icon: Layers, count: null },
               { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
-              { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null }
+              { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
+              { id: 'users', label: 'Users', icon: Users, count: null }
             ].map(tab => (
               <button
                 key={tab.id}
@@ -1559,6 +1562,9 @@ export default function Armory({ profile }) {
             )}
           </div>
         )}
+
+        {/* Users Tab */}
+        {activeTab === 'users' && <UsersTab profile={profile} />}
       </div>
 
       {/* Part Modal */}

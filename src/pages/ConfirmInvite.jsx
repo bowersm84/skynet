@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
-
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
-const REDIRECT_AFTER_VERIFY = `${window.location.origin}/set-password`
+import { useNavigate } from 'react-router-dom'
+import { supabase } from '../lib/supabase'
 
 export default function ConfirmInvite() {
+  const navigate = useNavigate()
   const [token, setToken] = useState(null)
   const [type, setType] = useState('invite')
   const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -20,11 +21,32 @@ export default function ConfirmInvite() {
     setType(ty)
   }, [])
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (!token) return
-    const verifyUrl = `${SUPABASE_URL}/auth/v1/verify?token=${encodeURIComponent(token)}&type=${encodeURIComponent(type)}&redirect_to=${encodeURIComponent(REDIRECT_AFTER_VERIFY)}`
-    // Use a real navigation (not fetch) so Supabase can do its 302 redirect to /set-password
-    window.location.href = verifyUrl
+    setLoading(true)
+    setError(null)
+
+    // POST-based token verification. Scanners pre-fetch GETs but don't trigger POSTs.
+    // verifyOtp posts to /auth/v1/verify with the token in the request body, returns a session.
+    const { data, error: verifyError } = await supabase.auth.verifyOtp({
+      token_hash: token,
+      type: type,
+    })
+
+    if (verifyError) {
+      setError(`Could not validate invitation: ${verifyError.message}. Contact your SkyNet administrator for a new invitation.`)
+      setLoading(false)
+      return
+    }
+
+    if (data?.session) {
+      // Session established. Route to set-password to capture the new password.
+      navigate('/set-password', { replace: true })
+      return
+    }
+
+    setError('Verification did not return a session. Contact your SkyNet administrator for a new invitation.')
+    setLoading(false)
   }
 
   if (error) {
@@ -35,6 +57,12 @@ export default function ConfirmInvite() {
           <div className="bg-red-900/50 border border-red-700 rounded p-4 text-red-300 text-sm mb-6">
             {error}
           </div>
+          <button
+            onClick={() => navigate('/')}
+            className="px-6 py-3 bg-skynet-accent hover:bg-blue-600 text-white font-semibold rounded transition-colors"
+          >
+            Back to Login
+          </button>
         </div>
       </div>
     )
@@ -66,9 +94,10 @@ export default function ConfirmInvite() {
 
           <button
             onClick={handleContinue}
-            className="w-full py-3 bg-skynet-accent hover:bg-blue-600 text-white font-semibold rounded transition-colors"
+            disabled={loading || !token}
+            className="w-full py-3 bg-skynet-accent hover:bg-blue-600 text-white font-semibold rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Continue →
+            {loading ? 'Verifying...' : 'Continue →'}
           </button>
 
           <p className="text-gray-600 text-xs mt-6 font-mono">

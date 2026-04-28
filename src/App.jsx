@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
+import ForgotPassword from './pages/ForgotPassword'
 import ConfirmInvite from './pages/ConfirmInvite'
 import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
@@ -348,6 +349,9 @@ function App() {
 
         {/* Set password route - lands here from welcome email magic link */}
         <Route path="/set-password" element={<SetPassword />} />
+
+        {/* Forgot password route - self-service password reset */}
+        <Route path="/forgot-password" element={<ForgotPassword />} />
 
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />

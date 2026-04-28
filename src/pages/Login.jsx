@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
 const SKYBOLT_DOMAIN = '@skybolt.com'
 
 export default function Login({ onLogin }) {
+  const navigate = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -99,6 +101,14 @@ export default function Login({ onLogin }) {
             className="w-full py-3 bg-skynet-accent hover:bg-blue-600 text-white font-semibold rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Authenticating...' : 'Access System'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate('/forgot-password')}
+            className="w-full mt-3 py-2 text-gray-500 hover:text-skynet-accent text-sm transition-colors"
+          >
+            Forgot password?
           </button>
         </form>
 

@@ -44,7 +44,8 @@ export default function Armory({ profile }) {
   const [activeTab, setActiveTab] = useState(visibleTabIds[0] || 'assemblies')
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
-  
+  const [activeFilter, setActiveFilter] = useState('active') // 'active' | 'inactive' | 'all'
+
   // Data
   const [parts, setParts] = useState([])
   const [materialTypes, setMaterialTypes] = useState([])
@@ -74,7 +75,8 @@ export default function Armory({ profile }) {
     requires_passivation: false,
     unit_cost: 0,
     material_type_id: null,
-    drawing_revision: ''
+    drawing_revision: '',
+    is_active: true
   })
   
   const [materialForm, setMaterialForm] = useState({
@@ -164,11 +166,11 @@ export default function Armory({ profile }) {
               part_number,
               description,
               part_type,
+              is_active,
               requires_passivation
             )
           )
         `)
-        .eq('is_active', true)
         .order('part_number')
 
       if (partsError) throw partsError
@@ -300,12 +302,19 @@ export default function Armory({ profile }) {
     if (activeTab === 'inventory') loadInventory()
   }, [activeTab, loadInventory])
 
-  // Filter parts based on search and tab
+  // Filter parts based on search, tab, and active state
   const filteredParts = parts.filter(p => {
-    const matchesSearch = 
+    const matchesSearch =
       p.part_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (p.description || '').toLowerCase().includes(searchQuery.toLowerCase())
-    
+
+    const matchesActive =
+      activeFilter === 'all' ? true :
+      activeFilter === 'active' ? p.is_active === true :
+      p.is_active === false
+
+    if (!matchesActive) return false
+
     if (activeTab === 'assemblies') {
       return matchesSearch && (p.part_type === 'assembly' || p.part_type === 'finished_good')
     } else if (activeTab === 'components') {
@@ -327,7 +336,8 @@ export default function Armory({ profile }) {
         requires_passivation: part.requires_passivation || false,
         unit_cost: part.unit_cost || 0,
         material_type_id: part.material_type_id || null,
-        drawing_revision: part.drawing_revision || ''
+        drawing_revision: part.drawing_revision || '',
+        is_active: part.is_active !== false
       })
 
       // Load existing routing steps
@@ -384,7 +394,8 @@ export default function Armory({ profile }) {
         requires_passivation: false,
         unit_cost: 0,
         material_type_id: null,
-        drawing_revision: ''
+        drawing_revision: '',
+        is_active: true
       })
       setRoutingSteps([])
       setDocRequirements([])
@@ -479,6 +490,7 @@ export default function Armory({ profile }) {
             unit_cost: parseFloat(partForm.unit_cost) || 0,
             material_type_id: partForm.material_type_id || null,
             drawing_revision: partForm.drawing_revision?.trim() || null,
+            is_active: partForm.is_active,
             updated_at: new Date().toISOString()
           })
           .eq('id', editingPart.id)
@@ -497,7 +509,8 @@ export default function Armory({ profile }) {
             requires_passivation: partForm.requires_passivation,
             unit_cost: parseFloat(partForm.unit_cost) || 0,
             material_type_id: partForm.material_type_id || null,
-            drawing_revision: partForm.drawing_revision?.trim() || null
+            drawing_revision: partForm.drawing_revision?.trim() || null,
+            is_active: partForm.is_active
           })
           .select()
           .single()
@@ -618,6 +631,17 @@ export default function Armory({ profile }) {
     setAvailableComponents(parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && p.id !== assembly.id))
     setShowBOMModal(true)
   }
+
+  // Keep the BOM modal in sync with the latest parts data so component edits
+  // (especially is_active flips) are reflected without closing the modal.
+  useEffect(() => {
+    if (!showBOMModal || !selectedAssembly) return
+    const refreshed = parts.find(p => p.id === selectedAssembly.id)
+    if (refreshed) {
+      setSelectedAssembly(refreshed)
+      setBomComponents(refreshed.assembly_bom || [])
+    }
+  }, [parts, showBOMModal, selectedAssembly?.id])
 
   // Add component to BOM
   const addToBOM = async (componentId) => {
@@ -974,8 +998,8 @@ export default function Armory({ profile }) {
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex gap-1">
             {[
-              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => p.part_type === 'assembly' || p.part_type === 'finished_good').length },
-              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good').length },
+              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
+              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
               { id: 'materials', label: 'Materials', icon: Layers, count: null },
               { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
               { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
@@ -1025,6 +1049,34 @@ export default function Armory({ profile }) {
                   className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
                 />
               </div>
+              <div className="flex items-center gap-1 bg-gray-800 border border-gray-700 rounded-lg p-1">
+                {[
+                  { value: 'active', label: 'Active' },
+                  { value: 'inactive', label: 'Inactive', countKey: 'inactive' },
+                  { value: 'all', label: 'All' }
+                ].map(opt => {
+                  const inactiveCount = parts.filter(p => !p.is_active).length
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setActiveFilter(opt.value)}
+                      className={`px-3 py-1 text-sm rounded transition-colors ${
+                        activeFilter === opt.value
+                          ? 'bg-skynet-accent text-white'
+                          : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                      }`}
+                    >
+                      {opt.label}
+                      {opt.value === 'inactive' && inactiveCount > 0 && (
+                        <span className={`ml-1.5 px-1.5 py-0.5 text-xs rounded ${
+                          activeFilter === opt.value ? 'bg-blue-700' : 'bg-amber-900/50 text-amber-300'
+                        }`}>{inactiveCount}</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
               <div className="flex items-center gap-2">
                 {activeTab === 'assemblies' && (
                   <button
@@ -1057,12 +1109,19 @@ export default function Armory({ profile }) {
                 {filteredParts.map(part => (
                   <div
                     key={part.id}
-                    className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors"
+                    className={`border rounded-lg p-4 transition-colors ${
+                      part.is_active
+                        ? 'bg-gray-800/50 border-gray-700 hover:border-gray-600'
+                        : 'bg-gray-900/40 border-amber-900/30 hover:border-amber-800/50 opacity-75'
+                    }`}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-skynet-accent font-mono font-medium">{part.part_number}</span>
+                          {!part.is_active && (
+                            <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                          )}
                           {part.part_type === 'assembly' && (
                             <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>
                           )}
@@ -1726,6 +1785,33 @@ export default function Armory({ profile }) {
                 </label>
               )}
 
+              {editingPart && (
+                <div className={`flex items-center gap-3 p-3 rounded-lg border ${
+                  partForm.is_active
+                    ? 'bg-emerald-900/20 border-emerald-800/50'
+                    : 'bg-amber-900/20 border-amber-800/50'
+                }`}>
+                  <label className="flex items-center gap-2 cursor-pointer flex-1">
+                    <input
+                      type="checkbox"
+                      checked={partForm.is_active}
+                      onChange={(e) => setPartForm({ ...partForm, is_active: e.target.checked })}
+                      className="w-4 h-4 rounded"
+                    />
+                    <div>
+                      <div className="text-white text-sm font-medium">
+                        {partForm.is_active ? 'Active' : 'Inactive — Pending Master Data'}
+                      </div>
+                      <div className="text-gray-400 text-xs">
+                        {partForm.is_active
+                          ? 'Visible to schedulers, customer service, and operators.'
+                          : 'Hidden from schedule/WO creation. Visible to schedulers as a "needs activation" flag.'}
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              )}
+
               {/* Routing Steps — for manufactured/finished_good */}
               {partForm.part_type !== 'assembly' && partForm.part_type !== 'purchased' && (
                 <div className="border border-gray-700 rounded-lg p-4 space-y-3">
@@ -2057,6 +2143,11 @@ export default function Armory({ profile }) {
                 <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                   <Layers className="text-purple-400" size={20} />
                   Bill of Materials
+                  {selectedAssembly.is_active ? (
+                    <span className="text-xs font-normal px-2 py-0.5 bg-emerald-900/50 text-emerald-300 rounded border border-emerald-700/50">Active</span>
+                  ) : (
+                    <span className="text-xs font-normal px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                  )}
                 </h2>
                 <p className="text-gray-500 text-sm">{selectedAssembly.part_number} - {selectedAssembly.description}</p>
               </div>
@@ -2068,52 +2159,99 @@ export default function Armory({ profile }) {
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {/* Current BOM */}
               <div>
-                <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
-                  Current Parts ({bomComponents.length})
-                </h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide">
+                    Current Parts ({bomComponents.length})
+                  </h3>
+                  {bomComponents.length > 0 && (() => {
+                    const total = bomComponents.length
+                    const activeCount = bomComponents.filter(b => b.component?.is_active !== false).length
+                    const allActive = activeCount === total
+                    return (
+                      <span className={`text-xs px-2 py-0.5 rounded border ${
+                        allActive
+                          ? 'bg-emerald-900/30 text-emerald-300 border-emerald-800/50'
+                          : 'bg-amber-900/30 text-amber-300 border-amber-800/50'
+                      }`}>
+                        {activeCount} of {total} component{total === 1 ? '' : 's'} active
+                      </span>
+                    )
+                  })()}
+                </div>
                 {bomComponents.length === 0 ? (
                   <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-6 text-center">
                     <p className="text-gray-500">No parts added yet</p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {bomComponents.map(bom => (
-                      <div
-                        key={bom.id}
-                        className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
-                      >
-                        <div className="flex items-center gap-3">
-                          <Wrench size={16} className="text-gray-500" />
-                          <div>
-                            <span className="text-skynet-accent font-mono">{bom.component?.part_number}</span>
-                            <span className="text-gray-500 ml-2">{bom.component?.description}</span>
-                            {bom.component?.requires_passivation && (
-                              <span className="ml-2 text-xs text-cyan-400">
-                                <Beaker size={10} className="inline" /> Finishing
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <div className="flex items-center gap-2">
-                            <span className="text-gray-500 text-sm">Qty:</span>
-                            <input
-                              type="number"
-                              min="1"
-                              value={bom.quantity}
-                              onChange={(e) => updateBOMQuantity(bom.id, e.target.value)}
-                              className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-center text-sm"
-                            />
-                          </div>
-                          <button
-                            onClick={() => removeFromBOM(bom.id)}
-                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded"
+                    {[...bomComponents]
+                      .sort((a, b) => {
+                        // Inactive first; then by sort_order
+                        const aActive = a.component?.is_active !== false ? 1 : 0
+                        const bActive = b.component?.is_active !== false ? 1 : 0
+                        if (aActive !== bActive) return aActive - bActive
+                        return (a.sort_order || 0) - (b.sort_order || 0)
+                      })
+                      .map(bom => {
+                        const isInactive = bom.component?.is_active === false
+                        return (
+                          <div
+                            key={bom.id}
+                            className={`border rounded-lg p-3 flex items-center justify-between ${
+                              isInactive
+                                ? 'bg-gray-900/40 border-amber-900/40'
+                                : 'bg-gray-800 border-gray-700'
+                            }`}
                           >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                              <Wrench size={16} className="text-gray-500 flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-skynet-accent font-mono">{bom.component?.part_number}</span>
+                                  <span className="text-gray-500">{bom.component?.description}</span>
+                                  {isInactive && (
+                                    <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                                  )}
+                                  {bom.component?.requires_passivation && (
+                                    <span className="text-xs text-cyan-400">
+                                      <Beaker size={10} className="inline" /> Finishing
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 flex-shrink-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500 text-sm">Qty:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={bom.quantity}
+                                  onChange={(e) => updateBOMQuantity(bom.id, e.target.value)}
+                                  className="w-16 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-center text-sm"
+                                />
+                              </div>
+                              <button
+                                onClick={() => {
+                                  // Find the full part record from `parts` so the edit modal has all fields
+                                  const fullPart = parts.find(p => p.id === bom.component?.id)
+                                  if (fullPart) openPartModal(fullPart)
+                                }}
+                                title={isInactive ? 'Edit & activate this component' : 'Edit this component'}
+                                className="p-1.5 text-skynet-accent hover:text-blue-300 hover:bg-blue-900/20 rounded"
+                              >
+                                <Edit2 size={16} />
+                              </button>
+                              <button
+                                onClick={() => removeFromBOM(bom.id)}
+                                className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
                   </div>
                 )}
               </div>

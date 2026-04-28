@@ -83,6 +83,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         part_number,
         description,
         part_type,
+        is_active,
         assembly_bom!assembly_bom_assembly_id_fkey(
           id,
           quantity,
@@ -96,7 +97,6 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         )
       `)
       .in('part_type', ['assembly', 'finished_good'])
-      .eq('is_active', true)
       .order('part_number')
 
     if (!error) setAvailableParts(data || [])
@@ -669,10 +669,18 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                           <button
                             key={part.id}
                             onClick={() => handleSelectNewProduct(part)}
-                            className="w-full px-4 py-2 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left"
+                            disabled={!part.is_active}
+                            title={!part.is_active ? 'Pending master data — not yet activated' : undefined}
+                            className={`w-full px-4 py-2 flex items-center justify-between transition-colors text-left ${
+                              !part.is_active
+                                ? 'opacity-50 cursor-not-allowed italic'
+                                : 'hover:bg-gray-800/50'
+                            }`}
                           >
                             <div>
-                              <span className="text-skynet-accent font-mono text-sm">{part.part_number}</span>
+                              <span className={`font-mono text-sm ${part.is_active ? 'text-skynet-accent' : 'text-gray-400'}`}>
+                                {part.part_number}{!part.is_active ? ' — Pending Master Data' : ''}
+                              </span>
                               <p className="text-xs text-gray-500">{part.description}</p>
                             </div>
                             <span className="text-xs text-gray-600">
@@ -690,10 +698,18 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                           <button
                             key={part.id}
                             onClick={() => handleSelectNewProduct(part)}
-                            className="w-full px-4 py-2 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left"
+                            disabled={!part.is_active}
+                            title={!part.is_active ? 'Pending master data — not yet activated' : undefined}
+                            className={`w-full px-4 py-2 flex items-center justify-between transition-colors text-left ${
+                              !part.is_active
+                                ? 'opacity-50 cursor-not-allowed italic'
+                                : 'hover:bg-gray-800/50'
+                            }`}
                           >
                             <div>
-                              <span className="text-amber-400 font-mono text-sm">{part.part_number}</span>
+                              <span className={`font-mono text-sm ${part.is_active ? 'text-amber-400' : 'text-gray-400'}`}>
+                                {part.part_number}{!part.is_active ? ' — Pending Master Data' : ''}
+                              </span>
                               <p className="text-xs text-gray-500">{part.description}</p>
                             </div>
                             <span className="text-xs px-1.5 py-0.5 bg-amber-900/30 text-amber-400 rounded">FG</span>

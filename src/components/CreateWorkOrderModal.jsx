@@ -1,6 +1,130 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
-import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical } from 'lucide-react'
+import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
+
+// Searchable product picker — replaces native <select> for the Product field.
+// Filters by part_number + description + customer. Groups results by part_type.
+// Inactive parts are still shown but non-selectable.
+function ProductCombobox({ value, onChange, assemblies, allowManufactured }) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const wrapperRef = useRef(null)
+  const inputRef = useRef(null)
+
+  const selected = assemblies.find(a => a.id === value)
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setOpen(false)
+        setSearch('')
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const matches = (a) => {
+    if (!search.trim()) return true
+    const q = search.toLowerCase()
+    return (
+      (a.part_number || '').toLowerCase().includes(q) ||
+      (a.description || '').toLowerCase().includes(q) ||
+      (a.customer || '').toLowerCase().includes(q)
+    )
+  }
+
+  const groups = [
+    { label: 'Products (Assembly)', items: assemblies.filter(a => a.part_type === 'assembly' && matches(a)) },
+    { label: 'Finished Goods', items: assemblies.filter(a => a.part_type === 'finished_good' && matches(a)) },
+  ]
+  if (allowManufactured) {
+    groups.push({ label: 'Parts (Manufactured)', items: assemblies.filter(a => a.part_type === 'manufactured' && matches(a)) })
+  }
+  const totalMatches = groups.reduce((sum, g) => sum + g.items.length, 0)
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(o => !o)
+          setTimeout(() => inputRef.current?.focus(), 10)
+        }}
+        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent flex items-center justify-between gap-2 text-left"
+      >
+        {selected ? (
+          <span className="truncate">
+            <span className="font-mono">{selected.part_number}</span>
+            <span className="text-gray-400"> — {selected.description}</span>
+          </span>
+        ) : (
+          <span className="text-gray-400">-- Select Product --</span>
+        )}
+        <ChevronDown size={16} className="text-gray-400 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute z-50 left-0 right-0 mt-1 bg-gray-800 border border-gray-600 rounded shadow-2xl max-h-80 flex flex-col">
+          <div className="relative p-2 border-b border-gray-700 flex-shrink-0">
+            <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              ref={inputRef}
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by part #, description, or customer..."
+              className="w-full pl-8 pr-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-white placeholder-gray-500 text-sm focus:border-skynet-accent focus:outline-none"
+            />
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {totalMatches === 0 ? (
+              <div className="text-gray-500 text-sm text-center py-4">No products match.</div>
+            ) : groups.map(g => g.items.length > 0 && (
+              <div key={g.label}>
+                <div className="px-3 py-1.5 bg-gray-900/50 text-gray-500 text-xs font-semibold uppercase tracking-wide sticky top-0">
+                  {g.label}
+                </div>
+                {g.items.map(a => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    disabled={!a.is_active}
+                    onClick={() => {
+                      if (!a.is_active) return
+                      onChange(a.id)
+                      setOpen(false)
+                      setSearch('')
+                    }}
+                    className={`w-full text-left px-3 py-2 text-sm border-t border-gray-700/50 ${
+                      !a.is_active
+                        ? 'opacity-50 cursor-not-allowed'
+                        : value === a.id
+                        ? 'bg-skynet-accent/20 hover:bg-skynet-accent/30'
+                        : 'hover:bg-gray-700'
+                    }`}
+                  >
+                    <div className="text-white font-mono text-xs flex items-center gap-2">
+                      {a.part_number}
+                      {!a.is_active && (
+                        <span className="text-amber-300 text-[10px] px-1 py-0.5 bg-amber-900/40 rounded">Pending Master Data</span>
+                      )}
+                    </div>
+                    <div className="text-gray-400 text-xs truncate">
+                      {a.description}{a.customer ? ` · ${a.customer}` : ''}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile }) {
   const [loading, setLoading] = useState(false)
@@ -870,36 +994,12 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                           <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
                             <div>
                               <label className="block text-gray-500 text-xs mb-1">Product</label>
-                              <select
+                              <ProductCombobox
                                 value={selected.assemblyId}
-                                onChange={(e) => updateAssemblySelection(assemblyIndex, e.target.value)}
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                              >
-                                <option value="">-- Select Product --</option>
-                                <optgroup label="Products (Assembly)">
-                                  {assemblies.filter(a => a.part_type === 'assembly').map(a => (
-                                    <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
-                                      {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                                <optgroup label="Finished Goods">
-                                  {assemblies.filter(a => a.part_type === 'finished_good').map(a => (
-                                    <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
-                                      {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                                {orderType === 'make_to_stock' && (
-                                  <optgroup label="Parts (Manufactured)">
-                                    {assemblies.filter(a => a.part_type === 'manufactured').map(a => (
-                                      <option key={a.id} value={a.id} disabled={!a.is_active} style={!a.is_active ? { color: '#888', fontStyle: 'italic' } : undefined}>
-                                        {a.part_number} - {a.description}{!a.is_active ? ' — Pending Master Data' : ''}
-                                      </option>
-                                    ))}
-                                  </optgroup>
-                                )}
-                              </select>
+                                onChange={(id) => updateAssemblySelection(assemblyIndex, id)}
+                                assemblies={assemblies}
+                                allowManufactured={orderType === 'make_to_stock'}
+                              />
                             </div>
                             {orderType === 'make_to_stock' ? (
                               <div>

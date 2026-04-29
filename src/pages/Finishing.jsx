@@ -477,7 +477,7 @@ export default function Finishing() {
       const { data: pickupData, error: pickupError } = await supabase
         .from('jobs')
         .select(`
-          id, job_number, quantity, status, production_lot_number, due_date,
+          id, job_number, quantity, status, production_lot_number,
           actual_start, actual_end, is_standalone_finishing,
           work_order:work_orders(wo_number, customer, priority, due_date),
           component:parts!component_id(part_number, description, customer),
@@ -503,8 +503,8 @@ export default function Finishing() {
           .filter(j => j._remainingQty > 0)
           .sort((a, b) => {
             // Oldest first by due_date, falling back to job_number
-            const da = a.work_order?.due_date || a.due_date || '9999-12-31'
-            const db = b.work_order?.due_date || b.due_date || '9999-12-31'
+            const da = a.work_order?.due_date || '9999-12-31'
+            const db = b.work_order?.due_date || '9999-12-31'
             if (da !== db) return da < db ? -1 : 1
             return (a.job_number || '').localeCompare(b.job_number || '')
           })

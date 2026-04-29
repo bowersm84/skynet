@@ -1640,7 +1640,7 @@ export default function Armory({ profile }) {
 
       {/* Part Modal */}
       {showPartModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+        <div className={`fixed inset-0 bg-black/70 flex items-center justify-center p-4 ${showBOMModal ? 'z-[60]' : 'z-50'}`}>
           <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col">
             <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
               <h2 className="text-lg font-semibold text-white">

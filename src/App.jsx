@@ -67,21 +67,30 @@ function MainApp() {
 
     initializeAuth()
 
-    // Listen for auth changes - only care about sign in/out
+    // Listen for auth changes - only care about sign in/out.
+    // The callback itself MUST NOT be async, and any Supabase query must run
+    // inside setTimeout(0) to escape Supabase's internal auth lock. Awaiting
+    // a query inline deadlocks getSession() and the profile fetch on refresh.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
+      (event, session) => {
         console.log('Auth event:', event)
-        
-        // Only handle actual new sign-in events (not token refreshes or existing sessions)
+
         if (event === 'SIGNED_IN' && session?.user && !hasSignedInRef.current) {
-          console.log('New sign in detected')
-          hasSignedInRef.current = true
-          setUser(session.user)
-          setShowLoadingScreen(true)
-          await fetchProfile(session.user.id)
-          setLoading(false)
+          // Defer: escapes the auth lock so fetchProfile can run
+          setTimeout(async () => {
+            console.log('New sign in detected')
+            hasSignedInRef.current = true
+            setUser(session.user)
+            setShowLoadingScreen(true)
+            try {
+              await fetchProfile(session.user.id)
+            } finally {
+              setLoading(false)
+            }
+          }, 0)
+          return
         }
-        
+
         if (event === 'SIGNED_OUT') {
           console.log('Sign out detected')
           hasSignedInRef.current = false
@@ -89,10 +98,9 @@ function MainApp() {
           setProfile(null)
           setCurrentPage('mainframe')
           setLoading(false)
+          return
         }
-        
-        // Intentionally ignore: TOKEN_REFRESHED, INITIAL_SESSION, USER_UPDATED, etc.
-        // Profile doesn't change on token refresh - no need to re-fetch
+        // Intentionally ignore: TOKEN_REFRESHED, INITIAL_SESSION, USER_UPDATED.
       }
     )
 

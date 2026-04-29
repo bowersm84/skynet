@@ -1102,20 +1102,57 @@ export default function Finishing() {
           }
         }
 
-        // Each batch now independently enters compliance review when it completes finishing
-        // Set compliance_status to pending_compliance on this send
-        const { error: complianceError } = await supabase
-          .from('finishing_sends')
-          .update({
-            compliance_status: 'pending_compliance',
-            updated_at: now
-          })
-          .eq('id', batch.id)
+        // Standalone J-FIN ("outsourced") batches skip Roger's review and go
+        // straight to complete — there is no upstream Skybolt machining flow
+        // for these jobs, so post-mfg compliance has nothing to gate.
+        if (batch.is_standalone === true) {
+          const verifiedQty = parseInt(verifiedCounts[batch.id]) || 0
+          const { error: autoApproveError } = await supabase
+            .from('finishing_sends')
+            .update({
+              compliance_status: 'approved',
+              compliance_outcome: 'accepted',
+              compliance_approved_by: operator.id,
+              compliance_approved_at: now,
+              compliance_good_qty: verifiedQty,
+              compliance_notes: 'Auto-approved (standalone finishing — no compliance review required)',
+              updated_at: now
+            })
+            .eq('id', batch.id)
+          if (autoApproveError) {
+            console.error('[Finishing] Auto-approve failed for standalone batch:', autoApproveError)
+          }
 
-        if (complianceError) {
-          console.error('[Finishing] Failed to set compliance status:', complianceError)
+          // Mark the parent J-FIN job complete.
+          const jobId = batch.job_id || batch.job?.id
+          if (jobId) {
+            const { error: jobCompleteError } = await supabase
+              .from('jobs')
+              .update({
+                status: 'complete',
+                actual_end: now,
+                good_pieces: verifiedQty,
+                updated_at: now
+              })
+              .eq('id', jobId)
+            if (jobCompleteError) {
+              console.error('[Finishing] Job status to complete failed:', jobCompleteError)
+            }
+          }
+        } else {
+          // Standard flow: send to compliance review.
+          const { error: complianceError } = await supabase
+            .from('finishing_sends')
+            .update({
+              compliance_status: 'pending_compliance',
+              updated_at: now
+            })
+            .eq('id', batch.id)
+          if (complianceError) {
+            console.error('[Finishing] Failed to set compliance status:', complianceError)
+          }
+          // Do NOT advance the parent job status here — job status is managed by compliance approval.
         }
-        // Do NOT advance the parent job status here — job status is managed by compliance approval
       } else {
         // Advance to next stage
         const nextStage = STAGES[currentIndex + 1].key

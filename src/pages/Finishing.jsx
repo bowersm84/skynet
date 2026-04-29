@@ -110,6 +110,7 @@ export default function Finishing() {
   const [showPickupModal, setShowPickupModal] = useState(false)
   const [pickupModalJob, setPickupModalJob] = useState(null)
   const [pickupQty, setPickupQty] = useState('')
+  const [pickupPLN, setPickupPLN] = useState('')
   const [pickupNotes, setPickupNotes] = useState('')
   const [pickupSubmitting, setPickupSubmitting] = useState(false)
 
@@ -1199,6 +1200,11 @@ export default function Finishing() {
   // Mirrors the kiosk's handleFinishingSend flow but operated from the finishing screen.
   const handleManualPickupSubmit = async () => {
     if (!pickupModalJob) return
+    const trimmedPLN = pickupPLN.trim()
+    if (!trimmedPLN) {
+      alert('Production Lot # is required.')
+      return
+    }
     const qty = parseInt(pickupQty)
     if (!qty || isNaN(qty) || qty <= 0) {
       alert('Enter a valid quantity (must be > 0).')
@@ -1230,7 +1236,7 @@ export default function Finishing() {
           machine_id: pickupModalJob.assigned_machine?.id || null,
           sent_by: operator.id,
           quantity: qty,
-          production_lot_number: pickupModalJob.production_lot_number || null,
+          production_lot_number: trimmedPLN,
           material_lot_number: materialLot,
           status: 'pending_finishing',
           notes: pickupNotes.trim() || 'Manual pickup (non-kiosk machine)',
@@ -1243,6 +1249,11 @@ export default function Finishing() {
       const newSent = pickupModalJob._sentQty + qty
       const totalQty = pickupModalJob.quantity || 0
       const updates = { updated_at: now }
+      // Persist PLN onto the job so subsequent batches auto-populate.
+      // Only write if it changed (avoids a no-op DB write on Batch B+ when nothing changed).
+      if (trimmedPLN !== (pickupModalJob.production_lot_number || '')) {
+        updates.production_lot_number = trimmedPLN
+      }
       if (['ready', 'assigned'].includes(pickupModalJob.status)) {
         updates.status = newSent >= totalQty ? 'manufacturing_complete' : 'in_progress'
         if (!pickupModalJob.actual_start) updates.actual_start = now
@@ -1264,6 +1275,7 @@ export default function Finishing() {
       setShowPickupModal(false)
       setPickupModalJob(null)
       setPickupQty('')
+      setPickupPLN('')
       setPickupNotes('')
       await loadData()
     } catch (err) {
@@ -2082,6 +2094,7 @@ export default function Finishing() {
                             onClick={() => {
                               setPickupModalJob(j)
                               setPickupQty(String(j._remainingQty))
+                              setPickupPLN(j.production_lot_number || '')
                               setPickupNotes('')
                               setShowPickupModal(true)
                             }}
@@ -2309,6 +2322,24 @@ export default function Finishing() {
               </div>
               <div>
                 <label className="block text-gray-400 text-sm mb-1">
+                  Production Lot # <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={pickupPLN}
+                  onChange={(e) => setPickupPLN(e.target.value)}
+                  placeholder="From the paper traveler"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                  autoFocus={!pickupPLN}
+                />
+                <p className="text-gray-600 text-xs mt-1">
+                  {pickupModalJob?.production_lot_number
+                    ? 'Auto-filled from earlier batch on this job — change only if the traveler shows a different PLN.'
+                    : 'Enter the PLN hand-written on the paper traveler. It will auto-fill for the next batch on this job.'}
+                </p>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
                   Quantity in this batch <span className="text-red-400">*</span>
                 </label>
                 <input
@@ -2317,7 +2348,7 @@ export default function Finishing() {
                   value={pickupQty}
                   onChange={(e) => setPickupQty(e.target.value)}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
-                  autoFocus
+                  autoFocus={!!pickupPLN}
                 />
                 <p className="text-gray-600 text-xs mt-1">Count the parts in front of you. Multiple batches per job are fine.</p>
               </div>
@@ -2341,7 +2372,7 @@ export default function Finishing() {
               </button>
               <button
                 onClick={handleManualPickupSubmit}
-                disabled={pickupSubmitting || !pickupQty}
+                disabled={pickupSubmitting || !pickupQty || !pickupPLN.trim()}
                 className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded flex items-center gap-2"
               >
                 {pickupSubmitting ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}

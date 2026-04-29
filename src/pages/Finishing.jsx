@@ -92,6 +92,8 @@ export default function Finishing() {
     quantity: '',
     material_lot_number: '',
     production_lot_number: '',
+    chemical_lot_number: '',
+    chemical_lot_number_2: '',
     customer: '',
     operation_type: 'full_finishing',
     notes: '',
@@ -242,7 +244,7 @@ export default function Finishing() {
   const loadNewJobReferences = async () => {
     setNewJobLoadingRefs(true)
     try {
-      const [partsRes, machinesRes] = await Promise.all([
+      const [partsRes, machinesRes, currentChem, currentChem2] = await Promise.all([
         supabase
           .from('parts')
           .select('id, part_number, description, customer, part_type, is_active')
@@ -252,11 +254,20 @@ export default function Finishing() {
           .select('id, name, code')
           .eq('is_active', true)
           .order('name'),
+        getCurrentChemicalLot(),
+        getCurrentChemicalLot2(),
       ])
       if (partsRes.error) throw partsRes.error
       if (machinesRes.error) throw machinesRes.error
       setNewJobParts(partsRes.data || [])
       setNewJobMachines(machinesRes.data || [])
+      // Pre-fill chemical lots, but only if the user hasn't already typed something
+      // (handles the race where the modal renders before this fetch returns).
+      setNewJobForm(f => ({
+        ...f,
+        chemical_lot_number: f.chemical_lot_number || (currentChem || ''),
+        chemical_lot_number_2: f.chemical_lot_number_2 || (currentChem2 || ''),
+      }))
     } catch (err) {
       console.error('Failed to load New Job references:', err)
       alert('Failed to load parts/machines list: ' + err.message)
@@ -274,6 +285,8 @@ export default function Finishing() {
       quantity: '',
       material_lot_number: '',
       production_lot_number: '',
+      chemical_lot_number: '',
+      chemical_lot_number_2: '',
       customer: '',
       operation_type: 'full_finishing',
       notes: '',
@@ -362,13 +375,9 @@ export default function Finishing() {
       // Determine starting stage
       const initialStage = newJobForm.operation_type === 'passivation_only' ? 'treatment' : 'wash'
 
-      // Pre-fill chemical lots from persistence
-      const [currentChem, currentChem2] = await Promise.all([
-        getCurrentChemicalLot(),
-        getCurrentChemicalLot2(),
-      ])
-
       // Step 2 — create the finishing_send linked to the new job
+      // Chemical lots come from the form (pre-filled from persistence on modal open,
+      // editable by James if either drum has changed).
       const { error: sendError } = await supabase
         .from('finishing_sends')
         .insert({
@@ -386,8 +395,8 @@ export default function Finishing() {
           finishing_operator_id: operator.id,
           finishing_started_at: now,
           finishing_lot_number: fln,
-          chemical_lot_number: currentChem || null,
-          chemical_lot_number_2: currentChem2 || null,
+          chemical_lot_number: newJobForm.chemical_lot_number.trim() || null,
+          chemical_lot_number_2: newJobForm.chemical_lot_number_2.trim() || null,
           incoming_count: qty,
           sent_at: now,
           created_at: now,
@@ -2672,6 +2681,35 @@ export default function Finishing() {
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
                   />
                   <p className="text-gray-600 text-xs mt-1">For batches arriving from non-Mazak-5 machines where the machinist wrote a PLN on the paper traveler.</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">
+                      Citric Acid Lot # <span className="text-gray-600 text-xs">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={newJobForm.chemical_lot_number}
+                      onChange={(e) => setNewJobForm(f => ({ ...f, chemical_lot_number: e.target.value }))}
+                      placeholder="Citric tank lot"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                    />
+                    <p className="text-gray-600 text-xs mt-1">Auto-filled from the most recent batch — change if the citric drum has changed.</p>
+                  </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">
+                      Alkaline Mix Lot # <span className="text-gray-600 text-xs">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={newJobForm.chemical_lot_number_2}
+                      onChange={(e) => setNewJobForm(f => ({ ...f, chemical_lot_number_2: e.target.value }))}
+                      placeholder="Alkaline tank lot"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                    />
+                    <p className="text-gray-600 text-xs mt-1">Auto-filled from the most recent batch — change if the alkaline drum has changed.</p>
+                  </div>
                 </div>
 
                 <div>

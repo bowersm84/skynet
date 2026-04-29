@@ -101,6 +101,16 @@ export default function Finishing() {
   // Collapsed state per batch
   const [collapsedBatches, setCollapsedBatches] = useState({})
 
+  // Manual pickup queue (jobs scheduled to non-kiosk machines)
+  const [pickupJobs, setPickupJobs] = useState([])
+  const [pickupSearch, setPickupSearch] = useState('')
+  const [pickupExpanded, setPickupExpanded] = useState(true)
+  const [showPickupModal, setShowPickupModal] = useState(false)
+  const [pickupModalJob, setPickupModalJob] = useState(null)
+  const [pickupQty, setPickupQty] = useState('')
+  const [pickupNotes, setPickupNotes] = useState('')
+  const [pickupSubmitting, setPickupSubmitting] = useState(false)
+
   // Queue search
   const [queueSearch, setQueueSearch] = useState('')
   const [queueExpanded, setQueueExpanded] = useState(false)
@@ -466,6 +476,45 @@ export default function Finishing() {
         .order('finishing_completed_at', { ascending: false })
         .limit(50)
       setRecentCompletions(recentData || [])
+
+      // Fetch jobs scheduled to non-kiosk machines that still have qty to send
+      // (manual pickup queue for phased rollout — Mazak 5 is the only kiosk)
+      const { data: pickupData, error: pickupError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status, production_lot_number, due_date,
+          actual_start, actual_end, is_standalone_finishing,
+          work_order:work_orders(wo_number, customer, priority, due_date),
+          component:parts!component_id(part_number, description, customer),
+          assigned_machine:machines!assigned_machine_id(id, name, code, kiosk_enabled),
+          finishing_sends(id, quantity, compliance_status)
+        `)
+        .eq('is_standalone_finishing', false)
+        .in('status', ['ready', 'assigned', 'in_setup', 'in_progress'])
+
+      if (pickupError) {
+        console.error('Error loading pickup jobs:', pickupError)
+        setPickupJobs([])
+      } else {
+        const filtered = (pickupData || [])
+          .filter(j => j.assigned_machine && j.assigned_machine.kiosk_enabled === false)
+          .map(j => {
+            const sentQty = (j.finishing_sends || [])
+              .filter(s => s.compliance_status !== 'rejected')
+              .reduce((sum, s) => sum + (s.quantity || 0), 0)
+            const remaining = Math.max(0, (j.quantity || 0) - sentQty)
+            return { ...j, _sentQty: sentQty, _remainingQty: remaining }
+          })
+          .filter(j => j._remainingQty > 0)
+          .sort((a, b) => {
+            // Oldest first by due_date, falling back to job_number
+            const da = a.work_order?.due_date || a.due_date || '9999-12-31'
+            const db = b.work_order?.due_date || b.due_date || '9999-12-31'
+            if (da !== db) return da < db ? -1 : 1
+            return (a.job_number || '').localeCompare(b.job_number || '')
+          })
+        setPickupJobs(filtered)
+      }
 
       // Build batch labels (A, B, C...) for jobs with multiple sends
       const allSends = [...(pendingData || []), ...(activeData || []), ...(recentData || [])]
@@ -1105,6 +1154,85 @@ export default function Finishing() {
     }
   }
 
+  // Manual pickup: James creates a finishing_send for an existing scheduled job.
+  // Mirrors the kiosk's handleFinishingSend flow but operated from the finishing screen.
+  const handleManualPickupSubmit = async () => {
+    if (!pickupModalJob) return
+    const qty = parseInt(pickupQty)
+    if (!qty || isNaN(qty) || qty <= 0) {
+      alert('Enter a valid quantity (must be > 0).')
+      return
+    }
+    if (qty > pickupModalJob._remainingQty) {
+      if (!confirm(`Quantity ${qty} exceeds remaining ${pickupModalJob._remainingQty}. Continue?`)) return
+    }
+
+    setPickupSubmitting(true)
+    try {
+      const now = new Date().toISOString()
+
+      // Pull material lot number from job_materials if present
+      const { data: matData } = await supabase
+        .from('job_materials')
+        .select('lot_number')
+        .eq('job_id', pickupModalJob.id)
+        .not('lot_number', 'is', null)
+        .limit(1)
+      const materialLot = matData?.[0]?.lot_number || null
+
+      // Create the pending_finishing send. Existing batch label logic in loadData
+      // will assign Batch A/B/C order from sent_at.
+      const { error: sendError } = await supabase
+        .from('finishing_sends')
+        .insert({
+          job_id: pickupModalJob.id,
+          machine_id: pickupModalJob.assigned_machine?.id || null,
+          sent_by: operator.id,
+          quantity: qty,
+          production_lot_number: pickupModalJob.production_lot_number || null,
+          material_lot_number: materialLot,
+          status: 'pending_finishing',
+          notes: pickupNotes.trim() || 'Manual pickup (non-kiosk machine)',
+          is_partial_send: true,
+          sent_at: now,
+        })
+      if (sendError) throw sendError
+
+      // Promote job status as appropriate.
+      const newSent = pickupModalJob._sentQty + qty
+      const totalQty = pickupModalJob.quantity || 0
+      const updates = { updated_at: now }
+      if (['ready', 'assigned'].includes(pickupModalJob.status)) {
+        updates.status = newSent >= totalQty ? 'manufacturing_complete' : 'in_progress'
+        if (!pickupModalJob.actual_start) updates.actual_start = now
+        if (newSent >= totalQty) updates.actual_end = now
+      } else if (pickupModalJob.status === 'in_setup' || pickupModalJob.status === 'in_progress') {
+        if (newSent >= totalQty) {
+          updates.status = 'manufacturing_complete'
+          updates.actual_end = now
+        }
+      }
+      if (Object.keys(updates).length > 1) {
+        const { error: jobError } = await supabase
+          .from('jobs')
+          .update(updates)
+          .eq('id', pickupModalJob.id)
+        if (jobError) console.error('Job status update failed (non-blocking):', jobError)
+      }
+
+      setShowPickupModal(false)
+      setPickupModalJob(null)
+      setPickupQty('')
+      setPickupNotes('')
+      await loadData()
+    } catch (err) {
+      console.error('Manual pickup error:', err)
+      alert('Failed to send batch: ' + err.message)
+    } finally {
+      setPickupSubmitting(false)
+    }
+  }
+
   // Helpers
   const getPriorityColor = (priority) => {
     switch (priority) {
@@ -1173,6 +1301,15 @@ export default function Finishing() {
         send.job?.work_order?.wo_number?.toLowerCase().includes(queueSearch.toLowerCase())
       )
     : queue
+
+  const filteredPickup = pickupSearch.trim()
+    ? pickupJobs.filter(j =>
+        j.component?.part_number?.toLowerCase().includes(pickupSearch.toLowerCase()) ||
+        j.job_number?.toLowerCase().includes(pickupSearch.toLowerCase()) ||
+        j.work_order?.wo_number?.toLowerCase().includes(pickupSearch.toLowerCase()) ||
+        j.assigned_machine?.name?.toLowerCase().includes(pickupSearch.toLowerCase())
+      )
+    : pickupJobs
 
   // ==================== RENDER ====================
 
@@ -1830,6 +1967,98 @@ export default function Finishing() {
             </div>
           ) : (
           <div className="lg:col-span-1">
+            {/* Awaiting Pickup — non-kiosk machine jobs */}
+            {pickupJobs.length > 0 && (
+              <div className="bg-gray-900 rounded-lg border border-amber-900/40 p-6 mb-6">
+                <h2 className="text-white font-semibold mb-4 flex items-center gap-2">
+                  <Hash size={18} className="text-amber-500" />
+                  Awaiting Pickup
+                  <span className="ml-auto text-gray-500 text-sm">
+                    {pickupSearch.trim() ? `${filteredPickup.length} of ${pickupJobs.length}` : pickupJobs.length} jobs
+                  </span>
+                  <button
+                    onClick={() => setPickupExpanded(v => !v)}
+                    className="text-gray-500 hover:text-white"
+                    title={pickupExpanded ? 'Collapse' : 'Expand'}
+                  >
+                    {pickupExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                  </button>
+                </h2>
+                <p className="text-gray-500 text-xs mb-4">
+                  Jobs scheduled to machines without kiosk hand-off. Pull a batch when parts arrive at your station.
+                </p>
+
+                {pickupExpanded && (
+                  <>
+                    <div className="relative mb-4">
+                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                      <input
+                        type="text"
+                        value={pickupSearch}
+                        onChange={(e) => setPickupSearch(e.target.value)}
+                        placeholder="Search by part #, job #, WO, or machine..."
+                        className="w-full pl-9 pr-8 py-2 bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-500 text-sm focus:border-cyan-500 focus:outline-none"
+                      />
+                      {pickupSearch && (
+                        <button
+                          onClick={() => setPickupSearch('')}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {filteredPickup.map(j => (
+                        <div
+                          key={j.id}
+                          className="bg-gray-800 rounded border border-gray-700 p-3 flex items-center gap-3"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-white font-mono text-sm">{j.job_number}</span>
+                              <span className="text-gray-600">·</span>
+                              <span className="text-cyan-400 font-mono text-sm">{j.component?.part_number || '—'}</span>
+                              {j.work_order?.priority === 'urgent' && (
+                                <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 rounded">URGENT</span>
+                              )}
+                            </div>
+                            <div className="text-gray-500 text-xs mt-1 truncate">
+                              {j.component?.description}
+                              {j.work_order?.customer ? ` · ${j.work_order.customer}` : (j.component?.customer ? ` · ${j.component.customer}` : '')}
+                            </div>
+                            <div className="text-gray-600 text-xs mt-1 flex items-center gap-3 flex-wrap">
+                              <span>{j.assigned_machine?.name || '—'}</span>
+                              <span>WO {j.work_order?.wo_number || '—'}</span>
+                              <span>
+                                Sent <span className="text-gray-400">{j._sentQty}</span> / {j.quantity}
+                                <span className="text-amber-400 ml-1">({j._remainingQty} left)</span>
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setPickupModalJob(j)
+                              setPickupQty(String(j._remainingQty))
+                              setPickupNotes('')
+                              setShowPickupModal(true)
+                            }}
+                            className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium rounded flex items-center gap-2 whitespace-nowrap"
+                          >
+                            <ArrowRight size={14} />
+                            Send Batch
+                          </button>
+                        </div>
+                      ))}
+                      {pickupSearch.trim() && filteredPickup.length === 0 && (
+                        <div className="text-gray-600 text-sm text-center py-4">No jobs match your search.</div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <div className="bg-gray-900 rounded-lg border border-gray-800 p-6">
               <h2 className="text-white font-semibold mb-4 flex items-center gap-2">
                 <Package size={18} className="text-gray-400" />
@@ -2003,6 +2232,84 @@ export default function Finishing() {
           )}
         </div>
       </main>
+
+      {/* Manual Pickup — Send Batch modal */}
+      {showPickupModal && pickupModalJob && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 rounded-lg border border-gray-700 max-w-lg w-full">
+            <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-white font-semibold">Send Batch to Finishing</h3>
+                <p className="text-gray-500 text-xs mt-1 font-mono">
+                  {pickupModalJob.job_number} · {pickupModalJob.component?.part_number}
+                </p>
+              </div>
+              <button
+                onClick={() => { setShowPickupModal(false); setPickupModalJob(null) }}
+                className="text-gray-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="bg-gray-800 rounded p-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Total qty</span>
+                  <span className="text-white font-mono">{pickupModalJob.quantity}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Already sent</span>
+                  <span className="text-white font-mono">{pickupModalJob._sentQty}</span>
+                </div>
+                <div className="flex justify-between border-t border-gray-700 mt-2 pt-2">
+                  <span className="text-amber-400">Remaining</span>
+                  <span className="text-amber-400 font-mono">{pickupModalJob._remainingQty}</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  Quantity in this batch <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={pickupQty}
+                  onChange={(e) => setPickupQty(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
+                  autoFocus
+                />
+                <p className="text-gray-600 text-xs mt-1">Count the parts in front of you. Multiple batches per job are fine.</p>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">Notes (optional)</label>
+                <textarea
+                  value={pickupNotes}
+                  onChange={(e) => setPickupNotes(e.target.value)}
+                  rows={2}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none text-sm"
+                />
+              </div>
+            </div>
+            <div className="p-4 border-t border-gray-800 flex items-center justify-end gap-2">
+              <button
+                onClick={() => { setShowPickupModal(false); setPickupModalJob(null) }}
+                className="px-4 py-2 text-gray-400 hover:text-white text-sm"
+                disabled={pickupSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleManualPickupSubmit}
+                disabled={pickupSubmitting || !pickupQty}
+                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded flex items-center gap-2"
+              >
+                {pickupSubmitting ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
+                Send to Queue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Start Batch Modal */}
       {showStartModal && startModalSend && (

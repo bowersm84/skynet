@@ -162,25 +162,20 @@ export default function Finishing() {
     }
   }, [])
 
-  // Generate finishing lot number via RPC
+  // Generate finishing lot number — global 6-digit sequence starting at 100000.
+  // New format: FLN-NNNNNN (e.g. FLN-100000). Existing FLN-YYMMDD-XXXX values
+  // in DB remain valid; this only affects newly generated lot numbers.
   const generateFinishingLotNumber = async () => {
-    const now = new Date()
-    const datePart = now.toISOString().slice(2, 10).replace(/-/g, '') // YYMMDD
-    const prefix = 'FLN'
-
     try {
-      const { data, error } = await supabase.rpc('next_lot_number', {
-        p_prefix: prefix,
-        p_date_part: datePart
-      })
-
+      const { data, error } = await supabase.rpc('next_finishing_lot_number')
       if (error) throw error
-      const seq = String(data).padStart(4, '0')
-      return `${prefix}-${datePart}-${seq}`
+      const seq = String(data).padStart(6, '0')
+      return `FLN-${seq}`
     } catch (err) {
-      // Fallback: timestamp-based number if RPC fails
+      // Fallback only if RPC fails — uses last 6 digits of epoch time so it
+      // is still a parseable number, just not from the canonical sequence.
       console.error('Lot number generation failed, using fallback:', err)
-      const fallback = `${prefix}-${datePart}-${now.getTime().toString().slice(-4)}`
+      const fallback = `FLN-${Date.now().toString().slice(-6)}`
       return fallback
     }
   }

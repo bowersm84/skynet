@@ -53,16 +53,18 @@ function ProductCombobox({ value, onChange, assemblies, allowManufactured }) {
           setOpen(o => !o)
           setTimeout(() => inputRef.current?.focus(), 10)
         }}
-        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent flex items-center justify-between gap-2 text-left"
+        className="w-full min-w-0 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent flex items-center justify-between gap-2 text-left"
       >
-        {selected ? (
-          <span className="truncate">
-            <span className="font-mono">{selected.part_number}</span>
-            <span className="text-gray-400"> — {selected.description}</span>
-          </span>
-        ) : (
-          <span className="text-gray-400">-- Select Product --</span>
-        )}
+        <span className="flex-1 min-w-0 truncate">
+          {selected ? (
+            <>
+              <span className="font-mono">{selected.part_number}</span>
+              <span className="text-gray-400"> — {selected.description}</span>
+            </>
+          ) : (
+            <span className="text-gray-400">-- Select Product --</span>
+          )}
+        </span>
         <ChevronDown size={16} className="text-gray-400 flex-shrink-0" />
       </button>
 
@@ -992,7 +994,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                       <div key={assemblyIndex} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
                         <div className="flex items-start justify-between gap-4 mb-4">
                           <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
-                            <div>
+                            <div className="min-w-0">
                               <label className="block text-gray-500 text-xs mb-1">Product</label>
                               <ProductCombobox
                                 value={selected.assemblyId}

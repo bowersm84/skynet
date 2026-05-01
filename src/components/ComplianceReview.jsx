@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import PrintPackageModal from './PrintPackageModal'
 import { 
   ChevronDown, 
@@ -342,11 +342,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
+      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+
       const html = buildTravelerHTML({
         job: fullJob,
         steps: steps || [],
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
+        coAllocations,
       })
       const win = window.open('', '_blank')
       if (!win) {

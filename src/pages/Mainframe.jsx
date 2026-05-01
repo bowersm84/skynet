@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import CustomerOrders from './CustomerOrders'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
@@ -59,6 +60,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const [overrideValue, setOverrideValue] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
   const [overrideSaving, setOverrideSaving] = useState(false)
+  const [orderLookupTab, setOrderLookupTab] = useState('work_orders') // 'work_orders' | 'customer_orders'
   const [woLookupData, setWOLookupData] = useState([])
   const [standaloneJobs, setStandaloneJobs] = useState([])
   const [showStandaloneSection, setShowStandaloneSection] = useState(false)
@@ -425,6 +427,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           status,
           order_quantity,
           stock_quantity,
+          has_cancelled_allocation,
           created_at,
           work_order_assemblies (
             id,
@@ -980,11 +983,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
+      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+
       const html = buildTravelerHTML({
         job: fullJob,
         steps: steps || [],
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
+        coAllocations,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -1905,8 +1911,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               <div className="flex items-center gap-3">
                 <ClipboardList className="text-skynet-accent" size={24} />
                 <div>
-                  <h2 className="text-xl font-semibold text-white">Work Order Lookup</h2>
-                  <p className="text-gray-500 text-sm">View all active work orders and job statuses</p>
+                  <h2 className="text-xl font-semibold text-white">Order Lookup</h2>
+                  <p className="text-gray-500 text-sm">Work orders and customer orders</p>
                 </div>
               </div>
               <button 
@@ -1921,30 +1927,68 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               </button>
             </div>
 
-            {/* Search Bar */}
-            <div className="px-6 py-4 border-b border-gray-800 flex-shrink-0">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={20} />
-                <input
-                  type="text"
-                  placeholder="Search by WO#, Job#, Customer, or Part#..."
-                  value={woLookupSearch}
-                  onChange={(e) => setWOLookupSearch(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
-                  autoFocus
-                />
-                {woLookupSearch && (
-                  <button
-                    onClick={() => setWOLookupSearch('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
-                  >
-                    <X size={16} />
-                  </button>
-                )}
-              </div>
+            {/* Tab strip — Work Orders / Customer Orders */}
+            <div className="px-6 border-b border-gray-800 flex-shrink-0 flex items-center gap-1">
+              <button
+                onClick={() => setOrderLookupTab('work_orders')}
+                className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  orderLookupTab === 'work_orders'
+                    ? 'border-skynet-accent text-skynet-accent'
+                    : 'border-transparent text-gray-400 hover:text-white'
+                }`}
+              >
+                Work Orders
+              </button>
+              <button
+                onClick={() => setOrderLookupTab('customer_orders')}
+                className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  orderLookupTab === 'customer_orders'
+                    ? 'border-purple-400 text-purple-300'
+                    : 'border-transparent text-gray-400 hover:text-white'
+                }`}
+              >
+                Customer Orders
+              </button>
             </div>
 
+            {/* Search Bar (Work Orders tab only — CustomerOrders has its own search) */}
+            {orderLookupTab === 'work_orders' && (
+              <div className="px-6 py-4 border-b border-gray-800 flex-shrink-0">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={20} />
+                  <input
+                    type="text"
+                    placeholder="Search by WO#, Job#, Customer, or Part#..."
+                    value={woLookupSearch}
+                    onChange={(e) => setWOLookupSearch(e.target.value)}
+                    className="w-full pl-10 pr-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                    autoFocus
+                  />
+                  {woLookupSearch && (
+                    <button
+                      onClick={() => setWOLookupSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Content */}
+            {orderLookupTab === 'customer_orders' ? (
+              <div className="flex-1 overflow-y-auto">
+                <CustomerOrders
+                  profile={profile}
+                  embedded={true}
+                  onNavigateToWO={(woNumber) => {
+                    setOrderLookupTab('work_orders')
+                    setWOLookupSearch(woNumber)
+                  }}
+                />
+              </div>
+            ) : (
             <div className="flex-1 overflow-y-auto p-6">
               {woLookupLoading ? (
                 <div className="flex items-center justify-center py-12">
@@ -2038,12 +2082,43 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                     
                     return (
                       <div key={wo.id} className={`border rounded-lg overflow-hidden ${
-                        allJobsComplete 
-                          ? 'border-gray-700 bg-gray-800/30' 
-                          : readyForAssemblyCount === totalJobs 
+                        allJobsComplete
+                          ? 'border-gray-700 bg-gray-800/30'
+                          : readyForAssemblyCount === totalJobs
                             ? 'border-emerald-700 bg-emerald-900/20'
                             : 'border-gray-700 bg-gray-800/50'
                       }`}>
+                        {/* Customer-order cancellation banner */}
+                        {wo.has_cancelled_allocation && (
+                          <div className="bg-amber-900/30 border-l-4 border-amber-500 px-3 py-1.5 text-amber-200 text-xs flex items-center justify-between">
+                            <span className="flex items-center gap-2">
+                              <AlertTriangle size={14} />
+                              Customer order cancelled — review allocation
+                            </span>
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                if (!confirm('Acknowledge cancellation? This dismisses the banner. The WO is unaffected.')) return
+                                const { error: ackErr } = await supabase
+                                  .from('work_orders')
+                                  .update({ has_cancelled_allocation: false })
+                                  .eq('id', wo.id)
+                                if (ackErr) {
+                                  alert('Failed to acknowledge: ' + ackErr.message)
+                                  return
+                                }
+                                await supabase.from('audit_logs').insert({
+                                  event_type: 'co_cancellation_acknowledged',
+                                  details: { work_order_id: wo.id, acknowledged_by: profile?.id || null },
+                                })
+                                fetchWOLookup()
+                              }}
+                              className="text-amber-300 hover:text-amber-100 underline text-xs"
+                            >
+                              Acknowledge
+                            </button>
+                          </div>
+                        )}
                         {/* WO Header Row */}
                         <div
                           onClick={() => setExpandedWOs(prev => ({ ...prev, [wo.id]: !prev[wo.id] }))}
@@ -2807,21 +2882,24 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                 </div>
               )}
             </div>
+            )}
 
             {/* Footer */}
-            <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between flex-shrink-0 bg-gray-900">
-              <span className="text-sm text-gray-500">
-                {filteredWOLookup.length} work order{filteredWOLookup.length !== 1 ? 's' : ''} found
-              </span>
-              <button
-                onClick={fetchWOLookup}
-                disabled={woLookupLoading}
-                className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-sm transition-colors disabled:opacity-50"
-              >
-                <RefreshCw size={16} className={woLookupLoading ? 'animate-spin' : ''} />
-                Refresh
-              </button>
-            </div>
+            {orderLookupTab === 'work_orders' && (
+              <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between flex-shrink-0 bg-gray-900">
+                <span className="text-sm text-gray-500">
+                  {filteredWOLookup.length} work order{filteredWOLookup.length !== 1 ? 's' : ''} found
+                </span>
+                <button
+                  onClick={fetchWOLookup}
+                  disabled={woLookupLoading}
+                  className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-sm transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw size={16} className={woLookupLoading ? 'animate-spin' : ''} />
+                  Refresh
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

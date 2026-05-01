@@ -27,15 +27,18 @@ import {
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
+import CustomersTab from './CustomersTab'
 
 export default function Armory({ profile }) {
   // Per-role tab visibility. Single source of truth.
   // Order in each array determines the default tab for that role (first item).
   const TAB_ACCESS_BY_ROLE = {
-    admin:      ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving', 'users'],
-    compliance: ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving'],
-    finishing:  ['inventory', 'receiving'],
-    machinist:  ['inventory'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving', 'customers', 'users'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving'],
+    finishing:        ['inventory', 'receiving'],
+    machinist:        ['inventory'],
+    scheduler:        ['customers'],
+    customer_service: ['customers'],
   }
   const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -1006,6 +1009,7 @@ export default function Armory({ profile }) {
               { id: 'material_master', label: 'Raw Material', icon: Layers, count: null },
               { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
               { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
+              { id: 'customers', label: 'Customers', icon: Users, count: null },
               { id: 'users', label: 'Users', icon: Users, count: null }
             ].filter(tab => canSeeTab(tab.id)).map(tab => (
               <button
@@ -1633,6 +1637,9 @@ export default function Armory({ profile }) {
             )}
           </div>
         )}
+
+        {/* Customers Tab */}
+        {activeTab === 'customers' && <CustomersTab profile={profile} />}
 
         {/* Users Tab */}
         {activeTab === 'users' && <UsersTab profile={profile} />}

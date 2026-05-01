@@ -106,6 +106,19 @@ CREATE TABLE public.finishing_sends (
   CONSTRAINT finishing_sends_verified_by_fkey FOREIGN KEY (verified_by) REFERENCES public.profiles(id),
   CONSTRAINT finishing_sends_compliance_approved_by_fkey FOREIGN KEY (compliance_approved_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.import_bom_staging (
+  assembly_part_number text NOT NULL,
+  component_part_number text NOT NULL,
+  quantity integer NOT NULL DEFAULT 1,
+  sort_order integer NOT NULL DEFAULT 0,
+  CONSTRAINT import_bom_staging_pkey PRIMARY KEY (assembly_part_number, component_part_number)
+);
+CREATE TABLE public.import_parts_staging (
+  part_number text NOT NULL,
+  description text,
+  part_type text NOT NULL CHECK (part_type = ANY (ARRAY['assembly'::text, 'finished_good'::text, 'manufactured'::text, 'purchased'::text])),
+  CONSTRAINT import_parts_staging_pkey PRIMARY KEY (part_number)
+);
 CREATE TABLE public.job_document_snapshots (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   job_id uuid NOT NULL,
@@ -366,6 +379,7 @@ CREATE TABLE public.machines (
   status_reason text,
   status_updated_at timestamp with time zone,
   status_updated_by uuid,
+  kiosk_enabled boolean NOT NULL DEFAULT false,
   CONSTRAINT machines_pkey PRIMARY KEY (id),
   CONSTRAINT machines_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id),
   CONSTRAINT machines_status_updated_by_fkey FOREIGN KEY (status_updated_by) REFERENCES public.profiles(id)
@@ -546,6 +560,7 @@ CREATE TABLE public.profiles (
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
   can_approve_compliance boolean DEFAULT false,
+  username text DEFAULT split_part((email)::text, '@'::text, 1),
   CONSTRAINT profiles_pkey PRIMARY KEY (id),
   CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id),
   CONSTRAINT profiles_home_location_id_fkey FOREIGN KEY (home_location_id) REFERENCES public.locations(id)

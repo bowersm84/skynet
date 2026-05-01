@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { getOpenCOLinesForPart } from '../lib/customerOrders'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
 
 // Searchable product picker — replaces native <select> for the Product field.
@@ -128,7 +129,7 @@ function ProductCombobox({ value, onChange, assemblies, allowManufactured }) {
   )
 }
 
-export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile }) {
+export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile, preselectedPartId = null, preselectedCoLines = [] }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const modalContentRef = useRef(null)
@@ -139,10 +140,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   const [woNumber, setWoNumber] = useState('')
   const [generatingWO, setGeneratingWO] = useState(false)
 
-  // Order type: make_to_order or make_to_stock
-  const [orderType, setOrderType] = useState('make_to_order')
-  const [customer, setCustomer] = useState('')
-  const [poNumber, setPoNumber] = useState('')
+  // (order_type, customer, po_number derived from linked COs at submit time)
 
   // Production order fields
   const [priority, setPriority] = useState('normal')
@@ -152,6 +150,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 
   // Routing cache: { [partId]: [steps] }
   const [routingCache, setRoutingCache] = useState({})
+  // CO line allocations per assembly row.
+  // coLinesByAssembly[index] = { lines: [...openLines], allocations: { [lineId]: qtyToAllocate } }
+  // qtyToAllocate defaults to line.remaining when checked, 0 (unchecked) when unchecked.
+  const [coLinesByAssembly, setCoLinesByAssembly] = useState({})
+  const [loadingCoLines, setLoadingCoLines] = useState({}) // { [assemblyIndex]: bool }
   // Routing modifications for C3
   const [routingRemovals, setRoutingRemovals] = useState({})       // { [stepId]: reason }
   const [removalInput, setRemovalInput] = useState(null)            // stepId being edited
@@ -162,6 +165,26 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   const [newStepType, setNewStepType] = useState('internal')
   const [dragRoutingFrom, setDragRoutingFrom] = useState(null)     // { partId, idx }
   const [dragRoutingOver, setDragRoutingOver] = useState(null)     // { partId, idx }
+
+  const fetchCoLinesForPart = useCallback(async (assemblyIndex, partId) => {
+    if (!partId) return
+    setLoadingCoLines(prev => ({ ...prev, [assemblyIndex]: true }))
+    try {
+      const lines = await getOpenCOLinesForPart(supabase, partId)
+      setCoLinesByAssembly(prev => ({
+        ...prev,
+        [assemblyIndex]: { lines, allocations: {} },
+      }))
+    } catch (err) {
+      console.error('Error fetching CO lines:', err)
+      setCoLinesByAssembly(prev => ({
+        ...prev,
+        [assemblyIndex]: { lines: [], allocations: {} },
+      }))
+    } finally {
+      setLoadingCoLines(prev => ({ ...prev, [assemblyIndex]: false }))
+    }
+  }, [])
 
   const fetchComponentRouting = useCallback(async (partId) => {
     if (!partId) return
@@ -252,53 +275,68 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   }, [fetchAssemblies])
 
   useEffect(() => {
-    if (isOpen) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      generateOrderNumber()
-      setOrderType('make_to_order')
-      setCustomer('')
-      setPoNumber('')
-      setPriority('normal')
-      setDueDate('')
-      setNotes('')
-      setSelectedAssemblies([])
-      setRoutingCache({})
-      setRoutingRemovals({})
-      setRemovalInput(null)
-      setRemovalReason('')
-      setRoutingAdditions({})
-      setAddingStepFor(null)
-      setNewStepName('')
-      setNewStepType('internal')
-      setError(null)
-    }
+    if (!isOpen) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    generateOrderNumber()
+    setPriority('normal')
+    setDueDate('')
+    setNotes('')
+    setSelectedAssemblies([])
+    setCoLinesByAssembly({})
+    setLoadingCoLines({})
+    setRoutingCache({})
+    setRoutingRemovals({})
+    setRemovalInput(null)
+    setRemovalReason('')
+    setRoutingAdditions({})
+    setAddingStepFor(null)
+    setNewStepName('')
+    setNewStepType('internal')
+    setError(null)
   }, [isOpen, generateOrderNumber])
 
-  // Handle order type change
-  const handleOrderTypeChange = (newType) => {
-    setOrderType(newType)
-    if (newType === 'make_to_stock') {
-      // MTS uses a single quantity field — zero out additionalForStock and recalc job qtys
-      setSelectedAssemblies(prev =>
-        prev.map(sa => ({
-          ...sa,
-          additionalForStock: 0,
-          jobs: sa.jobs.map(job => ({
-            ...job,
-            quantity: job.quantityCustomized ? job.quantity : sa.orderQuantity
-          }))
-        }))
-      )
-    } else {
-      // Switching away from MTS — remove any manufactured part selections
-      setSelectedAssemblies(prev =>
-        prev.filter(sa => {
-          const part = assemblies.find(a => a.id === sa.assemblyId)
-          return !part || part.part_type !== 'manufactured'
-        })
-      )
-    }
-  }
+  // Demand-driven entry: when called with preselectedPartId, auto-add a single
+  // assembly row with the chosen CO lines pre-checked at full remaining qty.
+  // We inline the part-type-aware job creation rather than calling
+  // updateAssemblySelection, because updateAssemblySelection clobbers the
+  // coLinesByAssembly entry we just set.
+  // Waits for the assemblies list to load (the part_type lookup needs it).
+  useEffect(() => {
+    if (!isOpen) return
+    if (!preselectedPartId || preselectedCoLines.length === 0) return
+    if (loadingAssemblies || assemblies.length === 0) return
+
+    const part = assemblies.find(a => a.id === preselectedPartId)
+    if (!part) return
+
+    const totalRemaining = preselectedCoLines.reduce((s, l) => s + l.remaining, 0)
+    const isAutoJobType = part.part_type === 'finished_good' || part.part_type === 'manufactured'
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedAssemblies([{
+      assemblyId: preselectedPartId,
+      orderQuantity: totalRemaining,
+      additionalForStock: 0,
+      jobs: isAutoJobType ? [{
+        componentId: part.id,
+        partNumber: part.part_number,
+        description: part.description,
+        quantity: totalRemaining,
+        quantityCustomized: false,
+        isFinishedGood: part.part_type === 'finished_good',
+        isManufactured: part.part_type === 'manufactured',
+      }] : [],
+    }])
+
+    const allocations = {}
+    preselectedCoLines.forEach(line => {
+      allocations[line.line_id] = line.remaining
+    })
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCoLinesByAssembly({ 0: { lines: preselectedCoLines, allocations } })
+
+    fetchComponentRouting(preselectedPartId)
+  }, [isOpen, preselectedPartId, preselectedCoLines, assemblies, loadingAssemblies, fetchComponentRouting])
 
   const addAssembly = () => {
     setSelectedAssemblies(prev => [{ assemblyId: '', orderQuantity: 1, additionalForStock: 0, jobs: [] }, ...prev])
@@ -333,6 +371,47 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     }
 
     setSelectedAssemblies(updated)
+
+    // Reset any prior CO selections for this row, then fetch fresh open lines.
+    setCoLinesByAssembly(prev => {
+      const next = { ...prev }
+      delete next[index]
+      return next
+    })
+    if (selectedPart) {
+      fetchCoLinesForPart(index, selectedPart.id)
+    }
+  }
+
+  // Allocation = how many of `line.remaining` to claim against this WO. When non-zero
+  // values exist, the assembly's orderQuantity becomes the sum of allocations (the
+  // user-entered Order Qty is overridden — COs ARE the demand). Job qtys for any
+  // non-customized job follow.
+  const setLineAllocation = (assemblyIndex, lineId, qty) => {
+    setCoLinesByAssembly(prev => {
+      const row = prev[assemblyIndex] || { lines: [], allocations: {} }
+      const nextAllocations = { ...row.allocations, [lineId]: qty }
+      const next = { ...prev, [assemblyIndex]: { ...row, allocations: nextAllocations } }
+
+      const totalAllocated = Object.values(nextAllocations).reduce((s, v) => s + (v || 0), 0)
+      if (totalAllocated > 0) {
+        setSelectedAssemblies(curr => {
+          const updated = [...curr]
+          if (!updated[assemblyIndex]) return curr
+          const stock = updated[assemblyIndex].additionalForStock || 0
+          updated[assemblyIndex] = {
+            ...updated[assemblyIndex],
+            orderQuantity: totalAllocated,
+            jobs: updated[assemblyIndex].jobs.map(job => ({
+              ...job,
+              quantity: job.quantityCustomized ? job.quantity : totalAllocated + stock,
+            })),
+          }
+          return updated
+        })
+      }
+      return next
+    })
   }
 
   const updateAssemblyQtyField = (index, field, value) => {
@@ -406,24 +485,29 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     }
 
     // Create Work Order
-    const isMTS = orderType === 'make_to_stock'
-    const totalOrderQty = selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.orderQuantity) || 0), 0)
-    const totalStockQty = isMTS
-      ? totalOrderQty
-      : selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0) || null
+
+    // Resolve each assembly's effective order quantity: when CO allocations are
+    // selected, the allocations ARE the demand and override the user-entered
+    // Order Qty. With no allocations, fall back to the user's entry.
+    const effectiveOrderQtyByIndex = selectedAssemblies.map((sa, i) => {
+      const allocs = coLinesByAssembly[i]?.allocations || {}
+      const totalAlloc = Object.values(allocs).reduce((s, v) => s + (v || 0), 0)
+      return totalAlloc > 0 ? totalAlloc : (parseInt(sa.orderQuantity) || 0)
+    })
+
+    const totalOrderQty = effectiveOrderQtyByIndex.reduce((sum, v) => sum + (v || 0), 0)
+    const totalStockQty = selectedAssemblies.reduce((sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0) || null
 
     const { data: workOrder, error: woError } = await supabase
       .from('work_orders')
       .insert({
         wo_number: woNumber,
-        order_type: orderType,
-        customer: !isMTS ? (customer || null) : null,
-        po_number: !isMTS ? (poNumber || null) : null,
+        // order_type, customer, po_number, is_combined set after CO allocation
         priority: priority,
         due_date: dueDate || null,
         notes: notes || null,
-        order_quantity: isMTS ? null : totalOrderQty || null,
-        stock_quantity: totalStockQty,
+        order_quantity: totalOrderQty || null,
+        stock_quantity: totalStockQty || null,
         status: 'pending'
       })
       .select()
@@ -452,10 +536,13 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 	}
 	
     // Create work_order_assemblies records and jobs for each selected assembly/FG
-    for (const assembly of selectedAssemblies) {
+    for (let assemblyIdx = 0; assemblyIdx < selectedAssemblies.length; assemblyIdx++) {
+      const assembly = selectedAssemblies[assemblyIdx]
       if (!assembly.assemblyId) continue
       const assemblyPart = assemblies.find(a => a.id === assembly.assemblyId)
       if (!assemblyPart) continue
+
+      const effectiveOrderQty = effectiveOrderQtyByIndex[assemblyIdx]
 
       // Skip work_order_assemblies for manufactured parts (only for assemblies/FGs)
       let woaId = null
@@ -465,8 +552,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
           .insert({
             work_order_id: workOrder.id,
             assembly_id: assemblyPart.id,
-            quantity: assembly.orderQuantity + assembly.additionalForStock,
-            order_quantity: isMTS ? null : assembly.orderQuantity || null,
+            quantity: effectiveOrderQty + assembly.additionalForStock,
+            order_quantity: effectiveOrderQty || null,
             stock_quantity: assembly.additionalForStock || null,
             status: 'pending'
           })
@@ -478,6 +565,27 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         }
 
         woaId = woaData?.id || null
+      }
+
+      // Write CO allocation rows for this assembly's selected lines.
+      // Triggers will fire and roll up parent CO line + header status.
+      const allocations = coLinesByAssembly[assemblyIdx]?.allocations || {}
+      const selectedAlloc = Object.entries(allocations).filter(([, qty]) => (qty || 0) > 0)
+
+      if (selectedAlloc.length > 0) {
+        const allocationRows = selectedAlloc.map(([lineId, qty]) => ({
+          customer_order_line_id: lineId,
+          work_order_id: workOrder.id,
+          quantity_allocated: qty,
+          created_by: profile?.id || null,
+        }))
+        const { error: allocError } = await supabase
+          .from('customer_order_allocations')
+          .insert(allocationRows)
+        if (allocError) {
+          console.error('Error creating CO allocations:', allocError)
+          // Don't fail the WO — log and continue.
+        }
       }
 
       // Create jobs and copy routing steps
@@ -555,6 +663,37 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         }
       }
     }
+
+    // Derive WO header fields from linked COs
+    const allSelectedLines = selectedAssemblies.flatMap((sa, idx) =>
+      Object.entries(coLinesByAssembly[idx]?.allocations || {})
+        .filter(([, qty]) => qty > 0)
+        .map(([lineId]) => coLinesByAssembly[idx].lines.find(l => l.line_id === lineId))
+        .filter(Boolean)
+    )
+
+    const uniqueCoIds = [...new Set(allSelectedLines.map(l => l.co_id))]
+
+    let woUpdate = {}
+    if (uniqueCoIds.length === 0) {
+      woUpdate = { order_type: 'make_to_stock', customer: null, po_number: null, is_combined: false }
+    } else if (uniqueCoIds.length === 1) {
+      const line = allSelectedLines[0]
+      woUpdate = {
+        order_type: 'make_to_order',
+        customer: line.customer_name,
+        po_number: line.po_number,
+        is_combined: false,
+      }
+    } else {
+      woUpdate = { order_type: 'make_to_order', customer: null, po_number: null, is_combined: true }
+    }
+
+    const { error: woUpdErr } = await supabase
+      .from('work_orders')
+      .update(woUpdate)
+      .eq('id', workOrder.id)
+    if (woUpdErr) console.error('Error setting derived WO header fields:', woUpdErr)
 
     onSuccess?.()
     onClose()
@@ -864,66 +1003,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
             </p>
           </div>
 
-          {/* Order Type Toggle */}
-          <div className="mb-4">
-            <label className="block text-gray-400 text-sm mb-2">Order Type</label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => handleOrderTypeChange('make_to_order')}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded font-medium transition-colors ${
-                  orderType === 'make_to_order'
-                    ? 'bg-skynet-accent text-white'
-                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                }`}
-              >
-                <ShoppingCart size={16} />
-                Make to Order
-              </button>
-              <button
-                type="button"
-                onClick={() => handleOrderTypeChange('make_to_stock')}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded font-medium transition-colors ${
-                  orderType === 'make_to_stock'
-                    ? 'bg-green-600 text-white'
-                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                }`}
-              >
-                <Package size={16} />
-                Make to Stock
-              </button>
-            </div>
-          </div>
-
           {/* PRODUCTION ORDER FIELDS */}
           <>
-            {/* Customer & PO (only for Make to Order) */}
-            {orderType === 'make_to_order' && (
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-gray-400 text-sm mb-1">Customer *</label>
-                  <input
-                    type="text"
-                    value={customer}
-                    onChange={(e) => setCustomer(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                    placeholder="Customer name"
-                    required={orderType === 'make_to_order'}
-                  />
-                </div>
-                <div>
-                  <label className="block text-gray-400 text-sm mb-1">PO Number</label>
-                  <input
-                    type="text"
-                      value={poNumber}
-                      onChange={(e) => setPoNumber(e.target.value)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                      placeholder="PO-12345"
-                    />
-                  </div>
-                </div>
-              )}
-
               {/* Priority, Due Date, Notes */}
               <div className="grid grid-cols-3 gap-4 mb-6">
                 <div>
@@ -967,15 +1048,17 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                     <Package size={18} />
                     Products
                   </h3>
-                  <button
-                    type="button"
-                    onClick={addAssembly}
-                    disabled={loadingAssemblies}
-                    className="flex items-center gap-1 px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-skynet-accent rounded transition-colors disabled:opacity-50"
-                  >
-                    <Plus size={16} />
-                    Add Product
-                  </button>
+                  {!preselectedPartId && (
+                    <button
+                      type="button"
+                      onClick={addAssembly}
+                      disabled={loadingAssemblies}
+                      className="flex items-center gap-1 px-3 py-1 text-sm bg-gray-800 hover:bg-gray-700 text-skynet-accent rounded transition-colors disabled:opacity-50"
+                    >
+                      <Plus size={16} />
+                      Add Product
+                    </button>
+                  )}
                 </div>
 
                 {loadingAssemblies ? (
@@ -996,54 +1079,64 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                           <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
                             <div className="min-w-0">
                               <label className="block text-gray-500 text-xs mb-1">Product</label>
-                              <ProductCombobox
-                                value={selected.assemblyId}
-                                onChange={(id) => updateAssemblySelection(assemblyIndex, id)}
-                                assemblies={assemblies}
-                                allowManufactured={orderType === 'make_to_stock'}
+                              {preselectedPartId && assemblyIndex === 0 ? (
+                                <div className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white">
+                                  <span className="font-mono">{assemblies.find(a => a.id === preselectedPartId)?.part_number}</span>
+                                  <span className="text-gray-400"> — {assemblies.find(a => a.id === preselectedPartId)?.description}</span>
+                                  <span className="ml-2 text-xs text-purple-300">(from demand selection)</span>
+                                </div>
+                              ) : (
+                                <ProductCombobox
+                                  value={selected.assemblyId}
+                                  onChange={(id) => updateAssemblySelection(assemblyIndex, id)}
+                                  assemblies={assemblies}
+                                  allowManufactured={true}
+                                />
+                              )}
+                            </div>
+                            <div>
+                              <label className="block text-gray-500 text-xs mb-1">Order Qty</label>
+                              {(() => {
+                                const allocs = coLinesByAssembly[assemblyIndex]?.allocations || {}
+                                const allocSum = Object.values(allocs).reduce((s, v) => s + (v || 0), 0)
+                                const fromCO = allocSum > 0
+                                return (
+                                  <>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      value={selected.orderQuantity}
+                                      onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
+                                      readOnly={fromCO}
+                                      className={`w-20 px-3 py-2 border rounded focus:outline-none ${
+                                        fromCO
+                                          ? 'bg-gray-800 border-gray-700 text-gray-400 cursor-not-allowed'
+                                          : 'bg-gray-700 border-gray-600 text-white focus:border-skynet-accent'
+                                      }`}
+                                    />
+                                    {fromCO && (
+                                      <div className="text-[10px] text-purple-300 mt-0.5">from selected COs</div>
+                                    )}
+                                  </>
+                                )
+                              })()}
+                            </div>
+                            <div>
+                              <label className="block text-gray-500 text-xs mb-1">+ Stock</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={selected.additionalForStock}
+                                onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'additionalForStock', e.target.value)}
+                                className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
                               />
                             </div>
-                            {orderType === 'make_to_stock' ? (
-                              <div>
-                                <label className="block text-gray-500 text-xs mb-1">Quantity</label>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={selected.orderQuantity}
-                                  onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
-                                  className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                                />
+                            <div>
+                              <label className="block text-gray-500 text-xs mb-1">= Total</label>
+                              <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
+                                {selected.orderQuantity + selected.additionalForStock}
                               </div>
-                            ) : (
-                              <>
-                                <div>
-                                  <label className="block text-gray-500 text-xs mb-1">Order Qty</label>
-                                  <input
-                                    type="number"
-                                    min="1"
-                                    value={selected.orderQuantity}
-                                    onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'orderQuantity', e.target.value)}
-                                    className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-gray-500 text-xs mb-1">+ Stock</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={selected.additionalForStock}
-                                    onChange={(e) => updateAssemblyQtyField(assemblyIndex, 'additionalForStock', e.target.value)}
-                                    className="w-20 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-gray-500 text-xs mb-1">= Total</label>
-                                  <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
-                                    {selected.orderQuantity + selected.additionalForStock}
-                                  </div>
-                                </div>
-                              </>
-                            )}
+                            </div>
                           </div>
                           <button
                             type="button"
@@ -1053,6 +1146,65 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                             <Trash2 size={18} />
                           </button>
                         </div>
+
+                        {/* Pending Customer Orders for the selected part */}
+                        {coLinesByAssembly[assemblyIndex]?.lines?.length > 0 && (() => {
+                          const totalAllocated = Object.values(coLinesByAssembly[assemblyIndex].allocations).reduce((s, v) => s + (v || 0), 0)
+                          return (
+                            <div className="mt-3 pl-4 border-l-2 border-purple-500/30">
+                              <div className="text-xs text-purple-300 font-semibold uppercase tracking-wide mb-2">
+                                Pending Customer Orders for this Part
+                              </div>
+                              <div className="space-y-1">
+                                {coLinesByAssembly[assemblyIndex].lines.map(line => {
+                                  const allocated = coLinesByAssembly[assemblyIndex].allocations[line.line_id] ?? 0
+                                  const isChecked = allocated > 0
+                                  return (
+                                    <div key={line.line_id} className="flex items-center gap-2 text-sm bg-gray-800/40 rounded px-2 py-1.5">
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked
+                                          setLineAllocation(assemblyIndex, line.line_id, checked ? line.remaining : 0)
+                                        }}
+                                        className="accent-purple-500"
+                                      />
+                                      <span className="font-mono text-purple-300 text-xs">{line.co_number}</span>
+                                      <span className="text-gray-400">·</span>
+                                      <span className="text-gray-300">{line.customer_name}</span>
+                                      <span className="text-gray-500 text-xs">Line {line.line_number}</span>
+                                      {line.due_date && (
+                                        <span className="text-gray-500 text-xs">due {new Date(line.due_date).toLocaleDateString()}</span>
+                                      )}
+                                      <div className="ml-auto flex items-center gap-2">
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          max={line.remaining}
+                                          value={allocated}
+                                          disabled={!isChecked}
+                                          onChange={(e) => {
+                                            const v = Math.max(0, Math.min(line.remaining, parseInt(e.target.value) || 0))
+                                            setLineAllocation(assemblyIndex, line.line_id, v)
+                                          }}
+                                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs disabled:opacity-40"
+                                        />
+                                        <span className="text-gray-500 text-xs">/ {line.remaining}</span>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                              <div className="mt-2 text-xs text-gray-400">
+                                Customer Allocations: {totalAllocated.toLocaleString()}
+                              </div>
+                            </div>
+                          )
+                        })()}
+                        {loadingCoLines[assemblyIndex] && (
+                          <div className="mt-3 pl-4 text-xs text-gray-500">Loading customer orders…</div>
+                        )}
 
                         {/* BOM Components (assemblies) or Finished Good indicator */}
                         {selected.assemblyId && (() => {
@@ -1081,7 +1233,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                     <div className="flex items-center gap-2">
                                       <span className="text-green-400 text-sm">
                                         {selected.orderQuantity + selected.additionalForStock} pcs
-                                        {orderType === 'make_to_order' && selected.additionalForStock > 0 && ` (${selected.orderQuantity} order + ${selected.additionalForStock} stock)`}
+                                        {selected.additionalForStock > 0 && ` (${selected.orderQuantity} order + ${selected.additionalForStock} stock)`}
                                       </span>
                                     </div>
                                   </div>
@@ -1182,7 +1334,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm text-center"
                                         />
                                         <span className="text-gray-500 text-sm">pcs</span>
-                                        {orderType === 'make_to_order' && !job.quantityCustomized && selected.additionalForStock > 0 && (
+                                        {!job.quantityCustomized && selected.additionalForStock > 0 && (
                                           <span className="text-gray-500 text-xs">({selected.orderQuantity} order + {selected.additionalForStock} stock)</span>
                                         )}
                                         <button
@@ -1233,7 +1385,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
               onClick={handleSubmit}
               disabled={
                 loading || 
-                (totalJobs === 0 || (orderType === 'make_to_order' && !customer))
+                totalJobs === 0
               }
               className="px-6 py-2 font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-skynet-accent hover:bg-blue-600 text-white"
             >

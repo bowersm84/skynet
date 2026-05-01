@@ -206,7 +206,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation),
           component:parts!component_id(id, part_number, description)
         `)
         .in('status', ['ready', 'pending_compliance'])
@@ -224,7 +224,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation),
           component:parts!component_id(id, part_number, description)
         `)
         .eq('status', 'incomplete')
@@ -240,7 +240,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation),
           component:parts!component_id(id, part_number, description),
           assigned_machine:machines(id, name, code)
         `)
@@ -342,7 +342,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         estimated_minutes,
         assigned_machine_id,
         work_order:work_orders(
-          id, wo_number, customer, priority, due_date
+          id, wo_number, customer, priority, due_date, has_cancelled_allocation
         ),
         component:parts!component_id(
           id, part_number, description
@@ -2395,6 +2395,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                   const style = getJobBlockStyle(job, date)
                                   if (!style) return null
                                   const isCompleted = job.status === 'complete' || job.status === 'manufacturing_complete'
+                                  const hasCancelledAlloc = !!job.work_order?.has_cancelled_allocation
 
                                   return (
                                     <div
@@ -2414,12 +2415,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                         ${draggedScheduledJob?.id === job.id ? 'opacity-50' : ''}
                                         ${style.isMultiDay ? 'z-10' : 'z-[1]'}
                                         ${highlightedJobId === job.id ? 'ring-2 ring-white animate-pulse !z-20' : ''}
+                                        ${hasCancelledAlloc ? 'ring-2 ring-amber-500' : ''}
                                         ${style.isMultiDay && (draggedJob || (draggedScheduledJob && draggedScheduledJob.id !== job.id)) ? 'pointer-events-none' : ''}`}
                                       style={{
                                         left: style.left,
                                         width: style.width
                                       }}
-                                      title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
+                                      title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}${hasCancelledAlloc ? ' ⚠️ Customer order cancelled — review allocation' : ''}`}
                                     >
                                       <JobBlockContent job={job} sizeTier={getBlockSizeTier(style.durationHours)} />
                                     </div>
@@ -2464,7 +2466,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                             const isCompleted = job.status === 'complete' || job.status === 'manufacturing_complete'
                             const canDrag = !isResizingThis && !isCompleted
                             const canResize = !isCompleted
-                            
+                            const hasCancelledAlloc = !!job.work_order?.has_cancelled_allocation
+
                             return (
                               <div
                                 key={job.id}
@@ -2485,12 +2488,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                   ${style.continuesToNext ? 'rounded-r-none' : ''}
                                   ${draggedScheduledJob?.id === job.id ? 'opacity-50' : ''}
                                   ${isResizingThis ? 'ring-2 ring-white cursor-ew-resize z-30' : ''}
-                                  ${!isResizingThis && highlightedJobId === job.id ? 'ring-2 ring-white animate-pulse z-20' : ''}`}
+                                  ${!isResizingThis && highlightedJobId === job.id ? 'ring-2 ring-white animate-pulse z-20' : ''}
+                                  ${hasCancelledAlloc && !isResizingThis ? 'ring-2 ring-amber-500' : ''}`}
                                 style={{
                                   left: style.left,
                                   width: style.width
                                 }}
-                                title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule, drag edges to resize)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}`}
+                                title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule, drag edges to resize)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}${hasCancelledAlloc ? ' ⚠️ Customer order cancelled — review allocation' : ''}`}
                               >
                                 {/* Left resize handle - only for non-completed jobs */}
                                 {!style.continuesFromPrevious && canResize && (

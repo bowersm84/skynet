@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
@@ -11,6 +11,7 @@ import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import Finishing from './pages/Finishing'
 import Armory from './pages/Armory'
+import CustomerOrders from './pages/CustomerOrders'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
@@ -167,7 +168,8 @@ function MainApp() {
 
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
-  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist'].includes(profile?.role)
+  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service'].includes(profile?.role)
+  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service'].includes(profile?.role)
 
   // Dashboards menu remains admin-only (distinct from Armory)
   const canAccessDashboards = profile?.role === 'admin'
@@ -180,6 +182,7 @@ function MainApp() {
     switch (currentPage) {
       case 'schedule': return 'Command'
       case 'armory': return 'Armory'
+      case 'customer_orders': return 'Customer Orders'
       default: return 'Mainframe'
     }
   }
@@ -262,6 +265,17 @@ function MainApp() {
               </button>
             )}
             
+            {/* Customer Orders button - shown when on Mainframe and user has access */}
+            {currentPage === 'mainframe' && canAccessCustomerOrders && (
+              <button
+                onClick={() => setCurrentPage('customer_orders')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <ShoppingCart size={18} />
+                <span className="text-sm font-medium">Customer Orders</span>
+              </button>
+            )}
+
             {/* Armory button - shown when on Mainframe and user has at least one Armory tab */}
             {currentPage === 'mainframe' && canAccessArmory && (
               <button
@@ -352,6 +366,9 @@ function MainApp() {
         )}
         {currentPage === 'armory' && canAccessArmory && (
           <Armory profile={profile} />
+        )}
+        {currentPage === 'customer_orders' && canAccessCustomerOrders && (
+          <CustomerOrders profile={profile} onNavigate={setCurrentPage} />
         )}
       </main>
 

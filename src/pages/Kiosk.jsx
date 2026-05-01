@@ -33,7 +33,7 @@ import {
   ExternalLink
 } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 
 
 export default function Kiosk() {
@@ -1208,11 +1208,14 @@ export default function Kiosk() {
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
+      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+
       const html = buildTravelerHTML({
         job: fullJob,
         steps: steps || [],
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
+        coAllocations,
       })
       const win = window.open('', '_blank')
       if (!win) {

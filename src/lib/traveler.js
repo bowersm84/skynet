@@ -12,8 +12,35 @@ const _formatDate = (dateStr) => {
   return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// Pulls active CO allocations for a WO for inclusion in the traveler.
+// Call from each surface that builds a traveler; pass the result as
+// `coAllocations` on travelerData.
+export async function fetchCOAllocationsForTraveler(supabase, workOrderId) {
+  if (!workOrderId) return []
+  const { data, error } = await supabase
+    .from('customer_order_allocations')
+    .select(`
+      quantity_allocated,
+      customer_order_line:customer_order_lines (
+        line_number,
+        customer_order:customer_orders (
+          co_number,
+          po_number,
+          customer:customers ( name )
+        )
+      )
+    `)
+    .eq('work_order_id', workOrderId)
+    .eq('is_active', true)
+  if (error) {
+    console.error('Error fetching traveler CO allocations:', error)
+    return []
+  }
+  return data || []
+}
+
 export function buildTravelerHTML(travelerData) {
-  const { job, steps, finishingBatches = [], outboundSends = [] } = travelerData
+  const { job, steps, finishingBatches = [], outboundSends = [], coAllocations } = travelerData
   const wo = job.work_order
   const comp = job.component
 
@@ -167,6 +194,53 @@ export function buildTravelerHTML(travelerData) {
     return [renderRow(null, null)]
   }).join('')
 
+  // Customer Orders Fulfilled by this Job — only renders when the call site
+  // has fetched coAllocations (undefined means "not fetched" → omit the section
+  // entirely so older callers don't lie about CO presence).
+  const coSectionHTML = (() => {
+    if (!Array.isArray(coAllocations)) return ''
+    const cellHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
+    const cellCSS = 'padding:6px 8px; border:1px solid #000;'
+    if (coAllocations.length === 0) {
+      return `
+    <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
+      <thead>
+        <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
+      </thead>
+      <tbody>
+        <tr><td style="${cellCSS} text-align:center; color:#666;" colspan="5">Stock build &mdash; no customer orders.</td></tr>
+      </tbody>
+    </table>`
+    }
+    const rows = coAllocations.map(a => {
+      const line = a.customer_order_line || {}
+      const co = line.customer_order || {}
+      const cust = co.customer || {}
+      return `
+        <tr>
+          <td style="${cellCSS}">${_esc(co.co_number) || '&mdash;'}</td>
+          <td style="${cellCSS}">${_esc(cust.name) || '&mdash;'}</td>
+          <td style="${cellCSS}">${_esc(co.po_number) || '&mdash;'}</td>
+          <td style="${cellCSS} text-align:center;">${line.line_number != null ? line.line_number : '&mdash;'}</td>
+          <td style="${cellCSS} text-align:right;">${(a.quantity_allocated || 0).toLocaleString()}</td>
+        </tr>`
+    }).join('')
+    return `
+    <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
+      <thead>
+        <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
+        <tr>
+          <th style="${cellHeaderCSS}">CO #</th>
+          <th style="${cellHeaderCSS}">Customer</th>
+          <th style="${cellHeaderCSS}">PO #</th>
+          <th style="${cellHeaderCSS}">Line</th>
+          <th style="${cellHeaderCSS}">Qty</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+  })()
+
   const blankRows = Array.from({ length: 3 }).map(() =>
     `<tr>${Array.from({ length: 8 }).map(() => `<td style="${routingCellCSS}">&nbsp;</td>`).join('')}</tr>`
   ).join('')
@@ -209,6 +283,7 @@ export function buildTravelerHTML(travelerData) {
             <td style="${headerLabelCSS}">Quantity</td><td style="${headerValueCSS} font-weight:bold;">${_esc(qtyDisplay)}</td></tr>
       </tbody>
     </table>
+    ${coSectionHTML}
     <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
       <thead>
         <tr><th style="${routingHeaderCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>

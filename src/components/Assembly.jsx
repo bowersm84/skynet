@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { 
+import {
   Package,
   CheckCircle,
   Clock,
@@ -12,7 +12,8 @@ import {
   User,
   MapPin,
   Calendar,
-  PauseCircle
+  PauseCircle,
+  Truck
 } from 'lucide-react'
 
 export default function Assembly({ profile, onUpdate }) {
@@ -29,7 +30,8 @@ export default function Assembly({ profile, onUpdate }) {
   const [startForm, setStartForm] = useState({
     station: '1',
     assembler: '1',
-    notes: ''
+    notes: '',
+    assembly_lot_number: ''
   })
   
   // Pause Assembly Modal
@@ -51,7 +53,109 @@ export default function Assembly({ profile, onUpdate }) {
     bad_quantity: 0,
     notes: ''
   })
+
+  // Send Batch to Outsource Modal
+  const [showSendBatchModal, setShowSendBatchModal] = useState(false)
+  const [sendBatchItem, setSendBatchItem] = useState(null)
+  const [sendBatchExternalStep, setSendBatchExternalStep] = useState(null)
+  const [sendBatchForm, setSendBatchForm] = useState({ quantity: 0 })
+  const [sendBatchAlreadySent, setSendBatchAlreadySent] = useState(0)
   
+  // Effective qty precedence — copied from Mainframe.jsx so all surfaces agree.
+  // 0. Manual admin override → wins over everything.
+  // 1. Outsourcing returns → most recent returned send wins.
+  // 2. Compliance-approved batches → sum of good_qty (or derived from verified - bad).
+  // 3. Machinist's good_pieces.
+  // 4. Original job.quantity.
+  const getEffectiveQty = (job) => {
+    if (job.qty_override != null) {
+      return { qty: job.qty_override, verified: true, overridden: true }
+    }
+    // 1. Outsourcing returns — group by routing step, pick the latest step, sum its returns.
+    //    Single step + multi-batch case → sum all batches.
+    //    Sequential ops case → only the latest op's batches matter (prior op's output
+    //    was the input to the next op).
+    if (job.outbound_sends?.length) {
+      const completedReturns = job.outbound_sends.filter(s =>
+        s.returned_at && s.quantity_returned != null
+      )
+      if (completedReturns.length > 0) {
+        const byStep = {}
+        for (const s of completedReturns) {
+          const stepId = s.routing_step_id || s.job_routing_step_id || '_unknown_'
+          if (!byStep[stepId]) byStep[stepId] = []
+          byStep[stepId].push(s)
+        }
+        const groups = Object.keys(byStep).map(id => {
+          const sends = byStep[id]
+          const latestMs = Math.max(...sends.map(s => new Date(s.returned_at).getTime()))
+          return { stepId: id, sends, latestMs }
+        })
+        groups.sort((a, b) => b.latestMs - a.latestMs)
+        const latestStepSends = groups[0].sends
+        const sum = latestStepSends.reduce((acc, s) => acc + (s.quantity_returned || 0), 0)
+        return { qty: sum, verified: true, overridden: false }
+      }
+    }
+    if (job.finishing_sends?.length) {
+      const approvedBatches = job.finishing_sends.filter(s => s.compliance_status === 'approved')
+      if (approvedBatches.length > 0) {
+        const sum = approvedBatches.reduce((acc, s) => {
+          if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
+          if (s.compliance_bad_qty != null) {
+            const base = s.verified_count ?? s.quantity
+            return acc + Math.max(0, base - s.compliance_bad_qty)
+          }
+          if (s.verified_count != null) return acc + s.verified_count
+          return acc + s.quantity
+        }, 0)
+        return { qty: sum, verified: true, overridden: false }
+      }
+    }
+    if (job.good_pieces != null && job.good_pieces > 0) {
+      return { qty: job.good_pieces, verified: true, overridden: false }
+    }
+    return { qty: job.quantity, verified: false, overridden: false }
+  }
+
+  // Compute the assembly-level supply qty from linked component jobs.
+  // Each component job's effective qty is normalized to "possible assemblies"
+  // using the BOM ratio implied by (job.quantity / woa.quantity), then we take
+  // the floor of the min across all components (limited by the scarcest part).
+  const computeSupplyQty = (woa, woaJobs) => {
+    const targetQty = woa?.quantity ?? 0
+    const jobs = (woaJobs || []).filter(j => !j.is_maintenance && j.quantity)
+    if (!jobs.length || !targetQty) return targetQty
+
+    let minPossibleAssemblies = Infinity
+    for (const job of jobs) {
+      const eq = getEffectiveQty(job)
+      const possible = Math.floor((eq.qty * targetQty) / job.quantity)
+      if (possible < minPossibleAssemblies) minPossibleAssemblies = possible
+    }
+    return minPossibleAssemblies === Infinity ? targetQty : minPossibleAssemblies
+  }
+
+  // Find the next pending external step on a WOA's route, or null.
+  const findNextExternalStep = (item) => {
+    const steps = (item.routingSteps || [])
+      .slice()
+      .sort((a, b) => a.step_order - b.step_order)
+    return steps.find(s => s.step_type === 'external' && s.status === 'pending') || null
+  }
+
+  // Map an external assembly routing step name to outbound_sends.operation_type.
+  // CHECK constraint allows: heat_treat, cad_plating, black_oxide, painting, priming, other
+  const deriveAssemblyOpType = (stepName) => {
+    const s = (stepName || '').toLowerCase()
+    if (s.includes('paint'))  return 'painting'
+    if (s.includes('prim'))   return 'priming'
+    if (s.includes('heat'))   return 'heat_treat'
+    if (s.includes('plat'))   return 'cad_plating'
+    if (s.includes('oxide'))  return 'black_oxide'
+    return 'other'
+  }
+
   // Load all assembly data
   const loadAssemblies = useCallback(async () => {
     try {
@@ -77,17 +181,32 @@ export default function Assembly({ profile, onUpdate }) {
             good_quantity,
             bad_quantity,
             assembly_id,
+            assembly_lot_number,
             assembly:parts!work_order_assemblies_assembly_id_fkey (
               id,
               part_number,
               description,
               part_type
+            ),
+            work_order_assembly_routing_steps (
+              id, step_order, step_name, step_type, status
             )
           ),
           jobs (
             id,
             status,
-            work_order_assembly_id
+            work_order_assembly_id,
+            quantity,
+            qty_override,
+            good_pieces,
+            is_maintenance,
+            finishing_sends (
+              id, quantity, verified_count,
+              compliance_status, compliance_good_qty, compliance_bad_qty
+            ),
+            outbound_sends (
+              id, quantity, quantity_returned, returned_at
+            )
           )
         `)
         .not('order_type', 'eq', 'maintenance')
@@ -145,8 +264,12 @@ export default function Assembly({ profile, onUpdate }) {
               customer: wo.customer,
               priority: wo.priority,
               due_date: wo.due_date,
-              work_order_id: wo.id
+              work_order_id: wo.id,
               // woa.assembly already contains { id, part_number, description } from nested query
+              targetQty: woa.quantity,
+              supplyQty: computeSupplyQty(woa, woaJobs),
+              routingSteps: woa.work_order_assembly_routing_steps || [],
+              woaJobs
             }
 
             if (woa.status === 'in_progress' || woa.status === 'paused') {
@@ -188,7 +311,9 @@ export default function Assembly({ profile, onUpdate }) {
             status: null,
             assembly: null, // No assembly info available
             isVirtual: true, // Flag to indicate this needs fixing
-            missingAssembly: true // Flag to show warning
+            missingAssembly: true, // Flag to show warning
+            targetQty: wo.jobs?.length || 1,
+            supplyQty: wo.jobs?.length || 1
           })
         }
       }
@@ -236,6 +361,8 @@ export default function Assembly({ profile, onUpdate }) {
     try {
       console.log('Starting assembly for:', startItem.id, 'isVirtual:', startItem.isVirtual)
 
+      const alnTrim = startForm.assembly_lot_number?.trim() || null
+
       // If this is a virtual entry (no work_order_assemblies record exists), create one first
       if (startItem.isVirtual) {
         const { data: newAssembly, error: createError } = await supabase
@@ -248,7 +375,10 @@ export default function Assembly({ profile, onUpdate }) {
             assembler_number: parseInt(startForm.assembler),
             assembly_started_at: new Date().toISOString(),
             assembly_started_by: profile?.id || null,
-            assembly_notes: startForm.notes || null
+            assembly_notes: startForm.notes || null,
+            assembly_lot_number: alnTrim,
+            assembly_lot_entered_by: alnTrim ? (profile?.id || null) : null,
+            assembly_lot_entered_at: alnTrim ? new Date().toISOString() : null
           })
           .select()
           .single()
@@ -258,7 +388,7 @@ export default function Assembly({ profile, onUpdate }) {
       } else {
         // Update existing record - use .select() to verify the update worked
         console.log('Updating work_order_assemblies id:', startItem.id)
-        
+
         const { data: updatedData, error } = await supabase
           .from('work_order_assemblies')
           .update({
@@ -267,7 +397,10 @@ export default function Assembly({ profile, onUpdate }) {
             assembler_number: parseInt(startForm.assembler),
             assembly_started_at: new Date().toISOString(),
             assembly_started_by: profile?.id || null,
-            assembly_notes: startForm.notes || null
+            assembly_notes: startForm.notes || null,
+            assembly_lot_number: alnTrim,
+            assembly_lot_entered_by: alnTrim ? (profile?.id || null) : null,
+            assembly_lot_entered_at: alnTrim ? new Date().toISOString() : null
           })
           .eq('id', startItem.id)
           .select()
@@ -276,13 +409,26 @@ export default function Assembly({ profile, onUpdate }) {
           console.error('Update error:', error)
           throw error
         }
-        
+
         if (!updatedData || updatedData.length === 0) {
           console.error('Update returned no data - ID may not exist or RLS blocking')
           throw new Error('Failed to update assembly record. Please check permissions.')
         }
-        
+
         console.log('Successfully updated work_order_assemblies:', updatedData)
+      }
+
+      // Mark the Assemble step (step_order=1) as in_progress on the WOA route
+      if (!startItem.isVirtual) {
+        await supabase
+          .from('work_order_assembly_routing_steps')
+          .update({
+            status: 'in_progress',
+            started_at: new Date().toISOString()
+          })
+          .eq('work_order_assembly_id', startItem.id)
+          .eq('step_order', 1)
+          .eq('status', 'pending')
       }
 
       // Update all jobs on this work order to 'in_assembly' status
@@ -304,7 +450,7 @@ export default function Assembly({ profile, onUpdate }) {
 
       setShowStartModal(false)
       setStartItem(null)
-      setStartForm({ station: '1', assembler: '1', notes: '' })
+      setStartForm({ station: '1', assembler: '1', notes: '', assembly_lot_number: '' })
       await loadAssemblies()
       if (onUpdate) onUpdate()
     } catch (err) {
@@ -321,44 +467,142 @@ export default function Assembly({ profile, onUpdate }) {
     setActionLoading('complete')
 
     try {
-      // Combine date and time from form
       const completedAt = new Date(`${completeForm.end_date}T${completeForm.end_time}:00`).toISOString()
 
-      // Append completion notes to existing notes
       let finalNotes = completeItem.assembly_notes || ''
       if (completeForm.notes) {
         if (finalNotes) finalNotes += '\n---\n'
         finalNotes += `Completion: ${completeForm.notes}`
       }
 
-      const { error } = await supabase
-        .from('work_order_assemblies')
+      const goodQty = parseInt(completeForm.good_quantity) || 0
+      const badQty = parseInt(completeForm.bad_quantity) || 0
+
+      // 1. Mark the Assemble routing step (step_order=1) complete
+      const { error: stepErr } = await supabase
+        .from('work_order_assembly_routing_steps')
         .update({
           status: 'complete',
+          completed_at: completedAt,
+          completed_by: profile?.id || null,
+          quantity: goodQty,
+          lot_number: completeItem.assembly_lot_number || null
+        })
+        .eq('work_order_assembly_id', completeItem.id)
+        .eq('step_order', 1)
+      if (stepErr) console.error('Error marking Assemble step complete:', stepErr)
+
+      // 2. Determine if any pending external step remains
+      const { data: routingSteps, error: routingErr } = await supabase
+        .from('work_order_assembly_routing_steps')
+        .select('id, step_order, step_name, step_type, status')
+        .eq('work_order_assembly_id', completeItem.id)
+        .order('step_order')
+      if (routingErr) throw routingErr
+
+      const nextExternal = (routingSteps || [])
+        .find(s => s.step_type === 'external' && s.status === 'pending')
+
+      // 3. If external step exists, auto-create outbound_sends for any unsent qty
+      if (nextExternal) {
+        const { data: existingSends } = await supabase
+          .from('outbound_sends')
+          .select('quantity')
+          .eq('source_type', 'work_order_assembly')
+          .eq('source_id', completeItem.id)
+          .eq('routing_step_id', nextExternal.id)
+
+        const sentSoFar = (existingSends || []).reduce((sum, s) => sum + (s.quantity || 0), 0)
+        const remaining = goodQty - sentSoFar
+
+        if (remaining > 0) {
+          const opType = deriveAssemblyOpType(nextExternal.step_name)
+          const { error: outErr } = await supabase
+            .from('outbound_sends')
+            .insert({
+              source_type: 'work_order_assembly',
+              source_id: completeItem.id,
+              routing_step_id: nextExternal.id,
+              operation_type: opType,
+              quantity: remaining,
+              sent_by: profile?.id || null
+            })
+          if (outErr) console.error('Error auto-creating outbound_send:', outErr)
+        }
+      }
+
+      // 3b. After potentially adding a final remainder send, re-evaluate external steps:
+      //     any step whose sends have ALL returned is now eligible to be marked complete.
+      //     This handles the case where Jody's partial sends already came back before
+      //     she completed assembly — those external steps were held open by Hotfix 4
+      //     and should now close.
+      const { data: externalSteps } = await supabase
+        .from('work_order_assembly_routing_steps')
+        .select('id, step_order')
+        .eq('work_order_assembly_id', completeItem.id)
+        .eq('step_type', 'external')
+
+      for (const xStep of (externalSteps || [])) {
+        const { data: stepSends } = await supabase
+          .from('outbound_sends')
+          .select('id, returned_at, quantity_returned, vendor_lot_number')
+          .eq('source_type', 'work_order_assembly')
+          .eq('source_id', completeItem.id)
+          .eq('routing_step_id', xStep.id)
+
+        const allReturned = stepSends && stepSends.length > 0
+          && stepSends.every(s => s.returned_at != null)
+
+        if (allReturned) {
+          const totalReturned = stepSends.reduce((sum, s) => sum + (s.quantity_returned || 0), 0)
+          const lastVendorLot = [...stepSends]
+            .sort((a, b) => new Date(b.returned_at) - new Date(a.returned_at))[0]
+            ?.vendor_lot_number
+          await supabase
+            .from('work_order_assembly_routing_steps')
+            .update({
+              status: 'complete',
+              completed_at: completedAt,
+              completed_by: profile?.id || null,
+              quantity: totalReturned,
+              lot_number: lastVendorLot || null
+            })
+            .eq('id', xStep.id)
+        }
+      }
+
+      // 4. Re-evaluate WOA status: pending_tco only when ALL routing steps are complete
+      const { data: finalSteps } = await supabase
+        .from('work_order_assembly_routing_steps')
+        .select('status')
+        .eq('work_order_assembly_id', completeItem.id)
+
+      const stillPending = (finalSteps || []).some(
+        s => !['complete', 'skipped', 'removed'].includes(s.status)
+      )
+      const newWoaStatus = stillPending ? 'ready_for_outsource' : 'pending_tco'
+      const { error: woaErr } = await supabase
+        .from('work_order_assemblies')
+        .update({
+          status: newWoaStatus,
           assembly_completed_at: completedAt,
-          assembly_completed_by: profile?.id || null, // Track who completed
-          good_quantity: completeForm.good_quantity,
-          bad_quantity: completeForm.bad_quantity,
+          assembly_completed_by: profile?.id || null,
+          good_quantity: goodQty,
+          bad_quantity: badQty,
           assembly_notes: finalNotes || null
         })
         .eq('id', completeItem.id)
+      if (woaErr) throw woaErr
 
-      if (error) throw error
-
-      // Update all jobs on this work order to 'pending_tco' (awaiting TCO close-out)
-      const { error: jobsError } = await supabase
-        .from('jobs')
-        .update({ 
-          status: 'pending_tco',
-          updated_at: new Date().toISOString()
-        })
-        .eq('work_order_id', completeItem.work_order_id)
-        .in('status', ['ready_for_assembly', 'in_assembly'])
-
-      if (jobsError) console.error('Error updating jobs:', jobsError)
-
-      // Work order stays open until TCO is approved
-      // (Do NOT set WO to complete here — that happens in TCO)
+      // 5. Job status flip — only when all routing steps complete (no external work outstanding)
+      if (!stillPending) {
+        const { error: jobsError } = await supabase
+          .from('jobs')
+          .update({ status: 'pending_tco', updated_at: new Date().toISOString() })
+          .eq('work_order_id', completeItem.work_order_id)
+          .in('status', ['ready_for_assembly', 'in_assembly'])
+        if (jobsError) console.error('Error updating jobs:', jobsError)
+      }
 
       setShowCompleteModal(false)
       setCompleteItem(null)
@@ -368,6 +612,76 @@ export default function Assembly({ profile, onUpdate }) {
     } catch (err) {
       console.error('Error completing assembly:', err)
       alert('Failed to complete assembly: ' + err.message)
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  // Send a batch of assembled units to an external vendor (creates a queued outbound_sends row)
+  const openSendBatchModal = async (item) => {
+    const externalStep = findNextExternalStep(item)
+    if (!externalStep) {
+      alert('No external step pending for this assembly.')
+      return
+    }
+
+    const { data: existingSends } = await supabase
+      .from('outbound_sends')
+      .select('quantity')
+      .eq('source_type', 'work_order_assembly')
+      .eq('source_id', item.id)
+      .eq('routing_step_id', externalStep.id)
+
+    const sentSoFar = (existingSends || []).reduce((sum, s) => sum + (s.quantity || 0), 0)
+    const supply = item.supplyQty ?? item.quantity ?? 0
+    const remaining = Math.max(0, supply - sentSoFar)
+
+    setSendBatchItem(item)
+    setSendBatchExternalStep(externalStep)
+    setSendBatchAlreadySent(sentSoFar)
+    setSendBatchForm({ quantity: remaining })
+    setShowSendBatchModal(true)
+  }
+
+  const handleSendBatch = async () => {
+    if (!sendBatchItem || !sendBatchExternalStep) return
+    const qty = parseInt(sendBatchForm.quantity)
+    if (!qty || qty <= 0) {
+      alert('Quantity must be greater than zero.')
+      return
+    }
+    const supply = sendBatchItem.supplyQty ?? sendBatchItem.quantity ?? 0
+    if (sendBatchAlreadySent + qty > supply) {
+      if (!confirm(`Total sent (${sendBatchAlreadySent + qty}) will exceed available supply (${supply}). Continue?`)) {
+        return
+      }
+    }
+
+    setActionLoading('send_batch')
+    try {
+      const opType = deriveAssemblyOpType(sendBatchExternalStep.step_name)
+      const { error } = await supabase
+        .from('outbound_sends')
+        .insert({
+          source_type: 'work_order_assembly',
+          source_id: sendBatchItem.id,
+          routing_step_id: sendBatchExternalStep.id,
+          operation_type: opType,
+          quantity: qty,
+          sent_by: profile?.id || null
+        })
+      if (error) throw error
+
+      setShowSendBatchModal(false)
+      setSendBatchItem(null)
+      setSendBatchExternalStep(null)
+      setSendBatchForm({ quantity: 0 })
+      setSendBatchAlreadySent(0)
+      await loadAssemblies()
+      if (onUpdate) onUpdate()
+    } catch (err) {
+      console.error('Error sending batch to outsource:', err)
+      alert('Failed to send batch: ' + err.message)
     } finally {
       setActionLoading(null)
     }
@@ -466,7 +780,7 @@ export default function Assembly({ profile, onUpdate }) {
   // Open Start Modal
   const openStartModal = (item) => {
     setStartItem(item)
-    setStartForm({ station: '1', assembler: '1', notes: '' })
+    setStartForm({ station: '1', assembler: '1', notes: '', assembly_lot_number: '' })
     setShowStartModal(true)
   }
 
@@ -491,8 +805,8 @@ export default function Assembly({ profile, onUpdate }) {
     setCompleteForm({ 
       end_date: dateStr,
       end_time: timeStr,
-      good_quantity: item.quantity, 
-      bad_quantity: 0, 
+      good_quantity: item.supplyQty ?? item.quantity,
+      bad_quantity: 0,
       notes: '' 
     })
     setShowCompleteModal(true)
@@ -619,7 +933,12 @@ export default function Assembly({ profile, onUpdate }) {
                           PAUSED
                         </div>
                       )}
-                      <div>Qty: <span className="text-white">{item.quantity}</span></div>
+                      <div>
+                        Qty: <span className="text-white">{item.supplyQty ?? item.quantity}</span>
+                        {item.supplyQty != null && item.supplyQty !== item.targetQty && (
+                          <span className="text-gray-500 text-xs ml-1">/ {item.targetQty} target</span>
+                        )}
+                      </div>
                       {item.good_quantity > 0 && (
                         <div className="text-green-400">Done: {item.good_quantity}</div>
                       )}
@@ -665,6 +984,21 @@ export default function Assembly({ profile, onUpdate }) {
                         >
                           <PauseCircle size={14} />
                           Pause
+                        </button>
+                      )}
+                      {findNextExternalStep(item) && item.status !== 'paused' && (
+                        <button
+                          onClick={() => openSendBatchModal(item)}
+                          disabled={actionLoading === 'send_batch'}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded transition-colors"
+                          title={`Send batch to ${findNextExternalStep(item).step_name}`}
+                        >
+                          {actionLoading === 'send_batch' ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Truck size={14} />
+                          )}
+                          Send Batch
                         </button>
                       )}
                       <button
@@ -725,7 +1059,12 @@ export default function Assembly({ profile, onUpdate }) {
                             <Calendar size={10} />
                             Due: {formatDate(item.due_date)}
                           </span>
-                          <span>Qty: {item.quantity}</span>
+                          <span>
+                            Qty: {item.supplyQty ?? item.quantity}
+                            {item.supplyQty != null && item.supplyQty !== item.targetQty && (
+                              <span className="text-gray-500"> / {item.targetQty} target</span>
+                            )}
+                          </span>
                           {item.good_quantity > 0 && (
                             <span className="text-green-400">Done: {item.good_quantity}</span>
                           )}
@@ -814,7 +1153,12 @@ export default function Assembly({ profile, onUpdate }) {
                   <span className="text-skynet-accent font-mono">{startItem.assembly?.part_number}</span>
                 </div>
                 <p className="text-gray-400 text-sm">{startItem.assembly?.description}</p>
-                <p className="text-gray-500 text-xs mt-2">Quantity: {startItem.quantity}</p>
+                <p className="text-gray-500 text-xs mt-2">
+                  Available to assemble: {startItem.supplyQty ?? startItem.quantity}
+                  {startItem.supplyQty != null && startItem.supplyQty !== startItem.targetQty && (
+                    <span className="text-gray-600"> ({startItem.targetQty} target)</span>
+                  )}
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -842,6 +1186,22 @@ export default function Assembly({ profile, onUpdate }) {
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-gray-300 text-sm font-medium mb-1">
+                  Assembly Lot Number (ALN)
+                </label>
+                <input
+                  type="text"
+                  value={startForm.assembly_lot_number}
+                  onChange={(e) => setStartForm({ ...startForm, assembly_lot_number: e.target.value })}
+                  placeholder="Enter ALN from logbook"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-500 focus:outline-none focus:border-skynet-accent"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Manual entry from the assembly logbook. Leave blank if not yet assigned.
+                </p>
               </div>
 
               <div>
@@ -960,11 +1320,19 @@ export default function Assembly({ profile, onUpdate }) {
                 </div>
               </div>
 
-              {(completeForm.good_quantity + completeForm.bad_quantity) !== completeItem.quantity && (
-                <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 text-yellow-400 text-sm">
-                  Total ({completeForm.good_quantity + completeForm.bad_quantity}) doesn't match expected quantity ({completeItem.quantity})
-                </div>
-              )}
+              {(() => {
+                const expected = completeItem.supplyQty ?? completeItem.quantity
+                const total = (completeForm.good_quantity || 0) + (completeForm.bad_quantity || 0)
+                if (total === expected) return null
+                return (
+                  <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 text-yellow-400 text-sm">
+                    Total ({total}) doesn't match expected supply quantity ({expected})
+                    {completeItem.supplyQty != null && completeItem.supplyQty !== completeItem.targetQty && (
+                      <span className="text-gray-500"> · WOA target was {completeItem.targetQty}</span>
+                    )}
+                  </div>
+                )
+              })()}
 
               <div>
                 <label className="block text-gray-400 text-sm mb-2">Completion Notes (Optional)</label>
@@ -1045,12 +1413,12 @@ export default function Assembly({ profile, onUpdate }) {
                   <input
                     type="number"
                     min="0"
-                    max={pauseItem.quantity}
+                    max={pauseItem.supplyQty ?? pauseItem.quantity}
                     value={pauseForm.completedQuantity}
                     onChange={(e) => setPauseForm({ ...pauseForm, completedQuantity: parseInt(e.target.value) || 0 })}
                     className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-center focus:border-skynet-accent focus:outline-none"
                   />
-                  <span className="text-gray-400">of {pauseItem.quantity} total</span>
+                  <span className="text-gray-400">of {pauseItem.supplyQty ?? pauseItem.quantity} total</span>
                 </div>
                 {pauseForm.returnToQueue && (
                   <p className="text-yellow-400/80 text-xs mt-2">
@@ -1099,7 +1467,85 @@ export default function Assembly({ profile, onUpdate }) {
           </div>
         </div>
       )}
-	  
+
+      {/* Send Batch to Outsource Modal */}
+      {showSendBatchModal && sendBatchItem && sendBatchExternalStep && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowSendBatchModal(false)}
+        >
+          <div
+            className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                <Truck size={18} className="text-purple-400" />
+                Send Batch to Outsource
+              </h2>
+              <button onClick={() => setShowSendBatchModal(false)} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-gray-800/50 rounded p-3">
+                <p className="text-gray-400 text-xs">Sending for:</p>
+                <p className="text-white font-medium">{sendBatchExternalStep.step_name}</p>
+                <p className="text-gray-500 text-xs mt-2">
+                  {sendBatchItem.assembly?.part_number} &middot; {sendBatchItem.wo_number}
+                </p>
+                {sendBatchItem.assembly_lot_number && (
+                  <p className="text-cyan-400 font-mono text-xs mt-1">ALN: {sendBatchItem.assembly_lot_number}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">Quantity *</label>
+                <input
+                  type="number"
+                  value={sendBatchForm.quantity}
+                  onChange={(e) => setSendBatchForm({ quantity: e.target.value })}
+                  min="1"
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-lg focus:border-purple-500 focus:outline-none"
+                />
+                <p className="text-gray-500 text-xs mt-1">
+                  Supply: {sendBatchItem.supplyQty ?? sendBatchItem.quantity} pcs
+                  {sendBatchAlreadySent > 0 && (
+                    <span> · Already sent: {sendBatchAlreadySent} pcs · Remaining: {(sendBatchItem.supplyQty ?? sendBatchItem.quantity) - sendBatchAlreadySent} pcs</span>
+                  )}
+                </p>
+              </div>
+
+              <p className="text-xs text-gray-500 italic">
+                This batch will appear in OutsourcedJobs &ldquo;Ready to Send&rdquo; for Ashley to log vendor &amp; ship date.
+              </p>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+              <button
+                onClick={() => setShowSendBatchModal(false)}
+                className="flex-1 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendBatch}
+                disabled={actionLoading === 'send_batch'}
+                className="flex-1 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white font-medium rounded transition-colors flex items-center justify-center gap-2"
+              >
+                {actionLoading === 'send_batch' ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <Truck size={18} />
+                )}
+                Send Batch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

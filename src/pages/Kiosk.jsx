@@ -3268,6 +3268,77 @@ export default function Kiosk() {
     return `${year}-${month}-${day}T${hours}:${minutes}`
   }
 
+  // Computes display-ready summary for a single finishing_sends row.
+  const getFinishingSendSummary = (send) => {
+    const sent = send.quantity ?? 0
+    const received = send.incoming_count
+    const verified = send.verified_count
+    const accepted = send.compliance_good_qty
+    const rejected = send.compliance_bad_qty
+    const discrepancy = send.count_discrepancy
+
+    const hasDiscrepancy =
+      (discrepancy != null && discrepancy !== 0) ||
+      (rejected != null && rejected > 0) ||
+      send.compliance_outcome === 'rejected' ||
+      send.compliance_outcome === 'rework'
+
+    let stage = 'sent'
+    if (received != null) stage = 'received'
+    if (send.finishing_completed_at) stage = 'finishing_complete'
+    if (verified != null) stage = 'verified'
+    if (send.compliance_outcome) stage = 'compliance_reviewed'
+
+    return {
+      sent,
+      received,
+      verified,
+      accepted,
+      rejected,
+      discrepancy,
+      hasDiscrepancy,
+      complianceOutcome: send.compliance_outcome || null,
+      stage
+    }
+  }
+
+  // Aggregates summaries across all sends for a job.
+  const getFinishingSendsRollup = (sends) => {
+    const sums = (sends || []).reduce(
+      (acc, send) => {
+        const s = getFinishingSendSummary(send)
+        acc.totalSent += s.sent
+        if (s.received != null) {
+          acc.totalReceived += s.received
+          acc.anyReceived = true
+        }
+        if (s.verified != null) {
+          acc.totalVerified += s.verified
+          acc.anyVerified = true
+        }
+        if (s.accepted != null) {
+          acc.totalAccepted += s.accepted
+          acc.anyAccepted = true
+        }
+        if (s.hasDiscrepancy) acc.anyDiscrepancy = true
+        if (s.complianceOutcome === 'rejected') acc.anyRejected = true
+        return acc
+      },
+      {
+        totalSent: 0,
+        totalReceived: 0,
+        totalVerified: 0,
+        totalAccepted: 0,
+        anyReceived: false,
+        anyVerified: false,
+        anyAccepted: false,
+        anyDiscrepancy: false,
+        anyRejected: false
+      }
+    )
+    return sums
+  }
+
   const NowButton = ({ onSet }) => (
     <button
       type="button"
@@ -3952,19 +4023,49 @@ export default function Kiosk() {
                           <span className="text-green-400 font-mono text-sm">{activeJob.production_lot_number}</span>
                         </div>
                       )}
-                      {finishingSends.length > 0 && (
-                        <div className="flex items-center gap-2 mt-1 text-sm">
-                          <SendHorizontal size={14} className="text-cyan-400" />
-                          <span className="text-cyan-400">
-                            {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs sent to finishing
-                          </span>
-                          {finishingSends.length > 1 && (
-                            <span className="text-gray-500">
-                              ({finishingSends.map((s, i) => `Batch ${String.fromCharCode(65 + i)}`).join(', ')})
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      {finishingSends.length > 0 && (() => {
+                        const rollup = getFinishingSendsRollup(finishingSends)
+                        return (
+                          <div className="flex items-center gap-2 mt-1 text-sm flex-wrap">
+                            <SendHorizontal size={14} className="text-cyan-400 flex-shrink-0" />
+                            <span className="text-cyan-400">{rollup.totalSent} sent</span>
+                            {rollup.anyReceived && (
+                              <>
+                                <span className="text-gray-600">·</span>
+                                <span className="text-blue-400">{rollup.totalReceived} received</span>
+                              </>
+                            )}
+                            {rollup.anyVerified && (
+                              <>
+                                <span className="text-gray-600">·</span>
+                                <span className="text-emerald-400">{rollup.totalVerified} verified</span>
+                              </>
+                            )}
+                            {rollup.anyAccepted && (
+                              <>
+                                <span className="text-gray-600">·</span>
+                                <span className="text-emerald-300">{rollup.totalAccepted} accepted</span>
+                              </>
+                            )}
+                            {rollup.anyDiscrepancy && (
+                              <span className="ml-1 px-2 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded flex items-center gap-1">
+                                <AlertCircle size={12} />
+                                Count mismatch
+                              </span>
+                            )}
+                            {rollup.anyRejected && (
+                              <span className="ml-1 px-2 py-0.5 text-xs bg-red-900/30 text-red-300 border border-red-800 rounded">
+                                Batch rejected
+                              </span>
+                            )}
+                            {finishingSends.length > 1 && (
+                              <span className="text-gray-500 text-xs">
+                                ({finishingSends.length} batches)
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })()}
                     </div>
                     <div className="text-right">
                       <p className="text-sm text-gray-500">Due</p>
@@ -5283,21 +5384,87 @@ export default function Kiosk() {
             </div>
 
             <div className="p-6 space-y-4">
-              {finishingSends.length > 0 && (
-                <div className="bg-gray-800/50 rounded-lg p-3">
-                  <p className="text-gray-400 text-xs mb-2">Previous sends:</p>
-                  {finishingSends.map((send, idx) => (
-                    <div key={send.id} className="flex justify-between text-sm text-gray-300">
-                      <span>{finishingSends.length > 1 && <span className="text-cyan-400 font-mono mr-1">Batch {String.fromCharCode(65 + idx)}</span>}{finishingSends.length > 1 ? '— ' : ''}{send.quantity} pcs</span>
-                      <span className="text-gray-500">{new Date(send.sent_at).toLocaleString()}</span>
+              {finishingSends.length > 0 && (() => {
+                const rollup = getFinishingSendsRollup(finishingSends)
+                return (
+                  <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
+                    <p className="text-gray-400 text-xs">Previous sends:</p>
+                    {finishingSends.map((send, idx) => {
+                      const s = getFinishingSendSummary(send)
+                      return (
+                        <div key={send.id} className="flex flex-col gap-1 text-sm border-b border-gray-700 pb-2 last:border-0 last:pb-0">
+                          <div className="flex justify-between text-gray-300">
+                            <span>
+                              {finishingSends.length > 1 && (
+                                <span className="text-cyan-400 font-mono mr-1">
+                                  Batch {String.fromCharCode(65 + idx)}
+                                </span>
+                              )}
+                              {finishingSends.length > 1 ? '— ' : ''}
+                              <span className="text-cyan-400">{s.sent} sent</span>
+                            </span>
+                            <span className="text-gray-500 text-xs">
+                              {new Date(send.sent_at).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap text-xs pl-2">
+                            {s.received != null ? (
+                              <span className="text-blue-400">{s.received} received</span>
+                            ) : (
+                              <span className="text-gray-600 italic">Pending receipt</span>
+                            )}
+                            {s.verified != null && (
+                              <>
+                                <span className="text-gray-700">·</span>
+                                <span className="text-emerald-400">{s.verified} verified</span>
+                              </>
+                            )}
+                            {s.accepted != null && (
+                              <>
+                                <span className="text-gray-700">·</span>
+                                <span className="text-emerald-300">{s.accepted} accepted</span>
+                                {s.rejected > 0 && (
+                                  <span className="text-red-400 text-xs ml-1">
+                                    ({s.rejected} rejected)
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            {s.hasDiscrepancy && (
+                              <span className="ml-auto px-1.5 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded flex items-center gap-1">
+                                <AlertCircle size={10} />
+                                Mismatch
+                              </span>
+                            )}
+                            {s.complianceOutcome === 'rejected' && (
+                              <span className="ml-auto px-1.5 py-0.5 text-xs bg-red-900/30 text-red-300 border border-red-800 rounded">
+                                Rejected
+                              </span>
+                            )}
+                            {s.complianceOutcome === 'rework' && (
+                              <span className="ml-auto px-1.5 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded">
+                                Rework
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    <div className="border-t border-gray-700 pt-2 space-y-1 text-sm">
+                      <div className="flex justify-between font-medium">
+                        <span className="text-gray-300">Total sent so far:</span>
+                        <span className="text-cyan-400">{rollup.totalSent} pcs</span>
+                      </div>
+                      {rollup.anyAccepted && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Total accepted by compliance:</span>
+                          <span className="text-emerald-300">{rollup.totalAccepted} pcs</span>
+                        </div>
+                      )}
                     </div>
-                  ))}
-                  <div className="border-t border-gray-700 mt-2 pt-2 flex justify-between text-sm font-medium">
-                    <span className="text-gray-300">Total sent so far:</span>
-                    <span className="text-cyan-400">{finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs</span>
                   </div>
-                </div>
-              )}
+                )
+              })()}
 
               <div>
                 <label className="block text-gray-400 text-sm mb-2">Quantity to Send *</label>
@@ -5690,27 +5857,96 @@ export default function Kiosk() {
                     <p className="text-3xl font-bold text-white">{activeJob.quantity}</p>
                   </div>
 
-                  {finishingSends.length > 0 && (
-                    <div className="bg-cyan-900/20 border border-cyan-800 rounded-lg p-3 space-y-1">
-                      <div className="flex items-center gap-2 text-cyan-400 text-sm font-medium">
-                        <SendHorizontal size={14} />
-                        Sent to Finishing During Production
-                      </div>
-                      {finishingSends.map((send, idx) => (
-                        <div key={send.id} className="flex justify-between text-sm text-gray-300 pl-5">
-                          <span>{finishingSends.length > 1 && <span className="text-cyan-400 font-mono mr-1">Batch {String.fromCharCode(65 + idx)}</span>}{finishingSends.length > 1 ? '— ' : ''}{send.quantity} pcs</span>
-                          <span className="text-gray-500">{new Date(send.sent_at).toLocaleTimeString()}</span>
+                  {finishingSends.length > 0 && (() => {
+                    const rollup = getFinishingSendsRollup(finishingSends)
+                    return (
+                      <div className="bg-cyan-900/20 border border-cyan-800 rounded-lg p-3 space-y-2">
+                        <div className="flex items-center gap-2 text-cyan-400 text-sm font-medium">
+                          <SendHorizontal size={14} />
+                          Sent to Finishing During Production
+                          {(rollup.anyDiscrepancy || rollup.anyRejected) && (
+                            <span className="ml-auto px-1.5 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded flex items-center gap-1">
+                              <AlertCircle size={10} />
+                              See finishing feedback below
+                            </span>
+                          )}
                         </div>
-                      ))}
-                      <div className="border-t border-cyan-800 pt-1 mt-1 flex justify-between text-sm pl-5">
-                        <span className="text-cyan-300 font-medium">Total already sent:</span>
-                        <span className="text-cyan-400 font-medium">{finishingSends.reduce((sum, s) => sum + s.quantity, 0)} pcs</span>
+                        {finishingSends.map((send, idx) => {
+                          const s = getFinishingSendSummary(send)
+                          return (
+                            <div key={send.id} className="pl-5 text-sm border-b border-cyan-900/50 pb-2 last:border-0 last:pb-0">
+                              <div className="flex justify-between text-gray-300">
+                                <span>
+                                  {finishingSends.length > 1 && (
+                                    <span className="text-cyan-400 font-mono mr-1">
+                                      Batch {String.fromCharCode(65 + idx)}
+                                    </span>
+                                  )}
+                                  {finishingSends.length > 1 ? '— ' : ''}
+                                  <span className="text-cyan-400">{s.sent} sent</span>
+                                </span>
+                                <span className="text-gray-500 text-xs">
+                                  {new Date(send.sent_at).toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap text-xs mt-1">
+                                {s.received != null ? (
+                                  <span className="text-blue-400">{s.received} received</span>
+                                ) : (
+                                  <span className="text-gray-500 italic">Pending receipt at finishing</span>
+                                )}
+                                {s.verified != null && (
+                                  <>
+                                    <span className="text-gray-700">·</span>
+                                    <span className="text-emerald-400">{s.verified} verified</span>
+                                  </>
+                                )}
+                                {s.accepted != null && (
+                                  <>
+                                    <span className="text-gray-700">·</span>
+                                    <span className="text-emerald-300">{s.accepted} accepted</span>
+                                    {s.rejected > 0 && (
+                                      <span className="text-red-400 ml-1">({s.rejected} rejected)</span>
+                                    )}
+                                  </>
+                                )}
+                                {s.hasDiscrepancy && !s.complianceOutcome && (
+                                  <span className="ml-auto px-1.5 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded">
+                                    Mismatch
+                                  </span>
+                                )}
+                                {s.complianceOutcome === 'rejected' && (
+                                  <span className="ml-auto px-1.5 py-0.5 text-xs bg-red-900/30 text-red-300 border border-red-800 rounded">
+                                    Rejected
+                                  </span>
+                                )}
+                                {s.complianceOutcome === 'rework' && (
+                                  <span className="ml-auto px-1.5 py-0.5 text-xs bg-amber-900/30 text-amber-300 border border-amber-800 rounded">
+                                    Rework
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
+                        <div className="border-t border-cyan-800 pt-1 mt-1 pl-5 space-y-1">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-cyan-300 font-medium">Total already sent:</span>
+                            <span className="text-cyan-400 font-medium">{rollup.totalSent} pcs</span>
+                          </div>
+                          {rollup.anyAccepted && (
+                            <div className="flex justify-between text-xs">
+                              <span className="text-gray-400">Compliance-accepted total:</span>
+                              <span className="text-emerald-300">{rollup.totalAccepted} pcs</span>
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-gray-500 text-xs pl-5 pt-1">
+                          Enter your total good/bad count for the entire job — including pieces already sent.
+                        </p>
                       </div>
-                      <p className="text-gray-500 text-xs pl-5 pt-1">
-                        Enter your total good/bad count for the entire job — including pieces already sent.
-                      </p>
-                    </div>
-                  )}
+                    )
+                  })()}
 
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">Actual End Time *</label>

@@ -2248,21 +2248,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               <p className="text-white">{send.chemical_lot_number_2 || '—'}</p>
                             </div>
                             <div>
-                              <p className="text-gray-500 text-xs">Incoming Count</p>
-                              <p className="text-white">{send.incoming_count ?? send.quantity}</p>
+                              <p className="text-gray-500 text-xs">Machine Count</p>
+                              <p className="text-white">{send.quantity ?? '—'}</p>
                             </div>
                             <div>
                               <p className="text-gray-500 text-xs">Verified Count</p>
                               <p className="text-white">{send.verified_count ?? '—'}</p>
                             </div>
-                            {send.count_discrepancy != null && send.count_discrepancy !== 0 && (
-                              <div className="col-span-2">
-                                <p className="text-xs text-yellow-400 flex items-center gap-1">
-                                  <AlertCircle size={12} />
-                                  Count discrepancy: {send.count_discrepancy > 0 ? '+' : ''}{send.count_discrepancy} pcs
-                                </p>
-                              </div>
-                            )}
+                            {(() => {
+                              if (send.verified_count == null || send.quantity == null) return null
+                              const delta = send.verified_count - send.quantity
+                              if (delta === 0) return null
+                              return (
+                                <div className="col-span-2">
+                                  <p className="text-xs text-yellow-400 flex items-center gap-1">
+                                    <AlertCircle size={12} />
+                                    Count discrepancy: {delta > 0 ? '+' : ''}{delta} pcs
+                                  </p>
+                                </div>
+                              )
+                            })()}
                           </div>
 
                           {/* Quantity Check */}
@@ -2765,21 +2770,26 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                               <p className="text-white">{details.latestSend.chemical_lot_number_2 || '—'}</p>
                             </div>
                             <div>
-                              <p className="text-gray-500 text-xs">Incoming Count</p>
-                              <p className="text-white">{details.latestSend.incoming_count ?? '—'}</p>
+                              <p className="text-gray-500 text-xs">Machine Count</p>
+                              <p className="text-white">{details.latestSend.quantity ?? '—'}</p>
                             </div>
                             <div>
                               <p className="text-gray-500 text-xs">Verified Count</p>
                               <p className="text-white">{details.latestSend.verified_count ?? '—'}</p>
                             </div>
-                            {details.latestSend.count_discrepancy != null && details.latestSend.count_discrepancy !== 0 && (
-                              <div className="col-span-2">
-                                <p className="text-xs text-yellow-400 flex items-center gap-1">
-                                  <AlertCircle size={12} />
-                                  Count discrepancy: {details.latestSend.count_discrepancy > 0 ? '+' : ''}{details.latestSend.count_discrepancy} pcs
-                                </p>
-                              </div>
-                            )}
+                            {(() => {
+                              if (details.latestSend.verified_count == null || details.latestSend.quantity == null) return null
+                              const delta = details.latestSend.verified_count - details.latestSend.quantity
+                              if (delta === 0) return null
+                              return (
+                                <div className="col-span-2">
+                                  <p className="text-xs text-yellow-400 flex items-center gap-1">
+                                    <AlertCircle size={12} />
+                                    Count discrepancy: {delta > 0 ? '+' : ''}{delta} pcs
+                                  </p>
+                                </div>
+                              )
+                            })()}
                           </div>
                         )}
 

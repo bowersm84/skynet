@@ -118,6 +118,105 @@ export default function OutsourcedJobs({ profile }) {
     return batch.quantity || 0
   }
 
+  // Hydrate a list of outbound_sends rows (assembly source) with their WOA + routing step data.
+  // Polymorphic source_id has no FK, so PostgREST embeds don't work — we do the join in JS.
+  const hydrateAssemblySends = async (sends) => {
+    if (!sends?.length) return []
+
+    const woaIds = [...new Set(sends.map(s => s.source_id).filter(Boolean))]
+    const stepIds = [...new Set(sends.map(s => s.routing_step_id).filter(Boolean))]
+
+    const [woaRes, stepsRes] = await Promise.all([
+      woaIds.length
+        ? supabase
+            .from('work_order_assemblies')
+            .select(`
+              id, quantity, status, assembly_lot_number,
+              assembly:parts!assembly_id (id, part_number, description, part_type),
+              work_order:work_orders (id, wo_number, customer)
+            `)
+            .in('id', woaIds)
+        : Promise.resolve({ data: [], error: null }),
+      stepIds.length
+        ? supabase
+            .from('work_order_assembly_routing_steps')
+            .select('id, step_order, step_name, step_type, status')
+            .in('id', stepIds)
+        : Promise.resolve({ data: [], error: null }),
+    ])
+
+    if (woaRes.error)   console.error('hydrateAssemblySends WOA error:', woaRes.error)
+    if (stepsRes.error) console.error('hydrateAssemblySends step error:', stepsRes.error)
+
+    const woaById  = Object.fromEntries((woaRes.data || []).map(w => [w.id, w]))
+    const stepById = Object.fromEntries((stepsRes.data || []).map(s => [s.id, s]))
+
+    return sends.map(s => ({
+      ...s,
+      woa: woaById[s.source_id] || null,
+      routingStep: stepById[s.routing_step_id] || null,
+    }))
+  }
+
+  // Per-WOA batch letter map: outbound_sends ordered by created_at gets A/B/C.
+  const computeAssemblyBatchLetters = async (woaIds) => {
+    if (!woaIds.length) return {}
+    const { data, error } = await supabase
+      .from('outbound_sends')
+      .select('id, source_id, created_at')
+      .eq('source_type', 'work_order_assembly')
+      .in('source_id', woaIds)
+      .order('created_at', { ascending: true })
+    if (error || !data) return {}
+    const byWoa = {}
+    for (const row of data) {
+      if (!byWoa[row.source_id]) byWoa[row.source_id] = []
+      byWoa[row.source_id].push(row)
+    }
+    const map = {}
+    for (const woaId in byWoa) {
+      byWoa[woaId].forEach((s, i) => { map[s.id] = String.fromCharCode(65 + i) })
+    }
+    return map
+  }
+
+  // Unified display metadata for a send record across both source types.
+  const getSendDisplayMeta = (record) => {
+    if (record.sourceKind === 'finishing') {
+      const stepName = record.step?.step_name
+        || record.job_routing_step?.step_name
+        || record.routing_step_name
+        || ''
+      const lotValue = record.batch?.finishing_lot_number
+        || record.finishing_send?.finishing_lot_number
+        || ''
+      return {
+        sourceKind: 'finishing',
+        stepName,
+        partNumber: record.job?.part?.part_number || '',
+        partDescription: record.job?.part?.description || '',
+        jobNumber: record.job?.job_number || '',
+        woNumber: record.job?.work_order?.wo_number || '',
+        customer: record.job?.work_order?.customer || '',
+        lotLabel: 'FLN',
+        lotValue,
+        batchPill: record.batchLetter ? `Batch ${record.batchLetter}` : '',
+      }
+    }
+    return {
+      sourceKind: 'assembly',
+      stepName: record.routingStep?.step_name || '',
+      partNumber: record.woa?.assembly?.part_number || '',
+      partDescription: record.woa?.assembly?.description || '',
+      jobNumber: '',
+      woNumber: record.woa?.work_order?.wo_number || '',
+      customer: record.woa?.work_order?.customer || '',
+      lotLabel: 'ALN',
+      lotValue: record.woa?.assembly_lot_number || '',
+      batchPill: record.batchLetter ? `Batch ${record.batchLetter}` : '',
+    }
+  }
+
   const fetchAll = async () => {
     try {
       await Promise.all([fetchReadyToSend(), fetchAtVendor(), fetchReturned()])
@@ -194,6 +293,7 @@ export default function OutsourcedJobs({ profile }) {
         if (sentSet.has(key)) continue
         rows.push({
           rowKey: key,
+          sourceKind: 'finishing',
           step,
           batch,
           job: batch.job,
@@ -201,11 +301,42 @@ export default function OutsourcedJobs({ profile }) {
         })
       }
     }
+
+    // ───── Assembly-source rows ─────
+    // outbound_sends.source_id is polymorphic (no FK), so we fetch raw rows
+    // then hydrate WOA + routing step via separate queries.
+    const { data: asmSendsRaw, error: asmErr } = await supabase
+      .from('outbound_sends')
+      .select('id, source_id, source_type, routing_step_id, operation_type, quantity, created_at')
+      .eq('source_type', 'work_order_assembly')
+      .is('sent_at', null)
+      .order('created_at', { ascending: true })
+
+    if (asmErr) {
+      console.error('Error fetching assembly-source ready sends:', asmErr)
+    } else if (asmSendsRaw?.length) {
+      const hydrated = await hydrateAssemblySends(asmSendsRaw)
+      const woaIds = [...new Set(hydrated.map(s => s.source_id).filter(Boolean))]
+      const letterMap = await computeAssemblyBatchLetters(woaIds)
+
+      for (const send of hydrated) {
+        rows.push({
+          rowKey: `asm|${send.id}`,
+          sourceKind: 'assembly',
+          send,
+          woa: send.woa,
+          routingStep: send.routingStep,
+          batchLetter: letterMap[send.id] || '',
+        })
+      }
+    }
+
     setReadySteps(rows)
   }
 
   const fetchAtVendor = async () => {
-    const { data, error } = await supabase
+    // 1. Finishing-source at-vendor rows
+    const { data: finishingData, error: finErr } = await supabase
       .from('outbound_sends')
       .select(`
         *,
@@ -218,25 +349,62 @@ export default function OutsourcedJobs({ profile }) {
         finishing_send:finishing_sends!finishing_send_id(id, finishing_lot_number, quantity, verified_count, compliance_good_qty),
         sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name)
       `)
+      .eq('source_type', 'finishing_send')
       .not('sent_at', 'is', null)
       .is('returned_at', null)
       .order('expected_return_at', { ascending: true })
 
-    if (error) {
-      console.error('Error fetching at-vendor sends:', error)
-      return
+    if (finErr) {
+      console.error('Error fetching finishing at-vendor sends:', finErr)
     }
-    const jobIds = [...new Set((data || []).map(s => s.job?.id).filter(Boolean))]
-    const letterMap = await computeBatchLetters(jobIds)
-    const enriched = (data || []).map(s => ({
+
+    const finJobIds = [...new Set((finishingData || []).map(s => s.job?.id).filter(Boolean))]
+    const finLetterMap = await computeBatchLetters(finJobIds)
+    const finishingEnriched = (finishingData || []).map(s => ({
       ...s,
-      batchLetter: s.finishing_send_id ? (letterMap[s.finishing_send_id] || '') : ''
+      sourceKind: 'finishing',
+      batchLetter: s.finishing_send_id ? (finLetterMap[s.finishing_send_id] || '') : ''
     }))
-    setAtVendor(enriched)
+
+    // 2. Assembly-source at-vendor rows
+    const { data: asmRaw, error: asmErr } = await supabase
+      .from('outbound_sends')
+      .select(`
+        *,
+        sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name)
+      `)
+      .eq('source_type', 'work_order_assembly')
+      .not('sent_at', 'is', null)
+      .is('returned_at', null)
+      .order('expected_return_at', { ascending: true })
+
+    if (asmErr) {
+      console.error('Error fetching assembly at-vendor sends:', asmErr)
+    }
+
+    const asmHydrated = await hydrateAssemblySends(asmRaw || [])
+    const asmWoaIds = [...new Set(asmHydrated.map(s => s.source_id).filter(Boolean))]
+    const asmLetterMap = await computeAssemblyBatchLetters(asmWoaIds)
+    const asmEnriched = asmHydrated.map(s => ({
+      ...s,
+      sourceKind: 'assembly',
+      batchLetter: asmLetterMap[s.id] || ''
+    }))
+
+    // 3. Merge and sort by expected_return_at (nulls last)
+    const merged = [...finishingEnriched, ...asmEnriched].sort((a, b) => {
+      if (!a.expected_return_at && !b.expected_return_at) return 0
+      if (!a.expected_return_at) return 1
+      if (!b.expected_return_at) return -1
+      return new Date(a.expected_return_at) - new Date(b.expected_return_at)
+    })
+
+    setAtVendor(merged)
   }
 
   const fetchReturned = async () => {
-    const { data, error } = await supabase
+    // 1. Finishing-source returned rows
+    const { data: finishingData, error: finErr } = await supabase
       .from('outbound_sends')
       .select(`
         *,
@@ -250,21 +418,51 @@ export default function OutsourcedJobs({ profile }) {
         sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name),
         returned_by_profile:profiles!outbound_sends_returned_by_fkey(full_name)
       `)
+      .eq('source_type', 'finishing_send')
       .not('returned_at', 'is', null)
       .order('returned_at', { ascending: false })
       .limit(20)
 
-    if (error) {
-      console.error('Error fetching returned sends:', error)
-      return
-    }
-    const jobIds = [...new Set((data || []).map(s => s.job?.id).filter(Boolean))]
-    const letterMap = await computeBatchLetters(jobIds)
-    const enriched = (data || []).map(s => ({
+    if (finErr) console.error('Error fetching finishing returned sends:', finErr)
+
+    const finJobIds = [...new Set((finishingData || []).map(s => s.job?.id).filter(Boolean))]
+    const finLetterMap = await computeBatchLetters(finJobIds)
+    const finishingEnriched = (finishingData || []).map(s => ({
       ...s,
-      batchLetter: s.finishing_send_id ? (letterMap[s.finishing_send_id] || '') : ''
+      sourceKind: 'finishing',
+      batchLetter: s.finishing_send_id ? (finLetterMap[s.finishing_send_id] || '') : ''
     }))
-    setReturned(enriched)
+
+    // 2. Assembly-source returned rows
+    const { data: asmRaw, error: asmErr } = await supabase
+      .from('outbound_sends')
+      .select(`
+        *,
+        sent_by_profile:profiles!outbound_sends_sent_by_fkey(full_name),
+        returned_by_profile:profiles!outbound_sends_returned_by_fkey(full_name)
+      `)
+      .eq('source_type', 'work_order_assembly')
+      .not('returned_at', 'is', null)
+      .order('returned_at', { ascending: false })
+      .limit(20)
+
+    if (asmErr) console.error('Error fetching assembly returned sends:', asmErr)
+
+    const asmHydrated = await hydrateAssemblySends(asmRaw || [])
+    const asmWoaIds = [...new Set(asmHydrated.map(s => s.source_id).filter(Boolean))]
+    const asmLetterMap = await computeAssemblyBatchLetters(asmWoaIds)
+    const asmEnriched = asmHydrated.map(s => ({
+      ...s,
+      sourceKind: 'assembly',
+      batchLetter: asmLetterMap[s.id] || ''
+    }))
+
+    // 3. Merge, sort by returned_at desc, cap at 20 total
+    const merged = [...finishingEnriched, ...asmEnriched]
+      .sort((a, b) => new Date(b.returned_at) - new Date(a.returned_at))
+      .slice(0, 20)
+
+    setReturned(merged)
   }
 
   useEffect(() => {
@@ -274,6 +472,8 @@ export default function OutsourcedJobs({ profile }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'outbound_sends' }, fetchAll)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'finishing_sends' }, fetchAll)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, fetchAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'work_order_assemblies' }, fetchAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'work_order_assembly_routing_steps' }, fetchAll)
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
@@ -286,29 +486,57 @@ export default function OutsourcedJobs({ profile }) {
     if (!form.vendor_name?.trim() || !form.quantity) return
     setSaving(true)
     try {
-      const jobId = row.job.id
-      const workOrderId = row.job.work_order?.id || null
+      if (row.sourceKind === 'assembly') {
+        // ───── Assembly path: UPDATE existing outbound_sends row ─────
+        const { error: updateErr } = await supabase
+          .from('outbound_sends')
+          .update({
+            vendor_name: form.vendor_name.trim(),
+            quantity: parseInt(form.quantity),
+            sent_at: form.sent_date ? localDateToISO(form.sent_date) : new Date().toISOString(),
+            sent_by: profile.id,
+            expected_return_at: form.expected_return || null,
+            notes: form.notes?.trim() || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.send.id)
+        if (updateErr) throw updateErr
 
-      const { error: insertErr } = await supabase
-        .from('outbound_sends')
-        .insert({
-          job_id: jobId,
-          work_order_id: workOrderId,
-          job_routing_step_id: row.step.id,
-          finishing_send_id: row.batch.id,
-          operation_type: deriveOperationType(row.step.step_name),
-          vendor_name: form.vendor_name.trim(),
-          quantity: parseInt(form.quantity),
-          sent_at: form.sent_date ? localDateToISO(form.sent_date) : new Date().toISOString(),
-          sent_by: profile.id,
-          expected_return_at: form.expected_return || null,
-          notes: form.notes?.trim() || null,
-        })
-      if (insertErr) throw insertErr
+        // Flip WOA status: ready_for_outsource → at_external_vendor (only if currently in that state).
+        const woaId = row.woa?.id
+        if (woaId) {
+          const { error: woaErr } = await supabase
+            .from('work_order_assemblies')
+            .update({ status: 'at_external_vendor' })
+            .eq('id', woaId)
+            .eq('status', 'ready_for_outsource')
+          if (woaErr) console.error('WOA status flip failed:', woaErr)
+        }
+      } else {
+        // ───── Finishing path: INSERT new outbound_sends row ─────
+        const jobId = row.job.id
+        const workOrderId = row.job.work_order?.id || null
 
-      // Note: we no longer flip the routing step status or the job status.
-      // Step status will be marked 'complete' when ALL batches at this step have returned.
-      // Job status logic for `at_external_vendor` is decoupled from this flow.
+        const { error: insertErr } = await supabase
+          .from('outbound_sends')
+          .insert({
+            source_type: 'finishing_send',
+            source_id: row.batch.id,
+            routing_step_id: row.step.id,
+            job_id: jobId,
+            work_order_id: workOrderId,
+            job_routing_step_id: row.step.id,
+            finishing_send_id: row.batch.id,
+            operation_type: deriveOperationType(row.step.step_name),
+            vendor_name: form.vendor_name.trim(),
+            quantity: parseInt(form.quantity),
+            sent_at: form.sent_date ? localDateToISO(form.sent_date) : new Date().toISOString(),
+            sent_by: profile.id,
+            expected_return_at: form.expected_return || null,
+            notes: form.notes?.trim() || null,
+          })
+        if (insertErr) throw insertErr
+      }
 
       setSendFormOpen(null)
       setSendForm({})
@@ -345,70 +573,142 @@ export default function OutsourcedJobs({ profile }) {
         .eq('id', send.id)
       if (sendErr) throw sendErr
 
-      // b. Check if all sends for THIS step have returned
-      if (send.job_routing_step_id) {
-        const { data: stepSends, error: stepSendsErr } = await supabase
-          .from('outbound_sends')
-          .select('id, returned_at')
-          .eq('job_routing_step_id', send.job_routing_step_id)
-        if (stepSendsErr) throw stepSendsErr
+      // b. Step + parent rollup — branches on source type
+      if (send.sourceKind === 'assembly') {
+        // ───── Assembly path ─────
+        const woaId = send.source_id
+        const stepId = send.routing_step_id
 
-        const allStepReturned = stepSends && stepSends.length > 0
-          && stepSends.every(s => s.returned_at != null)
+        if (stepId && woaId) {
+          // 1. Are all sends for this WOA + step returned?
+          const { data: stepSends, error: stepSendsErr } = await supabase
+            .from('outbound_sends')
+            .select('id, returned_at')
+            .eq('source_type', 'work_order_assembly')
+            .eq('source_id', woaId)
+            .eq('routing_step_id', stepId)
+          if (stepSendsErr) throw stepSendsErr
 
-        // Determine whether the routing step + job-level status should advance.
-        // Both gates require: (a) every existing outbound_send for this step has returned,
-        // AND (b) machining is fully complete (job.actual_end IS NOT NULL).
-        // Without (b), more batches may still be coming through the machine and will need
-        // to traverse this external step.
-        if (allStepReturned) {
-          const jobId = send.job?.id || send.job_id
-          const { data: jobRow, error: jobFetchErr } = await supabase
-            .from('jobs')
-            .select('id, actual_end')
-            .eq('id', jobId)
-            .single()
-          if (jobFetchErr) throw jobFetchErr
+          const allStepReturned = stepSends && stepSends.length > 0
+            && stepSends.every(s => s.returned_at != null)
 
-          const machiningDone = jobRow?.actual_end != null
+          if (allStepReturned) {
+            // 2. Look up the Assemble step's status — only mark this external step
+            //    complete when assembly itself is also done. Otherwise more batches
+            //    may yet flow through this step and we'd be prematurely closing it.
+            const { data: assembleStep } = await supabase
+              .from('work_order_assembly_routing_steps')
+              .select('status')
+              .eq('work_order_assembly_id', woaId)
+              .eq('step_order', 1)
+              .single()
 
-          if (machiningDone) {
-            const { error: stepErr } = await supabase
-              .from('job_routing_steps')
-              .update({
-                status: 'complete',
-                completed_at: new Date().toISOString(),
-                completed_by: profile.id,
-                lot_number: form.vendor_lot_number.trim(),
-              })
-              .eq('id', send.job_routing_step_id)
-            if (stepErr) throw stepErr
+            const assemblyDone = assembleStep?.status === 'complete'
 
-            // Check if ALL external steps on the job are complete (job-level rollup)
+            if (assemblyDone) {
+              const { error: stepErr } = await supabase
+                .from('work_order_assembly_routing_steps')
+                .update({
+                  status: 'complete',
+                  completed_at: new Date().toISOString(),
+                  completed_by: profile.id,
+                  lot_number: form.vendor_lot_number.trim(),
+                  quantity: quantityReturned,
+                })
+                .eq('id', stepId)
+              if (stepErr) throw stepErr
+            }
+            // else: leave external step at its current status. C3 (Assembly Complete)
+            // sweeps external steps and marks them complete when Jody finishes.
+
+            // 3. Are ALL routing steps (Assemble + every external step) complete?
+            //    Flipping to pending_tco while Assemble is still in_progress strands
+            //    the WOA out of Jody's queue and prevents her from sending further batches.
             const { data: allSteps, error: allStepsErr } = await supabase
-              .from('job_routing_steps')
+              .from('work_order_assembly_routing_steps')
               .select('id, step_type, status')
-              .eq('job_id', jobId)
-              .eq('step_type', 'external')
+              .eq('work_order_assembly_id', woaId)
             if (allStepsErr) throw allStepsErr
 
-            const allExternalComplete = allSteps && allSteps.length > 0
-              && allSteps.every(s => s.status === 'complete')
+            const allStepsComplete = allSteps && allSteps.length > 0
+              && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
 
-            if (allExternalComplete) {
-              const partType = send.job?.part?.part_type
-              const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
-              const { error: jobErr } = await supabase
+            if (allStepsComplete) {
+              // 4. WOA → pending_tco
+              const { error: woaErr } = await supabase
+                .from('work_order_assemblies')
+                .update({ status: 'pending_tco' })
+                .eq('id', woaId)
+              if (woaErr) throw woaErr
+
+              // 5. Linked component jobs → pending_tco
+              const { error: jobsErr } = await supabase
                 .from('jobs')
-                .update({ status: nextStatus, updated_at: new Date().toISOString() })
-                .eq('id', jobId)
-              if (jobErr) throw jobErr
+                .update({ status: 'pending_tco', updated_at: new Date().toISOString() })
+                .eq('work_order_assembly_id', woaId)
+                .in('status', ['ready_for_assembly', 'in_assembly'])
+              if (jobsErr) console.error('Error advancing jobs to pending_tco:', jobsErr)
+            }
+            // else: Assemble step still in_progress → leave WOA at its current status.
+            // The eventual Complete in Assembly.jsx (C3) will handle the final transition.
+          }
+        }
+      } else {
+        // ───── Finishing path (existing behavior) ─────
+        if (send.job_routing_step_id) {
+          const { data: stepSends, error: stepSendsErr } = await supabase
+            .from('outbound_sends')
+            .select('id, returned_at')
+            .eq('job_routing_step_id', send.job_routing_step_id)
+          if (stepSendsErr) throw stepSendsErr
+
+          const allStepReturned = stepSends && stepSends.length > 0
+            && stepSends.every(s => s.returned_at != null)
+
+          if (allStepReturned) {
+            const jobId = send.job?.id || send.job_id
+            const { data: jobRow, error: jobFetchErr } = await supabase
+              .from('jobs')
+              .select('id, actual_end')
+              .eq('id', jobId)
+              .single()
+            if (jobFetchErr) throw jobFetchErr
+
+            const machiningDone = jobRow?.actual_end != null
+
+            if (machiningDone) {
+              const { error: stepErr } = await supabase
+                .from('job_routing_steps')
+                .update({
+                  status: 'complete',
+                  completed_at: new Date().toISOString(),
+                  completed_by: profile.id,
+                  lot_number: form.vendor_lot_number.trim(),
+                })
+                .eq('id', send.job_routing_step_id)
+              if (stepErr) throw stepErr
+
+              const { data: allSteps, error: allStepsErr } = await supabase
+                .from('job_routing_steps')
+                .select('id, step_type, status')
+                .eq('job_id', jobId)
+                .eq('step_type', 'external')
+              if (allStepsErr) throw allStepsErr
+
+              const allExternalComplete = allSteps && allSteps.length > 0
+                && allSteps.every(s => s.status === 'complete')
+
+              if (allExternalComplete) {
+                const partType = send.job?.part?.part_type
+                const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+                const { error: jobErr } = await supabase
+                  .from('jobs')
+                  .update({ status: nextStatus, updated_at: new Date().toISOString() })
+                  .eq('id', jobId)
+                if (jobErr) throw jobErr
+              }
             }
           }
-          // If !machiningDone: leave step status and job status as-is.
-          // When the final batch lands and machining completes, the next return logged
-          // (or a separate trigger) will advance status. For S4 this means status advance
-          // happens naturally on the LAST batch's return after machining is done.
         }
       }
 
@@ -499,42 +799,65 @@ export default function OutsourcedJobs({ profile }) {
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             {readySteps.map(row => {
-              const { step, batch, job, rowKey } = row
+              const { rowKey } = row
+              const meta = getSendDisplayMeta(row)
               const isOpen = sendFormOpen === rowKey
               const form = sendForm[rowKey] || {}
-              const suggestions = getVendorSuggestions(step.step_name)
+              const suggestions = getVendorSuggestions(meta.stepName)
               const datalistId = `vendor-${rowKey}`
-              const batchQty = getBatchQty(batch)
+              const displayQty = row.sourceKind === 'finishing'
+                ? getBatchQty(row.batch)
+                : (row.send?.quantity || 0)
+              const batchQty = displayQty
+              const job = row.job
+              const step = row.step
 
               return (
                 <div key={rowKey} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
-                    {getStepBadge(step.step_name)}
+                    <div className="flex items-center gap-2">
+                      {getStepBadge(meta.stepName)}
+                      {row.sourceKind === 'assembly' && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-purple-900/30 text-purple-300 border-purple-800">
+                          Assembly
+                        </span>
+                      )}
+                    </div>
                     <span className="text-xs px-2 py-0.5 rounded bg-amber-900/30 text-amber-400 flex-shrink-0">
                       Ready to Send
                     </span>
                   </div>
 
                   <div className="flex items-center gap-3 text-sm">
-                    <span className="text-skynet-accent font-mono">{job?.part?.part_number}</span>
-                    {job?.part?.description && (
-                      <span className="text-gray-500 truncate">{job.part.description}</span>
+                    <span className="text-skynet-accent font-mono">{meta.partNumber}</span>
+                    {meta.partDescription && (
+                      <span className="text-gray-500 truncate">{meta.partDescription}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
-                    <span className="font-mono text-white">{job?.job_number}</span>
-                    {row.batchLetter && (
+                    {meta.jobNumber && <span className="font-mono text-white">{meta.jobNumber}</span>}
+                    {meta.batchPill && (
                       <>
-                        <span>·</span>
-                        <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {row.batchLetter}</span>
+                        {meta.jobNumber && <span>·</span>}
+                        <span className={`px-1.5 py-0.5 rounded font-mono ${
+                          row.sourceKind === 'assembly'
+                            ? 'bg-purple-900/40 text-purple-300'
+                            : 'bg-cyan-900/40 text-cyan-300'
+                        }`}>{meta.batchPill}</span>
                       </>
                     )}
                     <span>·</span>
-                    <span className="text-cyan-400 font-mono">{batch.finishing_lot_number || 'No FLN'}</span>
+                    {meta.lotValue ? (
+                      <span className={`font-mono ${row.sourceKind === 'assembly' ? 'text-purple-300' : 'text-cyan-400'}`}>
+                        {meta.lotLabel}: {meta.lotValue}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600 italic">{meta.lotLabel} pending</span>
+                    )}
                     <span>·</span>
-                    <span>{batchQty} pcs</span>
-                    {job?.work_order?.wo_number && <><span>·</span><span>{job.work_order.wo_number}</span></>}
-                    {job?.work_order?.customer && <><span>·</span><span>{job.work_order.customer}</span></>}
+                    <span>{displayQty} pcs</span>
+                    {meta.woNumber && <><span>·</span><span>{meta.woNumber}</span></>}
+                    {meta.customer && <><span>·</span><span>{meta.customer}</span></>}
                   </div>
 
                   {canEdit && !isOpen && (
@@ -546,7 +869,7 @@ export default function OutsourcedJobs({ profile }) {
                             ...prev,
                             [rowKey]: {
                               vendor_name: suggestions[0] || '',
-                              quantity: String(batchQty || ''),
+                              quantity: String(displayQty || ''),
                               sent_date: new Date().toISOString().split('T')[0],
                               expected_return: '',
                               notes: '',
@@ -582,7 +905,10 @@ export default function OutsourcedJobs({ profile }) {
                           <div className="flex items-center justify-between mb-1">
                             <label className="block text-gray-500 text-[10px]">Quantity Sent *</label>
                             <span className="text-[10px] text-gray-600">
-                              Batch: {batchQty} · Job order: {job.quantity}
+                              {row.sourceKind === 'assembly'
+                                ? <>Available: {batchQty}</>
+                                : <>Batch: {batchQty} · Job order: {job?.quantity ?? '—'}</>
+                              }
                             </span>
                           </div>
                           <input
@@ -667,11 +993,17 @@ export default function OutsourcedJobs({ profile }) {
               const isUploading = uploadingCertId === send.id
               const overdue = isPastToday(send.expected_return_at)
 
+              const meta = getSendDisplayMeta(send)
               return (
                 <div key={send.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2 flex-wrap">
-                      {getStepBadge(send.job_routing_step?.step_name, send.operation_type)}
+                      {getStepBadge(meta.stepName, send.operation_type)}
+                      {send.sourceKind === 'assembly' && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-purple-900/30 text-purple-300 border-purple-800">
+                          Assembly
+                        </span>
+                      )}
                       {send.vendor_name && (
                         <span className="text-sm text-white font-medium">{send.vendor_name}</span>
                       )}
@@ -682,21 +1014,27 @@ export default function OutsourcedJobs({ profile }) {
                   </div>
 
                   <div className="flex items-center gap-3 text-sm">
-                    <span className="text-skynet-accent font-mono">{send.job?.part?.part_number}</span>
-                    {send.job?.part?.description && (
-                      <span className="text-gray-500 truncate">{send.job.part.description}</span>
+                    <span className="text-skynet-accent font-mono">{meta.partNumber}</span>
+                    {meta.partDescription && (
+                      <span className="text-gray-500 truncate">{meta.partDescription}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-                    <span className="text-white font-mono">{send.job?.job_number}</span>
-                    {send.batchLetter && (
-                      <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {send.batchLetter}</span>
+                    {meta.jobNumber && <span className="text-white font-mono">{meta.jobNumber}</span>}
+                    {meta.batchPill && (
+                      <span className={`px-1.5 py-0.5 rounded font-mono ${
+                        send.sourceKind === 'assembly'
+                          ? 'bg-purple-900/40 text-purple-300'
+                          : 'bg-cyan-900/40 text-cyan-300'
+                      }`}>{meta.batchPill}</span>
                     )}
-                    {send.finishing_send?.finishing_lot_number && (
-                      <span className="text-cyan-400 font-mono">{send.finishing_send.finishing_lot_number}</span>
+                    {meta.lotValue && (
+                      <span className={`font-mono ${send.sourceKind === 'assembly' ? 'text-purple-300' : 'text-cyan-400'}`}>
+                        {meta.lotLabel}: {meta.lotValue}
+                      </span>
                     )}
-                    {send.job?.work_order?.wo_number && <span>· {send.job.work_order.wo_number}</span>}
-                    {send.job?.work_order?.customer && <span>· {send.job.work_order.customer}</span>}
+                    {meta.woNumber && <span>· {meta.woNumber}</span>}
+                    {meta.customer && <span>· {meta.customer}</span>}
                     <span>· Qty: {send.quantity}</span>
                   </div>
 
@@ -839,11 +1177,18 @@ export default function OutsourcedJobs({ profile }) {
             <p className="text-gray-600 text-sm italic text-center py-4">No returned sends yet</p>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              {returned.map(send => (
+              {returned.map(send => {
+                const meta = getSendDisplayMeta(send)
+                return (
                 <div key={send.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2 flex-wrap">
-                      {getStepBadge(send.job_routing_step?.step_name, send.operation_type)}
+                      {getStepBadge(meta.stepName, send.operation_type)}
+                      {send.sourceKind === 'assembly' && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-purple-900/30 text-purple-300 border-purple-800">
+                          Assembly
+                        </span>
+                      )}
                       {send.vendor_name && (
                         <span className="text-sm text-white font-medium">{send.vendor_name}</span>
                       )}
@@ -854,21 +1199,27 @@ export default function OutsourcedJobs({ profile }) {
                   </div>
 
                   <div className="flex items-center gap-3 text-sm">
-                    <span className="text-skynet-accent font-mono">{send.job?.part?.part_number}</span>
-                    {send.job?.part?.description && (
-                      <span className="text-gray-500 truncate">{send.job.part.description}</span>
+                    <span className="text-skynet-accent font-mono">{meta.partNumber}</span>
+                    {meta.partDescription && (
+                      <span className="text-gray-500 truncate">{meta.partDescription}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-                    <span className="text-white font-mono">{send.job?.job_number}</span>
-                    {send.batchLetter && (
-                      <span className="px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 rounded font-mono">Batch {send.batchLetter}</span>
+                    {meta.jobNumber && <span className="text-white font-mono">{meta.jobNumber}</span>}
+                    {meta.batchPill && (
+                      <span className={`px-1.5 py-0.5 rounded font-mono ${
+                        send.sourceKind === 'assembly'
+                          ? 'bg-purple-900/40 text-purple-300'
+                          : 'bg-cyan-900/40 text-cyan-300'
+                      }`}>{meta.batchPill}</span>
                     )}
-                    {send.finishing_send?.finishing_lot_number && (
-                      <span className="text-cyan-400 font-mono">{send.finishing_send.finishing_lot_number}</span>
+                    {meta.lotValue && (
+                      <span className={`font-mono ${send.sourceKind === 'assembly' ? 'text-purple-300' : 'text-cyan-400'}`}>
+                        {meta.lotLabel}: {meta.lotValue}
+                      </span>
                     )}
-                    {send.job?.work_order?.wo_number && <span>· {send.job.work_order.wo_number}</span>}
-                    {send.job?.work_order?.customer && <span>· {send.job.work_order.customer}</span>}
+                    {meta.woNumber && <span>· {meta.woNumber}</span>}
+                    {meta.customer && <span>· {meta.customer}</span>}
                   </div>
 
                   {send.vendor_lot_number && (
@@ -894,7 +1245,8 @@ export default function OutsourcedJobs({ profile }) {
                     </button>
                   )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           )
         )}

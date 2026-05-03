@@ -20,6 +20,8 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
+  Minimize2,
+  Maximize2,
   ArrowRight,
   Droplets,
   Flame,
@@ -103,6 +105,34 @@ export default function Finishing() {
   // Collapsed state per batch
   const [collapsedBatches, setCollapsedBatches] = useState({})
 
+  // Bulk toggle helpers for the Active Batches Collapse All / Expand All buttons
+  const collapseAllActiveBatches = () => {
+    setCollapsedBatches(prev => {
+      const next = { ...prev }
+      for (const batch of activeBatches) {
+        next[batch.id] = true
+      }
+      return next
+    })
+  }
+
+  const expandAllActiveBatches = () => {
+    setCollapsedBatches(prev => {
+      const next = { ...prev }
+      for (const batch of activeBatches) {
+        next[batch.id] = false
+      }
+      return next
+    })
+    // Also kick off document loads for any newly-expanded batches
+    for (const batch of activeBatches) {
+      if (collapsedBatches[batch.id]) {
+        const jobId = batch.job_id || batch.job?.id
+        if (jobId) loadBatchDocuments(batch.id, jobId)
+      }
+    }
+  }
+
   // Manual pickup queue (jobs scheduled to non-kiosk machines)
   const [pickupJobs, setPickupJobs] = useState([])
   const [pickupSearch, setPickupSearch] = useState('')
@@ -183,15 +213,20 @@ export default function Finishing() {
     }
   }
 
-  // Get current active finishing lot (persistence rule)
-  const getCurrentFinishingLot = async () => {
+  // Get this job's existing FLN if one was assigned to a prior batch.
+  // FLN scope is per-job: all batches of the same job share an FLN.
+  // Different jobs get different FLNs.
+  // Returns the EARLIEST assigned FLN for the job (the canonical one), or null
+  // if the job has no prior batch with an FLN — caller mints a new one.
+  const getCurrentFinishingLotForJob = async (jobId) => {
+    if (!jobId) return null
     try {
       const { data } = await supabase
         .from('finishing_sends')
         .select('finishing_lot_number')
+        .eq('job_id', jobId)
         .not('finishing_lot_number', 'is', null)
-        .neq('status', 'finishing_complete')
-        .order('finishing_started_at', { ascending: false })
+        .order('finishing_started_at', { ascending: true })
         .limit(1)
 
       if (data && data.length > 0 && data[0].finishing_lot_number) {
@@ -787,15 +822,18 @@ export default function Finishing() {
     setGeneratingLot(true)
     setShowStartModal(true)
 
-    // Pre-fill lot numbers in parallel
-    const [currentLot, currentChemicalLot, currentChemicalLot2] = await Promise.all([
-      getCurrentFinishingLot(),
+    const jobId = send?.job_id || send?.job?.id || null
+
+    // Pre-fill lot numbers in parallel.
+    // FLN: scoped per-job. Chemical lots: persist globally (drum-level traceability).
+    const [currentJobLot, currentChemicalLot, currentChemicalLot2] = await Promise.all([
+      getCurrentFinishingLotForJob(jobId),
       getCurrentChemicalLot(),
       getCurrentChemicalLot2()
     ])
 
-    if (currentLot) {
-      setStartLotNumber(currentLot)
+    if (currentJobLot) {
+      setStartLotNumber(currentJobLot)
     } else {
       const newLot = await generateFinishingLotNumber()
       setStartLotNumber(newLot)
@@ -1519,25 +1557,52 @@ export default function Finishing() {
                   Active Batches ({activeBatches.length})
                 </h2>
                 {activeBatches.length > 0 && (
-                  <div className="bg-gray-800 rounded-lg p-0.5 flex">
-                    <button
-                      onClick={() => setActiveView('job')}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                        activeView === 'job' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      <List size={12} />
-                      Job
-                    </button>
-                    <button
-                      onClick={() => { setActiveView('station'); setQueueExpanded(false) }}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                        activeView === 'station' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      <Columns size={12} />
-                      Station
-                    </button>
+                  <div className="flex items-center gap-2">
+                    {/* Collapse All / Expand All — only meaningful in Job view (Station view is its own layout) */}
+                    {activeView === 'job' && (
+                      <div className="bg-gray-800 rounded-lg p-0.5 flex">
+                        <button
+                          onClick={collapseAllActiveBatches}
+                          disabled={activeBatches.every(b => collapsedBatches[b.id])}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          title="Collapse all active batches"
+                        >
+                          <Minimize2 size={12} />
+                          Collapse All
+                        </button>
+                        <button
+                          onClick={expandAllActiveBatches}
+                          disabled={activeBatches.every(b => !collapsedBatches[b.id])}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          title="Expand all active batches"
+                        >
+                          <Maximize2 size={12} />
+                          Expand All
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Existing Job/Station view toggle */}
+                    <div className="bg-gray-800 rounded-lg p-0.5 flex">
+                      <button
+                        onClick={() => setActiveView('job')}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                          activeView === 'job' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        <List size={12} />
+                        Job
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('station'); setQueueExpanded(false) }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                          activeView === 'station' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        <Columns size={12} />
+                        Station
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1641,21 +1706,6 @@ export default function Finishing() {
 
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
-                                  <p className="text-gray-500 text-xs">Batch Quantity</p>
-                                  <p className="text-white text-xl">{batch.quantity}</p>
-                                </div>
-                                <div>
-                                  <p className="text-gray-500 text-xs">Due Date</p>
-                                  <p className="text-white">
-                                    {batch.job?.work_order?.due_date
-                                      ? new Date(batch.job.work_order.due_date).toLocaleDateString()
-                                      : '-'}
-                                  </p>
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-2 gap-4 mt-4">
-                                <div>
                                   <p className="text-gray-500 text-xs">Production Lot #</p>
                                   <p className="text-white font-mono text-sm">{batch.production_lot_number || batch.job?.production_lot_number || '-'}</p>
                                 </div>
@@ -1675,10 +1725,19 @@ export default function Finishing() {
                                   <p className="text-white font-mono text-sm">{batch.chemical_lot_number_2 || <span className="text-gray-600">&mdash;</span>}</p>
                                 </div>
                               </div>
+
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
                                   <p className="text-gray-500 text-xs">Material Lot #</p>
                                   <p className="text-white font-mono text-sm">{batch.material_lot_number || '-'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Due Date</p>
+                                  <p className="text-white">
+                                    {batch.job?.work_order?.due_date
+                                      ? new Date(batch.job.work_order.due_date).toLocaleDateString()
+                                      : '-'}
+                                  </p>
                                 </div>
                               </div>
 
@@ -2428,7 +2487,7 @@ export default function Finishing() {
                   <Hash size={14} className="inline mr-1" />
                   Finishing Lot #
                 </label>
-                <p className="text-gray-600 text-xs mb-2">Auto-filled from current lot. Change if material or chemicals have changed.</p>
+                <p className="text-gray-600 text-xs mb-2">Auto-filled from this job's lot. Click "New" to override (e.g., chemicals changed mid-job).</p>
                 <div className="flex gap-2">
                   <input
                     type="text"

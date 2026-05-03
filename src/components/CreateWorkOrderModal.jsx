@@ -370,6 +370,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
       fetchComponentRouting(selectedPart.id)
     }
 
+    // S6: Fetch assembly routing so the route renders on the assembly card
+    if (selectedPart && selectedPart.part_type === 'assembly') {
+      fetchComponentRouting(selectedPart.id)
+    }
+
     setSelectedAssemblies(updated)
 
     // Reset any prior CO selections for this row, then fetch fresh open lines.
@@ -565,6 +570,64 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         }
 
         woaId = woaData?.id || null
+      }
+
+      // S6: Copy assembly part_routing_steps → work_order_assembly_routing_steps
+      if (woaId) {
+        const { data: assemblyRouting } = await supabase
+          .from('part_routing_steps')
+          .select('*')
+          .eq('part_id', assemblyPart.id)
+          .eq('is_active', true)
+          .order('step_order')
+
+        const assemblyAdditions = routingAdditions[assemblyPart.id] || []
+        const assemblyRemovals = routingRemovals  // shared with components — only assembly steps will match
+
+        if ((assemblyRouting?.length || 0) > 0 || assemblyAdditions.length > 0) {
+          const woaSteps = (assemblyRouting || []).map(step => {
+            const removalReason = assemblyRemovals[step.id]
+            return {
+              work_order_assembly_id: woaId,
+              step_order: step.step_order,
+              step_name: step.step_name,
+              step_type: step.step_type,
+              station: step.default_station,
+              status: removalReason !== undefined ? 'removal_pending' : 'pending',
+              ...(removalReason !== undefined && {
+                removal_reason: removalReason,
+                removal_requested_by: profile?.id || null,
+                removal_requested_at: new Date().toISOString()
+              })
+            }
+          })
+
+          const maxOrder = (assemblyRouting?.length || 0) > 0
+            ? Math.max(...assemblyRouting.map(s => s.step_order))
+            : 0
+
+          assemblyAdditions.forEach((added, i) => {
+            woaSteps.push({
+              work_order_assembly_id: woaId,
+              step_order: maxOrder + i + 1,
+              step_name: added.stepName,
+              step_type: added.stepType,
+              station: null,
+              status: 'pending',
+              is_added_step: true,
+              added_by: profile?.id || null,
+              added_at: new Date().toISOString()
+            })
+          })
+
+          const { error: woaStepsError } = await supabase
+            .from('work_order_assembly_routing_steps')
+            .insert(woaSteps)
+
+          if (woaStepsError) {
+            console.error('Error creating WOA routing steps:', woaStepsError)
+          }
+        }
       }
 
       // Write CO allocation rows for this assembly's selected lines.
@@ -1256,7 +1319,33 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 </span>
                               )}
                             </div>
-                            
+
+                            {/* S6: Assembly route preview + ad-hoc step add */}
+                            <div className="mt-3 mb-3 bg-cyan-950/20 border border-cyan-900/50 rounded p-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-medium text-cyan-300">Assembly Route</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const stepName = prompt('External step name (e.g., Paint, Heat Treatment):')
+                                    if (!stepName?.trim()) return
+                                    setRoutingAdditions(prev => ({
+                                      ...prev,
+                                      [selected.assemblyId]: [
+                                        ...(prev[selected.assemblyId] || []),
+                                        { stepName: stepName.trim(), stepType: 'external' }
+                                      ]
+                                    }))
+                                  }}
+                                  className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                                >
+                                  <Plus size={12} />
+                                  Add External Step
+                                </button>
+                              </div>
+                              {renderRoutingSteps(selected.assemblyId)}
+                            </div>
+
                             {/* Available Parts from BOM */}
                             <div className="space-y-1 mb-3">
                               {getAssemblyById(selected.assemblyId)?.assembly_bom

@@ -1,665 +1,832 @@
--- WARNING: This schema is for context only and is not meant to be run.
--- Table order and constraints may not be valid for execution.
+## Table `assembly_bom`
 
-CREATE TABLE public.assembly_bom (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  assembly_id uuid NOT NULL,
-  component_id uuid NOT NULL,
-  quantity integer NOT NULL DEFAULT 1,
-  sort_order integer DEFAULT 0,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT assembly_bom_pkey PRIMARY KEY (id),
-  CONSTRAINT assembly_bom_assembly_id_fkey FOREIGN KEY (assembly_id) REFERENCES public.parts(id),
-  CONSTRAINT assembly_bom_component_id_fkey FOREIGN KEY (component_id) REFERENCES public.parts(id)
-);
-CREATE TABLE public.assembly_component_checkins (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  work_order_assembly_id uuid NOT NULL,
-  job_id uuid NOT NULL,
-  checked_in_at timestamp with time zone DEFAULT now(),
-  checked_in_by uuid,
-  quantity_received integer NOT NULL DEFAULT 1,
-  condition_notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT assembly_component_checkins_pkey PRIMARY KEY (id),
-  CONSTRAINT assembly_component_checkins_work_order_assembly_id_fkey FOREIGN KEY (work_order_assembly_id) REFERENCES public.work_order_assemblies(id),
-  CONSTRAINT assembly_component_checkins_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT assembly_component_checkins_checked_in_by_fkey FOREIGN KEY (checked_in_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.audit_logs (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  event_type text NOT NULL,
-  job_id uuid,
-  machine_id uuid,
-  operator_id uuid,
-  details jsonb,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT audit_logs_pkey PRIMARY KEY (id),
-  CONSTRAINT audit_logs_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT audit_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT audit_logs_operator_id_fkey FOREIGN KEY (operator_id) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.bar_sizes (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  size text NOT NULL UNIQUE,
-  size_decimal numeric,
-  shape text DEFAULT 'round'::text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT bar_sizes_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.document_types (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  code character varying NOT NULL UNIQUE,
-  name character varying NOT NULL,
-  description text,
-  category character varying DEFAULT 'general'::character varying,
-  file_types_allowed ARRAY DEFAULT ARRAY['pdf'::text, 'xlsx'::text, 'xls'::text, 'jpg'::text, 'png'::text],
-  requires_approval boolean DEFAULT true,
-  is_digital_form boolean DEFAULT false,
-  sort_order integer DEFAULT 0,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT document_types_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.finishing_sends (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  job_id uuid NOT NULL,
-  machine_id uuid,
-  sent_by uuid NOT NULL,
-  quantity integer NOT NULL CHECK (quantity > 0),
-  production_lot_number text,
-  material_lot_number text,
-  status text DEFAULT 'pending_finishing'::text CHECK (status = ANY (ARRAY['pending_finishing'::text, 'in_finishing'::text, 'finishing_complete'::text])),
-  notes text,
-  sent_at timestamp with time zone DEFAULT now(),
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  finishing_stage text DEFAULT 'wash'::text CHECK (finishing_stage = ANY (ARRAY['wash'::text, 'treatment'::text, 'dry'::text])),
-  stage_started_at timestamp with time zone,
-  finishing_operator_id uuid,
-  finishing_started_at timestamp with time zone,
-  finishing_completed_at timestamp with time zone,
-  finishing_lot_number text,
-  incoming_count integer,
-  verified_count integer,
-  count_discrepancy integer,
-  verified_by uuid,
-  verified_at timestamp with time zone,
-  chemical_lot_number text,
-  compliance_status text CHECK (compliance_status = ANY (ARRAY['pending_compliance'::text, 'approved'::text, 'rejected'::text])),
-  compliance_approved_by uuid,
-  compliance_approved_at timestamp with time zone,
-  compliance_notes text,
-  compliance_good_qty integer,
-  compliance_bad_qty integer,
-  is_partial_send boolean DEFAULT false,
-  compliance_outcome text CHECK (compliance_outcome = ANY (ARRAY['accepted'::text, 'rework'::text, 'rejected'::text])),
-  chemical_lot_number_2 text,
-  is_standalone boolean NOT NULL DEFAULT false,
-  standalone_operation_type text CHECK (standalone_operation_type IS NULL OR (standalone_operation_type = ANY (ARRAY['full_finishing'::text, 'passivation_only'::text]))),
-  CONSTRAINT finishing_sends_pkey PRIMARY KEY (id),
-  CONSTRAINT finishing_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT finishing_sends_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT finishing_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id),
-  CONSTRAINT finishing_sends_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
-  CONSTRAINT finishing_sends_verified_by_fkey FOREIGN KEY (verified_by) REFERENCES public.profiles(id),
-  CONSTRAINT finishing_sends_compliance_approved_by_fkey FOREIGN KEY (compliance_approved_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.import_bom_staging (
-  assembly_part_number text NOT NULL,
-  component_part_number text NOT NULL,
-  quantity integer NOT NULL DEFAULT 1,
-  sort_order integer NOT NULL DEFAULT 0,
-  CONSTRAINT import_bom_staging_pkey PRIMARY KEY (assembly_part_number, component_part_number)
-);
-CREATE TABLE public.import_parts_staging (
-  part_number text NOT NULL,
-  description text,
-  part_type text NOT NULL CHECK (part_type = ANY (ARRAY['assembly'::text, 'finished_good'::text, 'manufactured'::text, 'purchased'::text])),
-  CONSTRAINT import_parts_staging_pkey PRIMARY KEY (part_number)
-);
-CREATE TABLE public.job_document_snapshots (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  job_id uuid NOT NULL,
-  part_document_id uuid NOT NULL,
-  document_type_id uuid NOT NULL,
-  snapshot_file_url text NOT NULL,
-  snapshot_version character varying,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT job_document_snapshots_pkey PRIMARY KEY (id),
-  CONSTRAINT job_document_snapshots_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT job_document_snapshots_part_document_id_fkey FOREIGN KEY (part_document_id) REFERENCES public.part_documents(id),
-  CONSTRAINT job_document_snapshots_document_type_id_fkey FOREIGN KEY (document_type_id) REFERENCES public.document_types(id)
-);
-CREATE TABLE public.job_documents (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  job_id uuid NOT NULL,
-  document_type_id uuid,
-  file_name character varying,
-  file_url text,
-  file_size integer,
-  mime_type character varying,
-  form_data jsonb,
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying]::text[])),
-  uploaded_by uuid,
-  approved_by uuid,
-  approved_at timestamp with time zone,
-  rejection_reason text,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT job_documents_pkey PRIMARY KEY (id),
-  CONSTRAINT job_documents_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT job_documents_document_type_id_fkey FOREIGN KEY (document_type_id) REFERENCES public.document_types(id),
-  CONSTRAINT job_documents_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_documents_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.job_materials (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  job_id uuid NOT NULL,
-  material_type text NOT NULL,
-  bar_size text NOT NULL,
-  lot_number text,
-  bars_loaded integer NOT NULL DEFAULT 0,
-  bars_remaining integer,
-  loaded_by uuid,
-  loaded_at timestamp with time zone DEFAULT now(),
-  completed_by uuid,
-  completed_at timestamp with time zone,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  bar_length numeric,
-  CONSTRAINT job_materials_pkey PRIMARY KEY (id),
-  CONSTRAINT job_materials_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT job_materials_loaded_by_fkey FOREIGN KEY (loaded_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_materials_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.job_routing_steps (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  job_id uuid NOT NULL,
-  step_order integer NOT NULL,
-  step_name text NOT NULL,
-  step_type text DEFAULT 'internal'::text,
-  station text,
-  removal_requested_by uuid,
-  removal_approved_by uuid,
-  removal_approved_at timestamp with time zone,
-  lot_number text,
-  quantity integer,
-  completed_at timestamp with time zone,
-  completed_by uuid,
-  operator_initials text,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  status text DEFAULT 'pending'::text CHECK (status = ANY (ARRAY['pending'::text, 'in_progress'::text, 'complete'::text, 'skipped'::text, 'removal_pending'::text, 'removed'::text])),
-  removal_requested_at timestamp with time zone,
-  removal_reason text,
-  is_added_step boolean DEFAULT false,
-  added_by uuid,
-  added_at timestamp with time zone,
-  started_at timestamp with time zone,
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT job_routing_steps_pkey PRIMARY KEY (id),
-  CONSTRAINT job_routing_steps_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT job_routing_steps_removal_requested_by_fkey FOREIGN KEY (removal_requested_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_routing_steps_removal_approved_by_fkey FOREIGN KEY (removal_approved_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_routing_steps_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_routing_steps_added_by_fkey FOREIGN KEY (added_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.job_tools (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  job_id uuid NOT NULL,
-  tool_instance_id uuid,
-  tool_name character varying NOT NULL,
-  tool_type character varying,
-  serial_number character varying,
-  notes text,
-  added_by uuid,
-  added_at timestamp with time zone DEFAULT now(),
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT job_tools_pkey PRIMARY KEY (id),
-  CONSTRAINT job_tools_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT job_tools_tool_instance_id_fkey FOREIGN KEY (tool_instance_id) REFERENCES public.tool_instances(id),
-  CONSTRAINT job_tools_added_by_fkey FOREIGN KEY (added_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.jobs (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  work_order_id uuid,
-  part_id uuid,
-  job_number character varying NOT NULL,
-  quantity integer NOT NULL DEFAULT 1,
-  priority character varying DEFAULT 'normal'::character varying CHECK (priority::text = ANY (ARRAY['critical'::character varying, 'high'::character varying, 'normal'::character varying, 'low'::character varying]::text[])),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending_compliance'::text, 'ready'::text, 'assigned'::text, 'in_setup'::text, 'in_progress'::text, 'manufacturing_complete'::text, 'pending_passivation'::text, 'in_passivation'::text, 'pending_post_manufacturing'::text, 'ready_for_outsourcing'::text, 'at_external_vendor'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'pending_tco'::text, 'complete'::text, 'incomplete'::text, 'cancelled'::text])),
-  assigned_machine_id uuid,
-  assigned_user_id uuid,
-  checked_in_at timestamp with time zone,
-  checked_out_at timestamp with time zone,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  component_id uuid,
-  work_order_assembly_id uuid,
-  scheduled_start timestamp with time zone,
-  scheduled_end timestamp with time zone,
-  estimated_minutes integer CHECK (estimated_minutes IS NULL OR estimated_minutes > 0),
-  actual_start timestamp with time zone,
-  actual_end timestamp with time zone,
-  requires_attendance boolean DEFAULT false,
-  scheduled_by uuid,
-  scheduled_at timestamp with time zone,
-  setup_start timestamp with time zone,
-  production_start timestamp with time zone,
-  good_pieces integer DEFAULT 0,
-  bad_pieces integer DEFAULT 0,
-  time_per_unit numeric,
-  tooling_confirmed boolean DEFAULT false,
-  tooling_override boolean DEFAULT false,
-  tooling_override_by uuid,
-  tooling_override_at timestamp with time zone,
-  incomplete_reason text,
-  incomplete_at timestamp with time zone,
-  incomplete_by uuid,
-  material_confirmed boolean DEFAULT false,
-  material_confirmed_at timestamp with time zone,
-  material_confirmed_by uuid,
-  material_override boolean DEFAULT false,
-  material_override_by uuid,
-  material_override_at timestamp with time zone,
-  is_maintenance boolean DEFAULT false,
-  maintenance_description text,
-  finishing_start timestamp with time zone,
-  finishing_end timestamp with time zone,
-  finishing_operator_id uuid,
-  finishing_notes text,
-  paused_at timestamp with time zone,
-  pause_reason text,
-  tooling_required boolean DEFAULT false,
-  production_lot_number text,
-  finishing_lot_number text,
-  post_mfg_good_qty integer,
-  post_mfg_bad_qty integer,
-  post_mfg_notes text,
-  post_mfg_reviewed_by uuid,
-  post_mfg_reviewed_at timestamp with time zone,
-  compliance_outcome text CHECK (compliance_outcome = ANY (ARRAY['accepted'::text, 'rework'::text, 'rejected'::text, 'hold'::text, 'flag'::text])),
-  compliance_notes text,
-  qty_override integer,
-  qty_override_reason text,
-  qty_override_by uuid,
-  qty_override_at timestamp with time zone,
-  is_standalone_finishing boolean NOT NULL DEFAULT false,
-  source_description text,
-  CONSTRAINT jobs_pkey PRIMARY KEY (id),
-  CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
-  CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
-  CONSTRAINT jobs_assigned_machine_id_fkey FOREIGN KEY (assigned_machine_id) REFERENCES public.machines(id),
-  CONSTRAINT jobs_assigned_user_id_fkey FOREIGN KEY (assigned_user_id) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_component_id_fkey FOREIGN KEY (component_id) REFERENCES public.parts(id),
-  CONSTRAINT jobs_work_order_assembly_id_fkey FOREIGN KEY (work_order_assembly_id) REFERENCES public.work_order_assemblies(id),
-  CONSTRAINT jobs_qty_override_by_fkey FOREIGN KEY (qty_override_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_scheduled_by_fkey FOREIGN KEY (scheduled_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_tooling_override_by_fkey FOREIGN KEY (tooling_override_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_incomplete_by_fkey FOREIGN KEY (incomplete_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_material_confirmed_by_fkey FOREIGN KEY (material_confirmed_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_material_override_by_fkey FOREIGN KEY (material_override_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_post_mfg_reviewed_by_fkey FOREIGN KEY (post_mfg_reviewed_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.kiosk_sessions (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  operator_id uuid NOT NULL,
-  machine_id uuid NOT NULL,
-  logged_in_at timestamp with time zone DEFAULT now(),
-  is_active boolean DEFAULT true,
-  CONSTRAINT kiosk_sessions_pkey PRIMARY KEY (id),
-  CONSTRAINT kiosk_sessions_operator_id_fkey FOREIGN KEY (operator_id) REFERENCES public.profiles(id),
-  CONSTRAINT kiosk_sessions_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id)
-);
-CREATE TABLE public.locations (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  name character varying NOT NULL,
-  code character varying NOT NULL UNIQUE,
-  address text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT locations_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.lot_number_sequences (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  prefix text NOT NULL,
-  date_part text NOT NULL,
-  last_sequence integer NOT NULL DEFAULT 0,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT lot_number_sequences_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.machine_downtime_logs (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  machine_id uuid NOT NULL,
-  job_id uuid,
-  start_time timestamp with time zone NOT NULL,
-  end_time timestamp with time zone,
-  reason character varying NOT NULL,
-  notes text,
-  sent_to_scheduling boolean DEFAULT false,
-  sent_to_scheduling_at timestamp with time zone,
-  logged_by uuid,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT machine_downtime_logs_pkey PRIMARY KEY (id),
-  CONSTRAINT machine_downtime_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT machine_downtime_logs_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT machine_downtime_logs_logged_by_fkey FOREIGN KEY (logged_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.machine_idle_logs (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  machine_id uuid NOT NULL,
-  previous_job_id uuid,
-  next_job_id uuid,
-  idle_start timestamp with time zone NOT NULL,
-  idle_end timestamp with time zone,
-  idle_minutes integer,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT machine_idle_logs_pkey PRIMARY KEY (id),
-  CONSTRAINT machine_idle_logs_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT machine_idle_logs_previous_job_id_fkey FOREIGN KEY (previous_job_id) REFERENCES public.jobs(id),
-  CONSTRAINT machine_idle_logs_next_job_id_fkey FOREIGN KEY (next_job_id) REFERENCES public.jobs(id)
-);
-CREATE TABLE public.machines (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  location_id uuid NOT NULL,
-  name character varying NOT NULL,
-  code character varying NOT NULL,
-  machine_type character varying,
-  status character varying DEFAULT 'available'::character varying CHECK (status::text = ANY (ARRAY['available'::character varying::text, 'in_use'::character varying::text, 'maintenance'::character varying::text, 'offline'::character varying::text, 'down'::character varying::text])),
-  display_order integer DEFAULT 0,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  status_reason text,
-  status_updated_at timestamp with time zone,
-  status_updated_by uuid,
-  kiosk_enabled boolean NOT NULL DEFAULT false,
-  CONSTRAINT machines_pkey PRIMARY KEY (id),
-  CONSTRAINT machines_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id),
-  CONSTRAINT machines_status_updated_by_fkey FOREIGN KEY (status_updated_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.material_receiving (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  material_id uuid,
-  material_type text NOT NULL,
-  bar_size text,
-  bar_length_inches numeric,
-  lot_number text NOT NULL,
-  quantity integer NOT NULL,
-  received_by uuid,
-  received_at timestamp with time zone DEFAULT now(),
-  vendor text,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  rack text,
-  CONSTRAINT material_receiving_pkey PRIMARY KEY (id),
-  CONSTRAINT material_receiving_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
-  CONSTRAINT material_receiving_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.material_types (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  name text NOT NULL UNIQUE,
-  short_code text,
-  category text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT material_types_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.material_usage (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  material_receiving_id uuid,
-  material_id uuid,
-  lot_number text,
-  job_id uuid,
-  quantity_used integer NOT NULL,
-  used_by uuid,
-  used_at timestamp with time zone DEFAULT now(),
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  quantity_used_inches numeric,
-  CONSTRAINT material_usage_pkey PRIMARY KEY (id),
-  CONSTRAINT material_usage_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
-  CONSTRAINT material_usage_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
-  CONSTRAINT material_usage_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT material_usage_used_by_fkey FOREIGN KEY (used_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.materials (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  material_type_id uuid NOT NULL,
-  bar_size_inches numeric NOT NULL,
-  density_lbs_per_cubic_inch numeric,
-  vendor text,
-  notes text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT materials_pkey PRIMARY KEY (id),
-  CONSTRAINT materials_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
-);
-CREATE TABLE public.outbound_sends (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  job_id uuid,
-  work_order_id uuid,
-  operation_type text NOT NULL CHECK (operation_type = ANY (ARRAY['heat_treat'::text, 'cad_plating'::text, 'black_oxide'::text, 'painting'::text, 'priming'::text, 'other'::text])),
-  vendor_name text,
-  quantity integer NOT NULL,
-  sent_at timestamp with time zone,
-  sent_by uuid,
-  expected_return_at date,
-  returned_at timestamp with time zone,
-  returned_by uuid,
-  vendor_lot_number text,
-  cert_document_path text,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  job_routing_step_id uuid,
-  quantity_returned integer,
-  finishing_send_id uuid,
-  CONSTRAINT outbound_sends_pkey PRIMARY KEY (id),
-  CONSTRAINT outbound_sends_finishing_send_id_fkey FOREIGN KEY (finishing_send_id) REFERENCES public.finishing_sends(id),
-  CONSTRAINT outbound_sends_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT outbound_sends_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
-  CONSTRAINT outbound_sends_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.profiles(id),
-  CONSTRAINT outbound_sends_returned_by_fkey FOREIGN KEY (returned_by) REFERENCES public.profiles(id),
-  CONSTRAINT outbound_sends_job_routing_step_id_fkey FOREIGN KEY (job_routing_step_id) REFERENCES public.job_routing_steps(id)
-);
-CREATE TABLE public.part_document_requirements (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  part_id uuid NOT NULL,
-  document_type_id uuid NOT NULL,
-  is_required boolean DEFAULT true,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  required_at character varying DEFAULT 'compliance_review'::character varying CHECK (required_at::text = ANY (ARRAY['compliance_review'::character varying, 'manufacturing_complete'::character varying, 'tco'::character varying]::text[])),
-  CONSTRAINT part_document_requirements_pkey PRIMARY KEY (id),
-  CONSTRAINT part_document_requirements_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
-  CONSTRAINT part_document_requirements_document_type_id_fkey FOREIGN KEY (document_type_id) REFERENCES public.document_types(id)
-);
-CREATE TABLE public.part_documents (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  part_id uuid NOT NULL,
-  document_type_id uuid NOT NULL,
-  file_name character varying NOT NULL,
-  file_url text NOT NULL,
-  file_size integer,
-  mime_type character varying,
-  version character varying DEFAULT 'A'::character varying,
-  revision_notes text,
-  uploaded_by uuid,
-  is_current boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT part_documents_pkey PRIMARY KEY (id),
-  CONSTRAINT part_documents_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
-  CONSTRAINT part_documents_document_type_id_fkey FOREIGN KEY (document_type_id) REFERENCES public.document_types(id),
-  CONSTRAINT part_documents_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.part_machine_durations (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  part_id uuid NOT NULL,
-  machine_id uuid NOT NULL,
-  estimated_minutes integer CHECK (estimated_minutes IS NULL OR estimated_minutes > 0),
-  is_preferred boolean DEFAULT false,
-  preference_order integer DEFAULT 0,
-  notes text,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  created_by uuid,
-  base_quantity integer,
-  CONSTRAINT part_machine_durations_pkey PRIMARY KEY (id),
-  CONSTRAINT part_machine_durations_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
-  CONSTRAINT part_machine_durations_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
-  CONSTRAINT part_machine_durations_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.part_routing_steps (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  part_id uuid NOT NULL,
-  step_order integer NOT NULL,
-  step_name text NOT NULL,
-  step_type text DEFAULT 'internal'::text,
-  default_station text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  notes text,
-  CONSTRAINT part_routing_steps_pkey PRIMARY KEY (id),
-  CONSTRAINT part_routing_steps_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id)
-);
-CREATE TABLE public.parts (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  part_number character varying NOT NULL UNIQUE,
-  description text,
-  customer character varying,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  part_type character varying DEFAULT 'manufactured'::character varying CHECK (part_type::text = ANY (ARRAY['assembly'::character varying, 'finished_good'::character varying, 'manufactured'::character varying, 'purchased'::character varying]::text[])),
-  specification character varying,
-  unit_cost numeric DEFAULT 0,
-  requires_passivation boolean DEFAULT false,
-  material_type_id uuid,
-  drawing_revision character varying,
-  CONSTRAINT parts_pkey PRIMARY KEY (id),
-  CONSTRAINT parts_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
-);
-CREATE TABLE public.profiles (
-  id uuid NOT NULL,
-  email character varying NOT NULL,
-  full_name character varying,
-  role character varying NOT NULL DEFAULT 'machinist'::character varying CHECK (role::text = ANY (ARRAY['admin'::character varying::text, 'compliance'::character varying::text, 'machinist'::character varying::text, 'assembly'::character varying::text, 'display'::character varying::text, 'scheduler'::character varying::text, 'customer_service'::character varying::text, 'finishing'::character varying::text])),
-  home_location_id uuid,
-  can_float boolean DEFAULT false,
-  pin_code character varying,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  can_approve_compliance boolean DEFAULT false,
-  username text DEFAULT split_part((email)::text, '@'::text, 1),
-  CONSTRAINT profiles_pkey PRIMARY KEY (id),
-  CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id),
-  CONSTRAINT profiles_home_location_id_fkey FOREIGN KEY (home_location_id) REFERENCES public.locations(id)
-);
-CREATE TABLE public.routing_template_steps (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  template_id uuid NOT NULL,
-  step_order integer NOT NULL,
-  step_name text NOT NULL,
-  step_type text DEFAULT 'internal'::text,
-  default_station text,
-  created_at timestamp with time zone DEFAULT now(),
-  notes text,
-  CONSTRAINT routing_template_steps_pkey PRIMARY KEY (id),
-  CONSTRAINT routing_template_steps_template_id_fkey FOREIGN KEY (template_id) REFERENCES public.routing_templates(id)
-);
-CREATE TABLE public.routing_templates (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  name text NOT NULL UNIQUE,
-  material_category text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  description text,
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT routing_templates_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.tool_instances (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  tool_id uuid NOT NULL,
-  serial_number character varying NOT NULL,
-  status character varying DEFAULT 'good'::character varying CHECK (status::text = ANY (ARRAY['good'::character varying, 'bad'::character varying, 'discarded'::character varying]::text[])),
-  notes text,
-  logged_by uuid,
-  logged_at timestamp with time zone DEFAULT now(),
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT tool_instances_pkey PRIMARY KEY (id),
-  CONSTRAINT tool_instances_tool_id_fkey FOREIGN KEY (tool_id) REFERENCES public.tools(id),
-  CONSTRAINT tool_instances_logged_by_fkey FOREIGN KEY (logged_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.tools (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  name character varying NOT NULL UNIQUE,
-  tool_type character varying NOT NULL,
-  description text,
-  is_active boolean DEFAULT true,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  CONSTRAINT tools_pkey PRIMARY KEY (id)
-);
-CREATE TABLE public.work_order_assemblies (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  work_order_id uuid NOT NULL,
-  assembly_id uuid NOT NULL,
-  quantity integer NOT NULL DEFAULT 1,
-  created_at timestamp with time zone DEFAULT now(),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending'::character varying, 'in_progress'::character varying, 'paused'::character varying, 'complete'::character varying]::text[])),
-  assembly_started_at timestamp with time zone,
-  assembly_started_by uuid,
-  assembly_completed_at timestamp with time zone,
-  assembly_completed_by uuid,
-  assembly_notes text,
-  station_number integer,
-  assembler_number integer,
-  good_quantity integer,
-  bad_quantity integer,
-  order_quantity integer,
-  stock_quantity integer,
-  CONSTRAINT work_order_assemblies_pkey PRIMARY KEY (id),
-  CONSTRAINT work_order_assemblies_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
-  CONSTRAINT work_order_assemblies_assembly_id_fkey FOREIGN KEY (assembly_id) REFERENCES public.parts(id),
-  CONSTRAINT work_order_assemblies_assembly_started_by_fkey FOREIGN KEY (assembly_started_by) REFERENCES public.profiles(id),
-  CONSTRAINT work_order_assemblies_assembly_completed_by_fkey FOREIGN KEY (assembly_completed_by) REFERENCES public.profiles(id)
-);
-CREATE TABLE public.work_orders (
-  id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  wo_number character varying NOT NULL UNIQUE,
-  customer character varying,
-  po_number character varying,
-  priority character varying DEFAULT 'normal'::character varying CHECK (priority::text = ANY (ARRAY['critical'::character varying, 'high'::character varying, 'normal'::character varying, 'low'::character varying]::text[])),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending'::text, 'in_progress'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'complete'::text, 'shipped'::text, 'on_hold'::text, 'closed'::text, 'cancelled'::text])),
-  due_date date,
-  notes text,
-  created_by uuid,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
-  order_type character varying DEFAULT 'make_to_order'::character varying CHECK (order_type::text = ANY (ARRAY['make_to_order'::character varying, 'make_to_stock'::character varying, 'maintenance'::character varying]::text[])),
-  closed_at timestamp with time zone,
-  closed_by uuid,
-  tco_notes text,
-  maintenance_type text,
-  machine_id uuid,
-  stock_quantity integer,
-  order_quantity integer,
-  tco_parts_tested integer,
-  tco_tensile_pass boolean,
-  tco_shear_pass boolean,
-  CONSTRAINT work_orders_pkey PRIMARY KEY (id),
-  CONSTRAINT work_orders_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
-  CONSTRAINT work_orders_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES public.profiles(id),
-  CONSTRAINT work_orders_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id)
-);
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `assembly_id` | `uuid` |  |
+| `component_id` | `uuid` |  |
+| `quantity` | `int4` |  |
+| `sort_order` | `int4` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `assembly_component_checkins`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `work_order_assembly_id` | `uuid` |  |
+| `job_id` | `uuid` |  |
+| `checked_in_at` | `timestamptz` |  Nullable |
+| `checked_in_by` | `uuid` |  Nullable |
+| `quantity_received` | `int4` |  |
+| `condition_notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `audit_logs`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `event_type` | `text` |  |
+| `job_id` | `uuid` |  Nullable |
+| `machine_id` | `uuid` |  Nullable |
+| `operator_id` | `uuid` |  Nullable |
+| `details` | `jsonb` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `bar_sizes`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `size` | `text` |  Unique |
+| `size_decimal` | `numeric` |  Nullable |
+| `shape` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `customer_order_allocations`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `customer_order_line_id` | `uuid` |  |
+| `work_order_id` | `uuid` |  |
+| `quantity_allocated` | `int4` |  |
+| `is_active` | `bool` |  |
+| `created_by` | `uuid` |  Nullable |
+| `created_at` | `timestamptz` |  |
+| `deactivated_at` | `timestamptz` |  Nullable |
+| `deactivated_by` | `uuid` |  Nullable |
+
+## Table `customer_order_lines`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `customer_order_id` | `uuid` |  |
+| `line_number` | `int4` |  |
+| `part_id` | `uuid` |  |
+| `quantity_ordered` | `int4` |  |
+| `quantity_fulfilled` | `int4` |  |
+| `due_date` | `date` |  Nullable |
+| `priority` | `text` |  |
+| `notes` | `text` |  Nullable |
+| `status` | `text` |  |
+| `cancelled_at` | `timestamptz` |  Nullable |
+| `cancelled_by` | `uuid` |  Nullable |
+| `cancel_reason` | `text` |  Nullable |
+| `fulfilled_at` | `timestamptz` |  Nullable |
+| `fulfilled_by` | `uuid` |  Nullable |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `customer_orders`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `co_number` | `text` |  Unique |
+| `customer_id` | `uuid` |  |
+| `fishbowl_order_id` | `text` |  |
+| `po_number` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `status` | `text` |  |
+| `cancelled_at` | `timestamptz` |  Nullable |
+| `cancelled_by` | `uuid` |  Nullable |
+| `cancel_reason` | `text` |  Nullable |
+| `created_by` | `uuid` |  Nullable |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `customers`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `customer_id` | `text` |  Unique |
+| `name` | `text` |  |
+| `is_active` | `bool` |  |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `document_types`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `code` | `varchar` |  Unique |
+| `name` | `varchar` |  |
+| `description` | `text` |  Nullable |
+| `category` | `varchar` |  Nullable |
+| `file_types_allowed` | `_text` |  Nullable |
+| `requires_approval` | `bool` |  Nullable |
+| `is_digital_form` | `bool` |  Nullable |
+| `sort_order` | `int4` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `finishing_sends`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `machine_id` | `uuid` |  Nullable |
+| `sent_by` | `uuid` |  |
+| `quantity` | `int4` |  |
+| `production_lot_number` | `text` |  Nullable |
+| `material_lot_number` | `text` |  Nullable |
+| `status` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `sent_at` | `timestamptz` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `finishing_stage` | `text` |  Nullable |
+| `stage_started_at` | `timestamptz` |  Nullable |
+| `finishing_operator_id` | `uuid` |  Nullable |
+| `finishing_started_at` | `timestamptz` |  Nullable |
+| `finishing_completed_at` | `timestamptz` |  Nullable |
+| `finishing_lot_number` | `text` |  Nullable |
+| `incoming_count` | `int4` |  Nullable |
+| `verified_count` | `int4` |  Nullable |
+| `count_discrepancy` | `int4` |  Nullable |
+| `verified_by` | `uuid` |  Nullable |
+| `verified_at` | `timestamptz` |  Nullable |
+| `chemical_lot_number` | `text` |  Nullable |
+| `compliance_status` | `text` |  Nullable |
+| `compliance_approved_by` | `uuid` |  Nullable |
+| `compliance_approved_at` | `timestamptz` |  Nullable |
+| `compliance_notes` | `text` |  Nullable |
+| `compliance_good_qty` | `int4` |  Nullable |
+| `compliance_bad_qty` | `int4` |  Nullable |
+| `is_partial_send` | `bool` |  Nullable |
+| `compliance_outcome` | `text` |  Nullable |
+| `chemical_lot_number_2` | `text` |  Nullable |
+| `is_standalone` | `bool` |  |
+| `standalone_operation_type` | `text` |  Nullable |
+
+## Table `import_bom_staging`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `assembly_part_number` | `text` | Primary |
+| `component_part_number` | `text` | Primary |
+| `quantity` | `int4` |  |
+| `sort_order` | `int4` |  |
+
+## Table `import_parts_staging`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `part_number` | `text` | Primary |
+| `description` | `text` |  Nullable |
+| `part_type` | `text` |  |
+
+## Table `job_document_snapshots`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `part_document_id` | `uuid` |  |
+| `document_type_id` | `uuid` |  |
+| `snapshot_file_url` | `text` |  |
+| `snapshot_version` | `varchar` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `job_documents`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `document_type_id` | `uuid` |  Nullable |
+| `file_name` | `varchar` |  Nullable |
+| `file_url` | `text` |  Nullable |
+| `file_size` | `int4` |  Nullable |
+| `mime_type` | `varchar` |  Nullable |
+| `form_data` | `jsonb` |  Nullable |
+| `status` | `varchar` |  Nullable |
+| `uploaded_by` | `uuid` |  Nullable |
+| `approved_by` | `uuid` |  Nullable |
+| `approved_at` | `timestamptz` |  Nullable |
+| `rejection_reason` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `job_materials`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `material_type` | `text` |  |
+| `bar_size` | `text` |  |
+| `lot_number` | `text` |  Nullable |
+| `bars_loaded` | `int4` |  |
+| `bars_remaining` | `int4` |  Nullable |
+| `loaded_by` | `uuid` |  Nullable |
+| `loaded_at` | `timestamptz` |  Nullable |
+| `completed_by` | `uuid` |  Nullable |
+| `completed_at` | `timestamptz` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `bar_length` | `numeric` |  Nullable |
+
+## Table `job_routing_steps`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `step_order` | `int4` |  |
+| `step_name` | `text` |  |
+| `step_type` | `text` |  Nullable |
+| `station` | `text` |  Nullable |
+| `removal_requested_by` | `uuid` |  Nullable |
+| `removal_approved_by` | `uuid` |  Nullable |
+| `removal_approved_at` | `timestamptz` |  Nullable |
+| `lot_number` | `text` |  Nullable |
+| `quantity` | `int4` |  Nullable |
+| `completed_at` | `timestamptz` |  Nullable |
+| `completed_by` | `uuid` |  Nullable |
+| `operator_initials` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `status` | `text` |  Nullable |
+| `removal_requested_at` | `timestamptz` |  Nullable |
+| `removal_reason` | `text` |  Nullable |
+| `is_added_step` | `bool` |  Nullable |
+| `added_by` | `uuid` |  Nullable |
+| `added_at` | `timestamptz` |  Nullable |
+| `started_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `job_tools`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  |
+| `tool_instance_id` | `uuid` |  Nullable |
+| `tool_name` | `varchar` |  |
+| `tool_type` | `varchar` |  Nullable |
+| `serial_number` | `varchar` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `added_by` | `uuid` |  Nullable |
+| `added_at` | `timestamptz` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `jobs`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `work_order_id` | `uuid` |  Nullable |
+| `part_id` | `uuid` |  Nullable |
+| `job_number` | `varchar` |  |
+| `quantity` | `int4` |  |
+| `priority` | `varchar` |  Nullable |
+| `status` | `varchar` |  Nullable |
+| `assigned_machine_id` | `uuid` |  Nullable |
+| `assigned_user_id` | `uuid` |  Nullable |
+| `checked_in_at` | `timestamptz` |  Nullable |
+| `checked_out_at` | `timestamptz` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `component_id` | `uuid` |  Nullable |
+| `work_order_assembly_id` | `uuid` |  Nullable |
+| `scheduled_start` | `timestamptz` |  Nullable |
+| `scheduled_end` | `timestamptz` |  Nullable |
+| `estimated_minutes` | `int4` |  Nullable |
+| `actual_start` | `timestamptz` |  Nullable |
+| `actual_end` | `timestamptz` |  Nullable |
+| `requires_attendance` | `bool` |  Nullable |
+| `scheduled_by` | `uuid` |  Nullable |
+| `scheduled_at` | `timestamptz` |  Nullable |
+| `setup_start` | `timestamptz` |  Nullable |
+| `production_start` | `timestamptz` |  Nullable |
+| `good_pieces` | `int4` |  Nullable |
+| `bad_pieces` | `int4` |  Nullable |
+| `time_per_unit` | `numeric` |  Nullable |
+| `tooling_confirmed` | `bool` |  Nullable |
+| `tooling_override` | `bool` |  Nullable |
+| `tooling_override_by` | `uuid` |  Nullable |
+| `tooling_override_at` | `timestamptz` |  Nullable |
+| `incomplete_reason` | `text` |  Nullable |
+| `incomplete_at` | `timestamptz` |  Nullable |
+| `incomplete_by` | `uuid` |  Nullable |
+| `material_confirmed` | `bool` |  Nullable |
+| `material_confirmed_at` | `timestamptz` |  Nullable |
+| `material_confirmed_by` | `uuid` |  Nullable |
+| `material_override` | `bool` |  Nullable |
+| `material_override_by` | `uuid` |  Nullable |
+| `material_override_at` | `timestamptz` |  Nullable |
+| `is_maintenance` | `bool` |  Nullable |
+| `maintenance_description` | `text` |  Nullable |
+| `finishing_start` | `timestamptz` |  Nullable |
+| `finishing_end` | `timestamptz` |  Nullable |
+| `finishing_operator_id` | `uuid` |  Nullable |
+| `finishing_notes` | `text` |  Nullable |
+| `paused_at` | `timestamptz` |  Nullable |
+| `pause_reason` | `text` |  Nullable |
+| `tooling_required` | `bool` |  Nullable |
+| `production_lot_number` | `text` |  Nullable |
+| `finishing_lot_number` | `text` |  Nullable |
+| `post_mfg_good_qty` | `int4` |  Nullable |
+| `post_mfg_bad_qty` | `int4` |  Nullable |
+| `post_mfg_notes` | `text` |  Nullable |
+| `post_mfg_reviewed_by` | `uuid` |  Nullable |
+| `post_mfg_reviewed_at` | `timestamptz` |  Nullable |
+| `compliance_outcome` | `text` |  Nullable |
+| `compliance_notes` | `text` |  Nullable |
+| `qty_override` | `int4` |  Nullable |
+| `qty_override_reason` | `text` |  Nullable |
+| `qty_override_by` | `uuid` |  Nullable |
+| `qty_override_at` | `timestamptz` |  Nullable |
+| `is_standalone_finishing` | `bool` |  |
+| `source_description` | `text` |  Nullable |
+
+## Table `kiosk_sessions`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `operator_id` | `uuid` |  |
+| `machine_id` | `uuid` |  |
+| `logged_in_at` | `timestamptz` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+
+## Table `locations`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `varchar` |  |
+| `code` | `varchar` |  Unique |
+| `address` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `lot_number_sequences`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `prefix` | `text` |  |
+| `date_part` | `text` |  |
+| `last_sequence` | `int4` |  |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `machine_downtime_logs`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `machine_id` | `uuid` |  |
+| `job_id` | `uuid` |  Nullable |
+| `start_time` | `timestamptz` |  |
+| `end_time` | `timestamptz` |  Nullable |
+| `reason` | `varchar` |  |
+| `notes` | `text` |  Nullable |
+| `sent_to_scheduling` | `bool` |  Nullable |
+| `sent_to_scheduling_at` | `timestamptz` |  Nullable |
+| `logged_by` | `uuid` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `machine_idle_logs`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `machine_id` | `uuid` |  |
+| `previous_job_id` | `uuid` |  Nullable |
+| `next_job_id` | `uuid` |  Nullable |
+| `idle_start` | `timestamptz` |  |
+| `idle_end` | `timestamptz` |  Nullable |
+| `idle_minutes` | `int4` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `machines`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `location_id` | `uuid` |  |
+| `name` | `varchar` |  |
+| `code` | `varchar` |  |
+| `machine_type` | `varchar` |  Nullable |
+| `status` | `varchar` |  Nullable |
+| `display_order` | `int4` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `status_reason` | `text` |  Nullable |
+| `status_updated_at` | `timestamptz` |  Nullable |
+| `status_updated_by` | `uuid` |  Nullable |
+| `kiosk_enabled` | `bool` |  |
+
+## Table `material_receiving`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `material_id` | `uuid` |  Nullable |
+| `material_type` | `text` |  |
+| `bar_size` | `text` |  Nullable |
+| `bar_length_inches` | `numeric` |  Nullable |
+| `lot_number` | `text` |  |
+| `quantity` | `int4` |  |
+| `received_by` | `uuid` |  Nullable |
+| `received_at` | `timestamptz` |  Nullable |
+| `vendor` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `rack` | `text` |  Nullable |
+
+## Table `material_types`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `text` |  Unique |
+| `short_code` | `text` |  Nullable |
+| `category` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `material_usage`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `material_receiving_id` | `uuid` |  Nullable |
+| `material_id` | `uuid` |  Nullable |
+| `lot_number` | `text` |  Nullable |
+| `job_id` | `uuid` |  Nullable |
+| `quantity_used` | `int4` |  |
+| `used_by` | `uuid` |  Nullable |
+| `used_at` | `timestamptz` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `quantity_used_inches` | `numeric` |  Nullable |
+
+## Table `materials`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `material_type_id` | `uuid` |  |
+| `bar_size_inches` | `numeric` |  |
+| `density_lbs_per_cubic_inch` | `numeric` |  Nullable |
+| `vendor` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `outbound_sends`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `job_id` | `uuid` |  Nullable |
+| `work_order_id` | `uuid` |  Nullable |
+| `operation_type` | `text` |  |
+| `vendor_name` | `text` |  Nullable |
+| `quantity` | `int4` |  |
+| `sent_at` | `timestamptz` |  Nullable |
+| `sent_by` | `uuid` |  Nullable |
+| `expected_return_at` | `date` |  Nullable |
+| `returned_at` | `timestamptz` |  Nullable |
+| `returned_by` | `uuid` |  Nullable |
+| `vendor_lot_number` | `text` |  Nullable |
+| `cert_document_path` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `job_routing_step_id` | `uuid` |  Nullable |
+| `quantity_returned` | `int4` |  Nullable |
+| `finishing_send_id` | `uuid` |  Nullable |
+| `source_type` | `text` |  Nullable |
+| `source_id` | `uuid` |  Nullable |
+| `routing_step_id` | `uuid` |  Nullable |
+
+## Table `part_document_requirements`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `part_id` | `uuid` |  |
+| `document_type_id` | `uuid` |  |
+| `is_required` | `bool` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `required_at` | `varchar` |  Nullable |
+
+## Table `part_documents`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `part_id` | `uuid` |  |
+| `document_type_id` | `uuid` |  |
+| `file_name` | `varchar` |  |
+| `file_url` | `text` |  |
+| `file_size` | `int4` |  Nullable |
+| `mime_type` | `varchar` |  Nullable |
+| `version` | `varchar` |  Nullable |
+| `revision_notes` | `text` |  Nullable |
+| `uploaded_by` | `uuid` |  Nullable |
+| `is_current` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+
+## Table `part_machine_durations`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `part_id` | `uuid` |  |
+| `machine_id` | `uuid` |  |
+| `estimated_minutes` | `int4` |  Nullable |
+| `is_preferred` | `bool` |  Nullable |
+| `preference_order` | `int4` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `created_by` | `uuid` |  Nullable |
+| `base_quantity` | `int4` |  Nullable |
+
+## Table `part_routing_steps`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `part_id` | `uuid` |  |
+| `step_order` | `int4` |  |
+| `step_name` | `text` |  |
+| `step_type` | `text` |  Nullable |
+| `default_station` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `notes` | `text` |  Nullable |
+
+## Table `parts`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `part_number` | `varchar` |  Unique |
+| `description` | `text` |  Nullable |
+| `customer` | `varchar` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `part_type` | `varchar` |  Nullable |
+| `specification` | `varchar` |  Nullable |
+| `unit_cost` | `numeric` |  Nullable |
+| `requires_passivation` | `bool` |  Nullable |
+| `material_type_id` | `uuid` |  Nullable |
+| `drawing_revision` | `varchar` |  Nullable |
+
+## Table `profiles`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `email` | `varchar` |  |
+| `full_name` | `varchar` |  Nullable |
+| `role` | `varchar` |  |
+| `home_location_id` | `uuid` |  Nullable |
+| `can_float` | `bool` |  Nullable |
+| `pin_code` | `varchar` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `can_approve_compliance` | `bool` |  Nullable |
+| `username` | `text` |  Nullable |
+
+## Table `routing_template_steps`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `template_id` | `uuid` |  |
+| `step_order` | `int4` |  |
+| `step_name` | `text` |  |
+| `step_type` | `text` |  Nullable |
+| `default_station` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `notes` | `text` |  Nullable |
+
+## Table `routing_templates`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `text` |  Unique |
+| `material_category` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `description` | `text` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `tool_instances`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `tool_id` | `uuid` |  |
+| `serial_number` | `varchar` |  |
+| `status` | `varchar` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `logged_by` | `uuid` |  Nullable |
+| `logged_at` | `timestamptz` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `tools`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `varchar` |  Unique |
+| `tool_type` | `varchar` |  |
+| `description` | `text` |  Nullable |
+| `is_active` | `bool` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `work_order_assemblies`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `work_order_id` | `uuid` |  |
+| `assembly_id` | `uuid` |  |
+| `quantity` | `int4` |  |
+| `created_at` | `timestamptz` |  Nullable |
+| `status` | `varchar` |  Nullable |
+| `assembly_started_at` | `timestamptz` |  Nullable |
+| `assembly_started_by` | `uuid` |  Nullable |
+| `assembly_completed_at` | `timestamptz` |  Nullable |
+| `assembly_completed_by` | `uuid` |  Nullable |
+| `assembly_notes` | `text` |  Nullable |
+| `station_number` | `int4` |  Nullable |
+| `assembler_number` | `int4` |  Nullable |
+| `good_quantity` | `int4` |  Nullable |
+| `bad_quantity` | `int4` |  Nullable |
+| `order_quantity` | `int4` |  Nullable |
+| `stock_quantity` | `int4` |  Nullable |
+| `assembly_lot_number` | `text` |  Nullable |
+| `assembly_lot_entered_by` | `uuid` |  Nullable |
+| `assembly_lot_entered_at` | `timestamptz` |  Nullable |
+
+## Table `work_order_assembly_routing_steps`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `work_order_assembly_id` | `uuid` |  |
+| `step_order` | `int4` |  |
+| `step_name` | `text` |  |
+| `step_type` | `text` |  Nullable |
+| `station` | `text` |  Nullable |
+| `status` | `text` |  Nullable |
+| `removal_requested_by` | `uuid` |  Nullable |
+| `removal_requested_at` | `timestamptz` |  Nullable |
+| `removal_reason` | `text` |  Nullable |
+| `removal_approved_by` | `uuid` |  Nullable |
+| `removal_approved_at` | `timestamptz` |  Nullable |
+| `is_added_step` | `bool` |  Nullable |
+| `added_by` | `uuid` |  Nullable |
+| `added_at` | `timestamptz` |  Nullable |
+| `lot_number` | `text` |  Nullable |
+| `quantity` | `int4` |  Nullable |
+| `started_at` | `timestamptz` |  Nullable |
+| `completed_at` | `timestamptz` |  Nullable |
+| `completed_by` | `uuid` |  Nullable |
+| `operator_initials` | `text` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+
+## Table `work_orders`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `wo_number` | `varchar` |  Unique |
+| `customer` | `varchar` |  Nullable |
+| `po_number` | `varchar` |  Nullable |
+| `priority` | `varchar` |  Nullable |
+| `status` | `varchar` |  Nullable |
+| `due_date` | `date` |  Nullable |
+| `notes` | `text` |  Nullable |
+| `created_by` | `uuid` |  Nullable |
+| `created_at` | `timestamptz` |  Nullable |
+| `updated_at` | `timestamptz` |  Nullable |
+| `order_type` | `varchar` |  Nullable |
+| `closed_at` | `timestamptz` |  Nullable |
+| `closed_by` | `uuid` |  Nullable |
+| `tco_notes` | `text` |  Nullable |
+| `maintenance_type` | `text` |  Nullable |
+| `machine_id` | `uuid` |  Nullable |
+| `stock_quantity` | `int4` |  Nullable |
+| `order_quantity` | `int4` |  Nullable |
+| `tco_parts_tested` | `int4` |  Nullable |
+| `tco_tensile_pass` | `bool` |  Nullable |
+| `tco_shear_pass` | `bool` |  Nullable |
+| `is_combined` | `bool` |  |
+| `has_cancelled_allocation` | `bool` |  |
+

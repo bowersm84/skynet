@@ -400,7 +400,13 @@ export default function Armory({ profile }) {
         drawing_revision: '',
         is_active: true
       })
-      setRoutingSteps([])
+      const newPartType = activeTab === 'assemblies' ? 'assembly' : 'manufactured'
+      const isAssemblyPart = newPartType === 'assembly' || newPartType === 'finished_good'
+      setRoutingSteps(
+        isAssemblyPart
+          ? [{ step_name: 'Assemble', step_type: 'internal', default_station: '', notes: '' }]
+          : []
+      )
       setDocRequirements([])
       setShowDocRequirements(false)
       setPreferredMachineId(null)
@@ -464,8 +470,11 @@ export default function Armory({ profile }) {
       return
     }
 
-    // Routing is mandatory for manufactured and finished_good parts
-    const needsRouting = partForm.part_type === 'manufactured' || partForm.part_type === 'finished_good'
+    // Routing is mandatory for manufactured, assembly, and finished_good parts
+    const needsRouting =
+      partForm.part_type === 'manufactured' ||
+      partForm.part_type === 'finished_good' ||
+      partForm.part_type === 'assembly'
     if (needsRouting && routingSteps.length === 0) {
       alert('Routing is required — add at least one step')
       return
@@ -473,6 +482,17 @@ export default function Armory({ profile }) {
     if (needsRouting && routingSteps.some(s => !s.step_name.trim())) {
       alert('All routing steps must have a name')
       return
+    }
+
+    // Assembly/FG routes must begin with an internal "Assemble" step
+    const isAssemblyType =
+      partForm.part_type === 'assembly' || partForm.part_type === 'finished_good'
+    if (isAssemblyType && needsRouting && routingSteps.length > 0) {
+      const first = routingSteps[0]
+      if (first.step_name.trim().toLowerCase() !== 'assemble' || first.step_type !== 'internal') {
+        alert('Assembly and Finished Good routes must begin with an internal step named "Assemble".')
+        return
+      }
     }
 
     setSaving(true)
@@ -1819,8 +1839,8 @@ export default function Armory({ profile }) {
                 </div>
               )}
 
-              {/* Routing Steps — for manufactured/finished_good */}
-              {partForm.part_type !== 'assembly' && partForm.part_type !== 'purchased' && (
+              {/* Routing Steps — for manufactured/assembly/finished_good */}
+              {partForm.part_type !== 'purchased' && (
                 <div className="border border-gray-700 rounded-lg p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <p className="text-gray-400 text-sm font-medium">
@@ -1835,9 +1855,17 @@ export default function Armory({ profile }) {
                           className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-300 focus:outline-none focus:border-skynet-accent"
                         >
                           <option value="" disabled>Load from Template...</option>
-                          {routingTemplates.map(t => (
-                            <option key={t.id} value={t.id}>{t.name}</option>
-                          ))}
+                          {routingTemplates
+                            .filter(t => {
+                              const isAssemblyPart =
+                                partForm.part_type === 'assembly' || partForm.part_type === 'finished_good'
+                              return isAssemblyPart
+                                ? t.template_type === 'assembly'
+                                : t.template_type === 'component'
+                            })
+                            .map(t => (
+                              <option key={t.id} value={t.id}>{t.name}</option>
+                            ))}
                         </select>
                       )}
                       <button

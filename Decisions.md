@@ -367,3 +367,63 @@ DELETE policy added for symmetry with other tables (RLS audit pattern requires a
 4. **Demand-first UI beats part-first UI for schedulers.** They think in pools, not parts.
 5. **RLS audit pattern continues to pay.** Split policies by cmd; the standing pg_policies query catches missing ones.
 6. **Junction tables vs. parent FK.** When you need many-to-many or partial relationships, the junction is the right answer even if it adds UI complexity. Avoid FK-on-parent shortcuts that don't extend.
+
+## Post-Assembly Outsourcing & Assembly Routing (Sprint 6 — May 3, 2026)
+
+### Assemblies are now first-class routable entities
+- **Decision:** Assembly parts (`part_type IN ('assembly', 'finished_good')`) carry routing in `part_routing_steps` the same way components do. The first step is always `Assemble` (internal); additional steps (Paint, Heat Treatment, etc.) are added as needed in the master route.
+- **Why:** The fan-in pattern (components manufactured → converge at assembly) was implicit. Making the `Assemble` step explicit on a route lets us hang downstream steps (paint, engraving, future inspection) off the same routing engine that already handles component external steps. No special-casing — the routing engine just runs.
+- **Reused `part_routing_steps`** rather than building a parallel master table. The `part_id` FK is part-type-agnostic; we just start populating rows for assembly/FG part_ids. Backfill seeded the standard `Assemble` step on every existing assembly/FG part on May 3.
+
+### Runtime copy: `work_order_assembly_routing_steps`
+- **Decision:** Per-WOA routing copy lives in a parallel runtime table that mirrors `job_routing_steps` exactly (status, modification tracking, production data fields, FKs to profiles).
+- **Why:** WOA-level routing needs its own runtime because a WOA represents a distinct production unit from any single component job. Same status enum, same removal/addition workflow, same drag-and-drop reorder UI patterns can be reused.
+- **Backward compatibility:** WOAs without rows in this table fall through to the existing single-step Assemble flow (no behavior change for the 95% case).
+
+### Polymorphic `outbound_sends`
+- **Decision:** `outbound_sends.source_type` is constrained to `('finishing_send', 'work_order_assembly')` with `source_id` pointing to whichever entity. Legacy `finishing_send_id` and `job_routing_step_id` columns retained for backward compatibility but the polymorphic columns are the canonical path going forward.
+- **Why:** One outsourcing workflow, two upstream sources. Ashley's send-out and return UX is identical whether the box of parts came from finishing or from assembly. Doubling the table or building a parallel `assembly_sends` would force her to learn a second workflow for what is mechanically the same operation.
+- **Future-proof:** `source_type` enum can be extended (e.g., `'purchased_part'` for James's external passivation queue, item #104) without further schema migration.
+
+### Batch sending happens at the Assembly step (not OutsourcedJobs)
+- **Decision:** Jody sends partial qty to outsource directly from the Assembly module — same UX pattern as the kiosk's "Send to Finishing" button. Auto-creates an `outbound_sends` row with `source_type='work_order_assembly'`, `sent_at=NULL`, `vendor_name=NULL`. On Complete Assembly, the remaining qty auto-creates a final `outbound_sends` row.
+- **Why:** Mirrors the established kiosk → finishing batch flow, which Jody and the team already understand mentally. Ashley's OutsourcedJobs UI sees these as "Ready to Send" cards exactly like the existing finishing batches; she fills in vendor + sent_at when actually shipping.
+- **No intermediate `assembly_sends` table:** unlike finishing (which has its own multi-stage processing), assembly outsourcing has no in-house intermediate. The `outbound_sends` row IS the batch entity from the moment Jody marks it ready.
+
+### No post-assembly compliance gate
+- **Decision:** Assembly Complete branches directly to `ready_for_outsource` (if downstream external step exists) or `pending_tco` (if not). Roger does not review assemblies before they go to paint.
+- **Why:** Per April (04/15/26) and Matt's confirmation in S6 design discussion, the team doesn't gate finished assemblies before vendor send-out — that gate exists for finishing batches only. TCO covers final QC after parts return from the vendor.
+- **Implication:** Removing this from scope cut ~4 hours of UI/workflow work. Symmetry with the post-finishing compliance gate was tempting but not required by the actual workflow.
+
+### Assembly Lot Number — manual entry, automation deferred
+- **Decision:** New `assembly_lot_number text` column on `work_order_assemblies` plus tracking columns (`assembly_lot_entered_by`, `assembly_lot_entered_at`). Operator types the ALN from the existing manual logbook at Start Assembly. No `lot_number_sequences` row, no auto-generation in S6.
+- **Why:** The team currently maintains a paper logbook for assembly lot numbers. Forcing system-generated ALNs in S6 would mean operators would need to track *both* their handwritten book and the system number until adoption settled — a recipe for divergence. Capturing the existing book number digitally is the bridge step. Auto-generation will fold in later once the digital workflow is the source of truth.
+- **Vendor return lot:** Same pattern. Skybolt currently assigns 5-digit lot numbers manually when parts return from vendors. Captured manually in `outbound_sends.vendor_lot_number` (existing column) for now. Auto-generation deferred.
+
+### WOA status enum extended
+- **Decision:** `work_order_assemblies.status` CHECK now includes `ready_for_outsource`, `at_external_vendor`, `pending_tco` in addition to the original four (`pending`, `in_progress`, `paused`, `complete`).
+- **Why:** WOA status is the granular truth for the parent WO's post-assembly state. The WO-level status remains coarse (`in_assembly` / `complete`); WO Lookup surfaces the WOA detail line ("Out for Paint · Vendor Name") so Roger doesn't have to drill in.
+- **Status flow:**
+  - `in_assembly` → (assemble step complete + external step exists) → `ready_for_outsource`
+  - `ready_for_outsource` → (Ashley logs first send-out) → `at_external_vendor`
+  - `at_external_vendor` → (all sends returned) → `pending_tco`
+  - `pending_tco` → (TCO sign-off) → `complete`
+  - If no external step: `in_assembly` → `pending_tco` directly (existing flow, unchanged)
+
+### Routing templates split: component vs assembly
+- **Decision:** New `routing_templates.template_type` column with CHECK `('component','assembly')`. Existing 4 templates (Stainless, Steel, Heat-Treat Steel, Aluminium) defaulted to `'component'`. Three new assembly templates seeded: `Standard Assembly`, `Painted Assembly`, `Heat-Treated Assembly`.
+- **Why:** Same templates table, two distinct domains. The Armory Routing Templates tab toggles between Component and Assembly views. Component templates only show in component edit modal; Assembly templates only show in product edit modal. Keeps the master data UI from becoming a soup of unrelated routes.
+
+### What we did NOT change
+- Component-level routing flow (`job_routing_steps` and the kiosk → finishing → outsourcing pipeline).
+- Compliance review module (post-finishing compliance gate untouched).
+- TCO module (still the catch-all final gate).
+- Existing `outbound_sends` rows or workflow — legacy `finishing_send_id` column retained, polymorphic columns added alongside.
+- `routing_templates.material_category` semantics for component templates.
+
+This containment was deliberate. Post-assembly outsourcing is additive — it activates only when a WOA has an external routing step. Default Standard Assembly route (Assemble only) means the 95% case behaves exactly as it did before S6.
+
+### Lessons added to the playbook
+1. **Polymorphic source columns beat parallel tables** when one downstream workflow serves multiple upstream sources. Saved a table and a parallel UX in this sprint; will absorb the purchased-parts queue later.
+2. **Backward-compatible defaults are free with a backfill.** Seeding the standard "Assemble" step into every existing assembly/FG part means nothing breaks for in-flight WOAs.
+3. **Manual entry now, automation later.** Capturing existing paper-book numbers digitally is the lower-friction bridge to full automation. The schema accommodates both modes.

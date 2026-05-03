@@ -244,9 +244,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       }
 
       // Outsourced count — sum of:
-      //  (a) outbound_sends still at vendor (sent but not returned)
-      //  (b) approved batches with a pending external step (ready to send)
-      const [{ count: atVendorCount }, { data: readyBatches }, { data: existingSends }] = await Promise.all([
+      //  (a) outbound_sends still at vendor (sent but not returned) — both source types
+      //  (b) approved finishing batches with a pending external step (ready to send)
+      //  (c) assembly-source outbound_sends not yet sent (Jody created the row at Complete/Send Batch,
+      //      Ashley hasn't logged send-out yet)
+      const [
+        { count: atVendorCount },
+        { data: readyBatches },
+        { data: existingSends },
+        { count: asmReadyCount }
+      ] = await Promise.all([
         supabase
           .from('outbound_sends')
           .select('*', { count: 'exact', head: true })
@@ -266,7 +273,12 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         supabase
           .from('outbound_sends')
           .select('finishing_send_id, job_routing_step_id')
-          .not('finishing_send_id', 'is', null)
+          .not('finishing_send_id', 'is', null),
+        supabase
+          .from('outbound_sends')
+          .select('*', { count: 'exact', head: true })
+          .eq('source_type', 'work_order_assembly')
+          .is('sent_at', null)
       ])
 
       // Build a set of (batch, step) combos that already have an outbound_send
@@ -287,7 +299,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         return total
       })()
 
-      setOutsourcedCount((atVendorCount || 0) + readyToSendCount)
+      setOutsourcedCount((atVendorCount || 0) + readyToSendCount + (asmReadyCount || 0))
 
       setLastUpdated(new Date())
       console.log('✅ fetchData complete!')
@@ -437,7 +449,12 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             status,
             good_quantity,
             bad_quantity,
-            assembly:parts!assembly_id(id, part_number, description)
+            assembly_lot_number,
+            assembly:parts!assembly_id(id, part_number, description),
+            work_order_assembly_routing_steps (
+              id, step_order, step_name, step_type, status,
+              lot_number, completed_at, is_added_step
+            )
           ),
           jobs (
             id,
@@ -506,7 +523,59 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         return latestJob && new Date(wo.created_at) > sevenDaysAgo
       }) || []
 
-      setWOLookupData([...activeWOs, ...completedWOs])
+      // Hydrate WOA-level outbound_sends (polymorphic — no FK, fetched separately)
+      const allWoaIds = []
+      const finalWOs = [...activeWOs, ...completedWOs]
+      for (const wo of finalWOs) {
+        for (const woa of (wo.work_order_assemblies || [])) {
+          if (woa.id) allWoaIds.push(woa.id)
+        }
+      }
+
+      let asmSendsByWoa = {}
+      if (allWoaIds.length > 0) {
+        const { data: asmSends, error: asmErr } = await supabase
+          .from('outbound_sends')
+          .select(`
+            id, source_id, routing_step_id, operation_type, quantity, sent_at,
+            expected_return_at, returned_at, vendor_name, vendor_lot_number,
+            quantity_returned, created_at
+          `)
+          .eq('source_type', 'work_order_assembly')
+          .in('source_id', allWoaIds)
+          .order('created_at', { ascending: true })
+
+        if (asmErr) {
+          console.error('Error fetching WOA outbound_sends:', asmErr)
+        } else {
+          for (const send of asmSends || []) {
+            if (!asmSendsByWoa[send.source_id]) asmSendsByWoa[send.source_id] = []
+            asmSendsByWoa[send.source_id].push(send)
+          }
+        }
+      }
+
+      // Attach the sends list (and a batch-letter map) to each WOA so render code can use them
+      for (const wo of finalWOs) {
+        for (const woa of (wo.work_order_assemblies || [])) {
+          const sends = asmSendsByWoa[woa.id] || []
+          woa.assembly_outbound_sends = sends
+          // Per-WOA per-step batch lettering: A, B, C... ordered by created_at within each routing_step_id
+          const byStep = {}
+          for (const s of sends) {
+            const k = s.routing_step_id || '_'
+            if (!byStep[k]) byStep[k] = []
+            byStep[k].push(s)
+          }
+          const letterMap = {}
+          for (const stepId in byStep) {
+            byStep[stepId].forEach((s, i) => { letterMap[s.id] = String.fromCharCode(65 + i) })
+          }
+          woa.assembly_send_letter_map = letterMap
+        }
+      }
+
+      setWOLookupData(finalWOs)
 
       // Standalone J-FIN jobs have no work order; fetch separately
       const { data: standaloneJobsData, error: standaloneError } = await supabase
@@ -672,18 +741,34 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       return { qty: job.qty_override, verified: true, overridden: true }
     }
 
-    // 1. Outsourcing returns — check if any outbound_sends have returned values
+    // 1. Outsourcing returns — group by routing step, pick the latest step, sum its returns.
+    //    Single step + multi-batch case → sum all batches.
+    //    Sequential ops case → only the latest op's batches matter (prior op's output
+    //    was the input to the next op).
     if (job.outbound_sends?.length) {
       const completedReturns = job.outbound_sends.filter(s =>
         s.returned_at && s.quantity_returned != null
       )
       if (completedReturns.length > 0) {
-        // Sum across all returned sends. If multiple operations, the last
-        // one is the most authoritative since it was the last touch.
-        const sortedReturns = [...completedReturns].sort(
-          (a, b) => new Date(b.returned_at) - new Date(a.returned_at)
-        )
-        return { qty: sortedReturns[0].quantity_returned, verified: true, overridden: false }
+        // Group by step. Try the polymorphic routing_step_id first (S6+), fall back to
+        // the legacy job_routing_step_id field (pre-S6 finishing-side rows).
+        const byStep = {}
+        for (const s of completedReturns) {
+          const stepId = s.routing_step_id || s.job_routing_step_id || '_unknown_'
+          if (!byStep[stepId]) byStep[stepId] = []
+          byStep[stepId].push(s)
+        }
+        // Pick the step whose most-recent return is the latest overall (that's the most
+        // recent operation in the sequence).
+        const groups = Object.keys(byStep).map(id => {
+          const sends = byStep[id]
+          const latestMs = Math.max(...sends.map(s => new Date(s.returned_at).getTime()))
+          return { stepId: id, sends, latestMs }
+        })
+        groups.sort((a, b) => b.latestMs - a.latestMs)
+        const latestStepSends = groups[0].sends
+        const sum = latestStepSends.reduce((acc, s) => acc + (s.quantity_returned || 0), 0)
+        return { qty: sum, verified: true, overridden: false }
       }
     }
 
@@ -711,6 +796,26 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
 
     // 4. Original order
     return { qty: job.quantity, verified: false, overridden: false }
+  }
+
+  // How many units have completed ALL routing steps and are ready to ship?
+  // - No external steps  → woa.good_quantity (0 until Jody clicks Complete)
+  // - With external(s)   → sum of quantity_returned for the LAST external step
+  //   (each external consumes the prior step's output, so only the latest matters)
+  const computeAvailableQty = (woa) => {
+    const steps = (woa?.work_order_assembly_routing_steps || [])
+      .slice()
+      .sort((a, b) => b.step_order - a.step_order)  // descending — last step first
+    const lastExternal = steps.find(s => s.step_type === 'external')
+
+    if (!lastExternal) {
+      // No external steps — available is whatever Jody marked good at Complete
+      return woa?.good_quantity || 0
+    }
+
+    const returnedSends = (woa?.assembly_outbound_sends || [])
+      .filter(s => s.routing_step_id === lastExternal.id && s.returned_at)
+    return returnedSends.reduce((sum, s) => sum + (s.quantity_returned || 0), 0)
   }
 
   // Return the best available count for a single finishing_send batch.
@@ -2171,19 +2276,13 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                   <Calendar size={12} />
                                   Due: {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : 'N/A'}
                                 </span>
-                                {wo.order_type === 'make_to_order' && wo.order_quantity > 0 && (
+                                {wo.order_type !== 'maintenance' && ((wo.order_quantity || 0) + (wo.stock_quantity || 0) > 0) && (
                                   <span className="flex items-center gap-1">
                                     <Package size={12} />
                                     Qty: {(wo.order_quantity || 0) + (wo.stock_quantity || 0)}
-                                    {wo.stock_quantity > 0 && (
+                                    {wo.order_quantity > 0 && wo.stock_quantity > 0 && (
                                       <span className="text-gray-500">({wo.order_quantity} order + {wo.stock_quantity} stock)</span>
                                     )}
-                                  </span>
-                                )}
-                                {wo.order_type === 'make_to_stock' && wo.stock_quantity > 0 && (
-                                  <span className="flex items-center gap-1">
-                                    <Package size={12} />
-                                    Qty: {wo.stock_quantity}
                                   </span>
                                 )}
                               </div>
@@ -2235,12 +2334,25 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             <p className="text-xs text-gray-400">{woa.assembly?.description}</p>
                                           </div>
                                         </div>
-                                        <div className="flex items-center gap-3 text-sm">
+                                        <div className="flex flex-col items-end gap-0.5 text-sm">
                                           <span className="text-gray-500">Qty: {woa.quantity}
                                             {woa.order_quantity != null && (
                                               <span className="text-gray-600"> ({woa.order_quantity} order + {woa.stock_quantity || 0} stock)</span>
                                             )}
                                           </span>
+                                          {(() => {
+                                            const available = computeAvailableQty(woa)
+                                            if (available <= 0) return null
+                                            const fullyDelivered = available >= woa.quantity
+                                            return (
+                                              <span className={`text-xs ${fullyDelivered ? 'text-green-400' : 'text-emerald-400/80'}`}>
+                                                Available: <span className="font-medium">{available}</span>
+                                                {!fullyDelivered && (
+                                                  <span className="text-gray-600"> / {woa.quantity}</span>
+                                                )}
+                                              </span>
+                                            )
+                                          })()}
                                           {woa.status === 'complete' && (
                                             <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-400 rounded">
                                               {woa.good_quantity}/{woa.quantity} good
@@ -2249,6 +2361,122 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                         </div>
                                       </div>
                                     </div>
+
+                                    {/* Assembly Routing — only render if WOA has any routing steps with non-trivial route */}
+                                    {woa.work_order_assembly_routing_steps?.length > 0 && (() => {
+                                      const sortedAsmSteps = [...woa.work_order_assembly_routing_steps]
+                                        .sort((a, b) => a.step_order - b.step_order)
+                                      const hasOnlyAssembleStep =
+                                        sortedAsmSteps.length === 1 &&
+                                        sortedAsmSteps[0].step_name?.toLowerCase() === 'assemble'
+                                      // Skip render for trivial single-Assemble routes — no value over the existing UI
+                                      if (hasOnlyAssembleStep && !woa.assembly_lot_number) return null
+                                      return (
+                                        <div className="px-4 py-2 pl-10 bg-cyan-950/10 border-b border-gray-700">
+                                          <div className="flex items-center gap-2 mb-1">
+                                            <span className="text-[10px] uppercase tracking-wide text-cyan-300 font-medium">Assembly Routing</span>
+                                            {woa.assembly_lot_number && (
+                                              <span className="flex items-center gap-1 text-xs text-cyan-400 font-mono">
+                                                ALN: {woa.assembly_lot_number}
+                                              </span>
+                                            )}
+                                            {woa.status === 'ready_for_outsource' && (
+                                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-900/30 text-amber-300 border border-amber-800">Ready for Outsource</span>
+                                            )}
+                                            {woa.status === 'at_external_vendor' && (
+                                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-300 border border-blue-800">At Vendor</span>
+                                            )}
+                                            {woa.status === 'pending_tco' && (
+                                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-900/30 text-emerald-300 border border-emerald-800">Returned · Pending TCO</span>
+                                            )}
+                                          </div>
+                                          <div className="space-y-0.5">
+                                            {sortedAsmSteps.map(step => {
+                                              const stepSends = step.step_type === 'external'
+                                                ? (woa.assembly_outbound_sends || []).filter(s => s.routing_step_id === step.id)
+                                                : []
+                                              const totalSent = stepSends.reduce((sum, s) => sum + (s.quantity || 0), 0)
+                                              const totalReturned = stepSends.reduce((sum, s) => sum + (s.quantity_returned || 0), 0)
+                                              const allReturned = stepSends.length > 0 && stepSends.every(s => s.returned_at != null)
+
+                                              return (
+                                                <div key={step.id}>
+                                                  {/* Step header row */}
+                                                  <div className="flex items-center gap-2 text-xs pl-2 border-l border-cyan-900/40">
+                                                    <span className="text-gray-500 font-mono">{step.step_order}.</span>
+                                                    <span className={`text-gray-300 ${(step.status === 'removed' || step.status === 'skipped') ? 'line-through' : ''}`}>
+                                                      {step.step_name}
+                                                    </span>
+                                                    {step.step_type === 'external' && (
+                                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-orange-900/30 text-orange-400 border border-orange-800">External</span>
+                                                    )}
+                                                    {step.is_added_step && (
+                                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-900/30 text-purple-300 border border-purple-800">Ad-hoc</span>
+                                                    )}
+                                                    {step.status === 'in_progress' && (
+                                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">In Progress</span>
+                                                    )}
+                                                    {step.status === 'complete' && step.step_type !== 'external' && (
+                                                      <span className="flex items-center gap-1 text-green-400">
+                                                        <CheckCircle size={10} />
+                                                        {step.lot_number || ''}
+                                                      </span>
+                                                    )}
+                                                    {step.step_type === 'external' && stepSends.length > 0 && (
+                                                      <span className="text-gray-500 text-[10px]">
+                                                        {totalSent} sent
+                                                        {totalReturned > 0 && (
+                                                          <span className={allReturned ? 'text-green-400' : 'text-amber-400'}>
+                                                            {' '}· {totalReturned} returned
+                                                          </span>
+                                                        )}
+                                                      </span>
+                                                    )}
+                                                    {step.status === 'pending' && step.step_order === 1 && woa.status === 'in_progress' && (
+                                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800">In Progress</span>
+                                                    )}
+                                                    {step.status === 'removed' && (
+                                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-500 border border-gray-700">Removed</span>
+                                                    )}
+                                                  </div>
+
+                                                  {/* Per-batch outbound_send detail under each external step */}
+                                                  {step.step_type === 'external' && stepSends.length > 0 && (
+                                                    <div className="ml-6 mt-0.5 space-y-0.5">
+                                                      {stepSends.map(send => {
+                                                        const letter = woa.assembly_send_letter_map?.[send.id] || ''
+                                                        return (
+                                                          <div key={send.id} className="flex items-center gap-2 text-[11px] text-gray-400 pl-2 border-l border-purple-900/30 flex-wrap">
+                                                            {letter && (
+                                                              <span className="px-1 py-0.5 bg-purple-900/30 text-purple-300 rounded font-mono text-[9px]">Batch {letter}</span>
+                                                            )}
+                                                            {!send.sent_at ? (
+                                                              <span className="text-amber-400">Pending send · {send.quantity} pcs queued</span>
+                                                            ) : !send.returned_at ? (
+                                                              <span className="text-blue-400">
+                                                                {send.quantity} sent
+                                                                {send.vendor_name && <span className="text-gray-500"> to {send.vendor_name}</span>}
+                                                                <span className="text-gray-500"> · awaiting return</span>
+                                                              </span>
+                                                            ) : (
+                                                              <span className="text-green-400">
+                                                                {send.quantity} sent → {send.quantity_returned} returned
+                                                                {send.vendor_name && <span className="text-gray-500"> · {send.vendor_name}</span>}
+                                                                {send.vendor_lot_number && <span className="text-cyan-400"> · {send.vendor_lot_number}</span>}
+                                                              </span>
+                                                            )}
+                                                          </div>
+                                                        )
+                                                      })}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              )
+                                            })}
+                                          </div>
+                                        </div>
+                                      )
+                                    })()}
 
                                     {/* Jobs under this assembly */}
                                     {assemblyJobs.length > 0 ? (

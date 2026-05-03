@@ -10,6 +10,7 @@ export default function RoutingTemplatesTab({ onDataChange }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(null)
+  const [templateTypeFilter, setTemplateTypeFilter] = useState('component')
 
   // Modal state
   const [showModal, setShowModal] = useState(false)
@@ -28,6 +29,7 @@ export default function RoutingTemplatesTab({ onDataChange }) {
         routing_template_steps(*)
       `)
       .eq('is_active', true)
+      .eq('template_type', templateTypeFilter)
       .order('name')
 
     if (!error) {
@@ -39,7 +41,7 @@ export default function RoutingTemplatesTab({ onDataChange }) {
       setTemplates(sorted)
     }
     setLoading(false)
-  }, [])
+  }, [templateTypeFilter])
 
   useEffect(() => {
     fetchTemplates()
@@ -127,6 +129,7 @@ export default function RoutingTemplatesTab({ onDataChange }) {
             name: form.name.trim(),
             description: form.description.trim() || null,
             material_category: form.material_category.trim() || null,
+            template_type: templateTypeFilter,
             updated_at: new Date().toISOString()
           })
           .eq('id', editingTemplate.id)
@@ -137,7 +140,8 @@ export default function RoutingTemplatesTab({ onDataChange }) {
           .insert({
             name: form.name.trim(),
             description: form.description.trim() || null,
-            material_category: form.material_category.trim() || null
+            material_category: form.material_category.trim() || null,
+            template_type: templateTypeFilter
           })
           .select()
           .single()
@@ -210,7 +214,37 @@ export default function RoutingTemplatesTab({ onDataChange }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-gray-400">Manage routing templates for manufacturing processes</p>
+        <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setTemplateTypeFilter('component')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                templateTypeFilter === 'component'
+                  ? 'bg-skynet-accent text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+              }`}
+            >
+              Component Routes
+            </button>
+            <button
+              type="button"
+              onClick={() => setTemplateTypeFilter('assembly')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                templateTypeFilter === 'assembly'
+                  ? 'bg-skynet-accent text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+              }`}
+            >
+              Assembly Routes
+            </button>
+          </div>
+          <p className="text-gray-500 text-sm">
+            {templateTypeFilter === 'component'
+              ? 'Routes for manufactured components'
+              : 'Routes for assembled products'}
+          </p>
+        </div>
         <button
           onClick={() => openModal()}
           className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"

@@ -10,8 +10,10 @@ import {
   Ban,
   AlertTriangle,
   ExternalLink,
+  Pencil,
 } from 'lucide-react'
 import CreateCustomerOrderModal from '../components/CreateCustomerOrderModal'
+import EditCustomerOrderModal from '../components/EditCustomerOrderModal'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
 import {
   CO_STATUS_LABELS,
@@ -42,6 +44,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
   const [actionStatus, setActionStatus] = useState(null)
 
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [editCoId, setEditCoId] = useState(null)
   const [confirmAction, setConfirmAction] = useState(null) // { type, ...payload }
 
   // CO-line allocation drilldown state. Only one panel open at a time.
@@ -446,6 +449,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
                     onToggle={() => toggleExpand(co.id)}
                     canEdit={canEdit}
                     canCancelCO={canCancelCO}
+                    onEditCOClick={() => setEditCoId(co.id)}
                     onCancelCOClick={() =>
                       setConfirmAction({
                         type: 'cancel_co',
@@ -492,6 +496,20 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
           onSuccess={() => {
             setActionStatus({ type: 'success', message: 'Customer order created.' })
             loadOrders()
+          }}
+        />
+      )}
+
+      {editCoId && (
+        <EditCustomerOrderModal
+          isOpen={!!editCoId}
+          coId={editCoId}
+          profile={profile}
+          onClose={() => setEditCoId(null)}
+          onSuccess={() => {
+            setActionStatus({ type: 'success', message: 'Customer order updated.' })
+            loadOrders()
+            setEditCoId(null)
           }}
         />
       )}
@@ -580,6 +598,7 @@ function CORow({
   onToggle,
   canEdit,
   canCancelCO,
+  onEditCOClick,
   onCancelCOClick,
   onMarkLineCompleteClick,
   onCancelLineClick,
@@ -627,6 +646,15 @@ function CORow({
           {co.created_at ? new Date(co.created_at).toLocaleDateString() : '—'}
         </td>
         <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+          {canEdit && co.status !== 'cancelled' && (
+            <button
+              onClick={onEditCOClick}
+              className="px-2 py-1 text-xs text-purple-300 hover:bg-purple-900/30 rounded inline-flex items-center gap-1 mr-1"
+              title="Edit customer order"
+            >
+              <Pencil size={12} /> Edit
+            </button>
+          )}
           {canCancelCO && (
             <button
               onClick={onCancelCOClick}

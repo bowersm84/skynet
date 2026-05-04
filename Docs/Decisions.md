@@ -452,3 +452,68 @@ Chemical traceability through finishing's per-job FLN scope is preserved. Assemb
 
 ### Flag flip behavior
 The change is one line. Existing WOs at flip time keep behaving under the rules they were created with (no retro-routing). New WOs created after the flip get the full S6 Jody-driven flow.
+
+---
+
+## Sprint 6 — Post-Assembly Outsourcing & Pre-Go-Live Hardening (May 3-4, 2026)
+
+S6 was originally scoped as the post-assembly outsourcing build (Jody-driven assembly module → outsource → return). Mid-sprint we made the call to ship **without the assembly module active**, behind a feature flag, because Jody and her team weren't trained yet. The post-assembly outsourcing capability is fully built and tested; it activates when `FEATURES.ASSEMBLY_MODULE` flips to `true`. The remainder of the sprint became pre-go-live hardening — a series of bugs surfaced during testing, most of them in the multi-batch flow path that the original code never anticipated.
+
+### Assembly module — feature-flagged for go-live
+
+- **Decision:** `src/config.js` exports `FEATURES.ASSEMBLY_MODULE`. Default `false`. Flipping requires a code commit + Amplify redeploy (no Armory toggle, no env var).
+- **Why hardcoded constant, not env var or DB toggle:** A constant lives in source, is searchable in `git log`, leaves a clean audit trail per flip, and has no out-of-band coordination step (env vars in Vite require both a build config update AND a rebuild). DB toggles invite accidental flips during a Jody shift. The flag will move once at most, maybe twice — the lightweight option is correct.
+- **What hides when off:** Assembly nav entry in Mainframe; Assembly KPI tile (and the `lg:grid-cols-7` grid auto-collapses to `lg:grid-cols-6`); the `selectedView === 'assembly'` route renders a polite "module disabled" placeholder for any deep-links.
+- **Status routing when off:** Components flow to `pending_tco` directly after their external work (instead of `ready_for_assembly`). Three sites in `ComplianceReview.jsx` and one in `OutsourcedJobs.jsx` carry the `(partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE) ? 'pending_tco' : 'ready_for_assembly'` branch.
+- **Post-assembly outsourcing also off when flag off:** Originally the system was going to auto-create assembly outbound_sends so Ashley could ship paint/HT batches without Jody. Two issues during testing — the auto-created qty was wrong (used `woa.quantity` target instead of actual supply), and creating the send right after compliance approval is logically premature (nothing has physically been assembled yet at that moment). Decision: skip post-assembly outsourcing entirely while the flag is off. Skybolt handles painting/HT of assembled products outside SkyNet during the flag-off period, same as how they handle the assembly act itself. WOAs sit at `pending` and TCO closes them out as-is. The `maybeCreateAssemblyOutboundSends` helper was deleted in the second pass, not just neutered behind the flag.
+
+### Multi-batch flow architecture (the sprint's hardest lessons)
+
+Three bugs surfaced during testing that traced to the same root cause: code paths assumed single-batch flow and broke when multiple batches arrived in the same routing step.
+
+- **`getEffectiveQty` path 1** returned only the most recent return's `quantity_returned` instead of summing across batches. WO Lookup showed 275/700 instead of 655/700 when two HT batches returned. **Fix:** Group returns by routing step, identify the latest step, sum `quantity_returned` for that step's batches. Single-step multi-batch case sums correctly; sequential ops case (HT → BO) only the latest op's batches matter.
+- **Premature `pending_tco` rollup on assembly outbound return** marked the assembly's external step `complete` and flipped WOA + jobs to `pending_tco` after the FIRST batch returned, even though more components were still being assembled. **Fix (Hotfix 4):** External routing steps don't get marked complete from returns alone — only when ALL routing steps are complete (Assemble + every external) does the WOA flip. The `Complete` handler in Assembly.jsx (Batch C C3) sweeps external steps when assembly is done.
+- **Late-arriving approved batches stranded** when their parent job had already rolled to `pending_tco` (e.g., earlier batches met the qty_override). `OutsourcedJobs.fetchReadyToSend` filtered those out. **Fix:** Filter relaxed to exclude only truly terminal statuses (`complete`, `cancelled`, `incomplete`). `handleLogSendOut` defensively reopens routing steps that were prematurely marked complete by earlier batches.
+
+**Pattern:** Multi-batch is the dominant case in this codebase, not the edge case. Future code that touches batch flow must explicitly handle: (a) sum across multiple batches at the same step, (b) don't close upstream gates while work may still arrive, (c) late batches on already-rolled-up jobs still need to flow through outsourcing.
+
+### Traveler external-step lot rendering
+
+- **Decision:** `src/lib/traveler.js` resolves external step lot numbers from the linked `outbound_sends.vendor_lot_number` first, falling back to `step.lot_number` only when no per-send value is available.
+- **Why:** Same root issue as Hotfix 3's WO Lookup fix — `step.lot_number` is a single field that holds only the most recent return's lot. When multiple batches return, it overwrites earlier values. Reading from `outbound_sends` per-batch keeps the traveler aligned with WO Lookup.
+
+### FLN scope — per-job, not per-active-bath (revised)
+
+- **Decision:** `finishing_lot_number` is per-job. All finishing batches of the same job share one FLN. Different jobs always get distinct FLNs.
+- **Why changed:** Originally the FLN persistence rule was "any batch in flight with an FLN → reuse it" — modeled on the chemical bath. This caused different jobs running simultaneously to share an FLN, which Skybolt's compliance team didn't want. The chemical-bath traceability is preserved separately via `chemical_lot_number` and `chemical_lot_number_2` on each batch (those continue to persist globally).
+- **Implementation:** `getCurrentFinishingLotForJob(jobId)` replaces `getCurrentFinishingLot()`. Filtered by `job_id`, ordered ascending so the canonical (first-issued) FLN for the job is returned.
+
+### Manual-pickup material lot — sticky on job, mandatory
+
+- **Decision:** The Manual Pickup ("Send Batch to Finishing") modal in `Finishing.jsx` requires a Material Lot # entry. Sticky on parent job: typed once on Batch A, pre-fills from `job_materials.lot_number` for Batch B+. Closes the lot chain of custody gap for non-kiosk machines.
+- **Why:** Mazak 5 is the only kiosk-enabled machine. For every other machine, James was the sole point of capture for material lot — but the modal didn't capture it; the field silently fell through to NULL. AS9100 traceability requires the material lot on every finishing record.
+- **Pre-fill fallback:** Query reads `job_materials` first, falls back to most recent `finishing_sends.material_lot_number` if no `job_materials` row exists. Self-heals legacy data (manual-pickup batches submitted before the fix have material_lot_number on the finishing_send but no job_materials row).
+
+### Date-only timezone parsing — fix `expected_return_at` rendering
+
+- **Decision:** `src/pages/Mainframe.jsx` uses `formatDateOnly` and `isPastToday` helpers (copied from `OutsourcedJobs.jsx`) to render date-only columns. Never use `new Date('YYYY-MM-DD')` directly — JavaScript parses that as UTC midnight, shifting one day in negative-offset timezones.
+- **Why:** `expected_return_at` is a `date` column, not `timestamptz`. PostgREST returns it as `'2026-05-04'`, which JS interprets as UTC midnight = May 3 7pm EST. WO Lookup OUTSOURCING displayed "Due May 3" for an outbound shipped May 4 with same-day expected return.
+- **Backlog:** Both `formatDateOnly`/`isPastToday` and `getEffectiveQty` are now duplicated across files. Post-go-live cleanup: extract to `src/lib/dateUtils.js` and `src/lib/qty.js`.
+
+### WO Lookup display refinements
+
+- **Available Qty line** added under the WOA header. Shows the count of physically-in-hand units ready to ship (component-only WOs render `woa.good_quantity`; WOAs with external steps show the LAST external step's returned qty). Auto-hides when 0.
+- **WO header total fixed** to handle mixed MTS+MTO — previously `Qty: 300` was shown for an MTS-tagged WO that also had an order_quantity > 0. Now always shows the total + breakdown when both components are non-zero.
+- **OUTSOURCING per-batch detail** under each external step: amber for queued, blue for at-vendor, green for returned. Step header shows running totals.
+
+### Finishing UI cleanups
+
+- **Batch Quantity field removed** from the expanded finishing batch card. The Incoming Count display already covers both numbers (`280 (sent: 300)`); the standalone Batch Quantity was redundant. Due Date moved into the now-empty grid slot next to Material Lot #.
+- **Collapse All / Expand All** buttons added to Active Batches header in Job view. Hidden in Station view.
+
+### Late patterns formalized
+
+- **`ready_for_outsourcing` → `ready_for_outsource`:** Alignment between `jobs.status` and `work_order_assemblies.status` enums. Some prior code paths used `ready_for_outsourcing` (with `-ing`); the canonical is `ready_for_outsource`. Used consistently in S6 code.
+- **Polymorphic `outbound_sends.source_id` cannot use PostgREST embeds:** Two-step fetch + JS hydrate pattern. Hotfix 1 introduced `hydrateAssemblySends(sends)` in `OutsourcedJobs.jsx` for this. Same pattern applied in `Mainframe.jsx` for the WOA outbound_sends pull.
+
+### S6 prod migration was verified on May 4, 2026 against the 12-point checklist. Keeps the audit trail tight for AS9100.

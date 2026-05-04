@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
+import { FEATURES } from '../config'
 import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus } from 'lucide-react'
 
 const OPERATION_LABELS = {
@@ -700,7 +701,9 @@ export default function OutsourcedJobs({ profile }) {
 
               if (allExternalComplete) {
                 const partType = send.job?.part?.part_type
-                const nextStatus = partType === 'finished_good' ? 'pending_tco' : 'ready_for_assembly'
+                const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
+                  ? 'pending_tco'
+                  : 'ready_for_assembly'
                 const { error: jobErr } = await supabase
                   .from('jobs')
                   .update({ status: nextStatus, updated_at: new Date().toISOString() })

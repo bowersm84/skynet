@@ -141,6 +141,7 @@ export default function Finishing() {
   const [pickupModalJob, setPickupModalJob] = useState(null)
   const [pickupQty, setPickupQty] = useState('')
   const [pickupPLN, setPickupPLN] = useState('')
+  const [pickupMaterialLot, setPickupMaterialLot] = useState('')
   const [pickupNotes, setPickupNotes] = useState('')
   const [pickupSubmitting, setPickupSubmitting] = useState(false)
 
@@ -1246,6 +1247,11 @@ export default function Finishing() {
       alert('Production Lot # is required.')
       return
     }
+    const trimmedMaterialLot = pickupMaterialLot.trim()
+    if (!trimmedMaterialLot) {
+      alert('Material Lot # is required.')
+      return
+    }
     const qty = parseInt(pickupQty)
     if (!qty || isNaN(qty) || qty <= 0) {
       alert('Enter a valid quantity (must be > 0).')
@@ -1259,14 +1265,7 @@ export default function Finishing() {
     try {
       const now = new Date().toISOString()
 
-      // Pull material lot number from job_materials if present
-      const { data: matData } = await supabase
-        .from('job_materials')
-        .select('lot_number')
-        .eq('job_id', pickupModalJob.id)
-        .not('lot_number', 'is', null)
-        .limit(1)
-      const materialLot = matData?.[0]?.lot_number || null
+      const materialLot = trimmedMaterialLot
 
       // Create the pending_finishing send. Existing batch label logic in loadData
       // will assign Batch A/B/C order from sent_at.
@@ -1285,6 +1284,30 @@ export default function Finishing() {
           sent_at: now,
         })
       if (sendError) throw sendError
+
+      // Persist material lot to job_materials so Batch B+ pre-fills correctly.
+      // Check if an entry exists for this job with this lot — if not, insert.
+      const { data: existingMat } = await supabase
+        .from('job_materials')
+        .select('id, lot_number')
+        .eq('job_id', pickupModalJob.id)
+        .eq('lot_number', trimmedMaterialLot)
+        .limit(1)
+      if (!existingMat || existingMat.length === 0) {
+        const { error: matError } = await supabase
+          .from('job_materials')
+          .insert({
+            job_id: pickupModalJob.id,
+            lot_number: trimmedMaterialLot,
+            loaded_by: operator.id,
+            loaded_at: now,
+            // Other job_materials fields (material_type, bar_size, bar_length,
+            // bars_loaded) left null — those aren't captured at finishing pickup.
+            // The kiosk path fills them on Mazak 5; for non-kiosk machines they
+            // remain null. lot_number is what downstream traceability needs.
+          })
+        if (matError) console.error('job_materials insert failed (non-fatal):', matError)
+      }
 
       // Promote job status as appropriate.
       const newSent = pickupModalJob._sentQty + qty
@@ -1317,6 +1340,7 @@ export default function Finishing() {
       setPickupModalJob(null)
       setPickupQty('')
       setPickupPLN('')
+      setPickupMaterialLot('')
       setPickupNotes('')
       await loadData()
     } catch (err) {
@@ -2153,11 +2177,39 @@ export default function Finishing() {
                             </div>
                           </div>
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               setPickupModalJob(j)
                               setPickupQty(String(j._remainingQty))
                               setPickupPLN(j.production_lot_number || '')
                               setPickupNotes('')
+
+                              // Sticky material lot — try job_materials first (canonical source).
+                              // Fall back to most recent finishing_send for this job — covers any
+                              // legacy manual-pickup batches whose job_materials insert silently
+                              // failed pre-fix, and is also defensive against any future code path
+                              // that writes finishing_sends.material_lot_number without job_materials.
+                              let materialLot = ''
+                              const { data: matData } = await supabase
+                                .from('job_materials')
+                                .select('lot_number')
+                                .eq('job_id', j.id)
+                                .not('lot_number', 'is', null)
+                                .order('created_at', { ascending: false })
+                                .limit(1)
+                              if (matData?.[0]?.lot_number) {
+                                materialLot = matData[0].lot_number
+                              } else {
+                                const { data: fsData } = await supabase
+                                  .from('finishing_sends')
+                                  .select('material_lot_number')
+                                  .eq('job_id', j.id)
+                                  .not('material_lot_number', 'is', null)
+                                  .order('sent_at', { ascending: false })
+                                  .limit(1)
+                                materialLot = fsData?.[0]?.material_lot_number || ''
+                              }
+
+                              setPickupMaterialLot(materialLot)
                               setShowPickupModal(true)
                             }}
                             className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium rounded flex items-center gap-2 whitespace-nowrap"
@@ -2361,7 +2413,7 @@ export default function Finishing() {
                 </p>
               </div>
               <button
-                onClick={() => { setShowPickupModal(false); setPickupModalJob(null) }}
+                onClick={() => { setShowPickupModal(false); setPickupModalJob(null); setPickupMaterialLot('') }}
                 className="text-gray-500 hover:text-white"
               >
                 <X size={20} />
@@ -2402,6 +2454,23 @@ export default function Finishing() {
               </div>
               <div>
                 <label className="block text-gray-400 text-sm mb-1">
+                  Material Lot # <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={pickupMaterialLot}
+                  onChange={(e) => setPickupMaterialLot(e.target.value)}
+                  placeholder="From the paper traveler"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                />
+                <p className="text-gray-600 text-xs mt-1">
+                  {pickupMaterialLot
+                    ? 'Auto-filled from earlier batch on this job — change only if the traveler shows a different lot.'
+                    : 'Enter the material lot # hand-written on the paper traveler. It will auto-fill for the next batch on this job.'}
+                </p>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
                   Quantity in this batch <span className="text-red-400">*</span>
                 </label>
                 <input
@@ -2426,7 +2495,7 @@ export default function Finishing() {
             </div>
             <div className="p-4 border-t border-gray-800 flex items-center justify-end gap-2">
               <button
-                onClick={() => { setShowPickupModal(false); setPickupModalJob(null) }}
+                onClick={() => { setShowPickupModal(false); setPickupModalJob(null); setPickupMaterialLot('') }}
                 className="px-4 py-2 text-gray-400 hover:text-white text-sm"
                 disabled={pickupSubmitting}
               >
@@ -2434,7 +2503,7 @@ export default function Finishing() {
               </button>
               <button
                 onClick={handleManualPickupSubmit}
-                disabled={pickupSubmitting || !pickupQty || !pickupPLN.trim()}
+                disabled={pickupSubmitting || !pickupQty || !pickupPLN.trim() || !pickupMaterialLot.trim()}
                 className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded flex items-center gap-2"
               >
                 {pickupSubmitting ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}

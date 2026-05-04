@@ -427,3 +427,28 @@ This containment was deliberate. Post-assembly outsourcing is additive — it ac
 1. **Polymorphic source columns beat parallel tables** when one downstream workflow serves multiple upstream sources. Saved a table and a parallel UX in this sprint; will absorb the purchased-parts queue later.
 2. **Backward-compatible defaults are free with a backfill.** Seeding the standard "Assemble" step into every existing assembly/FG part means nothing breaks for in-flight WOAs.
 3. **Manual entry now, automation later.** Capturing existing paper-book numbers digitally is the lower-friction bridge to full automation. The schema accommodates both modes.
+
+---
+
+## Assembly Module Feature Flag — Go-Live (May 4, 2026, revised)
+
+**Assembly module feature flag (May 2026, revised):** `FEATURES.ASSEMBLY_MODULE` in `src/config.js` controls whether the Assembly module is active. When false (go-live default), components route directly to `pending_tco` after their external work. **Post-assembly outsourcing (Paint, Heat Treat on the assembled product) is also off-system** — Skybolt handles those operations outside SkyNet, same as the physical assembly act. WOAs sit at `pending` while the flag is off; TCO closes them out as-is. When true, full S6 Jody-driven flow resumes (Jody starts assembly, sends batches, etc.) for new WOs. Flipping requires a code commit + Amplify redeploy.
+
+### Why the revision
+
+An earlier draft of this flag had compliance auto-create `outbound_sends` rows for assembly-level external steps so Ashley could ship paint/HT batches without Jody. Two issues surfaced in test:
+1. The auto-row's `quantity` was `woa.quantity` (target), not the actual supply that survived component compliance — counts were wrong (e.g., 700 instead of 640).
+2. Auto-creation fired immediately when the last component was approved by compliance — but at that moment nothing has actually been physically assembled, so a "ready to send to paint" row is logically meaningless.
+
+If the assembly act itself is off-system while the flag is off, the post-assembly outsourcing must also be off-system. Both come back into SkyNet together when the flag flips.
+
+### Hidden surfaces while flag is off
+- Mainframe Assembly KPI tile and view (placeholder shown if deep-linked).
+- OutsourcedJobs has no assembly-source rows (component-finishing rows unchanged).
+- WO Lookup still renders the assembly route (so Roger can see `Paint` as a step in the part definition), but no batch detail under it — that's the correct visual state for "off-system step."
+
+### Audit/compliance gap during flag-off
+Chemical traceability through finishing's per-job FLN scope is preserved. Assembly-level traceability for the off-system ops (ALN, vendor lots on the assembled product) is also off-system — known gap, resolved when the flag flips on.
+
+### Flag flip behavior
+The change is one line. Existing WOs at flip time keep behaving under the rules they were created with (no retro-routing). New WOs created after the flip get the full S6 Jody-driven flow.

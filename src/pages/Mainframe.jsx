@@ -15,6 +15,7 @@ import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
 import CreatePinPromptModal from '../components/CreatePinPromptModal'
 import ChangePinModal from '../components/ChangePinModal'
+import { FEATURES } from '../config'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const [machines, setMachines] = useState([])
@@ -735,6 +736,28 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   //   3. job.good_pieces (machinist's count).
   //   4. job.quantity (original order).
   // Returns { qty, verified } where verified=true means qty comes from a post-production source.
+
+  // Format a 'date' column (no time component) as a local-tz calendar date.
+  // Reading 'YYYY-MM-DD' as a JS Date directly causes UTC interpretation,
+  // which shifts the display by one day in negative-offset timezones.
+  // Split the string and construct a local-tz Date instead.
+  const formatDateOnly = (dateStr) => {
+    if (!dateStr) return ''
+    const [y, m, d] = dateStr.split('-').map(Number)
+    const localDate = new Date(y, m - 1, d)
+    return localDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }
+
+  // Compare a 'date' column value to today, in local tz, without UTC drift.
+  const isPastToday = (dateStr) => {
+    if (!dateStr) return false
+    const [y, m, d] = dateStr.split('-').map(Number)
+    const target = new Date(y, m - 1, d)
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return target < today
+  }
+
   const getEffectiveQty = (job) => {
     // 0. Manual admin override — wins over everything.
     if (job.qty_override != null) {
@@ -1376,8 +1399,12 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         </div>
       </div>
 
-      {/* Stats Bar - ordered to follow process flow */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+      {/* Stats Bar - ordered to follow process flow. Column count adapts to the
+          Assembly tile's visibility — 7 cols when shown, 6 when hidden, so tiles
+          always span the full row width. */}
+      <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 ${
+        FEATURES.ASSEMBLY_MODULE ? 'lg:grid-cols-7' : 'lg:grid-cols-6'
+      }`}>
         <StatCard
           id="lineup"
           label="Machine Lineup"
@@ -1416,14 +1443,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           colorClass="text-skynet-accent"
           onClick={setSelectedView}
         />
-        <StatCard
-          id="assembly"
-          label="Assembly"
-          value={assemblyCount}
-          colorClass="text-green-400"
-          borderClass={assemblyCount > 0 ? 'border-green-800' : 'border-gray-800'}
-          onClick={setSelectedView}
-        />
+        {FEATURES.ASSEMBLY_MODULE && (
+          <StatCard
+            id="assembly"
+            label="Assembly"
+            value={assemblyCount}
+            colorClass="text-green-400"
+            borderClass={assemblyCount > 0 ? 'border-green-800' : 'border-gray-800'}
+            onClick={setSelectedView}
+          />
+        )}
         <StatCard
           id="tco"
           label="TCO Review"
@@ -1991,9 +2020,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       />
 
       {/* Assembly View */}
-      {selectedView === 'assembly' && (
+      {selectedView === 'assembly' && FEATURES.ASSEMBLY_MODULE && (
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <Assembly profile={profile} onUpdate={fetchData} />
+        </div>
+      )}
+      {selectedView === 'assembly' && !FEATURES.ASSEMBLY_MODULE && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center text-gray-400">
+          The Assembly module is currently disabled. Contact your administrator if you need access.
         </div>
       )}
 
@@ -2710,7 +2744,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                   <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Outsourcing</span>
                                                   {job.outbound_sends.map(send => {
                                                     const opLabel = { heat_treat: 'Heat Treatment', cad_plating: 'Cad Plating', black_oxide: 'Black Oxide', painting: 'Painting', priming: 'Priming' }[send.operation_type] || send.operation_type
-                                                    const overdue = send.expected_return_at && !send.returned_at && new Date(send.expected_return_at) < new Date(new Date().toDateString())
+                                                    const overdue = send.expected_return_at && !send.returned_at && isPastToday(send.expected_return_at)
                                                     return (
                                                       <div key={send.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700 flex-wrap">
                                                         <Truck size={10} className="text-gray-500 flex-shrink-0" />
@@ -2730,7 +2764,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                           <span className={overdue ? 'text-red-400 font-medium' : 'text-gray-400'}>
                                                             {overdue && '⚠ '}
                                                             Sent {send.sent_at ? new Date(send.sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
-                                                            {send.expected_return_at ? ` · Due ${new Date(send.expected_return_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
+                                                            {send.expected_return_at ? ` · Due ${formatDateOnly(send.expected_return_at)}` : ''}
                                                           </span>
                                                         )}
                                                       </div>
@@ -3018,7 +3052,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                           <span className="text-[10px] uppercase tracking-wide text-gray-600 font-medium">Outsourcing</span>
                                           {job.outbound_sends.map(send => {
                                             const opLabel = { heat_treat: 'Heat Treatment', cad_plating: 'Cad Plating', black_oxide: 'Black Oxide', painting: 'Painting', priming: 'Priming' }[send.operation_type] || send.operation_type
-                                            const overdue = send.expected_return_at && !send.returned_at && new Date(send.expected_return_at) < new Date(new Date().toDateString())
+                                            const overdue = send.expected_return_at && !send.returned_at && isPastToday(send.expected_return_at)
                                             return (
                                               <div key={send.id} className="flex items-center gap-2 text-xs pl-2 border-l border-gray-700 flex-wrap">
                                                 <Truck size={10} className="text-gray-500 flex-shrink-0" />
@@ -3038,7 +3072,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                   <span className={overdue ? 'text-red-400 font-medium' : 'text-gray-400'}>
                                                     {overdue && '⚠ '}
                                                     Sent {send.sent_at ? new Date(send.sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
-                                                    {send.expected_return_at ? ` · Due ${new Date(send.expected_return_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
+                                                    {send.expected_return_at ? ` · Due ${formatDateOnly(send.expected_return_at)}` : ''}
                                                   </span>
                                                 )}
                                               </div>

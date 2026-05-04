@@ -121,10 +121,20 @@ export function buildTravelerHTML(travelerData) {
       : []
 
     const renderRow = (linkedSend, batchSuffix) => {
-      let rowLot = step.lot_number || ''
+      // For external steps with a linked send, the per-batch vendor lot wins over
+      // step.lot_number (which holds only the most recent return's lot — unreliable
+      // when multiple batches exist on the same step).
+      let rowLot = ''
+      if (isExternalStep && linkedSend?.vendor_lot_number) {
+        rowLot = linkedSend.vendor_lot_number
+      } else {
+        rowLot = step.lot_number || ''
+      }
       if (!rowLot && (isWash || isTreatment || isDry) && fb?.finishing_lot_number) rowLot = fb.finishing_lot_number
       if (!rowLot && isMachineStep && job.production_lot_number) rowLot = job.production_lot_number
-      if (!rowLot && isExternalStep && linkedSend?.vendor_lot_number) rowLot = linkedSend.vendor_lot_number
+      // Final fallback for external steps where the send exists but vendor_lot_number is null
+      // (e.g., still at vendor) — use step.lot_number if it has a value, else blank
+      if (!rowLot && isExternalStep && step.lot_number) rowLot = step.lot_number
 
       let rowQty = step.quantity != null ? String(step.quantity) : ''
       if (!rowQty && (isWash || isTreatment || isDry) && finishingQty !== '') rowQty = String(finishingQty)

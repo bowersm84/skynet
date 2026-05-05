@@ -85,6 +85,18 @@ export default function UsersTab({ profile }) {
     }
   }
 
+  const handleInviteNoEmail = async (form) => {
+    const result = await callManageUsers('invite_no_email', form)
+    if (result?.success) {
+      setActionStatus({
+        type: 'success',
+        message: `User ${form.username} created. Tell them their password in person — they will be required to change it on first login.`,
+      })
+      setShowInviteModal(false)
+      await loadUsers()
+    }
+  }
+
   const handleResendInvite = async (email) => {
     if (!confirm(`Resend invitation to ${email}?`)) return
     const result = await callManageUsers('resend_invite', { email })
@@ -98,6 +110,20 @@ export default function UsersTab({ profile }) {
     const result = await callManageUsers('reset_password', { email })
     if (result?.success) {
       setActionStatus({ type: 'success', message: `Password reset email sent to ${email}` })
+    }
+  }
+
+  const [setPasswordUser, setSetPasswordUser] = useState(null)
+
+  const handleSetPassword = async ({ user_id, new_password, full_name }) => {
+    const result = await callManageUsers('set_password', { user_id, new_password })
+    if (result?.success) {
+      setActionStatus({
+        type: 'success',
+        message: `Password set for ${full_name}. Tell them in person — they will be required to change it on first login.`,
+      })
+      setSetPasswordUser(null)
+      await loadUsers()
     }
   }
 
@@ -181,7 +207,9 @@ export default function UsersTab({ profile }) {
               </tr>
             </thead>
             <tbody>
-              {users.map(user => (
+              {users.map(user => {
+                const isNoEmail = (user.email || '').toLowerCase().endsWith('@skynet.local')
+                return (
                 <tr key={user.id} className="border-t border-gray-800 hover:bg-gray-800/40">
                   <td className="px-4 py-3 text-white font-mono">{user.username}</td>
                   <td className="px-4 py-3 text-gray-300">{user.full_name || <span className="text-gray-600">—</span>}</td>
@@ -201,9 +229,15 @@ export default function UsersTab({ profile }) {
                       <IconButton title="Resend invite" onClick={() => handleResendInvite(user.email)}>
                         <RefreshCw size={14} />
                       </IconButton>
-                      <IconButton title="Reset password" onClick={() => handleResetPassword(user.email)}>
-                        <Lock size={14} />
-                      </IconButton>
+                      {isNoEmail ? (
+                        <IconButton title="Set password" onClick={() => setSetPasswordUser(user)}>
+                          <KeyRound size={14} />
+                        </IconButton>
+                      ) : (
+                        <IconButton title="Send reset email" onClick={() => handleResetPassword(user.email)}>
+                          <Lock size={14} />
+                        </IconButton>
+                      )}
                       <IconButton title="Reset PIN" onClick={() => handleResetPin(user)}>
                         <KeyRound size={14} />
                       </IconButton>
@@ -217,7 +251,8 @@ export default function UsersTab({ profile }) {
                     </div>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
               {users.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500">No users yet</td></tr>
               )}
@@ -230,6 +265,7 @@ export default function UsersTab({ profile }) {
         <InviteUserModal
           locations={locations}
           onSubmit={handleInvite}
+          onSubmitNoEmail={handleInviteNoEmail}
           onClose={() => setShowInviteModal(false)}
         />
       )}
@@ -240,6 +276,14 @@ export default function UsersTab({ profile }) {
           locations={locations}
           onSubmit={handleSaveEdits}
           onClose={() => setEditingUser(null)}
+        />
+      )}
+
+      {setPasswordUser && (
+        <SetPasswordModal
+          user={setPasswordUser}
+          onClose={() => setSetPasswordUser(null)}
+          onSubmit={handleSetPassword}
         />
       )}
     </div>
@@ -262,9 +306,12 @@ function IconButton({ children, onClick, title, danger }) {
   )
 }
 
-function InviteUserModal({ locations, onSubmit, onClose }) {
+function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
+  const [noEmail, setNoEmail] = useState(false)
   const [form, setForm] = useState({
     email: '',
+    username: '',
+    temp_password: '',
     full_name: '',
     role: 'machinist',
     home_location_id: locations[0]?.id || '',
@@ -272,14 +319,49 @@ function InviteUserModal({ locations, onSubmit, onClose }) {
     can_approve_compliance: false,
   })
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    setError(null)
     setSubmitting(true)
-    // Auto-append @skybolt.com if user typed just the username portion
-    const email = form.email.includes('@') ? form.email : `${form.email}@skybolt.com`
-    await onSubmit({ ...form, email })
-    setSubmitting(false)
+    try {
+      if (noEmail) {
+        const username = form.username.trim().toLowerCase()
+        if (!/^[a-z0-9._-]{2,40}$/.test(username)) {
+          setError('Username must be 2-40 characters, letters/digits/._- only.')
+          setSubmitting(false)
+          return
+        }
+        if ((form.temp_password || '').length < 6) {
+          setError('Temporary password must be at least 6 characters.')
+          setSubmitting(false)
+          return
+        }
+        await onSubmitNoEmail({
+          username,
+          full_name: form.full_name,
+          role: form.role,
+          home_location_id: form.home_location_id || null,
+          can_float: form.can_float,
+          can_approve_compliance: form.can_approve_compliance,
+          temp_password: form.temp_password,
+        })
+      } else {
+        // Auto-append @skybolt.com if user typed just the username portion
+        const email = form.email.includes('@') ? form.email : `${form.email}@skybolt.com`
+        await onSubmit({
+          email,
+          full_name: form.full_name,
+          role: form.role,
+          home_location_id: form.home_location_id || null,
+          can_float: form.can_float,
+          can_approve_compliance: form.can_approve_compliance,
+        })
+      }
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -290,25 +372,82 @@ function InviteUserModal({ locations, onSubmit, onClose }) {
           <button onClick={onClose} className="text-gray-500 hover:text-white"><X size={18} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-5 space-y-4">
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Username (email local-part)</label>
-            <div className="flex">
-              <input
-                type="text"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-l text-white focus:outline-none focus:border-skynet-accent"
-                placeholder="rsmith"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck="false"
-                required
-              />
-              <span className="px-3 py-2 bg-gray-800 border border-l-0 border-gray-700 rounded-r text-gray-500 text-sm font-mono flex items-center">
-                @skybolt.com
-              </span>
+          <label className="flex items-center gap-2 text-sm text-gray-300 p-3 bg-gray-800/40 border border-gray-700 rounded">
+            <input
+              type="checkbox"
+              checked={noEmail}
+              onChange={(e) => setNoEmail(e.target.checked)}
+            />
+            User has no email — set password manually
+          </label>
+
+          {error && (
+            <div className="p-3 rounded bg-red-900/40 text-red-300 border border-red-800 text-sm">
+              {error}
             </div>
-          </div>
+          )}
+
+          {noEmail ? (
+            <>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Username</label>
+                <div className="flex">
+                  <input
+                    type="text"
+                    value={form.username}
+                    onChange={(e) => setForm({ ...form, username: e.target.value })}
+                    className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-l text-white focus:outline-none focus:border-skynet-accent"
+                    placeholder="testop1"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck="false"
+                    required
+                  />
+                  <span className="px-3 py-2 bg-gray-800 border border-l-0 border-gray-700 rounded-r text-gray-500 text-sm font-mono flex items-center">
+                    @skynet.local
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Temporary Password</label>
+                <input
+                  type="text"
+                  value={form.temp_password}
+                  onChange={(e) => setForm({ ...form, temp_password: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:outline-none focus:border-skynet-accent"
+                  placeholder="temp123"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck="false"
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Min 6 characters. User will be required to change this on first login.
+                </p>
+              </div>
+            </>
+          ) : (
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Username (email local-part)</label>
+              <div className="flex">
+                <input
+                  type="text"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-l text-white focus:outline-none focus:border-skynet-accent"
+                  placeholder="rsmith"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck="false"
+                  required
+                />
+                <span className="px-3 py-2 bg-gray-800 border border-l-0 border-gray-700 rounded-r text-gray-500 text-sm font-mono flex items-center">
+                  @skybolt.com
+                </span>
+              </div>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm text-gray-400 mb-1">Full Name</label>
@@ -340,6 +479,7 @@ function InviteUserModal({ locations, onSubmit, onClose }) {
                 onChange={(e) => setForm({ ...form, home_location_id: e.target.value })}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
               >
+                <option value="">— None —</option>
                 {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
             </div>
@@ -375,7 +515,9 @@ function InviteUserModal({ locations, onSubmit, onClose }) {
               disabled={submitting}
               className="px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded disabled:opacity-50"
             >
-              {submitting ? 'Sending invite...' : 'Send Invite'}
+              {submitting
+                ? (noEmail ? 'Creating...' : 'Sending invite...')
+                : (noEmail ? 'Create User' : 'Send Invite')}
             </button>
           </div>
         </form>
@@ -397,7 +539,11 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSubmitting(true)
-    await onSubmit(form)
+    const payload = {
+      ...form,
+      home_location_id: form.home_location_id || null,
+    }
+    await onSubmit(payload)
     setSubmitting(false)
   }
 
@@ -482,6 +628,101 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
               className="px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded disabled:opacity-50"
             >
               {submitting ? 'Saving...' : 'Save Changes'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function SetPasswordModal({ user, onClose, onSubmit }) {
+  const [newPassword, setNewPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (newPassword.length < 6) {
+      setError('Password must be at least 6 characters.')
+      return
+    }
+    if (newPassword !== confirm) {
+      setError('Passwords do not match.')
+      return
+    }
+    setSubmitting(true)
+    try {
+      await onSubmit({
+        user_id: user.id,
+        new_password: newPassword,
+        full_name: user.full_name || user.username,
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
+        <div className="flex justify-between items-center p-5 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">
+            Set Password for {user.full_name || user.username}
+          </h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-white"><X size={18} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <p className="text-sm text-gray-400">
+            User will be required to change this on first login. Tell them in person.
+          </p>
+
+          {error && (
+            <div className="p-3 rounded bg-red-900/40 text-red-300 border border-red-800 text-sm">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">New Password</label>
+            <input
+              type="text"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:outline-none focus:border-skynet-accent"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Confirm Password</label>
+            <input
+              type="text"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:outline-none focus:border-skynet-accent"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
+              required
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-800">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-400 hover:text-white">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded disabled:opacity-50"
+            >
+              {submitting ? 'Setting...' : 'Set Password'}
             </button>
           </div>
         </form>

@@ -16,9 +16,18 @@ export default function Login({ onLogin }) {
     setLoading(true)
     setError(null)
 
-    // Allow user to type either "mbowers" or "mbowers@skybolt.com" — handle both gracefully
+    // Allow user to type either "mbowers" or "mbowers@skybolt.com" — handle both gracefully.
+    // For no-email users (testop1, etc.), look up the placeholder @skynet.local address by username.
     const trimmed = username.trim().toLowerCase()
-    const email = trimmed.includes('@') ? trimmed : `${trimmed}${SKYBOLT_DOMAIN}`
+    let email
+    if (trimmed.includes('@')) {
+      email = trimmed
+    } else {
+      const { data: lookedUp } = await supabase.rpc('get_email_by_username', {
+        p_username: trimmed,
+      })
+      email = lookedUp || `${trimmed}${SKYBOLT_DOMAIN}`
+    }
 
     const { data, error } = await supabase.auth.signInWithPassword({
       email,

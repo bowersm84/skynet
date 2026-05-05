@@ -16,6 +16,7 @@ import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
+import ForceChangePassword from './components/ForceChangePassword'
 
 const DASHBOARDS = [
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
@@ -214,6 +215,17 @@ function MainApp() {
 
   if (showLoadingScreen) {
     return <LoadingScreen onComplete={() => setShowLoadingScreen(false)} />
+  }
+
+  if (profile?.must_change_password) {
+    return (
+      <ForceChangePassword
+        profile={profile}
+        onComplete={async () => {
+          if (user?.id) await fetchProfile(user.id)
+        }}
+      />
+    )
   }
 
   return (

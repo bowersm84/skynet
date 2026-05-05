@@ -23,6 +23,7 @@ export async function fetchCOAllocationsForTraveler(supabase, workOrderId) {
       quantity_allocated,
       customer_order_line:customer_order_lines (
         line_number,
+        due_date,
         customer_order:customer_orders (
           co_number,
           po_number,
@@ -56,7 +57,31 @@ export function buildTravelerHTML(travelerData) {
     qtyDisplay = `${job.quantity} (stock)`
   }
 
-  const customerDisplay = wo?.order_type === 'make_to_stock' ? 'STOCK' : _esc(wo?.customer) || '&mdash;'
+  const customerDisplay = (() => {
+    if (wo?.order_type === 'make_to_stock') return 'STOCK'
+    const names = Array.from(new Set(
+      (coAllocations || [])
+        .map(a => a.customer_order_line?.customer_order?.customer?.name)
+        .filter(Boolean)
+    )).sort()
+    if (names.length === 0) return _esc(wo?.customer) || '&mdash;'
+    if (names.length === 1) return _esc(names[0])
+    // Multi-customer: list all, comma-separated. The traveler is a
+    // physical paper artifact — full disclosure is preferred over
+    // a "+N more" abbreviation.
+    return names.map(_esc).join(', ')
+  })()
+
+  // Earliest CO due date as a fallback when wo.due_date is null
+  // (multi-CO WOs leave wo.due_date null at create time).
+  const dueDateDisplay = (() => {
+    if (wo?.due_date) return _formatDate(wo.due_date)
+    const dates = (coAllocations || [])
+      .map(a => a.customer_order_line?.due_date)
+      .filter(Boolean)
+      .sort()
+    return dates.length > 0 ? _formatDate(dates[0]) : '&mdash;'
+  })()
 
   const initials = (name) => {
     if (!name) return ''
@@ -205,20 +230,25 @@ export function buildTravelerHTML(travelerData) {
   }).join('')
 
   // Customer Orders Fulfilled by this Job — only renders when the call site
-  // has fetched coAllocations (undefined means "not fetched" → omit the section
-  // entirely so older callers don't lie about CO presence).
+  // has fetched coAllocations. Treat coAllocations === undefined as "caller
+  // didn't pass" (omit) and === [] as "caller passed and there are none".
+  // For the empty case, the message depends on order_type so a make_to_order
+  // WO with no allocations doesn't get mislabeled as "Stock build".
   const coSectionHTML = (() => {
     if (!Array.isArray(coAllocations)) return ''
     const cellHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
     const cellCSS = 'padding:6px 8px; border:1px solid #000;'
     if (coAllocations.length === 0) {
+      const msg = wo?.order_type === 'make_to_stock'
+        ? 'Stock build &mdash; no customer orders.'
+        : 'No active customer order allocations.'
       return `
     <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
       </thead>
       <tbody>
-        <tr><td style="${cellCSS} text-align:center; color:#666;" colspan="5">Stock build &mdash; no customer orders.</td></tr>
+        <tr><td style="${cellCSS} text-align:center; color:#666;" colspan="5">${msg}</td></tr>
       </tbody>
     </table>`
     }
@@ -288,7 +318,7 @@ export function buildTravelerHTML(travelerData) {
         <tr><td style="${headerLabelCSS}">Material</td><td style="${headerValueCSS}">${_esc(comp?.material_type?.name) || '&mdash;'}</td>
             <td style="${headerLabelCSS}">PO Number</td><td style="${headerValueCSS}">${_esc(wo?.po_number) || '&mdash;'}</td></tr>
         <tr><td style="${headerLabelCSS}">Drawing Rev</td><td style="${headerValueCSS}">${_esc(comp?.drawing_revision) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Due Date</td><td style="${headerValueCSS}">${_formatDate(wo?.due_date)}</td></tr>
+            <td style="${headerLabelCSS}">Due Date</td><td style="${headerValueCSS}">${dueDateDisplay}</td></tr>
         <tr><td style="${headerLabelCSS}">Customer</td><td style="${headerValueCSS}">${customerDisplay}</td>
             <td style="${headerLabelCSS}">Quantity</td><td style="${headerValueCSS} font-weight:bold;">${_esc(qtyDisplay)}</td></tr>
       </tbody>

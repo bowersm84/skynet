@@ -421,8 +421,17 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 
   const updateAssemblyQtyField = (index, field, value) => {
     const updated = [...selectedAssemblies]
-    const min = field === 'orderQuantity' ? 1 : 0
-    updated[index][field] = Math.max(min, parseInt(value) || 0)
+    // additionalForStock is allowed to go negative during editing — Total
+    // input drives it via (total - orderQuantity) and we want the user to
+    // see what they typed. Save-time validation flags negative stock.
+    const parsed = parseInt(value)
+    const num = Number.isFinite(parsed) ? parsed : 0
+    if (field === 'additionalForStock') {
+      updated[index][field] = num
+    } else {
+      const min = field === 'orderQuantity' ? 1 : 0
+      updated[index][field] = Math.max(min, num)
+    }
     const total = updated[index].orderQuantity + updated[index].additionalForStock
     // Update job quantities that haven't been customized
     updated[index].jobs = updated[index].jobs.map(job => ({
@@ -470,6 +479,21 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+
+    const invalidAssemblies = selectedAssemblies.filter(
+      (a) => a.additionalForStock < 0
+    )
+    if (invalidAssemblies.length > 0) {
+      const labels = invalidAssemblies.map((a) => {
+        const part = assemblies.find(p => p.id === a.assemblyId)
+        return part?.part_number || 'unnamed'
+      })
+      setError(
+        `Total quantity must be at least Order Qty for: ${labels.join(', ')}`
+      )
+      return
+    }
+
     setLoading(true)
     setError(null)
 
@@ -479,7 +503,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
       console.error('Error creating work order:', err)
       setError(err.message)
     }
-    
+
     setLoading(false)
   }
 
@@ -763,6 +787,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   }
 
   const totalJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
+  const hasInvalidTotals = selectedAssemblies.some((a) => a.additionalForStock < 0)
 
   const reorderPartRouting = (partId, fromIdx, toIdx) => {
     if (fromIdx === toIdx) return
@@ -1139,7 +1164,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                     {selectedAssemblies.map((selected, assemblyIndex) => (
                       <div key={assemblyIndex} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
                         <div className="flex items-start justify-between gap-4 mb-4">
-                          <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
+                          <div className="flex-1 grid grid-cols-[1fr_auto_auto_auto] gap-3 items-end gap-y-1">
                             <div className="min-w-0">
                               <label className="block text-gray-500 text-xs mb-1">Product</label>
                               {preselectedPartId && assemblyIndex === 0 ? (
@@ -1196,10 +1221,31 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                             </div>
                             <div>
                               <label className="block text-gray-500 text-xs mb-1">= Total</label>
-                              <div className="w-20 px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-center">
-                                {selected.orderQuantity + selected.additionalForStock}
-                              </div>
+                              <input
+                                type="number"
+                                value={selected.orderQuantity + selected.additionalForStock}
+                                onChange={(e) => {
+                                  const total = e.target.value === '' ? 0 : parseInt(e.target.value)
+                                  if (isNaN(total)) return
+                                  // Allow stock to go negative — save-time validation handles it.
+                                  updateAssemblyQtyField(
+                                    assemblyIndex,
+                                    'additionalForStock',
+                                    total - selected.orderQuantity,
+                                  )
+                                }}
+                                className={`w-20 px-3 py-2 border rounded text-white text-center focus:outline-none ${
+                                  selected.additionalForStock < 0
+                                    ? 'bg-red-950/40 border-red-700 focus:border-red-500'
+                                    : 'bg-gray-700 border-gray-600 focus:border-skynet-accent'
+                                }`}
+                              />
                             </div>
+                            {selected.additionalForStock < 0 && (
+                              <div className="col-span-4 text-xs text-red-400">
+                                Total must be at least {selected.orderQuantity} (the order quantity).
+                              </div>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -1473,8 +1519,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
               type="button"
               onClick={handleSubmit}
               disabled={
-                loading || 
-                totalJobs === 0
+                loading ||
+                totalJobs === 0 ||
+                hasInvalidTotals
               }
               className="px-6 py-2 font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-skynet-accent hover:bg-blue-600 text-white"
             >

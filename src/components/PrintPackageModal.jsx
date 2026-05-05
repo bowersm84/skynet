@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { getDocumentUrl } from '../lib/s3'
+import { fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { Printer, X, Loader2, FileText } from 'lucide-react'
 
 // HTML escape for template strings
@@ -23,7 +24,7 @@ function formatDate(dateStr) {
 }
 
 function buildTravelerHTML(travelerData) {
-  const { job, steps, finishingBatch } = travelerData
+  const { job, steps, finishingBatch, coAllocations } = travelerData
   const wo = job.work_order
   const comp = job.component
 
@@ -35,7 +36,29 @@ function buildTravelerHTML(travelerData) {
     qtyDisplay = `${job.quantity} (stock)`
   }
 
-  const customerDisplay = wo?.order_type === 'make_to_stock' ? 'STOCK' : esc(wo?.customer) || '&mdash;'
+  const customerDisplay = (() => {
+    if (wo?.order_type === 'make_to_stock') return 'STOCK'
+    const names = Array.from(new Set(
+      (coAllocations || [])
+        .map(a => a.customer_order_line?.customer_order?.customer?.name)
+        .filter(Boolean)
+    )).sort()
+    if (names.length === 0) return esc(wo?.customer) || '&mdash;'
+    if (names.length === 1) return esc(names[0])
+    // Multi-customer: list all, comma-separated. The traveler is a
+    // physical paper artifact — full disclosure beats "+N more".
+    return names.map(esc).join(', ')
+  })()
+
+  // Earliest CO due date when wo.due_date is null (multi-CO WOs).
+  const dueDateDisplay = (() => {
+    if (wo?.due_date) return formatDate(wo.due_date)
+    const dates = (coAllocations || [])
+      .map(a => a.customer_order_line?.due_date)
+      .filter(Boolean)
+      .sort()
+    return dates.length > 0 ? formatDate(dates[0]) : '&mdash;'
+  })()
 
   // Helper: derive last-name initials from a full_name like "James Smith" -> "JS"
   const initials = (name) => {
@@ -143,7 +166,7 @@ function buildTravelerHTML(travelerData) {
             <td style="${headerLabelCSS}">Drawing Rev</td>
             <td style="${headerValueCSS}">${esc(comp?.drawing_revision) || '&mdash;'}</td>
             <td style="${headerLabelCSS}">Due Date</td>
-            <td style="${headerValueCSS}">${formatDate(wo?.due_date)}</td>
+            <td style="${headerValueCSS}">${dueDateDisplay}</td>
           </tr>
           <tr>
             <td style="${headerLabelCSS}">Customer</td>
@@ -282,7 +305,7 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
           .select(`
             id, job_number, quantity, status,
             work_order:work_orders (
-              wo_number, customer, po_number, due_date,
+              id, wo_number, customer, po_number, due_date,
               order_type, order_quantity, stock_quantity
             ),
             component:parts!component_id (
@@ -294,6 +317,10 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
           .eq('id', job.id)
           .single()
         if (jobError) throw jobError
+
+        // Pull active CO allocations so the traveler renders multi-customer
+        // and earliest-due-date correctly (Batch C of 2026-05-05 traveler fix).
+        const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id)
 
         // Fetch routing steps
         const { data: steps, error: stepsError } = await supabase
@@ -326,6 +353,7 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
           job: fullJob,
           steps: steps || [],
           finishingBatch: finishingBatches?.[0] || null,
+          coAllocations,
         })
 
         // Fetch part documents (master docs for this component)

@@ -16,6 +16,8 @@ import PrintPackageModal from '../components/PrintPackageModal'
 import CreatePinPromptModal from '../components/CreatePinPromptModal'
 import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
+import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import CustomerDisplay from '../components/CustomerDisplay'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const [machines, setMachines] = useState([])
@@ -576,6 +578,35 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         }
       }
 
+      // Hydrate active CO allocations per WO. Used for the customer/due display rule.
+      // Polymorphic shape mirrors what EditWorkOrderModal loads on open.
+      const allWoIds = finalWOs.map(w => w.id).filter(Boolean)
+      let allocsByWo = {}
+      if (allWoIds.length > 0) {
+        const { data: allocsData, error: allocsErr } = await supabase
+          .from('customer_order_allocations')
+          .select(`
+            id, work_order_id, quantity_allocated, customer_order_line_id,
+            customer_order_lines (
+              id, line_number, due_date, part_id,
+              customer_orders ( co_number, customers ( id, name ) )
+            )
+          `)
+          .in('work_order_id', allWoIds)
+          .eq('is_active', true)
+        if (allocsErr) {
+          console.error('Failed to fetch WO allocations:', allocsErr)
+        } else {
+          for (const a of allocsData || []) {
+            if (!allocsByWo[a.work_order_id]) allocsByWo[a.work_order_id] = []
+            allocsByWo[a.work_order_id].push(a)
+          }
+        }
+      }
+      for (const wo of finalWOs) {
+        wo.active_allocations = allocsByWo[wo.id] || []
+      }
+
       setWOLookupData(finalWOs)
 
       // Standalone J-FIN jobs have no work order; fetch separately
@@ -870,16 +901,18 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const filteredWOLookup = woLookupData.filter(wo => {
     if (!woLookupSearch.trim()) return true
     const search = woLookupSearch.toLowerCase()
-    
-    // Search WO number, customer
+
+    // Search WO number, customer (free text), and any allocation-derived customer names
     if (wo.wo_number?.toLowerCase().includes(search)) return true
     if (wo.customer?.toLowerCase().includes(search)) return true
-    
+    const allocSummary = summarizeWOAllocations(wo.active_allocations)
+    if (allocSummary.customerList.some(n => n?.toLowerCase().includes(search))) return true
+
     // Search assembly part numbers
-    if (wo.work_order_assemblies?.some(woa => 
+    if (wo.work_order_assemblies?.some(woa =>
       woa.assembly?.part_number?.toLowerCase().includes(search)
     )) return true
-    
+
     // Search job numbers and component part numbers
     return wo.jobs?.some(job =>
       job.job_number?.toLowerCase().includes(search) ||
@@ -1068,7 +1101,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         .select(`
           id, job_number, quantity, status,
           production_lot_number, good_pieces, actual_end,
-          work_order:work_orders ( wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+          work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
           component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
           assigned_machine:machines!assigned_machine_id ( name ),
           assigned_user:profiles!assigned_user_id ( full_name )
@@ -1111,7 +1144,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
-      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+      const woIdForAllocs = fullJob.work_order?.id || fullJob.work_order_id
+      if (!woIdForAllocs) {
+        console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
+      }
+      const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -2218,7 +2255,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                     const allJobsComplete = wo.jobs?.every(j => ['complete', 'cancelled'].includes(j.status))
                     const readyForAssemblyCount = wo.jobs?.filter(j => j.status === 'ready_for_assembly').length || 0
                     const totalJobs = wo.jobs?.length || 0
-                    
+                    const allocSummary = summarizeWOAllocations(wo.active_allocations)
+                    const effectiveDue = formatWODueDate(allocSummary, wo.due_date)
+
                     return (
                       <div key={wo.id} className={`border rounded-lg overflow-hidden ${
                         allJobsComplete
@@ -2304,11 +2343,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                               <div className="flex items-center gap-3 text-sm text-gray-400">
                                 <span className="flex items-center gap-1">
                                   <User size={12} />
-                                  {wo.customer}
+                                  <CustomerDisplay summary={allocSummary} fallback={wo.customer} />
                                 </span>
                                 <span className="flex items-center gap-1">
                                   <Calendar size={12} />
-                                  Due: {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : 'N/A'}
+                                  Due: {effectiveDue ? new Date(effectiveDue).toLocaleDateString() : 'N/A'}
+                                  {allocSummary.hasMultipleDueDates && (
+                                    <span className="text-xs text-gray-500 ml-1">(earliest)</span>
+                                  )}
                                 </span>
                                 {wo.order_type !== 'maintenance' && ((wo.order_quantity || 0) + (wo.stock_quantity || 0) > 0) && (
                                   <span className="flex items-center gap-1">
@@ -3273,6 +3315,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           isOpen={!!editingWO}
           onClose={() => setEditingWO(null)}
           workOrder={editingWO}
+          profile={profile}
           onSuccess={() => {
             fetchWOLookup()
             fetchData()

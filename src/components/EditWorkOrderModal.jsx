@@ -1,8 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Package, Wrench, AlertTriangle, ShoppingCart, Save } from 'lucide-react'
+import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import CustomerDisplay from './CustomerDisplay'
 
-export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSuccess }) {
+const ALLOC_GATE_ROLES = ['admin', 'scheduler']
+
+let tempAllocSeq = 0
+const nextTempAllocId = () => `new-alloc-${++tempAllocSeq}`
+
+export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSuccess, profile }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -21,6 +28,24 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
   const [availableParts, setAvailableParts] = useState([])
   const [loadingParts, setLoadingParts] = useState(false)
 
+  // CO allocation editing (Batch B of previous prompt)
+  const [allocations, setAllocations] = useState([])                          // active allocs from DB, with join data
+  const [allocationsToDeactivate, setAllocationsToDeactivate] = useState([])  // ids of existing rows to flip is_active=false
+  const [newAllocations, setNewAllocations] = useState([])                    // staged adds, with display fields
+  const [eligibleLines, setEligibleLines] = useState([])                      // CO lines available to add
+  const [showAddCO, setShowAddCO] = useState(false)
+  const [addCoQty, setAddCoQty] = useState({})                                // { lineId: qtyString }
+  const [addCoError, setAddCoError] = useState({})                            // { lineId: errStr }
+
+  // Add-component-to-existing-product (Batch B of this prompt)
+  const [newComponents, setNewComponents] = useState([])
+  const [showAddCompFor, setShowAddCompFor] = useState(null) // assemblyIndex or null
+  // BOM components per assembly, lazy-loaded the first time the user opens
+  // the picker on that assembly. Shape: { [assemblyId]: [{ id, part_number, description, bom_qty }] }
+  const [bomComponentsByAssembly, setBomComponentsByAssembly] = useState({})
+
+  const canEditAllocations = ALLOC_GATE_ROLES.includes(profile?.role)
+
   useEffect(() => {
     if (isOpen && workOrder) {
       loadWorkOrder()
@@ -28,19 +53,87 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     }
   }, [isOpen, workOrder])
 
-  const loadWorkOrder = () => {
+  // Lazy load: pull BOM components for an assembly the first time the user
+  // opens the Add Component picker on it. Cached per assemblyId for the
+  // lifetime of the modal.
+  const loadBOMComponents = async (assemblyId) => {
+    if (!assemblyId || bomComponentsByAssembly[assemblyId]) return
+    const { data, error } = await supabase
+      .from('assembly_bom')
+      .select(`
+        quantity,
+        component:parts!assembly_bom_component_id_fkey (
+          id, part_number, description, part_type
+        )
+      `)
+      .eq('assembly_id', assemblyId)
+      .order('sort_order', { ascending: true })
+
+    if (error) {
+      console.error('Failed to load BOM components:', error)
+      setBomComponentsByAssembly(prev => ({ ...prev, [assemblyId]: [] }))
+      return
+    }
+
+    const components = (data || [])
+      .filter(row => row.component && row.component.part_type === 'manufactured')
+      .map(row => ({
+        id: row.component.id,
+        part_number: row.component.part_number,
+        description: row.component.description,
+        bom_qty: row.quantity,
+      }))
+    setBomComponentsByAssembly(prev => ({ ...prev, [assemblyId]: components }))
+  }
+
+  const loadWorkOrder = async () => {
     setCustomer(workOrder.customer || '')
     setDueDate(workOrder.due_date || '')
     setPriority(workOrder.priority || 'normal')
     setError('')
     setNewAssemblies([])
     setShowAddProduct(false)
+    setAllocations([])
+    setAllocationsToDeactivate([])
+    setNewAllocations([])
+    setEligibleLines([])
+    setShowAddCO(false)
+    setAddCoQty({})
+    setAddCoError({})
+    setNewComponents([])
+    setShowAddCompFor(null)
+    setBomComponentsByAssembly({})
 
     // Build existing assemblies with their jobs
     const woStockQty = workOrder.stock_quantity || 0
     const woAssemblies = workOrder.work_order_assemblies || []
+
+    // Defensive re-fetch — upstream queries don't reliably include
+    // component_id, which the Add Component picker needs to filter
+    // out parts already on the assembly.
+    const { data: freshJobs, error: jobsErr } = await supabase
+      .from('jobs')
+      .select(`
+        id, job_number, work_order_assembly_id, quantity, status, component_id,
+        component:parts!jobs_component_id_fkey (
+          id, part_number, description
+        )
+      `)
+      .eq('work_order_id', workOrder.id)
+
+    if (jobsErr) {
+      console.error('Failed to refetch jobs for edit modal:', jobsErr)
+    }
+
+    const jobsByWoa = new Map()
+    for (const j of freshJobs || []) {
+      const arr = jobsByWoa.get(j.work_order_assembly_id) || []
+      arr.push(j)
+      jobsByWoa.set(j.work_order_assembly_id, arr)
+    }
+
     const assemblies = woAssemblies.map((woa, idx) => {
-      const jobs = (workOrder.jobs || []).filter(j => j.work_order_assembly_id === woa.id)
+      const jobs = jobsByWoa.get(woa.id) || (workOrder.jobs || []).filter(j => j.work_order_assembly_id === woa.id)
       // Derive per-assembly stock split: for single-assembly WOs assign all stock_quantity;
       // for multi-assembly WOs assign stock to first assembly (pragmatic default)
       const stockForThis = idx === 0 ? woStockQty : 0
@@ -61,6 +154,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         jobs: jobs.map(j => ({
           id: j.id,
           jobNumber: j.job_number,
+          componentId: j.component?.id || j.component_id || null,
           componentPartNumber: j.component?.part_number || '',
           componentDescription: j.component?.description || '',
           quantity: j.quantity,
@@ -72,6 +166,110 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       }
     })
     setExistingAssemblies(assemblies)
+
+    if (!canEditAllocations) return
+
+    // Fetch active allocations on this WO
+    const { data: allocs, error: allocErr } = await supabase
+      .from('customer_order_allocations')
+      .select(`
+        id, quantity_allocated, customer_order_line_id,
+        customer_order_lines (
+          id, line_number, due_date, quantity_ordered, quantity_fulfilled,
+          part_id,
+          parts ( id, part_number, description ),
+          customer_orders ( co_number, customers ( id, name ) )
+        )
+      `)
+      .eq('work_order_id', workOrder.id)
+      .eq('is_active', true)
+    if (allocErr) {
+      console.error('Failed to load allocations:', allocErr)
+      return
+    }
+    setAllocations(allocs || [])
+
+    // Fetch eligible CO lines: any line with remaining > 0 whose part_id matches
+    // any assembly part on this WO, status not cancelled/complete.
+    const partIds = (woAssemblies || [])
+      .map(woa => woa.assembly?.id)
+      .filter(Boolean)
+    if (partIds.length === 0) return
+
+    const { data: candidateLines, error: linesErr } = await supabase
+      .from('customer_order_lines')
+      .select(`
+        id, line_number, due_date, quantity_ordered, quantity_fulfilled, part_id, status,
+        parts ( id, part_number, description ),
+        customer_orders!inner ( id, co_number, status, customers ( id, name ) )
+      `)
+      .in('part_id', partIds)
+      .in('status', ['not_started', 'in_progress'])
+    if (linesErr) {
+      console.error('Failed to load eligible CO lines:', linesErr)
+      return
+    }
+
+    const filteredLines = (candidateLines || []).filter(
+      l => l.customer_orders?.status !== 'cancelled'
+    )
+    const lineIds = filteredLines.map(l => l.id)
+    let allocSumByLine = new Map()
+    if (lineIds.length > 0) {
+      const { data: allLineAllocs, error: alErr } = await supabase
+        .from('customer_order_allocations')
+        .select('customer_order_line_id, quantity_allocated, work_order_id, is_active')
+        .in('customer_order_line_id', lineIds)
+        .eq('is_active', true)
+      if (alErr) {
+        console.error('Failed to compute remaining on eligible lines:', alErr)
+      } else {
+        for (const a of allLineAllocs || []) {
+          allocSumByLine.set(
+            a.customer_order_line_id,
+            (allocSumByLine.get(a.customer_order_line_id) || 0) + (Number(a.quantity_allocated) || 0),
+          )
+        }
+      }
+    }
+
+    // Hide lines whose remaining demand is fully soaked up by allocations to THIS WO
+    // (those rows already render in the existing-allocations section).
+    const thisWoAllocByLine = new Map()
+    for (const a of allocs || []) {
+      thisWoAllocByLine.set(
+        a.customer_order_line_id,
+        (thisWoAllocByLine.get(a.customer_order_line_id) || 0) + (Number(a.quantity_allocated) || 0),
+      )
+    }
+
+    const eligibles = filteredLines.map(l => {
+      const ordered = Number(l.quantity_ordered) || 0
+      const fulfilled = Number(l.quantity_fulfilled) || 0
+      const totalAllocated = allocSumByLine.get(l.id) || 0
+      const remaining = Math.max(0, ordered - fulfilled - totalAllocated)
+      const allocatedToThisWo = thisWoAllocByLine.get(l.id) || 0
+      return {
+        line_id: l.id,
+        line_number: l.line_number,
+        part_id: l.part_id,
+        part_number: l.parts?.part_number || '—',
+        co_number: l.customer_orders?.co_number || '',
+        customer_name: l.customer_orders?.customers?.name || '',
+        due_date: l.due_date || null,
+        remaining,
+        allocatedToThisWo,
+      }
+    }).filter(l => l.remaining > 0 && l.allocatedToThisWo === 0)
+
+    eligibles.sort((a, b) => {
+      const ad = a.due_date || '9999-12-31'
+      const bd = b.due_date || '9999-12-31'
+      if (ad !== bd) return ad < bd ? -1 : 1
+      return (a.co_number || '').localeCompare(b.co_number || '')
+    })
+
+    setEligibleLines(eligibles)
   }
 
   const fetchAvailableParts = async () => {
@@ -102,6 +300,143 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     if (!error) setAvailableParts(data || [])
     setLoadingParts(false)
   }
+
+  // ── Allocation handlers (Batch B) ─────────────────────────────────────────
+
+  // Find existing-assembly index by part_id; returns -1 if not found.
+  const findAssemblyIdxByPartId = (partId) =>
+    existingAssemblies.findIndex(a => a.assemblyId === partId)
+
+  // Status set that locks allocation editing for a given assembly row.
+  const isAssemblyAllocLocked = (assembly) =>
+    !!assembly && assembly.status && assembly.status !== 'pending'
+
+  // Add allocation (option-b math): try to reduce stock first; bump total only on shortfall.
+  const handleAddAllocation = (line) => {
+    setAddCoError(prev => ({ ...prev, [line.line_id]: null }))
+    const qty = parseInt(addCoQty[line.line_id], 10)
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setAddCoError(prev => ({ ...prev, [line.line_id]: 'Enter a positive quantity.' }))
+      return
+    }
+    if (qty > line.remaining) {
+      setAddCoError(prev => ({ ...prev, [line.line_id]: `Max ${line.remaining}.` }))
+      return
+    }
+    const woaIdx = findAssemblyIdxByPartId(line.part_id)
+    if (woaIdx < 0) {
+      setAddCoError(prev => ({ ...prev, [line.line_id]: 'Matching product row not found.' }))
+      return
+    }
+    const assembly = existingAssemblies[woaIdx]
+    if (isAssemblyAllocLocked(assembly)) {
+      setAddCoError(prev => ({ ...prev, [line.line_id]: 'Production started — allocations locked.' }))
+      return
+    }
+
+    let shortfall = 0
+    setExistingAssemblies(prev => {
+      const updated = [...prev]
+      const a = { ...updated[woaIdx] }
+      const currentStock = a.additionalForStock || 0
+      if (currentStock >= qty) {
+        a.additionalForStock = currentStock - qty
+        a.orderQuantity = (a.orderQuantity || 0) + qty
+      } else {
+        shortfall = qty - currentStock
+        a.additionalForStock = 0
+        a.orderQuantity = (a.orderQuantity || 0) + qty
+      }
+      a.quantity = a.orderQuantity + a.additionalForStock
+      updated[woaIdx] = a
+      return updated
+    })
+
+    setNewAllocations(prev => [...prev, {
+      tempId: nextTempAllocId(),
+      lineId: line.line_id,
+      woaIndex: woaIdx,
+      partId: line.part_id,
+      partNumber: line.part_number,
+      coNumber: line.co_number,
+      customerName: line.customer_name,
+      lineNumber: line.line_number,
+      dueDate: line.due_date,
+      qty,
+      lineRemaining: line.remaining,
+      shortfall,
+    }])
+
+    // Remove or shrink the line in eligibleLines
+    setEligibleLines(prev =>
+      prev
+        .map(l => l.line_id === line.line_id ? { ...l, remaining: l.remaining - qty } : l)
+        .filter(l => l.remaining > 0)
+    )
+    setAddCoQty(prev => ({ ...prev, [line.line_id]: '' }))
+  }
+
+  // Remove an existing (already-saved) allocation: queue id for deactivation,
+  // hide from local view, return qty to stock on the matching assembly.
+  const handleRemoveExistingAllocation = (alloc) => {
+    if (allocationsToDeactivate.includes(alloc.id)) return
+    const partId = alloc.customer_order_lines?.part_id
+    const woaIdx = findAssemblyIdxByPartId(partId)
+    if (woaIdx >= 0) {
+      const assembly = existingAssemblies[woaIdx]
+      if (isAssemblyAllocLocked(assembly)) {
+        // Defensive guard — UI should hide the trash on locked rows
+        return
+      }
+      setExistingAssemblies(prev => {
+        const updated = [...prev]
+        const a = { ...updated[woaIdx] }
+        const qty = Number(alloc.quantity_allocated) || 0
+        a.orderQuantity = Math.max(1, (a.orderQuantity || 0) - qty)
+        a.additionalForStock = (a.additionalForStock || 0) + qty
+        a.quantity = a.orderQuantity + a.additionalForStock
+        updated[woaIdx] = a
+        return updated
+      })
+    }
+    setAllocationsToDeactivate(prev => [...prev, alloc.id])
+    setAllocations(prev => prev.filter(a => a.id !== alloc.id))
+  }
+
+  // Remove a not-yet-saved allocation: pop from list, reverse the math.
+  const handleRemoveNewAllocation = (tempId) => {
+    const ent = newAllocations.find(n => n.tempId === tempId)
+    if (!ent) return
+    setExistingAssemblies(prev => {
+      const updated = [...prev]
+      const a = { ...updated[ent.woaIndex] }
+      const qty = ent.qty
+      a.orderQuantity = Math.max(1, (a.orderQuantity || 0) - qty)
+      a.additionalForStock = (a.additionalForStock || 0) + qty
+      a.quantity = a.orderQuantity + a.additionalForStock
+      updated[ent.woaIndex] = a
+      return updated
+    })
+    setNewAllocations(prev => prev.filter(n => n.tempId !== tempId))
+  }
+
+  // Live summary that includes existing + new (unsaved) allocations and excludes
+  // the queued-for-deactivation set. Used for Customer/Due read-only displays.
+  const liveAllocationSummary = useMemo(() => {
+    const existingShape = (allocations || []).map(a => ({
+      customer_order_lines: a.customer_order_lines,
+    }))
+    const stagedShape = (newAllocations || []).map(n => ({
+      customer_order_lines: {
+        due_date: n.dueDate,
+        customer_orders: {
+          co_number: n.coNumber,
+          customers: { id: `staged-${n.lineId}`, name: n.customerName },
+        },
+      },
+    }))
+    return summarizeWOAllocations([...existingShape, ...stagedShape])
+  }, [allocations, newAllocations])
 
   // Check if a part is already on this WO
   const isPartAlreadyOnWO = (partId) => {
@@ -168,6 +503,9 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     if (dueDate !== (workOrder.due_date || '')) return true
     if (priority !== (workOrder.priority || 'normal')) return true
     if (newAssemblies.length > 0) return true
+    if (newAllocations.length > 0) return true
+    if (allocationsToDeactivate.length > 0) return true
+    if (newComponents.length > 0) return true
     for (const a of existingAssemblies) {
       if (a.orderQuantity !== a.originalOrderQuantity) return true
       if (a.additionalForStock !== a.originalAdditionalForStock) return true
@@ -288,6 +626,97 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         }
       }
 
+      // 4. Insert new CO allocations (Batch B). Triggers will roll up CO line/header status.
+      if (newAllocations.length > 0) {
+        const allocRows = newAllocations.map(n => ({
+          customer_order_line_id: n.lineId,
+          work_order_id: workOrder.id,
+          quantity_allocated: n.qty,
+          created_by: profile?.id || null,
+        }))
+        const { error: allocErr } = await supabase
+          .from('customer_order_allocations')
+          .insert(allocRows)
+        if (allocErr) throw allocErr
+      }
+
+      // 5. Deactivate existing CO allocations queued for removal.
+      if (allocationsToDeactivate.length > 0) {
+        const { error: deactErr } = await supabase
+          .from('customer_order_allocations')
+          .update({
+            is_active: false,
+            deactivated_at: new Date().toISOString(),
+            deactivated_by: profile?.id || null,
+          })
+          .in('id', allocationsToDeactivate)
+        if (deactErr) throw deactErr
+      }
+
+      // 6. Insert new components into existing assemblies (Batch B).
+      // Mirrors CreateWorkOrderModal: INSERT into jobs in pending_compliance,
+      // then copy part_routing_steps → job_routing_steps for each new job.
+      if (newComponents.length > 0) {
+        // Compute the next J-###### number once and increment as we insert.
+        const { data: prodJobs } = await supabase
+          .from('jobs')
+          .select('job_number')
+          .like('job_number', 'J-%')
+        let nextJobNum = 1
+        if (prodJobs && prodJobs.length > 0) {
+          const jobNumbers = prodJobs
+            .map(j => {
+              const m = j.job_number.match(/^J-(\d+)$/)
+              return m ? parseInt(m[1], 10) : 0
+            })
+            .filter(n => !isNaN(n) && n > 0)
+          if (jobNumbers.length > 0) nextJobNum = Math.max(...jobNumbers) + 1
+        }
+
+        for (const nc of newComponents) {
+          const { data: newJob, error: jobInsErr } = await supabase
+            .from('jobs')
+            .insert({
+              job_number: `J-${String(nextJobNum++).padStart(6, '0')}`,
+              work_order_id: workOrder.id,
+              work_order_assembly_id: nc.woaId,
+              component_id: nc.componentId,
+              quantity: nc.quantity,
+              status: 'pending_compliance',
+              is_maintenance: false,
+            })
+            .select('id')
+            .single()
+          if (jobInsErr) throw jobInsErr
+
+          // Copy part_routing_steps → job_routing_steps for this new job
+          const { data: partRouting, error: prErr } = await supabase
+            .from('part_routing_steps')
+            .select('*')
+            .eq('part_id', nc.componentId)
+            .eq('is_active', true)
+            .order('step_order')
+          if (prErr) throw prErr
+
+          if ((partRouting?.length || 0) > 0) {
+            const jobSteps = partRouting.map(step => ({
+              job_id: newJob.id,
+              step_order: step.step_order,
+              step_name: step.step_name,
+              step_type: step.step_type,
+              station: step.default_station,
+              status: 'pending',
+            }))
+            const { error: stepsErr } = await supabase
+              .from('job_routing_steps')
+              .insert(jobSteps)
+            if (stepsErr) throw stepsErr
+          }
+        }
+
+        setNewComponents([])
+      }
+
       onSuccess?.()
       onClose()
     } catch (err) {
@@ -332,21 +761,36 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
           <div className="grid grid-cols-3 gap-4 mb-4">
             <div>
               <label className="block text-gray-400 text-sm mb-1">Customer</label>
-              <input
-                type="text"
-                value={customer}
-                onChange={e => setCustomer(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
-              />
+              {liveAllocationSummary.hasAllocations ? (
+                <div className="w-full px-3 py-2 bg-gray-800/60 border border-gray-700 rounded text-gray-300">
+                  <CustomerDisplay summary={liveAllocationSummary} fallback={customer} />
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={customer}
+                  onChange={e => setCustomer(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
+                />
+              )}
             </div>
             <div>
               <label className="block text-gray-400 text-sm mb-1">Due Date</label>
-              <input
-                type="date"
-                value={dueDate}
-                onChange={e => setDueDate(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
-              />
+              {liveAllocationSummary.hasAllocations ? (
+                <div className="w-full px-3 py-2 bg-gray-800/60 border border-gray-700 rounded text-gray-300 flex items-center gap-2">
+                  <span>{formatWODueDate(liveAllocationSummary, workOrder.due_date) || '—'}</span>
+                  {liveAllocationSummary.hasMultipleDueDates && (
+                    <span className="text-xs text-gray-500">(earliest)</span>
+                  )}
+                </div>
+              ) : (
+                <input
+                  type="date"
+                  value={dueDate}
+                  onChange={e => setDueDate(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
+                />
+              )}
             </div>
             <div>
               <label className="block text-gray-400 text-sm mb-1">Priority</label>
@@ -362,6 +806,159 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
               </select>
             </div>
           </div>
+
+          {/* Customer Orders section (admin/scheduler only) */}
+          {canEditAllocations && (
+            <div className="border-t border-gray-700 pt-4 mb-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider">Customer Orders</h3>
+                {!showAddCO && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddCO(true)}
+                    className="flex items-center gap-1 px-3 py-1 text-xs bg-purple-900/40 hover:bg-purple-900/60 text-purple-200 border border-purple-500/30 rounded"
+                  >
+                    <Plus size={12} /> Add Customer Order
+                  </button>
+                )}
+              </div>
+
+              {allocations.length === 0 && newAllocations.length === 0 && !showAddCO && (
+                <div className="text-xs text-gray-500 italic mb-2">
+                  No customer order allocations on this work order.
+                </div>
+              )}
+
+              {/* Existing allocations */}
+              {allocations.map(a => {
+                const line = a.customer_order_lines
+                const partId = line?.part_id
+                const woaIdx = findAssemblyIdxByPartId(partId)
+                const assembly = woaIdx >= 0 ? existingAssemblies[woaIdx] : null
+                const locked = isAssemblyAllocLocked(assembly)
+                return (
+                  <div key={a.id} className="flex items-center gap-3 px-3 py-2 mb-1 bg-gray-800/40 border border-gray-700 rounded text-sm">
+                    <span className="font-mono text-purple-300 text-xs">{line?.customer_orders?.co_number || '—'}</span>
+                    <span className="text-gray-500">·</span>
+                    <span className="text-gray-300">{line?.customer_orders?.customers?.name || '—'}</span>
+                    <span className="text-gray-500 text-xs">Line {line?.line_number}</span>
+                    <span className="text-gray-500">·</span>
+                    <span className="font-mono text-gray-300 text-xs">{line?.parts?.part_number || '—'}</span>
+                    <span className="ml-auto font-mono text-gray-200">{a.quantity_allocated} pcs</span>
+                    {line?.due_date && (
+                      <span className="text-gray-500 text-xs">due {line.due_date}</span>
+                    )}
+                    {locked ? (
+                      <span className="text-xs text-gray-600" title="Production started — allocations locked">🔒</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveExistingAllocation(a)}
+                        className="p-1 text-red-400 hover:bg-red-900/30 rounded"
+                        title="Remove allocation"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+
+              {/* New (unsaved) allocations */}
+              {newAllocations.map(n => (
+                <div key={n.tempId} className="flex items-center gap-3 px-3 py-2 mb-1 bg-purple-900/10 border border-purple-700/30 rounded text-sm">
+                  <span className="font-mono text-purple-300 text-xs">{n.coNumber}</span>
+                  <span className="text-gray-500">·</span>
+                  <span className="text-gray-300">{n.customerName}</span>
+                  <span className="text-gray-500 text-xs">Line {n.lineNumber}</span>
+                  <span className="text-gray-500">·</span>
+                  <span className="font-mono text-gray-300 text-xs">{n.partNumber}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/40 text-purple-300 rounded">unsaved</span>
+                  {n.shortfall > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 bg-amber-900/40 text-amber-300 rounded" title="Total grew to absorb shortfall">
+                      Total +{n.shortfall}
+                    </span>
+                  )}
+                  <span className="ml-auto font-mono text-gray-200">{n.qty} pcs</span>
+                  {n.dueDate && (
+                    <span className="text-gray-500 text-xs">due {n.dueDate}</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveNewAllocation(n.tempId)}
+                    className="p-1 text-red-400 hover:bg-red-900/30 rounded"
+                    title="Discard staged allocation"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+
+              {/* Inline picker */}
+              {showAddCO && (
+                <div className="mt-2 border border-purple-500/30 rounded">
+                  <div className="px-3 py-2 bg-purple-900/10 flex items-center justify-between">
+                    <span className="text-xs text-purple-300 uppercase tracking-wider">Eligible CO lines</span>
+                    <button
+                      type="button"
+                      onClick={() => { setShowAddCO(false); setAddCoQty({}); setAddCoError({}) }}
+                      className="text-gray-400 hover:text-white"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto">
+                    {eligibleLines.length === 0 ? (
+                      <div className="p-3 text-xs text-gray-500 italic">
+                        No eligible CO lines for the parts on this work order.
+                      </div>
+                    ) : eligibleLines.map(line => {
+                      const woaIdx = findAssemblyIdxByPartId(line.part_id)
+                      const assembly = woaIdx >= 0 ? existingAssemblies[woaIdx] : null
+                      const locked = isAssemblyAllocLocked(assembly)
+                      const err = addCoError[line.line_id]
+                      return (
+                        <div key={line.line_id} className={`px-3 py-2 border-t border-gray-800 text-sm flex items-center gap-2 ${locked ? 'opacity-50' : ''}`}>
+                          <span className="font-mono text-purple-300 text-xs">{line.co_number}</span>
+                          <span className="text-gray-500">·</span>
+                          <span className="text-gray-300 text-xs">{line.customer_name}</span>
+                          <span className="text-gray-500 text-xs">L{line.line_number}</span>
+                          <span className="text-gray-500">·</span>
+                          <span className="font-mono text-gray-300 text-xs">{line.part_number}</span>
+                          <span className="ml-auto text-amber-300 text-xs font-mono">{line.remaining} remaining</span>
+                          {line.due_date && (
+                            <span className="text-gray-500 text-xs">due {line.due_date}</span>
+                          )}
+                          <input
+                            type="number"
+                            min="1"
+                            max={line.remaining}
+                            placeholder="Qty"
+                            value={addCoQty[line.line_id] || ''}
+                            onChange={(e) => setAddCoQty(prev => ({ ...prev, [line.line_id]: e.target.value }))}
+                            disabled={locked}
+                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs disabled:opacity-40"
+                          />
+                          <button
+                            type="button"
+                            disabled={locked}
+                            onClick={() => handleAddAllocation(line)}
+                            title={locked ? 'Production started — allocations locked.' : undefined}
+                            className="px-2 py-1 text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded"
+                          >
+                            Add
+                          </button>
+                          {err && (
+                            <span className="text-[10px] text-red-300 ml-1">{err}</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Divider */}
           <div className="border-t border-gray-700 pt-4 mb-4">
@@ -486,6 +1083,73 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                     ) : (
                       <div className="px-4 py-3 pl-10 text-sm text-gray-500 italic">
                         No jobs linked to this product
+                      </div>
+                    )}
+
+                    {/* Newly-added (unsaved) components for THIS assembly */}
+                    {newComponents.filter(nc => nc.assemblyIndex === aIdx).map(nc => (
+                      <div key={nc.tempId} className="px-4 py-2 pl-10 flex items-center justify-between bg-purple-900/10 border-t border-purple-700/30">
+                        <div className="flex items-center gap-3">
+                          <Wrench size={12} className="text-purple-400" />
+                          <div>
+                            <span className="text-purple-300 text-sm font-mono">{nc.componentPartNumber}</span>
+                            <span className="text-[10px] ml-2 px-1.5 py-0.5 bg-purple-900/40 text-purple-300 rounded">unsaved</span>
+                            <p className="text-xs text-gray-500">{nc.componentDescription}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-gray-300 font-mono">{nc.quantity} pcs</span>
+                          <button
+                            type="button"
+                            onClick={() => setNewComponents(prev => prev.filter(n => n.tempId !== nc.tempId))}
+                            className="p-1 text-red-400 hover:bg-red-900/30 rounded"
+                            title="Discard new component"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Add Component (admin/scheduler only) */}
+                    {canEditAllocations && (
+                      <div className="px-4 py-2 pl-10 border-t border-gray-800">
+                        {showAddCompFor === aIdx ? (
+                          <AddComponentInlineForm
+                            parts={bomComponentsByAssembly[assembly.assemblyId] || []}
+                            bomLoaded={Array.isArray(bomComponentsByAssembly[assembly.assemblyId])}
+                            existingComponentIds={[
+                              ...assembly.jobs.map(j => j.componentId).filter(Boolean),
+                            ]}
+                            defaultQty={assembly.quantity}
+                            onAdd={(componentId, qty) => {
+                              const list = bomComponentsByAssembly[assembly.assemblyId] || []
+                              const part = list.find(p => p.id === componentId)
+                              setNewComponents(prev => [...prev, {
+                                tempId: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                                assemblyIndex: aIdx,
+                                woaId: assembly.woaId,
+                                componentId,
+                                componentPartNumber: part?.part_number,
+                                componentDescription: part?.description,
+                                quantity: qty,
+                              }])
+                              setShowAddCompFor(null)
+                            }}
+                            onCancel={() => setShowAddCompFor(null)}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              loadBOMComponents(assembly.assemblyId)
+                              setShowAddCompFor(aIdx)
+                            }}
+                            className="text-xs text-skynet-accent hover:text-blue-400 inline-flex items-center gap-1"
+                          >
+                            <Plus size={12} /> Add Component
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -750,6 +1414,108 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// Inline component picker for "Add Component" under an existing assembly.
+// Searchable filter over part_number / description. Components already
+// present in the assembly's job list are excluded from the dropdown.
+function AddComponentInlineForm({ parts, bomLoaded = true, existingComponentIds, defaultQty, onAdd, onCancel }) {
+  const [search, setSearch] = useState('')
+  const [selectedId, setSelectedId] = useState(null)
+  const [qty, setQty] = useState(String(defaultQty || 1))
+
+  const visibleParts = useMemo(
+    () => parts.filter(p => !existingComponentIds.includes(p.id)),
+    [parts, existingComponentIds]
+  )
+
+  const matches = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return visibleParts
+    return visibleParts.filter(p =>
+      (p.part_number || '').toLowerCase().includes(q) ||
+      (p.description || '').toLowerCase().includes(q)
+    )
+  }, [visibleParts, search])
+
+  const handleAdd = () => {
+    const n = parseInt(qty, 10)
+    if (!selectedId) return
+    if (!Number.isFinite(n) || n < 1) return
+    onAdd(selectedId, n)
+  }
+
+  return (
+    <div className="bg-gray-900 border border-skynet-accent/40 rounded p-2">
+      <div className="flex items-center gap-2 mb-2">
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search part # or description..."
+          className="flex-1 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:outline-none focus:border-skynet-accent"
+          autoFocus
+        />
+        <input
+          type="number"
+          min="1"
+          value={qty}
+          onChange={e => setQty(e.target.value)}
+          className="w-20 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-xs text-center focus:outline-none focus:border-skynet-accent"
+          title="Quantity"
+        />
+        <button
+          type="button"
+          onClick={handleAdd}
+          disabled={!selectedId || !Number.isFinite(parseInt(qty, 10)) || parseInt(qty, 10) < 1}
+          className="px-2 py-1 text-xs bg-skynet-accent text-white rounded disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Add
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-2 py-1 text-xs text-gray-400 hover:text-white"
+        >
+          Cancel
+        </button>
+      </div>
+      <div className="max-h-44 overflow-y-auto border border-gray-800 rounded">
+        {!bomLoaded ? (
+          <div className="p-3 text-xs text-gray-500 italic flex items-center gap-2">
+            <Loader2 size={12} className="animate-spin" /> Loading BOM…
+          </div>
+        ) : parts.length === 0 ? (
+          <div className="p-3 text-xs text-gray-500 italic">
+            No components defined in this product's BOM.
+          </div>
+        ) : visibleParts.length === 0 ? (
+          <div className="p-3 text-xs text-gray-500 italic">
+            All BOM components are already on this product.
+          </div>
+        ) : matches.length === 0 ? (
+          <div className="p-3 text-xs text-gray-500 italic">No parts match.</div>
+        ) : matches.map(p => {
+          const isSelected = selectedId === p.id
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setSelectedId(p.id)}
+              className={`w-full text-left px-2 py-1.5 border-t border-gray-800 first:border-t-0 text-xs flex items-center gap-2 ${
+                isSelected
+                  ? 'bg-skynet-accent/20'
+                  : 'hover:bg-gray-800'
+              }`}
+            >
+              <span className="font-mono text-white">{p.part_number}</span>
+              <span className="text-gray-400 truncate">{p.description}</span>
+            </button>
+          )
+        })}
       </div>
     </div>
   )

@@ -1156,7 +1156,7 @@ export default function Kiosk() {
           id, job_number, quantity, status,
           production_lot_number, good_pieces, actual_end,
           work_order:work_orders (
-            wo_number, customer, po_number, due_date,
+            id, wo_number, customer, po_number, due_date,
             order_type, order_quantity, stock_quantity
           ),
           component:parts!component_id (
@@ -1208,7 +1208,11 @@ export default function Kiosk() {
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
-      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+      const woIdForAllocs = fullJob.work_order?.id || fullJob.work_order_id
+      if (!woIdForAllocs) {
+        console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
+      }
+      const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
 
       const html = buildTravelerHTML({
         job: fullJob,

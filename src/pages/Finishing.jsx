@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
   Unlock,
@@ -55,6 +57,9 @@ export default function Finishing() {
   const [queue, setQueue] = useState([])
   const [activeBatches, setActiveBatches] = useState([])
   const [recentCompletions, setRecentCompletions] = useState([])
+  // Active CO allocations grouped by work_order_id, used to derive Customer
+  // and earliest Due Date on batch cards. Map<woId, allocation[]>.
+  const [woAllocations, setWoAllocations] = useState(new Map())
   const [recentExpanded, setRecentExpanded] = useState(false)
   const [batchLabels, setBatchLabels] = useState({})
   const [loading, setLoading] = useState(true)
@@ -466,7 +471,7 @@ export default function Finishing() {
           job:jobs(
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description,
-            work_order:work_orders(wo_number, customer, priority, due_date, order_type, notes),
+            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes),
             component:parts!component_id(id, part_number, description, customer, part_type),
             assigned_machine:machines!assigned_machine_id(name)
           ),
@@ -486,7 +491,7 @@ export default function Finishing() {
           job:jobs(
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description,
-            work_order:work_orders(wo_number, customer, priority, due_date, order_type, notes),
+            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes),
             component:parts!component_id(id, part_number, description, customer, part_type),
             assigned_machine:machines!assigned_machine_id(name)
           ),
@@ -507,7 +512,7 @@ export default function Finishing() {
           *,
           job:jobs(
             id, job_number, is_standalone_finishing, source_description,
-            work_order:work_orders(wo_number, customer),
+            work_order:work_orders(id, wo_number, customer, due_date),
             component:parts!component_id(part_number, description, customer),
             assigned_machine:machines!assigned_machine_id(name)
           )
@@ -518,6 +523,41 @@ export default function Finishing() {
         .limit(50)
       setRecentCompletions(recentData || [])
 
+      // Hydrate active CO allocations per WO so batch cards can derive
+      // Customer / earliest Due Date when the WO is multi-CO.
+      const woIdsForAllocs = new Set()
+      for (const list of [pendingData || [], activeData || [], recentData || []]) {
+        for (const send of list) {
+          const woId = send.job?.work_order?.id
+          if (woId) woIdsForAllocs.add(woId)
+        }
+      }
+      const nextAllocsMap = new Map()
+      if (woIdsForAllocs.size > 0) {
+        const { data: allocsData, error: allocsErr } = await supabase
+          .from('customer_order_allocations')
+          .select(`
+            work_order_id,
+            quantity_allocated,
+            customer_order_lines (
+              line_number, due_date,
+              customer_orders ( co_number, customers ( id, name ) )
+            )
+          `)
+          .eq('is_active', true)
+          .in('work_order_id', Array.from(woIdsForAllocs))
+        if (allocsErr) {
+          console.error('Failed to load WO allocations for finishing cards:', allocsErr)
+        } else {
+          for (const a of allocsData || []) {
+            const arr = nextAllocsMap.get(a.work_order_id) || []
+            arr.push(a)
+            nextAllocsMap.set(a.work_order_id, arr)
+          }
+        }
+      }
+      setWoAllocations(nextAllocsMap)
+
       // Fetch jobs scheduled to non-kiosk machines that still have qty to send
       // (manual pickup queue for phased rollout — Mazak 5 is the only kiosk)
       const { data: pickupData, error: pickupError } = await supabase
@@ -525,7 +565,7 @@ export default function Finishing() {
         .select(`
           id, job_number, quantity, status, production_lot_number,
           actual_start, actual_end, is_standalone_finishing,
-          work_order:work_orders(wo_number, customer, priority, due_date),
+          work_order:work_orders(id, wo_number, customer, priority, due_date),
           component:parts!component_id(part_number, description, customer),
           assigned_machine:machines!assigned_machine_id(id, name, code, kiosk_enabled),
           finishing_sends(id, quantity, compliance_status)
@@ -547,13 +587,41 @@ export default function Finishing() {
             return { ...j, _sentQty: sentQty, _remainingQty: remaining }
           })
           .filter(j => j._remainingQty > 0)
-          .sort((a, b) => {
-            // Oldest first by due_date, falling back to job_number
-            const da = a.work_order?.due_date || '9999-12-31'
-            const db = b.work_order?.due_date || '9999-12-31'
-            if (da !== db) return da < db ? -1 : 1
-            return (a.job_number || '').localeCompare(b.job_number || '')
-          })
+
+        // Hydrate active CO allocations per WO so the customer/due display can derive from them.
+        const woIds = Array.from(new Set(filtered.map(j => j.work_order?.id).filter(Boolean)))
+        if (woIds.length > 0) {
+          const { data: pickupAllocs } = await supabase
+            .from('customer_order_allocations')
+            .select(`
+              work_order_id, quantity_allocated,
+              customer_order_lines (
+                id, due_date, part_id,
+                customer_orders ( co_number, customers ( id, name ) )
+              )
+            `)
+            .in('work_order_id', woIds)
+            .eq('is_active', true)
+          const byWo = {}
+          for (const a of pickupAllocs || []) {
+            if (!byWo[a.work_order_id]) byWo[a.work_order_id] = []
+            byWo[a.work_order_id].push(a)
+          }
+          for (const j of filtered) {
+            if (j.work_order) j.work_order.active_allocations = byWo[j.work_order.id] || []
+          }
+        }
+
+        filtered.sort((a, b) => {
+          // Oldest first by effective due_date (allocation-derived if any), fallback to wo.due_date
+          const aSummary = summarizeWOAllocations(a.work_order?.active_allocations)
+          const bSummary = summarizeWOAllocations(b.work_order?.active_allocations)
+          const da = formatWODueDate(aSummary, a.work_order?.due_date) || '9999-12-31'
+          const db = formatWODueDate(bSummary, b.work_order?.due_date) || '9999-12-31'
+          if (da !== db) return da < db ? -1 : 1
+          return (a.job_number || '').localeCompare(b.job_number || '')
+        })
+
         setPickupJobs(filtered)
       }
 
@@ -912,7 +980,7 @@ export default function Finishing() {
         .select(`
           id, job_number, quantity, status,
           production_lot_number, good_pieces, actual_end,
-          work_order:work_orders ( wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+          work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
           component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
           assigned_machine:machines!assigned_machine_id ( name ),
           assigned_user:profiles!assigned_user_id ( full_name )
@@ -955,7 +1023,11 @@ export default function Finishing() {
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
-      const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id || fullJob.work_order_id)
+      const woIdForAllocs = fullJob.work_order?.id || fullJob.work_order_id
+      if (!woIdForAllocs) {
+        console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
+      }
+      const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1716,17 +1788,30 @@ export default function Finishing() {
                                      title={batch.job?.work_order?.priority} />
                               </div>
 
-                              <div className="grid grid-cols-2 gap-4 mt-4">
-                                <div>
-                                  <p className="text-gray-500 text-xs">Part</p>
-                                  <p className="text-white">{batch.job?.component?.part_number}</p>
-                                  <p className="text-gray-400 text-sm">{batch.job?.component?.description}</p>
-                                </div>
-                                <div>
-                                  <p className="text-gray-500 text-xs">Customer</p>
-                                  <p className="text-white">{batch.job?.work_order?.customer || batch.job?.component?.customer || '-'}</p>
-                                </div>
-                              </div>
+                              {(() => {
+                                const woId = batch.job?.work_order?.id
+                                const allocs = woId ? woAllocations.get(woId) : null
+                                const summary = summarizeWOAllocations(allocs || [])
+                                const fallbackCustomer = batch.job?.work_order?.customer || batch.job?.component?.customer || ''
+                                return (
+                                  <div className="grid grid-cols-2 gap-4 mt-4">
+                                    <div>
+                                      <p className="text-gray-500 text-xs">Part</p>
+                                      <p className="text-white">{batch.job?.component?.part_number}</p>
+                                      <p className="text-gray-400 text-sm">{batch.job?.component?.description}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-gray-500 text-xs">Customer</p>
+                                      <p className="text-white">
+                                        <CustomerDisplay
+                                          summary={summary}
+                                          fallback={fallbackCustomer || <span className="text-gray-600">-</span>}
+                                        />
+                                      </p>
+                                    </div>
+                                  </div>
+                                )
+                              })()}
 
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
@@ -1758,9 +1843,21 @@ export default function Finishing() {
                                 <div>
                                   <p className="text-gray-500 text-xs">Due Date</p>
                                   <p className="text-white">
-                                    {batch.job?.work_order?.due_date
-                                      ? new Date(batch.job.work_order.due_date).toLocaleDateString()
-                                      : '-'}
+                                    {(() => {
+                                      const woId = batch.job?.work_order?.id
+                                      const allocs = woId ? woAllocations.get(woId) : null
+                                      const summary = summarizeWOAllocations(allocs || [])
+                                      const due = formatWODueDate(summary, batch.job?.work_order?.due_date)
+                                      if (!due) return <span className="text-gray-500">—</span>
+                                      return (
+                                        <>
+                                          {new Date(due).toLocaleDateString()}
+                                          {summary.hasMultipleDueDates && (
+                                            <span className="text-gray-500 text-xs ml-1">(earliest)</span>
+                                          )}
+                                        </>
+                                      )
+                                    })()}
                                   </p>
                                 </div>
                               </div>
@@ -2149,7 +2246,10 @@ export default function Finishing() {
                     </div>
 
                     <div className="space-y-2 max-h-96 overflow-y-auto">
-                      {filteredPickup.map(j => (
+                      {filteredPickup.map(j => {
+                        const pickupSummary = summarizeWOAllocations(j.work_order?.active_allocations)
+                        const fallbackCustomer = j.work_order?.customer || j.component?.customer || ''
+                        return (
                         <div
                           key={j.id}
                           className="bg-gray-800 rounded border border-gray-700 p-3 flex items-center gap-3"
@@ -2165,7 +2265,12 @@ export default function Finishing() {
                             </div>
                             <div className="text-gray-500 text-xs mt-1 truncate">
                               {j.component?.description}
-                              {j.work_order?.customer ? ` · ${j.work_order.customer}` : (j.component?.customer ? ` · ${j.component.customer}` : '')}
+                              {(pickupSummary.hasAllocations || fallbackCustomer) && (
+                                <>
+                                  {' · '}
+                                  <CustomerDisplay summary={pickupSummary} fallback={fallbackCustomer} className="text-gray-500" />
+                                </>
+                              )}
                             </div>
                             <div className="text-gray-600 text-xs mt-1 flex items-center gap-3 flex-wrap">
                               <span>{j.assigned_machine?.name || '—'}</span>
@@ -2218,7 +2323,8 @@ export default function Finishing() {
                             Send Batch
                           </button>
                         </div>
-                      ))}
+                        )
+                      })}
                       {pickupSearch.trim() && filteredPickup.length === 0 && (
                         <div className="text-gray-600 text-sm text-center py-4">No jobs match your search.</div>
                       )}
@@ -2310,7 +2416,12 @@ export default function Finishing() {
                           </div>
                           <p className="text-cyan-400 text-sm">{send.job?.component?.part_number}</p>
                           <p className="text-gray-500 text-xs">
-                            {send.job?.work_order?.wo_number} • {send.job?.work_order?.customer || '-'}
+                            {send.job?.work_order?.wo_number} •{' '}
+                            <CustomerDisplay
+                              summary={summarizeWOAllocations(send.job?.work_order?.id ? (woAllocations.get(send.job.work_order.id) || []) : [])}
+                              fallback={send.job?.work_order?.customer || '-'}
+                              className="text-gray-500"
+                            />
                           </p>
                           <div className="flex items-center gap-4 mt-2">
                             <span className="text-white text-sm">Qty: {send.quantity}</span>
@@ -2378,7 +2489,14 @@ export default function Finishing() {
                               )}
                             </p>
                             <p className="text-cyan-400 text-xs">{send.job?.component?.part_number}</p>
-                            <p className="text-gray-500 text-xs">{send.job?.work_order?.wo_number} · {send.job?.work_order?.customer}</p>
+                            <p className="text-gray-500 text-xs">
+                              {send.job?.work_order?.wo_number} ·{' '}
+                              <CustomerDisplay
+                                summary={summarizeWOAllocations(send.job?.work_order?.id ? (woAllocations.get(send.job.work_order.id) || []) : [])}
+                                fallback={send.job?.work_order?.customer || '—'}
+                                className="text-gray-500"
+                              />
+                            </p>
                           </div>
                           <div className="text-right">
                             <p className="text-white text-sm">{send.verified_count ?? send.quantity} pcs</p>

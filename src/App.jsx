@@ -48,19 +48,24 @@ function MainApp() {
     // Check for existing session on mount
     const initializeAuth = async () => {
       console.log('Initializing auth...')
+      // Claim signed-in synchronously so a SIGNED_IN event fired by supabase
+      // for the restored session can't slip past the listener guard before
+      // getSession() resolves. If there is no session we reset it below.
+      hasSignedInRef.current = true
       try {
         const { data: { session } } = await supabase.auth.getSession()
-        
+
         if (session?.user) {
           console.log('Found existing session for:', session.user.email)
           setUser(session.user)
-          hasSignedInRef.current = true
           await fetchProfile(session.user.id)
         } else {
           console.log('No existing session')
+          hasSignedInRef.current = false
         }
       } catch (error) {
         console.error('Error getting session:', error)
+        hasSignedInRef.current = false
       } finally {
         setLoading(false)
       }

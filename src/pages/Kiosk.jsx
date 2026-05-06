@@ -303,6 +303,28 @@ export default function Kiosk() {
   const isAdmin = operator?.role === 'admin'
   const canOperate = operator?.role === 'machinist' || operator?.role === 'admin'
 
+  // Clear any expired Supabase session left in localStorage. We
+  // disabled autoRefreshToken (re-PIN is the renewal mechanism), so
+  // an expired JWT can otherwise linger and make queries 401 silently
+  // until restoreSession's kiosk_sessions check fails.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (cancelled || !session) return
+        const expiresAt = session.expires_at ?? 0
+        const nowSec = Math.floor(Date.now() / 1000)
+        if (expiresAt <= nowSec) {
+          await supabase.auth.signOut({ scope: 'local' })
+        }
+      } catch (err) {
+        console.warn('Stale-session check failed:', err)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   // Load machine on mount
   useEffect(() => {
     if (machineCode) {
@@ -499,6 +521,25 @@ export default function Kiosk() {
     const interval = setInterval(checkSession, 30000)
     return () => clearInterval(interval)
   }, [operator, machine])
+
+  // JWT expiry — warn 15 min before the 8h boundary, then force-logout.
+  // Re-PIN is the renewal mechanism (intentional — every shift the
+  // operator re-attests their identity for traceability).
+  useEffect(() => {
+    if (!operator) return
+    const WARN_AT = 7 * 60 * 60 * 1000 + 45 * 60 * 1000
+    const FORCE_AT = 8 * 60 * 60 * 1000
+    const warnTimer = setTimeout(() => {
+      setToastMessage('Session expires in 15 minutes. PIN in again to continue.')
+    }, WARN_AT)
+    const forceTimer = setTimeout(() => {
+      handleLogout()
+    }, FORCE_AT)
+    return () => {
+      clearTimeout(warnTimer)
+      clearTimeout(forceTimer)
+    }
+  }, [operator])
 
   // Track user activity — reset timer on any interaction
   useEffect(() => {
@@ -1476,51 +1517,80 @@ export default function Kiosk() {
       setAuthError('PIN must be at least 4 digits')
       return
     }
+    if (!machine) {
+      setAuthError('Machine not loaded')
+      return
+    }
     setAuthenticating(true)
     setAuthError(null)
 
     try {
-      // Validate PIN
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('pin_code', pin)
-        .eq('is_active', true)
-        .single()
+      // Server-side PIN verification + JWT issuance. The edge function
+      // fails closed on duplicate-PIN matches (AS9100 traceability), so
+      // a generic 'Invalid PIN' covers both no-match and collision.
+      const { data: authData, error: authErr } = await supabase.functions.invoke(
+        'kiosk-authenticate',
+        {
+          body: {
+            pin,
+            machine_id: machine.id,
+            device_id: deviceIdRef.current,
+          },
+        }
+      )
 
-      if (error) {
-        if (error.code === 'PGRST116') setAuthError('Invalid PIN')
-        else throw error
+      if (authErr || !authData?.access_token || !authData?.operator) {
+        setAuthError('Invalid PIN')
+        setPin('')
         return
       }
 
-      if (!['machinist', 'admin', 'finishing', 'display'].includes(data.role)) {
-        setAuthError('Unauthorized role for kiosk access')
+      const profile = authData.operator
+
+      // Adopt the operator's JWT so subsequent queries run as
+      // `authenticated` instead of `anon`. refresh_token is a random
+      // opaque value that we never use — re-PIN is the renewal
+      // mechanism, so we stopAutoRefresh immediately.
+      const { error: sessionErr } = await supabase.auth.setSession({
+        access_token: authData.access_token,
+        refresh_token: authData.refresh_token,
+      })
+      if (sessionErr) {
+        console.error('setSession failed:', sessionErr)
+        setAuthError('Login failed')
+        setPin('')
         return
       }
 
-      if (!machine) {
-        setAuthError('Machine not loaded')
-        return
+      try {
+        // Disable supabase-js auto-refresh; our refresh_token is a
+        // placeholder and the kiosk requires a fresh PIN at expiry.
+        // NOTE: stopAutoRefresh is global to the supabase client
+        // singleton — if this device later navigates to a non-kiosk
+        // page in the same tab, that page's auto-refresh is also off.
+        // Acceptable for our deployment (kiosk pages are dedicated).
+        await supabase.auth.stopAutoRefresh()
+      } catch (e) {
+        console.warn('stopAutoRefresh unavailable:', e)
       }
 
-      // Check for in_setup jobs on OTHER machines (for pause warning)
+      // Cross-machine setup-job check — runs authenticated now.
       const { data: setupJobs } = await supabase
         .from('jobs')
         .select('id, job_number, status, assigned_machine_id, machines:assigned_machine_id(name)')
-        .eq('assigned_user_id', data.id)
+        .eq('assigned_user_id', profile.id)
         .eq('status', 'in_setup')
         .neq('assigned_machine_id', machine.id)
 
       if (setupJobs && setupJobs.length > 0) {
         // Has setup jobs on other machines — show pause confirmation modal
-        setPendingLogin(data)
+        setPendingLogin(profile)
         setCrossMachineModal({ activeJobs: setupJobs })
         return
       }
 
       // No setup jobs elsewhere — login immediately
-      await completeLogin(data)
+      await completeLogin(profile)
     } catch (err) {
       console.error('Auth error:', err)
       setAuthError('Authentication failed')
@@ -1560,8 +1630,16 @@ export default function Kiosk() {
     }
   }
 
-  // Cross-machine modal: cancel — go back to PIN screen
-  const handleCancelMachineSwitch = () => {
+  // Cross-machine modal: cancel — go back to PIN screen.
+  // The JWT was already adopted in handlePinSubmit before the modal
+  // fired, so clear it now to avoid leaving the client authenticated
+  // as an operator who didn't actually log in.
+  const handleCancelMachineSwitch = async () => {
+    try {
+      await supabase.auth.signOut({ scope: 'local' })
+    } catch (err) {
+      console.error('signOut failed:', err)
+    }
     setCrossMachineModal(null)
     setPendingLogin(null)
     setPin('')
@@ -1582,6 +1660,15 @@ export default function Kiosk() {
       } catch (err) {
         console.error('Session deactivation failed:', err)
       }
+    }
+    // Clear the operator's JWT from this device so subsequent queries
+    // fall back to anon. scope:'local' so only this client clears —
+    // other tabs/devices on the same Supabase project keep their
+    // sessions independently.
+    try {
+      await supabase.auth.signOut({ scope: 'local' })
+    } catch (err) {
+      console.error('signOut failed:', err)
     }
     setOperator(null)
     setPin('')

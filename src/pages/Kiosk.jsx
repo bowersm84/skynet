@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { 
@@ -35,10 +35,32 @@ import {
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 
+const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
+
+function getKioskDeviceId() {
+  try {
+    let id = localStorage.getItem(KIOSK_DEVICE_ID_KEY)
+    if (!id) {
+      id = (crypto?.randomUUID?.() || `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      localStorage.setItem(KIOSK_DEVICE_ID_KEY, id)
+    }
+    return id
+  } catch {
+    // Storage blocked (private mode etc.). Fall back to a per-tab id —
+    // the user will have to PIN in every refresh, which is the SAFE
+    // failure mode.
+    return `ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+}
 
 export default function Kiosk() {
   const { machineCode } = useParams()
-  
+
+  // Per-device id — stable across reloads via localStorage. Binds the
+  // kiosk_sessions row to this physical device so opening /kiosk/MZ-5
+  // on a different device requires a fresh PIN.
+  const deviceIdRef = useRef(getKioskDeviceId())
+
   // Machine state
   const [machine, setMachine] = useState(null)
   const [machineLoading, setMachineLoading] = useState(true)
@@ -310,6 +332,7 @@ export default function Kiosk() {
           .from('kiosk_sessions')
           .select('operator_id')
           .eq('machine_id', machine.id)
+          .eq('device_id', deviceIdRef.current)
           .eq('is_active', true)
           .order('logged_in_at', { ascending: false })
           .limit(1)
@@ -412,7 +435,14 @@ export default function Kiosk() {
         table: 'kiosk_sessions',
         filter: `operator_id=eq.${operator.id}`
       }, (payload) => {
-        if (payload.new.machine_id === machine.id && payload.new.is_active === false) {
+        // Only react if the deactivated row was for THIS device —
+        // otherwise a logout on another device would cascade and
+        // log this device out too.
+        if (
+          payload.new.machine_id === machine.id &&
+          payload.new.device_id === deviceIdRef.current &&
+          payload.new.is_active === false
+        ) {
           // Delay + re-check to avoid race with completeLogin
           // (step 1 deactivates all, step 2 reactivates this one)
           setTimeout(async () => {
@@ -422,7 +452,8 @@ export default function Kiosk() {
                 .select('is_active')
                 .eq('operator_id', operator.id)
                 .eq('machine_id', machine.id)
-                .single()
+                .eq('device_id', deviceIdRef.current)
+                .maybeSingle()
 
               if (!currentSession || !currentSession.is_active) {
                 handleLogout()
@@ -449,6 +480,7 @@ export default function Kiosk() {
           .select('is_active')
           .eq('operator_id', operator.id)
           .eq('machine_id', machine.id)
+          .eq('device_id', deviceIdRef.current)
           .maybeSingle()
 
         if (!session || !session.is_active) {
@@ -653,30 +685,44 @@ export default function Kiosk() {
   const loadMachine = async () => {
     setMachineLoading(true)
     setMachineError(null)
-    const searchTerm = decodeURIComponent(machineCode)
+    // iOS Safari and several browsers append a trailing slash when
+    // saving a URL to the home screen. Strip it, plus any whitespace,
+    // before lookup. DB stores codes uppercase; use ilike so the URL
+    // can be lower- or mixed-case.
+    const searchTerm = decodeURIComponent(machineCode || '')
+      .replace(/\/+$/, '')
+      .trim()
+
+    if (!searchTerm) {
+      setMachineError('No machine specified')
+      return
+    }
 
     try {
       let { data, error } = await supabase
         .from('machines')
         .select('*, location:locations(name, code)')
-        .eq('code', searchTerm)
+        .ilike('code', searchTerm)
         .eq('is_active', true)
-        .single()
+        .maybeSingle()
 
-      if (error?.code === 'PGRST116') {
+      if (!data && !error) {
         const { data: nameData, error: nameError } = await supabase
           .from('machines')
           .select('*, location:locations(name, code)')
           .ilike('name', searchTerm)
           .eq('is_active', true)
-          .single()
-        
-        if (nameError?.code === 'PGRST116') {
+          .maybeSingle()
+
+        if (nameError) throw nameError
+        if (!nameData) {
           setMachineError(`Machine "${searchTerm}" not found`)
           return
-        } else if (nameError) throw nameError
-        else data = nameData
-      } else if (error) throw error
+        }
+        data = nameData
+      } else if (error) {
+        throw error
+      }
 
       setMachine(data)
     } catch (err) {
@@ -1392,15 +1438,18 @@ export default function Kiosk() {
           .eq('operator_id', profile.id)
       }
 
-      // Step 2: Upsert active session for current machine
+      // Step 2: Insert active session for current (machine, device).
+      // Sessions are now bound to a per-device id so a different
+      // device opening the same /kiosk/<code> URL must PIN in.
       await supabase
         .from('kiosk_sessions')
-        .upsert({
-          operator_id: profile.id,
+        .insert({
           machine_id: machine.id,
+          operator_id: profile.id,
+          device_id: deviceIdRef.current,
+          is_active: true,
           logged_in_at: new Date().toISOString(),
-          is_active: true
-        }, { onConflict: 'operator_id,machine_id' })
+        })
     } catch (err) {
       // Session management failure must never block machine access
       console.error('Session management error (non-blocking):', err)
@@ -1520,7 +1569,8 @@ export default function Kiosk() {
           .from('kiosk_sessions')
           .update({ is_active: false })
           .eq('operator_id', operator.id)
-          .eq('machine_id', machine.id)
+          .eq('device_id', deviceIdRef.current)
+          .eq('is_active', true)
       } catch (err) {
         console.error('Session deactivation failed:', err)
       }

@@ -34,6 +34,13 @@ import {
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
 
+const ONGOING_STATUSES = [
+  'in_setup',
+  'in_progress',
+  'pending_passivation',
+  'in_passivation',
+]
+
 export default function Schedule({ user, profile, onNavigate, canEdit = false }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
   const [incompleteJobs, setIncompleteJobs] = useState([]) // Jobs sent back from kiosk
@@ -236,6 +243,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         setIncompleteJobs(incompleteData || [])
       }
 
+      // Fetch jobs scheduled within the visible week, AND any ongoing job
+      // (in_setup / in_progress / pending_passivation / in_passivation) whose
+      // scheduled_start lies before the week — those are still occupying the
+      // machine and need to render on the grid as carryover bars.
+      const ongoingList = ONGOING_STATUSES.join(',')
+      const weekStartIso = weekStart.toISOString()
+      const weekEndIso = weekEnd.toISOString()
       const { data: scheduledData, error: scheduledError } = await supabase
         .from('jobs')
         .select(`
@@ -246,9 +260,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         `)
         .not('assigned_machine_id', 'is', null)
         .not('scheduled_start', 'is', null)
-        .gte('scheduled_start', weekStart.toISOString())
-        .lte('scheduled_start', weekEnd.toISOString())
         .not('status', 'eq', 'cancelled')
+        .or(
+          `and(scheduled_start.gte.${weekStartIso},scheduled_start.lte.${weekEndIso}),` +
+          `and(scheduled_start.lt.${weekStartIso},status.in.(${ongoingList}))`
+        )
         .order('scheduled_start', { ascending: true })
 
       if (scheduledError) {
@@ -524,9 +540,18 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
       ? job.actual_end
       : job.scheduled_end
+
+    // View bounds — used both for clipping and for "extends to end of view"
+    // treatment of ongoing jobs that don't yet have a scheduled_end recorded.
+    const viewEnd = new Date(weekDates[6])
+    viewEnd.setHours(23, 59, 59, 999)
+
+    const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
     const jobEnd = endTime
       ? new Date(endTime)
-      : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+      : isOngoingNoEnd
+        ? viewEnd
+        : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
 
     const dayStart = new Date(dayDate)
     dayStart.setHours(0, 0, 0, 0)
@@ -539,15 +564,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     if (jobEnd < dayStart) return null
 
     // Left edge: where the job starts relative to this day
+    // For carryover bars (jobStart before this column), pin to left edge of column.
     const visibleStart = jobStart < dayStart ? dayStart : jobStart
     const startHour = visibleStart.getHours() + visibleStart.getMinutes() / 60
     const leftPercent = (startHour / 24) * 100
 
-    // Right edge: full extent from anchor day (not clipped at day boundary)
-    // Clip only at end of visible week to prevent infinite overflow
-    const weekEnd = new Date(weekDates[6])
-    weekEnd.setHours(23, 59, 59, 999)
-    const clippedEnd = jobEnd > weekEnd ? weekEnd : jobEnd
+    // Right edge: clip at end of visible view to prevent infinite overflow
+    const clippedEnd = jobEnd > viewEnd ? viewEnd : jobEnd
 
     // Width in hours from visible start to clipped end
     const durationMs = clippedEnd.getTime() - visibleStart.getTime()
@@ -563,27 +586,33 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       durationHours,
       isMultiDay,
       continuesFromPrevious: jobStart < dayStart,
-      continuesToNext: jobEnd > weekEnd
+      continuesToNext: jobEnd > viewEnd
     }
   }
 
   // Zoomed day view: position based on hour columns
   const getJobBlockStyleZoomed = (job, dayDate) => {
     if (!job.scheduled_start) return null
-    
+
     const jobStart = new Date(job.scheduled_start)
     // Use actual_end for completed jobs, otherwise scheduled_end
     const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
       ? job.actual_end
       : job.scheduled_end
-    const jobEnd = endTime 
-      ? new Date(endTime) 
-      : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
-    
+
     const dayStart = new Date(dayDate)
     dayStart.setHours(0, 0, 0, 0)
     const dayEnd = new Date(dayDate)
     dayEnd.setHours(23, 59, 59, 999)
+
+    // Ongoing jobs without a recorded scheduled_end stretch to the end of the
+    // visible day rather than collapsing to a 60-minute fallback.
+    const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
+    const jobEnd = endTime
+      ? new Date(endTime)
+      : isOngoingNoEnd
+        ? dayEnd
+        : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
     
     if (jobStart > dayEnd) return null
     if (jobEnd < dayStart) return null
@@ -703,6 +732,21 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     setDraggedJob(null)
     setDraggedScheduledJob(null)
     setDropTarget(null)
+  }
+
+  // Compute the next available start time on a machine: end of the last
+  // scheduled job there (whose scheduled_end is known), or now if the
+  // machine is idle / its last bookings extend backwards in time.
+  const computeNextSlotStart = (machineId, jobs) => {
+    const onMachine = jobs.filter(
+      (j) => j.assigned_machine_id === machineId && j.scheduled_end
+    )
+    const now = new Date()
+    if (onMachine.length === 0) return now
+    const lastEnd = new Date(
+      Math.max(...onMachine.map((j) => new Date(j.scheduled_end).getTime()))
+    )
+    return lastEnd > now ? lastEnd : now
   }
 
   // Snap to the next valid business-hours slot after a job ends
@@ -1366,9 +1410,17 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
         ? job.actual_end
         : job.scheduled_end
+      // Ongoing jobs (in_setup / in_progress / passivation) without a recorded
+      // scheduled_end are still occupying the machine — render them as
+      // extending to the end of the visible view rather than computing a fake
+      // ending from estimated_minutes (which would put them in the past for
+      // long-running carryover jobs).
+      const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
       const jobEnd = endTime
         ? new Date(endTime)
-        : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+        : isOngoingNoEnd
+          ? weekEnd
+          : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
 
       // Job must touch this day
       if (jobStart > dayEnd || jobEnd < dayStart) return false

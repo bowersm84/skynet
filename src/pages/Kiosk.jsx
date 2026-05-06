@@ -475,12 +475,16 @@ export default function Kiosk() {
 
     const checkSession = async () => {
       try {
+        // Filter by is_active=true so .maybeSingle() returns null
+        // (not multiple rows) when this device's session was
+        // deactivated and an old inactive row also matches.
         const { data: session } = await supabase
           .from('kiosk_sessions')
           .select('is_active')
           .eq('operator_id', operator.id)
           .eq('machine_id', machine.id)
           .eq('device_id', deviceIdRef.current)
+          .eq('is_active', true)
           .maybeSingle()
 
         if (!session || !session.is_active) {
@@ -1429,8 +1433,12 @@ export default function Kiosk() {
   // Shared login completion — deactivate all sessions, create new one, set operator
   const completeLogin = async (profile) => {
     try {
-      // Step 1: Deactivate ALL sessions for this operator (clean slate)
-      // Admin users are exempt — they can be logged into multiple machines
+      // Step 1: Deactivate ALL sessions for this operator across every
+      // machine and device. Admins are exempt (multi-machine login OK).
+      // INTENTIONAL: no device_id filter here — when a non-admin PINs
+      // in, all of their other devices get force-logged-out so an
+      // operator is only "active" on one device at a time. Do not add
+      // a device_id filter; it would break single-operator enforcement.
       if (profile.role !== 'admin') {
         await supabase
           .from('kiosk_sessions')

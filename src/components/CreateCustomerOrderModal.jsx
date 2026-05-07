@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, ChevronDown, Search, Loader2 } from 'lucide-react'
 import { formatCONumber } from '../lib/customerOrders'
+import { loadActiveSalespeople } from '../lib/salespeople'
 
 // Customer combobox — searchable picker over public.customers (active only).
 // Same UX pattern as ProductCombobox in CreateWorkOrderModal.jsx; duplicated
@@ -214,9 +215,11 @@ const newLine = () => ({
 export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, profile }) {
   const [customers, setCustomers] = useState([])
   const [parts, setParts] = useState([])
+  const [salespeople, setSalespeople] = useState([])
   const [loadingRefs, setLoadingRefs] = useState(false)
 
   const [customerId, setCustomerId] = useState(null)
+  const [salespersonId, setSalespersonId] = useState('')
   const [fishbowlOrderId, setFishbowlOrderId] = useState('')
   const [poNumber, setPoNumber] = useState('')
   const [notes, setNotes] = useState('')
@@ -230,7 +233,7 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
     let cancelled = false
     const load = async () => {
       setLoadingRefs(true)
-      const [{ data: cust, error: ce }, { data: prt, error: pe }] = await Promise.all([
+      const [{ data: cust, error: ce }, { data: prt, error: pe }, sp] = await Promise.all([
         supabase
           .from('customers')
           .select('id, customer_id, name')
@@ -242,12 +245,14 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
           .eq('is_active', true)
           .in('part_type', ['assembly', 'finished_good'])
           .order('part_number', { ascending: true }),
+        loadActiveSalespeople(),
       ])
       if (cancelled) return
       if (ce) setError(`Failed to load customers: ${ce.message}`)
       if (pe) setError(`Failed to load parts: ${pe.message}`)
       setCustomers(cust || [])
       setParts(prt || [])
+      setSalespeople(sp || [])
       setLoadingRefs(false)
     }
     load()
@@ -285,6 +290,10 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
       setError('Select a customer.')
       return
     }
+    if (!salespersonId) {
+      setError('Salesperson is required.')
+      return
+    }
     const cleanedFb = fishbowlOrderId.replace(/[^A-Z0-9]/gi, '').toUpperCase()
     if (!cleanedFb) {
       setError('Fishbowl Order ID is required (alphanumeric).')
@@ -316,6 +325,7 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
         .insert({
           co_number: coNumber,
           customer_id: selectedCustomer.id,
+          salesperson_id: salespersonId,
           fishbowl_order_id: cleanedFb,
           po_number: poNumber.trim() || null,
           notes: notes.trim() || null,
@@ -407,6 +417,23 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
                       customers={customers}
                     />
                   )}
+                </div>
+
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">
+                    Salesperson <span className="text-red-400">*</span>
+                  </label>
+                  <select
+                    value={salespersonId}
+                    onChange={(e) => setSalespersonId(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent"
+                    required
+                  >
+                    <option value="">— Select —</option>
+                    {salespeople.map((s) => (
+                      <option key={s.id} value={s.id}>{s.full_name}</option>
+                    ))}
+                  </select>
                 </div>
 
                 <div>

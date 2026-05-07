@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, ChevronDown, Search, Loader2, AlertTriangle } from 'lucide-react'
+import { loadActiveSalespeople } from '../lib/salespeople'
 
 // Local copies of the Customer/Part comboboxes used in CreateCustomerOrderModal.
 // Duplicated rather than extracted per the brief — keep the create modal untouched.
@@ -224,6 +225,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
 
   const [customers, setCustomers] = useState([])
   const [parts, setParts] = useState([])
+  const [salespeople, setSalespeople] = useState([])
 
   const [coNumber, setCoNumber] = useState('')
   const [coStatus, setCoStatus] = useState(null)
@@ -231,6 +233,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
   // Header working state
   const [header, setHeader] = useState({
     customer_id: null,
+    salesperson_id: '',
     po_number: '',
     fishbowl_order_id: '',
     notes: '',
@@ -258,7 +261,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           .from('customer_orders')
           .select(`
             id, co_number, fishbowl_order_id, po_number, notes, status,
-            customer_id,
+            customer_id, salesperson_id,
             customers ( id, customer_id, name )
           `)
           .eq('id', coId)
@@ -296,7 +299,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
         }
 
         // Reference data — same loaders as CreateCustomerOrderModal
-        const [{ data: cust, error: ce }, { data: prt, error: pe }] = await Promise.all([
+        const [{ data: cust, error: ce }, { data: prt, error: pe }, sp] = await Promise.all([
           supabase
             .from('customers')
             .select('id, customer_id, name')
@@ -308,6 +311,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
             .eq('is_active', true)
             .in('part_type', ['assembly', 'finished_good'])
             .order('part_number', { ascending: true }),
+          loadActiveSalespeople(),
         ])
         if (ce) throw ce
         if (pe) throw pe
@@ -319,6 +323,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
 
         const initialHeader = {
           customer_id: co.customer_id || null,
+          salesperson_id: co.salesperson_id || '',
           po_number: co.po_number || '',
           fishbowl_order_id: co.fishbowl_order_id || '',
           notes: co.notes || '',
@@ -355,6 +360,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
 
         setCustomers(cust || [])
         setParts(prt || [])
+        setSalespeople(sp || [])
       } catch (err) {
         if (!cancelled) setError(err.message || String(err))
       } finally {
@@ -423,6 +429,13 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
       next.header = 'Customer is required.'
       ok = false
     }
+    if (!header.salesperson_id) {
+      next.header = next.header || 'Salesperson is required.'
+      ok = false
+    } else if (!salespeople.some(s => s.id === header.salesperson_id)) {
+      next.header = next.header || 'The previously assigned salesperson is no longer active. Please select a new one.'
+      ok = false
+    }
 
     for (const l of lines) {
       if (isRowReadOnly(l)) continue
@@ -461,6 +474,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
       if (originalHeader) {
         const headerChanged =
           header.customer_id !== originalHeader.customer_id ||
+          (header.salesperson_id || '') !== (originalHeader.salesperson_id || '') ||
           (header.po_number || '') !== (originalHeader.po_number || '') ||
           (header.fishbowl_order_id || '') !== (originalHeader.fishbowl_order_id || '') ||
           (header.notes || '') !== (originalHeader.notes || '')
@@ -470,6 +484,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
             .from('customer_orders')
             .update({
               customer_id: header.customer_id,
+              salesperson_id: header.salesperson_id || null,
               po_number: header.po_number?.trim() || null,
               fishbowl_order_id: header.fishbowl_order_id?.trim() || null,
               notes: header.notes?.trim() || null,
@@ -580,6 +595,38 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
                       customers={customers}
                       disabled={isCancelled}
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">
+                      Salesperson <span className="text-red-400">*</span>
+                    </label>
+                    {(() => {
+                      const currentInList = salespeople.some(s => s.id === header.salesperson_id)
+                      const showStaleWarning = header.salesperson_id && !currentInList
+                      return (
+                        <>
+                          <select
+                            value={currentInList ? header.salesperson_id : ''}
+                            onChange={(e) => updateHeader({ salesperson_id: e.target.value })}
+                            disabled={isCancelled}
+                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:border-skynet-accent disabled:bg-gray-800 disabled:text-gray-400"
+                            required
+                          >
+                            <option value="">— Select —</option>
+                            {salespeople.map((s) => (
+                              <option key={s.id} value={s.id}>{s.full_name}</option>
+                            ))}
+                          </select>
+                          {showStaleWarning && (
+                            <div className="text-xs text-yellow-400 mt-1">
+                              The previously assigned salesperson is no longer active.
+                              Please select a new one.
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
                   </div>
 
                   <div>

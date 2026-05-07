@@ -90,8 +90,9 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
         .select(`
           id, co_number, fishbowl_order_id, po_number, notes, status,
           cancelled_at, cancel_reason, created_at,
-          customer_id,
-          customers ( id, customer_id, name )
+          customer_id, salesperson_id,
+          customers ( id, customer_id, name ),
+          salesperson:profiles!customer_orders_salesperson_id_fkey ( id, full_name )
         `)
         .order('created_at', { ascending: false })
       if (cosErr) throw cosErr
@@ -425,6 +426,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
                 <th className="w-8 px-2 py-3"></th>
                 <th className="px-4 py-3 text-left">CO #</th>
                 <th className="px-4 py-3 text-left">Customer</th>
+                <th className="px-4 py-3 text-left">Salesperson</th>
                 <th className="px-4 py-3 text-left">PO #</th>
                 <th className="px-4 py-3 text-left">Lines</th>
                 <th className="px-4 py-3 text-left">Earliest Due</th>
@@ -633,6 +635,9 @@ function CORow({
           )}
         </td>
         <td className="px-4 py-3 text-gray-300 text-sm">
+          {co.salesperson?.full_name || <span className="text-gray-600">—</span>}
+        </td>
+        <td className="px-4 py-3 text-gray-300 text-sm">
           {co.po_number || <span className="text-gray-600">—</span>}
         </td>
         <td className="px-4 py-3 text-gray-300 text-sm">{co.line_count}</td>
@@ -668,7 +673,7 @@ function CORow({
       </tr>
       {expanded && (
         <tr className="bg-gray-950 border-t border-gray-800">
-          <td colSpan={9} className="p-0">
+          <td colSpan={10} className="p-0">
             <div className="px-6 py-4">
               {co.cancel_reason && co.status === 'cancelled' && (
                 <div className="mb-3 p-2 rounded bg-red-900/30 border border-red-800/60 text-red-200 text-xs flex items-start gap-2">

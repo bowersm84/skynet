@@ -29,7 +29,7 @@ export default function UsersTab({ profile }) {
     setLoading(true)
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, email, full_name, username, role, home_location_id, can_float, can_approve_compliance, is_active, pin_code, created_at')
+      .select('id, email, full_name, username, role, home_location_id, can_float, can_approve_compliance, is_salesperson, is_active, pin_code, created_at')
       .order('created_at', { ascending: false })
     if (error) {
       setActionStatus({ type: 'error', message: `Failed to load users: ${error.message}` })
@@ -219,7 +219,10 @@ export default function UsersTab({ profile }) {
                   <td className="px-4 py-3">{getStatusBadge(user)}</td>
                   <td className="px-4 py-3 text-xs text-gray-400">
                     {user.can_approve_compliance && <span className="mr-2">+ Compliance Approver</span>}
-                    {user.can_float && <span>+ Floater</span>}
+                    {user.can_float && <span className="mr-2">+ Floater</span>}
+                    {user.is_salesperson && (
+                      <span className="text-xs text-green-300">+ Sales</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-1">
@@ -317,6 +320,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
     home_location_id: locations[0]?.id || '',
     can_float: false,
     can_approve_compliance: false,
+    is_salesperson: false,
   })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
@@ -345,6 +349,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
           home_location_id: form.home_location_id || null,
           can_float: form.can_float,
           can_approve_compliance: form.can_approve_compliance,
+          is_salesperson: form.is_salesperson,
           temp_password: form.temp_password,
         })
       } else {
@@ -357,6 +362,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
           home_location_id: form.home_location_id || null,
           can_float: form.can_float,
           can_approve_compliance: form.can_approve_compliance,
+          is_salesperson: form.is_salesperson,
         })
       }
     } finally {
@@ -504,6 +510,14 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
               />
               Can approve compliance (backup approver)
             </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.is_salesperson}
+                onChange={(e) => setForm({ ...form, is_salesperson: e.target.checked })}
+              />
+              <span>Salesperson (appears in CO assignment dropdowns)</span>
+            </label>
           </div>
 
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-800">
@@ -533,6 +547,7 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
     home_location_id: user.home_location_id || '',
     can_float: user.can_float || false,
     can_approve_compliance: user.can_approve_compliance || false,
+    is_salesperson: user.is_salesperson || false,
   })
   const [submitting, setSubmitting] = useState(false)
 
@@ -615,6 +630,14 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
                 onChange={(e) => setForm({ ...form, can_approve_compliance: e.target.checked })}
               />
               Can approve compliance (backup approver)
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.is_salesperson}
+                onChange={(e) => setForm({ ...form, is_salesperson: e.target.checked })}
+              />
+              <span>Salesperson (appears in CO assignment dropdowns)</span>
             </label>
           </div>
 

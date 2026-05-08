@@ -517,3 +517,114 @@ Three bugs surfaced during testing that traced to the same root cause: code path
 - **Polymorphic `outbound_sends.source_id` cannot use PostgREST embeds:** Two-step fetch + JS hydrate pattern. Hotfix 1 introduced `hydrateAssemblySends(sends)` in `OutsourcedJobs.jsx` for this. Same pattern applied in `Mainframe.jsx` for the WOA outbound_sends pull.
 
 ### S6 prod migration was verified on May 4, 2026 against the 12-point checklist. Keeps the audit trail tight for AS9100.
+---
+
+## Post-S6 Hardening & Feature Expansion (May 7-8, 2026)
+
+This sprint-let between S6 go-live and the formal Sprint 7 RLS hardening absorbed a series of urgent fixes, security work, and feature expansions that surfaced as real users started exercising the system. Documented here because each decision encodes a "we learned this the hard way" lesson worth not relitigating.
+
+### Edge functions: source-controlled in repo, deployed manually via Dashboard
+
+- **Decision:** Every Supabase Edge Function lives at `supabase/functions/<name>/index.ts` in the repo. The file is canonical. Deployment is a manual paste-and-deploy into the Supabase Dashboard for each project (prod and test).
+- **Why:** Supabase has no auto-deploy from a connected repo. Without source control, the only copy of a function lives in the live Dashboard — one accidental delete and there is no way to restore. We hit this when the `manage-users` function had been edited multiple times in the Dashboard with no tracked history; when CC tried to make a small surgical edit, the file didn't exist locally to edit.
+- **Discipline going forward:** Edit the file first, commit, then paste into the Dashboard for both prod and test. Never edit only in the Dashboard. Every CC prompt that touches an edge function explicitly says "update the file in `supabase/functions/<name>/index.ts`." This is now a non-negotiable rule.
+
+### Kiosk authentication: real Supabase JWT, not anon
+
+- **Decision:** New edge function `kiosk-authenticate` validates a kiosk operator's PIN server-side and mints a real Supabase-format HS256 JWT with `aud='authenticated'`, `role='authenticated'`, 8-hour lifetime. The client calls `supabase.auth.setSession(...)` with that token, then `supabase.auth.stopAutoRefresh()`. The kiosk runs as an authenticated user for the rest of the shift.
+- **Why:** The previous design ran kiosks as anon, which forced every kiosk-readable table to have a permissive anon policy. That blast radius was unacceptable as the schema grew. With kiosks authenticated, anon access on the database tightens to only what's needed pre-PIN: `machines` (active only) and `locations`.
+- **Fail-closed PIN matching:** Lookup pulls up to 2 rows. 0 matches OR ≥2 matches → 401 "Invalid credentials." Collision (≥2 matches with the same PIN) is logged to `audit_logs` as `kiosk_pin_collision` so admins can spot when a PIN reset is needed. Never silently picks one operator out of multiple — AS9100 / FAA traceability requires positive identification.
+- **JWT_SECRET, not SUPABASE_JWT_SECRET:** Supabase reserves the `SUPABASE_` prefix for its auto-injected secrets. We use `JWT_SECRET` (no prefix) as the env var name, populated from the project's Legacy JWT Secret (Project Settings → API → JWT Keys → Legacy JWT Secret). Each project's secret is different — test and prod have separate values.
+- **Modern projects use JWKS but legacy secret still works for signing.** New Supabase projects default to asymmetric (JWKS) JWT signing keys, but the legacy HMAC secret is retained for verification. Our HS256-signed tokens are accepted because Supabase verifies against the legacy secret. If the legacy secret is ever rotated out, the function will need to switch to RS256 with the project's signing key.
+
+### Per-device kiosk session binding
+
+- **Decision:** `kiosk_sessions` keyed by (operator_id, machine_id, device_id) with a partial unique index on `is_active = true`. New `device_id` column populated client-side from `localStorage.skynet.kiosk.device_id` (UUID generated via `crypto.randomUUID()` on first kiosk load, persisted forever).
+- **Why:** Original design keyed sessions by (operator_id, machine_id) only. If Roger logged in on the iPad at Mazak 5, then Patrick walked up with a different iPad and opened the same kiosk URL, Patrick's view inherited Roger's active session — wrong operator attribution on every subsequent kiosk action. Per-device binding eliminates that.
+- **Migration:** Dropped two old uniqueness constraints (`kiosk_sessions_operator_id_machine_id_key` and `kiosk_sessions_operator_machine_unique`) which both blocked multi-device sessions. Wiped legacy active rows with NULL device_id (`UPDATE ... SET is_active=false WHERE device_id IS NULL`) so no device auto-restores under a previous operator.
+- **`kiosk_sessions` schema clarification:** No `logged_out_at` column exists. Sessions terminate via `is_active = false` only. This came up multiple times in the session and is worth recording.
+
+### AWS Amplify SPA rewrite — proper 200, not 404→200
+
+- **Decision:** Replaced the `404-200` rewrite rule with a status-200 regex that matches everything except static assets. Cache headers added: `index.html` no-cache, `/assets/**` `max-age=31536000`.
+- **Why:** Iframe icons on iPads loaded the route via the native browser; the old `404-200` rule returned a soft-404 that some user-agents handled inconsistently. Status 200 with the regex pattern serves `index.html` directly for any route without an asset extension. Stable across iOS Safari, iPad home-screen icons, and direct-URL navigation.
+- **Pattern:** `</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>`
+
+### No-email user accounts + admin-set passwords
+
+- **Decision:** New `invite_no_email` action on `manage-users` creates a user with email `<username>@skynet.local` (a non-routable placeholder) and a temp password chosen by the admin. New `set_password` action lets an admin change any user's password directly. Both flows set `profiles.must_change_password = true`; the user is forced through a `/force-change-password` flow on next login.
+- **Why:** Some operators (especially shop-floor staff) don't have a Skybolt email and don't need one. Forcing every user to have a real inbox just to receive an invite link adds friction. The placeholder-email pattern keeps Supabase Auth happy (it requires a unique email per user) without requiring a deliverable inbox. Admin-set passwords also handle the practical case where someone forgets their credentials and there's no one nearby to walk them through the recovery flow — admin sets a known temp, force-change picks up on first login.
+- **Login lookup via SECURITY DEFINER RPC:** New `get_email_by_username(p_username text)` RPC returns the email for a username. Granted to anon. Lets the Login form resolve "mbowers" to "mbowers@skybolt.com" or "mbowers@skynet.local" without exposing the profiles table to anonymous selects.
+
+### Salesperson tracking via flag on user, not separate table
+
+- **Decision:** `profiles.is_salesperson boolean` flags which users can be assigned to a customer order. `customer_orders.salesperson_id` (nullable, FK to profiles, ON DELETE SET NULL) records the assignment. Mandatory on Create CO and Edit CO modals. Visible as a column on the Customer Orders list and in Order Lookup. NOT on the traveler.
+- **Why:** Adding a separate Salespeople table would have created a parallel set of name-management CRUD with no real upside — most salespeople either are or will be SkyNet users (some have CS roles, others may eventually log in). Tying salesperson identity to the existing user account avoids duplication and lets future features (notifications, dashboards, commission reporting) key off the same identity.
+- **Stale dropdown handling on Edit CO:** When a CO has `salesperson_id` pointing at someone who is no longer flagged as salesperson (or is_active=false), the Edit modal renders a yellow "Previously assigned salesperson is no longer active. Please select a new one." warning and blocks save until a new pick is made. Historical attribution preserved (the FK stays) but the user is forced to refresh the assignment.
+- **Trigger doesn't auto-pick up new metadata fields.** When invite-by-email fires `auth.admin.inviteUserByEmail` with `is_salesperson` in user_metadata, the existing `handle_new_user` trigger doesn't read that field — it only knows about the original set (role, full_name, can_float, can_approve_compliance). Solution: after the invite call succeeds, the edge function does a follow-up `UPDATE profiles SET is_salesperson = ...` patch using the service role key. Same pattern as `invite_no_email` already used. This will be needed for any future profile fields added without simultaneously updating the trigger.
+
+### Multi-CO customer + due-date display
+
+- **Decision:** New helper module `src/lib/workOrderDisplay.js` exports `summarizeWOAllocations(wo, allocations)` and `formatWODueDate(...)`. Used by Order Lookup, EditWorkOrderModal, and Finishing batch cards.
+- **Why:** A single WO can be allocated against multiple customer orders (especially for stock builds that get partially committed). Showing only one customer name on the row hid the full customer footprint. The new display: "CHI AVIATION + 2 more" with a click-to-expand popover listing all customers + due dates per allocation. Earliest due date is the displayed due date; all dates visible in the expanded popover.
+- **Traveler exception:** The traveler shows the comma-separated full list of customer names with no "+N more" abbreviation. Physical paper has no popover — printing the abbreviated form would lose data.
+- **Earliest due date as fallback when wo.due_date is null:** `formatWODueDate` returns the earliest CO line's due_date when the WO header has none.
+
+### WO cancellation: there is no WO-level cancel; allocation release is job-cancel-scoped
+
+- **Decision:** No "Cancel Work Order" surface exists in the UI. All cancellation happens at the job level. Four code paths cancel jobs: `handleCancelJob` (Mainframe edit modal), `handleWOLookupCancelConfirm` (WO Lookup), Compliance reject (initial run), Compliance reject (TCO/post-mfg). After any job cancellation, the system checks whether any viable jobs remain on the parent WO (statuses: pending_compliance, ready, assigned, in_setup, in_progress, pending_passivation, in_passivation). If none remain, all active `customer_order_allocations` for that WO are deactivated (`is_active=false, deactivated_at, deactivated_by` — matches the existing 3-field pattern from EditWorkOrderModal cancel-line and CustomerOrders cancelLine).
+- **Why scoped to "last viable job," not blanket deactivate-on-job-cancel:** A WO can hold multiple jobs (multiple parts × multiple quantities). Cancelling one job in a multi-job WO should NOT release the entire WO's allocations — other jobs are still backing that demand. The "no viable jobs remaining" guard is what makes the rule safe in both single-job and multi-job WOs.
+- **`has_cancelled_allocation` flag is unrelated and untouched.** That column tracks the opposite scenario (CO line cancelled, WO alive); this code path doesn't read or write it.
+- **A proper "Cancel WO" surface is a Sprint 7+ candidate** — would consolidate the cascade (set work_orders.status='cancelled', cancel all viable jobs, deactivate all allocations) into one user-visible action. Today's job-level path covers the actual operational need.
+
+### Document management — anytime upload, defer-with-note, auto-pull-forward
+
+This is the largest single feature in the session. Four sub-decisions:
+
+#### Auto-pull-forward at job creation (forward-only)
+
+- **Decision:** When a new `jobs` row is INSERTed, the job creation flow immediately reads all current `part_documents` (where `is_current=true`) for that part and copies them into `job_documents` for the new job. Marker column `job_documents.source = 'part_pulled_forward'` distinguishes auto-pulled rows from operator uploads.
+- **Why:** Roger had been re-uploading the same drawing (and Production Log Blank, master spec, etc.) on every job for the same part. Wasted compliance time. The auto-pull means part-level docs are present from the moment the job exists; Roger only needs to upload genuinely-new (lot-cert, batch-specific) docs at compliance.
+- **Forward-only:** Existing in-flight jobs are not retroactively populated. Roger has been managing those manually so far; auto-injecting docs into mid-flight jobs could conflict with what's already attached. New jobs from this point forward get the auto-pull.
+- **Versioning preserved through snapshots:** When a part document gets replaced, jobs created before that replacement keep their snapshot copy (job_documents row references the older file_url). Only NEW jobs from the replacement onward see the new version. This matches the existing snapshot pattern and avoids retroactively rewriting documents on jobs that are mid-flight or completed.
+
+#### Required-slot uploads at compliance auto-promote; ad-hoc uploads use opt-in checkbox
+
+- **Decision:** Documents uploaded into a Required Documents slot at pre-mfg compliance (Drawing, Production Log Blank, etc.) ALWAYS auto-promote to `part_documents` with versioning. No checkbox. Documents uploaded to the Additional Documents free-form slot at compliance, OR via the new AddJobDocumentModal in WO Lookup, present a "Also save as part-level document for future jobs" checkbox (default UNCHECKED). When checked, the upload writes to both `job_documents` and `part_documents`; when unchecked, only `job_documents`.
+- **Why split the behavior:** Required-slot uploads are by definition part-level — there is no scenario where Roger uploads "the Drawing" into the Drawing slot and doesn't want it to apply to the next job for the same part. Forcing him to tick a checkbox there is decision-fatigue with no real choice behind it. Ad-hoc uploads are genuinely ambiguous (could be anything from a one-off lot cert to a part-level master spec) — explicit choice is appropriate.
+- **Versioning helper:** `getNextVersionLetter(prev)` in `src/lib/documents.js` computes Rev A → B → C from the previous `part_documents.version` value. When an upload promotes, the previous current row flips to `is_current=false` and a new row inserts as current with the next letter.
+- **Future polish (NOT done now):** Add `is_part_level` flag on `document_types` so the catalog itself encodes which types are inherently part-level (Drawing → always, Lot Cert → never). Defers the per-upload decision entirely. Skipped for now until the doc type catalog stabilizes.
+
+#### Defer documents at pre-mfg compliance with required reason
+
+- **Decision:** A "Defer documents — approve without all required documents" toggle appears under the Compliance Outcome buttons at pre-mfg, BUT only when at least one required document for the `compliance_review` phase is missing. When toggled on, a textarea is shown for the reason (required); approval proceeds without enforcing the doc-completeness gate. The job carries `documents_deferred=true` plus `documents_deferred_reason / _by / _at` for audit. The deferral auto-clears (sets `documents_deferred=false`, but preserves the historical reason/by/at) when ALL `compliance_review`-phase requirements are subsequently satisfied — not all phases, just compliance_review.
+- **Why phase-filtered:** `part_document_requirements.required_at` distinguishes pre-mfg ('compliance_review') from post-mfg ('manufacturing_complete'). The deferred flag is a pre-mfg concept; it should clear when pre-mfg is satisfied, not wait for post-mfg docs that legitimately don't exist yet.
+- **Why hide the defer toggle when nothing's missing:** The earlier draft rendered the toggle unconditionally. This caused confusion at the compliance screen — "All required documents approved ✓" was shown right above a defer toggle that had nothing to defer. Now the toggle only appears when there's an actual gap.
+- **Visibility:** Yellow "Docs Deferred" badge renders next to job_number on every surface where jobs are displayed (Mainframe row, Compliance queue, kiosk, finishing). Compliance dashboard widget "Jobs awaiting deferred documentation" lists deferred jobs sorted by `documents_deferred_at` ascending; widget hides when count = 0.
+
+#### "Other" document type dedupe
+
+- **Decision:** Removed the synthetic "Other (use Notes)" option from the document type dropdown. Use only the real `document_types.name='Other'` row. When that real type is selected, the Notes field becomes required (label gets a red asterisk, placeholder changes to "Required — describe the document," and the form blocks save with empty notes).
+- **Why:** The original prompt added a synthetic option without realizing the document_types table already had an "Other" row, so two appeared in the dropdown. Cleaning up to use only the canonical entry. The required-Notes UX hangs off whether the real "Other" type is selected.
+
+### Materials hard-delete + deactivate (planned)
+
+- **Decision:** Materials can be hard-deleted only when zero references exist in `material_receiving` AND `material_usage`. Otherwise the Delete button renders disabled with a tooltip showing the reference count. A separate Deactivate button is always enabled (and reversible — toggles `is_active`). Inactive rows stay visible in the Raw Material list but render greyed with an "Inactive" badge. Active rows sort first.
+- **Duplicate prevention at DB level:** `materials_unique_type_size_vendor` partial unique index on `(material_type_id, bar_size_inches, LOWER(TRIM(vendor)))`. Case-insensitive on vendor. Frontend pre-checks before INSERT; if a duplicate exists and is INACTIVE, prompts "Reactivate Existing" instead of allowing a new row.
+- **Why a/k/a aerospace traceability rationale:** A material that was ever received and consumed in a part that shipped must remain auditable forever. Hard-delete is reserved for the case where nothing has ever touched it (created in error, test data, etc.). The `is_active` flag soft-deletes from operator-facing dropdowns (Receiving, etc.) without touching history.
+- **Test data cleanup precedent:** During this session we hard-deleted three materials that had come over from test (303SS Danforth Metals 0.5", 6061-T6 Alro 0.5", 303SS Test Vendor 0.375"). Reference check confirmed zero rows in either ref table. The pattern (diagnostic SELECT on refs → DELETE if all zero) is now codified in the UI button behavior. The `job_materials` table uses a text `material_type` column, NOT an FK to `materials.id`, so it does NOT block deletion — only `material_receiving` and `material_usage` are real blockers.
+
+### Smaller fixes worth recording
+
+- **Edit Work Order: add CO + add Component, with multi-CO support.** EditWorkOrderModal can add new CO line allocations to an existing WO (Option B math: stock first, grow total if short) and add new components to existing assemblies (BOM-scoped per assembly_bom, manufactured-only via part_type='manufactured', existing components excluded from picker). Total field allows stock to go negative during typing (no clamp); validation on save with red border + inline error + disabled Save button. The picker dedupe required adding a defensive re-fetch of jobs with explicit `component_id` so newly-added rows match existing.
+- **Edit Customer Order modal.** Add new lines, edit headers, edit existing lines. Quantity floor for each line = `quantity_fulfilled + active_allocated`. Part swap allowed only when `activeAllocated=0 AND quantity_fulfilled=0`. Existing RLS policies sufficient.
+- **Compliance officer Finished Goods save.** Validation rule "Assembly and Finished Good routes must begin with an internal step named Assemble" was over-applied — Finished Goods often go straight to Finishing or have other route shapes. Restricted the rule to `part_type === 'assembly'` only. Finished Goods can have any route.
+- **assembly_bom DELETE policy was missing.** Confirmed via `pg_policies` — the table had SELECT, INSERT, UPDATE policies but no DELETE. Postgres returned 204 with zero rows affected (not an error), supabase-js didn't surface it, so the UI silently re-fetched and the row reappeared. Added: `CREATE POLICY "assembly_bom_delete_authenticated" ON public.assembly_bom FOR DELETE TO authenticated USING (true)`. Sprint 7 RLS audit will verify every public table has all four CRUD policies — this should be the last one-off of this kind.
+- **App refresh redirected to splash screen.** Race condition in `App.jsx` initializeAuth — Supabase fired SIGNED_IN before getSession resolved, bypassing the `hasSignedInRef` guard. Fixed by claiming the ref synchronously before the await; reset only if no session.
+- **Stale profile state on role change.** When April's role was changed from customer_service to scheduler mid-session, her client cached the old role in React state until logout. Re-login forced a fresh profile fetch and resolved it. Future polish: realtime subscription on `profiles` filtered to current user id, triggers re-fetch on row update. Logged on the post-go-live polish list — not urgent.
+
+### Test environment parity discipline
+
+Every SQL change, edge function update, and (where applicable) Amplify config change made on prod during this session was replicated to test. Two key reminders:
+- Test Supabase has its own Legacy JWT Secret — different from prod's. The `JWT_SECRET` env var on test's `kiosk-authenticate` must be set from test's Project Settings → API → JWT Keys → Legacy JWT Secret, not prod's.
+- Edge function deploys are independent per project. Re-paste the same source from `supabase/functions/<name>/index.ts` into both Dashboards.

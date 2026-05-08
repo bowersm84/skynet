@@ -610,7 +610,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
 
           // Create jobs in pending_compliance
           for (const job of assembly.jobs) {
-            const { error: jobErr } = await supabase
+            const { data: newJob, error: jobErr } = await supabase
               .from('jobs')
               .insert({
                 job_number: `J-${String(nextJobNum++).padStart(6, '0')}`,
@@ -621,7 +621,35 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                 status: 'pending_compliance',
                 is_maintenance: false
               })
+              .select('id')
+              .single()
             if (jobErr) throw jobErr
+
+            // Snapshot current part-level documents onto the new job.
+            // Mirrors CreateWorkOrderModal's pull-forward so create and edit
+            // paths produce identical job document state.
+            const { data: partDocs } = await supabase
+              .from('part_documents')
+              .select('document_type_id, file_name, file_url, file_size, mime_type')
+              .eq('part_id', job.componentId)
+              .eq('is_current', true)
+            if (partDocs && partDocs.length > 0) {
+              const jobDocRows = partDocs.map(pd => ({
+                job_id: newJob.id,
+                document_type_id: pd.document_type_id,
+                file_name: pd.file_name,
+                file_url: pd.file_url,
+                file_size: pd.file_size,
+                mime_type: pd.mime_type,
+                uploaded_by: profile?.id ?? null,
+                status: 'approved',
+                source: 'part_pulled_forward',
+              }))
+              const { error: pullErr } = await supabase
+                .from('job_documents')
+                .insert(jobDocRows)
+              if (pullErr) console.error('Failed to pull part documents into new job:', pullErr)
+            }
           }
         }
       }
@@ -711,6 +739,30 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
               .from('job_routing_steps')
               .insert(jobSteps)
             if (stepsErr) throw stepsErr
+          }
+
+          // Snapshot current part-level documents onto the new job.
+          const { data: partDocs } = await supabase
+            .from('part_documents')
+            .select('document_type_id, file_name, file_url, file_size, mime_type')
+            .eq('part_id', nc.componentId)
+            .eq('is_current', true)
+          if (partDocs && partDocs.length > 0) {
+            const jobDocRows = partDocs.map(pd => ({
+              job_id: newJob.id,
+              document_type_id: pd.document_type_id,
+              file_name: pd.file_name,
+              file_url: pd.file_url,
+              file_size: pd.file_size,
+              mime_type: pd.mime_type,
+              uploaded_by: profile?.id ?? null,
+              status: 'approved',
+              source: 'part_pulled_forward',
+            }))
+            const { error: pullErr } = await supabase
+              .from('job_documents')
+              .insert(jobDocRows)
+            if (pullErr) console.error('Failed to pull part documents into new job:', pullErr)
           }
         }
 

@@ -4,7 +4,11 @@ import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { FEATURES } from '../config'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
+import { promoteToPartDocument } from '../lib/documents'
 import PrintPackageModal from './PrintPackageModal'
+import DocsDeferredBadge from './DocsDeferredBadge'
+import DeferredDocsWidget from './DeferredDocsWidget'
+import AddJobDocumentModal from './AddJobDocumentModal'
 import { 
   ChevronDown, 
   ChevronRight, 
@@ -32,7 +36,7 @@ import {
 } from 'lucide-react'
 
 
-export default function ComplianceReview({ jobs, onUpdate, profile }) {
+export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateToWO }) {
   const [expandedJob, setExpandedJob] = useState(null)
   const [jobDetails, setJobDetails] = useState({})
   const [uploading, setUploading] = useState(null)
@@ -50,6 +54,44 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   const [printPackageJob, setPrintPackageJob] = useState(null)
   const [postMfgData, setPostMfgData] = useState({})
   // Shape: { [jobId]: { good_qty: string, bad_qty: string, notes: string } }
+
+  // Per-job defer-documents state for pre-mfg approvals.
+  // Shape: { [jobId]: { defer: boolean, reason: string } }
+  const [deferData, setDeferData] = useState({})
+
+  // When a job's pre-mfg required docs become fully satisfied, drop any stale
+  // deferData entry so a checked-and-typed defer state can't survive an upload
+  // and quietly come back if a doc later gets deleted. Watches jobDetails
+  // because that's the upstream source of the doc-completeness check.
+  useEffect(() => {
+    setDeferData(prev => {
+      const ids = Object.keys(prev)
+      if (ids.length === 0) return prev
+      let next = prev
+      for (const jobId of ids) {
+        const details = jobDetails[jobId]
+        if (!details) continue
+        const stageReqs = (details.requirements || []).filter(r =>
+          r.required_at === 'compliance_review' || !r.required_at
+        )
+        const docs = details.jobDocs || []
+        const hasMissing = stageReqs.some(r =>
+          r.is_required && !docs.some(d => d.document_type_id === r.document_type_id && d.status === 'approved')
+        )
+        const entry = prev[jobId]
+        if (!hasMissing && (entry?.defer || entry?.reason)) {
+          if (next === prev) next = { ...prev }
+          next[jobId] = { defer: false, reason: '' }
+        }
+      }
+      return next
+    })
+  }, [jobDetails])
+
+  // Additional Documents modal target: { jobId, partId } or null. Drives
+  // the AddJobDocumentModal which carries its own "save to part" checkbox.
+  const [additionalDocFor, setAdditionalDocFor] = useState(null)
+
 
   // Per-batch compliance state
   const [pendingBatches, setPendingBatches] = useState([])
@@ -877,6 +919,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
   }
 
   const handleAdditionalUpload = async (jobId, file) => {
+    // Additional Documents are ad-hoc with no document_type_id, so there is
+    // no part-level slot to promote into. The opt-in checkbox does not appear
+    // in this surface; this handler stays job-only by design.
     const uploadKey = jobId + '-additional'
     setUploading(uploadKey)
     try {
@@ -938,10 +983,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
   }
 
-  const handleFileUpload = async (jobId, documentTypeId, documentTypeCode, file) => {
+  const handleFileUpload = async (jobId, documentTypeId, documentTypeCode, file, opts = {}) => {
+    const { saveToPart = false, partId = null } = opts
     const uploadKey = jobId + '-' + documentTypeId
     setUploading(uploadKey)
-    
+
     try {
       const s3Path = `jobs/${jobId}`
       const { filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
@@ -961,20 +1007,40 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       if (dbError) throw dbError
 
+      // Pre-mfg opt-in promotion to part_documents. partId presence is the
+      // contract — only pre-mfg call sites pass it.
+      if (saveToPart && partId && documentTypeId) {
+        const { error: promoteErr } = await promoteToPartDocument(supabase, {
+          partId,
+          documentTypeId,
+          fileName: file.name,
+          fileUrl: filePath,
+          fileSize,
+          mimeType,
+          uploadedBy: profile.id,
+          revisionNotes: null,
+        })
+        if (promoteErr) {
+          console.error('Part-level promotion failed:', promoteErr)
+          alert('Document uploaded to job, but failed to save to part: ' + promoteErr.message)
+        }
+      }
+
       const freshDetails = await fetchJobDetails(jobId)
       setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
-      
+
     } catch (err) {
       console.error('Upload error:', err)
       alert('Failed to upload document: ' + err.message)
     }
-    
+
     setUploading(null)
   }
 
-  const handleReplaceDocument = async (docId, jobId, documentTypeId, file) => {
+  const handleReplaceDocument = async (docId, jobId, documentTypeId, file, opts = {}) => {
+    const { saveToPart = false, partId = null } = opts
     setReplacing(docId)
-    
+
     try {
       const s3Path = `jobs/${jobId}`
       const { filePath, fileSize, mimeType } = await uploadDocument(file, s3Path)
@@ -996,14 +1062,33 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
       if (dbError) throw dbError
 
+      // Pre-mfg opt-in promotion: a Replace creates a new part-level revision
+      // (matches AddJobDocumentModal's behavior — versioning, not in-place edit).
+      if (saveToPart && partId && documentTypeId) {
+        const { error: promoteErr } = await promoteToPartDocument(supabase, {
+          partId,
+          documentTypeId,
+          fileName: file.name,
+          fileUrl: filePath,
+          fileSize,
+          mimeType,
+          uploadedBy: profile.id,
+          revisionNotes: null,
+        })
+        if (promoteErr) {
+          console.error('Part-level promotion failed:', promoteErr)
+          alert('Document replaced on job, but failed to save to part: ' + promoteErr.message)
+        }
+      }
+
       const freshDetails = await fetchJobDetails(jobId)
       setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
-      
+
     } catch (err) {
       console.error('Replace error:', err)
       alert('Failed to replace document: ' + err.message)
     }
-    
+
     setReplacing(null)
   }
 
@@ -1047,7 +1132,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     setApproving(null)
   }
 
-  const handleApproveJob = async (jobId, currentStatus, outcome) => {
+  const handleApproveJob = async (jobId, currentStatus, outcome, deferInfo = null) => {
     setApproving(jobId)
     const pmData = postMfgData[jobId] || {}
 
@@ -1165,11 +1250,40 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         updatePayload.post_mfg_reviewed_at = now
       }
 
+      // Pre-mfg defer-with-note path: stamp the deferred fields and record an
+      // audit_logs entry. Defense-in-depth — UI also blocks empty reason.
+      const isDeferring = currentStatus === 'pending_compliance'
+        && deferInfo?.defer === true
+      if (isDeferring) {
+        const reason = (deferInfo.reason || '').trim()
+        if (!reason) {
+          alert('A note is required when deferring documents.')
+          setApproving(null)
+          return
+        }
+        updatePayload.documents_deferred = true
+        updatePayload.documents_deferred_reason = reason
+        updatePayload.documents_deferred_by = profile.id
+        updatePayload.documents_deferred_at = now
+      }
+
       const { error } = await supabase
         .from('jobs')
         .update(updatePayload)
         .eq('id', jobId)
       if (error) throw error
+
+      if (isDeferring) {
+        await supabase.from('audit_logs').insert({
+          event_type: 'compliance_documents_deferred',
+          job_id: jobId,
+          operator_id: profile?.id ?? null,
+          details: {
+            reason: deferInfo.reason.trim(),
+            missing_doc_types: deferInfo.missingDocTypes || [],
+          },
+        })
+      }
       onUpdate()
     } catch (err) {
       console.error('Approve job error:', err)
@@ -1179,7 +1293,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
     }
   }
 
-  const handleApproveAndPrint = async (job, outcome) => {
+  const handleApproveAndPrint = async (job, outcome, deferInfo = null) => {
     setApproving(job.id)
     const pmData = postMfgData[job.id] || {}
 
@@ -1290,11 +1404,39 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         updatePayload.post_mfg_reviewed_at = now
       }
 
+      // Pre-mfg defer-with-note: same treatment as handleApproveJob.
+      const isDeferring = job.status === 'pending_compliance'
+        && deferInfo?.defer === true
+      if (isDeferring) {
+        const reason = (deferInfo.reason || '').trim()
+        if (!reason) {
+          alert('A note is required when deferring documents.')
+          setApproving(null)
+          return
+        }
+        updatePayload.documents_deferred = true
+        updatePayload.documents_deferred_reason = reason
+        updatePayload.documents_deferred_by = profile.id
+        updatePayload.documents_deferred_at = now
+      }
+
       const { error } = await supabase
         .from('jobs')
         .update(updatePayload)
         .eq('id', job.id)
       if (error) throw error
+
+      if (isDeferring) {
+        await supabase.from('audit_logs').insert({
+          event_type: 'compliance_documents_deferred',
+          job_id: job.id,
+          operator_id: profile?.id ?? null,
+          details: {
+            reason: deferInfo.reason.trim(),
+            missing_doc_types: deferInfo.missingDocTypes || [],
+          },
+        })
+      }
       onUpdate()
       setPrintPackageJob(job)
     } catch (err) {
@@ -1494,13 +1636,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                     )}
                     <div className={"w-3 h-3 rounded-full " + dotClass}></div>
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-white font-mono">{job.job_number}</span>
                         <span className="text-gray-500">•</span>
                         <span className="text-gray-400">{job.work_order?.wo_number}</span>
                         {job.work_order?.order_type === 'make_to_stock' && (
                           <span className="text-xs px-2 py-0.5 bg-green-900/50 text-green-400 rounded">Stock</span>
                         )}
+                        <DocsDeferredBadge job={job} />
                       </div>
                       <div className="text-sm text-gray-500">
                         <span className="text-skynet-accent">{job.component?.part_number}</span>
@@ -1526,7 +1669,6 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                   const hasRouting = allSteps.length > 0
                   const hasPendingRemovals = allSteps.some(s => s.status === 'removal_pending')
                   const isRoutingChecked = !!routingReviewed[job.id]
-                  const canApproveFull = jobCanApprove && (!hasRouting || isRoutingChecked) && !hasPendingRemovals
                   const canEditRouting = isComplianceUser && job.status === 'pending_compliance'
 
                   return (
@@ -1848,7 +1990,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                     onChange={(e) => {
                                       const selectedFile = e.target.files[0]
                                       if (selectedFile) {
-                                        handleFileUpload(job.id, req.document_type_id, req.document_type.code, selectedFile)
+                                        // Required-slot uploads at pre-mfg auto-promote unconditionally:
+                                        // these slots are part-level by nature (Drawing, Production Log Blank).
+                                        // Post-mfg slots (Production Log Filled, Passivation Card, etc.) stay job-only.
+                                        const promote = requiredStage === 'compliance_review' && !!job.component_id
+                                        handleFileUpload(job.id, req.document_type_id, req.document_type.code, selectedFile, {
+                                          saveToPart: promote,
+                                          partId: promote ? job.component_id : null,
+                                        })
                                       }
                                       e.target.value = ''
                                     }}
@@ -1901,7 +2050,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                                             onChange={(e) => {
                                               const selectedFile = e.target.files[0]
                                               if (selectedFile) {
-                                                handleReplaceDocument(doc.id, job.id, req.document_type_id, selectedFile)
+                                                // Same auto-promote rule as Upload: pre-mfg only.
+                                                const promote = requiredStage === 'compliance_review' && !!job.component_id
+                                                handleReplaceDocument(doc.id, job.id, req.document_type_id, selectedFile, {
+                                                  saveToPart: promote,
+                                                  partId: promote ? job.component_id : null,
+                                                })
                                               }
                                               e.target.value = ''
                                             }}
@@ -1934,29 +2088,21 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                       </div>
                     )}
 
-                    {/* Additional Documents */}
+                    {/* Additional Documents — uses AddJobDocumentModal so the
+                        operator gets a typed picker + opt-in "save to part"
+                        checkbox. Inline file input was the prior pattern but
+                        gave no way to express promotion intent. */}
                     {isComplianceUser && (
                       <div className="mt-4">
                         <div className="flex items-center justify-between mb-2">
                           <h4 className="text-gray-400 text-sm font-medium">Additional Documents</h4>
-                          <label className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded cursor-pointer transition-colors">
-                            {uploading === job.id + '-additional' ? (
-                              <Loader2 size={12} className="animate-spin" />
-                            ) : (
-                              <Upload size={12} />
-                            )}
-                            {uploading === job.id + '-additional' ? 'Uploading...' : 'Upload Document'}
-                            <input
-                              type="file"
-                              className="hidden"
-                              disabled={uploading === job.id + '-additional'}
-                              onChange={(e) => {
-                                const file = e.target.files?.[0]
-                                if (file) handleAdditionalUpload(job.id, file)
-                                e.target.value = ''
-                              }}
-                            />
-                          </label>
+                          <button
+                            onClick={() => setAdditionalDocFor({ jobId: job.id, partId: job.component_id || null })}
+                            className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+                          >
+                            <Upload size={12} />
+                            Upload Document
+                          </button>
                         </div>
                         {(details?.jobDocs || [])
                           .filter(d => !d.document_type_id)
@@ -2073,42 +2219,110 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
                         const outcomeValid = outcome === 'accepted'
                           || (outcome === 'hold' && outcomeNote.length > 0)
                           || (outcome === 'flag' && outcomeNote.length > 0)
+                        // Defer-with-note (pre-mfg only): when required docs are
+                        // missing but the job must move forward, compliance can
+                        // approve with a recorded reason. Auto-clears when all
+                        // required docs are later uploaded (AddJobDocumentModal).
+                        // Gated on !jobCanApprove (docs-only) — routing review
+                        // is a separate gate handled below.
+                        const isPreMfg = requiredStage === 'compliance_review'
+                        const hasMissingDocs = !jobCanApprove
+                        const defer = isPreMfg && hasMissingDocs && !!deferData[job.id]?.defer
+                        const deferReason = (deferData[job.id]?.reason || '').trim()
+                        const deferActive = defer && needsDocGuard
+                        // Split routing/doc gates so a deferred-doc submit
+                        // still blocks on routing-not-reviewed or pending removals.
+                        const routingOk = (!hasRouting || isRoutingChecked) && !hasPendingRemovals
+                        const docsOk = jobCanApprove || (deferActive && deferReason.length > 0)
                         const submitEnabled = outcomeValid
-                          && (!needsDocGuard || canApproveFull)
+                          && (!needsDocGuard || (routingOk && docsOk))
                           && approving !== job.id
+                        const missingDocTypes = isPreMfg
+                          ? stageReqs.filter(r => r.is_required && !hasApprovedDocument(job.id, r.document_type_id)).map(r => r.document_type_id)
+                          : []
+                        const deferInfo = deferActive
+                          ? { defer: true, reason: deferReason, missingDocTypes }
+                          : null
                         const printAllowed = outcome === 'accepted' || outcome === 'flag'
                         const submitLabel = outcome === 'hold' ? 'Place on Hold'
                           : outcome === 'flag' ? 'Submit with Flag'
+                          : deferActive ? 'Submit (Docs Deferred)'
                           : 'Submit Acceptance'
                         const submitColor = outcome === 'hold' ? 'bg-slate-600 hover:bg-slate-500'
                           : outcome === 'flag' ? 'bg-amber-600 hover:bg-amber-500'
+                          : deferActive ? 'bg-yellow-600 hover:bg-yellow-500'
                           : 'bg-green-600 hover:bg-green-500'
 
                         return (
-                          <div className="flex justify-end gap-2">
-                            <button
-                              onClick={() => handleApproveJob(job.id, job.status, outcome)}
-                              disabled={!submitEnabled}
-                              className={`flex items-center gap-2 px-4 py-2 ${submitColor} text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
-                            >
-                              {approving === job.id ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
-                              {approving === job.id ? 'Submitting...' : submitLabel}
-                            </button>
-                            {printAllowed && (
-                              <button
-                                onClick={() => handleApproveAndPrint(job, outcome)}
-                                disabled={!submitEnabled}
-                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                {approving === job.id ? (
-                                  <Loader2 size={16} className="animate-spin" />
-                                ) : (
-                                  <><CheckCircle size={16} /><Printer size={16} /></>
+                          <>
+                            {/* Defer-documents control: only meaningful pre-mfg
+                                with missing required docs and an accept/flag outcome.
+                                Hidden once every required pre-mfg doc is approved —
+                                routing-not-yet-reviewed is a separate gate. */}
+                            {isPreMfg && needsDocGuard && hasMissingDocs && (
+                              <div className="mb-4 border border-yellow-700/50 bg-yellow-900/10 rounded p-3">
+                                <label className="flex items-start gap-2 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={defer}
+                                    onChange={e => setDeferData(prev => ({
+                                      ...prev,
+                                      [job.id]: { ...prev[job.id], defer: e.target.checked },
+                                    }))}
+                                    className="mt-1"
+                                    disabled={approving === job.id}
+                                  />
+                                  <div>
+                                    <div className="text-sm text-yellow-300">
+                                      Defer documents — approve without all required documents
+                                    </div>
+                                    <div className="text-xs text-gray-500">
+                                      Use only when the job must move forward and remaining
+                                      documents will be uploaded later. A note explaining why
+                                      is required.
+                                    </div>
+                                  </div>
+                                </label>
+                                {defer && (
+                                  <textarea
+                                    value={deferData[job.id]?.reason || ''}
+                                    onChange={e => setDeferData(prev => ({
+                                      ...prev,
+                                      [job.id]: { ...prev[job.id], reason: e.target.value },
+                                    }))}
+                                    placeholder="Why are documents being deferred?"
+                                    rows={2}
+                                    className="w-full mt-2 px-3 py-2 bg-gray-800 border border-yellow-700 rounded text-white text-sm"
+                                    disabled={approving === job.id}
+                                  />
                                 )}
-                                {approving === job.id ? 'Submitting...' : `${submitLabel} & Print`}
-                              </button>
+                              </div>
                             )}
-                          </div>
+                            <div className="flex justify-end gap-2">
+                              <button
+                                onClick={() => handleApproveJob(job.id, job.status, outcome, deferInfo)}
+                                disabled={!submitEnabled}
+                                className={`flex items-center gap-2 px-4 py-2 ${submitColor} text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+                              >
+                                {approving === job.id ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
+                                {approving === job.id ? 'Submitting...' : submitLabel}
+                              </button>
+                              {printAllowed && (
+                                <button
+                                  onClick={() => handleApproveAndPrint(job, outcome, deferInfo)}
+                                  disabled={!submitEnabled}
+                                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {approving === job.id ? (
+                                    <Loader2 size={16} className="animate-spin" />
+                                  ) : (
+                                    <><CheckCircle size={16} /><Printer size={16} /></>
+                                  )}
+                                  {approving === job.id ? 'Submitting...' : `${submitLabel} & Print`}
+                                </button>
+                              )}
+                            </div>
+                          </>
                         )
                       })()}
                     </div>
@@ -2135,6 +2349,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
 
   return (
     <div className="space-y-4">
+      {/* Deferred-documents widget — self-hides when count = 0 */}
+      <DeferredDocsWidget refreshKey={jobs} onNavigateToWO={onNavigateToWO} />
+
       {/* Pending Review - Machining */}
       {renderPendingSection(
         pendingMachiningJobs,
@@ -3345,6 +3562,23 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
         isOpen={!!printPackageJob}
         job={printPackageJob}
         onClose={() => setPrintPackageJob(null)}
+      />
+
+      {/* Additional Documents modal — typed picker + opt-in part promotion */}
+      <AddJobDocumentModal
+        isOpen={!!additionalDocFor}
+        jobId={additionalDocFor?.jobId}
+        partId={additionalDocFor?.partId}
+        profile={profile}
+        onClose={() => setAdditionalDocFor(null)}
+        onSuccess={async () => {
+          const jobId = additionalDocFor?.jobId
+          if (jobId) {
+            const fresh = await fetchJobDetails(jobId)
+            setJobDetails(prev => ({ ...prev, [jobId]: fresh }))
+          }
+          onUpdate?.()
+        }}
       />
     </div>
   )

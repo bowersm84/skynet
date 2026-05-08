@@ -18,6 +18,8 @@ import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
+import AddJobDocumentModal from '../components/AddJobDocumentModal'
+import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
@@ -86,6 +88,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const [jobDocCache, setJobDocCache] = useState({})
   const [loadingJobDocs, setLoadingJobDocs] = useState({})
   const [viewingWODoc, setViewingWODoc] = useState(null)
+  // Add-document modal: { jobId, partId } or null
+  const [addDocFor, setAddDocFor] = useState(null)
+  const canManageJobDocs = ['admin', 'compliance'].includes(profile?.role)
 
   // Memoized fetch function
   const fetchData = useCallback(async (isAutoRefresh = false) => {
@@ -471,11 +476,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             assigned_machine_id,
             scheduled_start,
             work_order_assembly_id,
+            component_id,
             compliance_outcome,
             compliance_notes,
             qty_override,
             qty_override_reason,
             qty_override_at,
+            documents_deferred,
+            documents_deferred_reason,
+            documents_deferred_at,
             qty_override_by_profile:profiles!qty_override_by(full_name),
             component:parts!component_id(part_number, description),
             machine:assigned_machine_id(name),
@@ -1778,10 +1787,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               <p className="text-gray-500">No jobs in the system</p>
             </div>
           ) : (
-            <ComplianceReview 
-              jobs={jobs} 
+            <ComplianceReview
+              jobs={jobs}
               onUpdate={fetchData}
               profile={profile}
+              onNavigateToWO={(woNumber) => {
+                setShowWOLookup(true)
+                setOrderLookupTab('work_orders')
+                setWOLookupSearch(woNumber)
+              }}
             />
           )}
         </>
@@ -2594,8 +2608,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                               className="px-4 py-3 pl-10 border-b border-gray-800 last:border-b-0 hover:bg-gray-800/30"
                                             >
                                               <div className="grid grid-cols-12 gap-2 items-center">
-                                                <div className="col-span-2">
+                                                <div className="col-span-2 flex items-center gap-1.5 flex-wrap">
                                                   <span className="text-white font-mono text-sm">{job.job_number}</span>
+                                                  <DocsDeferredBadge job={job} />
                                                 </div>
                                                 <div className="col-span-2">
                                                   <div className="flex items-center gap-2">
@@ -2876,6 +2891,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                         <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
                                                       </button>
                                                     ))
+                                                  )}
+                                                  {canManageJobDocs && (
+                                                    <button
+                                                      onClick={() => setAddDocFor({ jobId: job.id, partId: job.component_id || job.component?.id || null })}
+                                                      className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 transition-colors text-left text-xs text-skynet-accent hover:text-blue-300"
+                                                    >
+                                                      <Plus size={12} />
+                                                      Add Document
+                                                    </button>
                                                   )}
                                                 </div>
                                               )}
@@ -3185,6 +3209,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                               </button>
                                             ))
                                           )}
+                                          {canManageJobDocs && (
+                                            <button
+                                              onClick={() => setAddDocFor({ jobId: job.id, partId: job.component_id || job.component?.id || null })}
+                                              className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 transition-colors text-left text-xs text-skynet-accent hover:text-blue-300"
+                                            >
+                                              <Plus size={12} />
+                                              Add Document
+                                            </button>
+                                          )}
                                         </div>
                                       )}
                                     </div>
@@ -3435,6 +3468,28 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         isOpen={!!printPackageJob}
         job={printPackageJob}
         onClose={() => setPrintPackageJob(null)}
+      />
+
+      {/* Add Job Document Modal (WO Lookup, admin/compliance only) */}
+      <AddJobDocumentModal
+        isOpen={!!addDocFor}
+        jobId={addDocFor?.jobId}
+        partId={addDocFor?.partId}
+        profile={profile}
+        onClose={() => setAddDocFor(null)}
+        onSuccess={async () => {
+          const jobId = addDocFor?.jobId
+          if (jobId) {
+            const { data } = await supabase
+              .from('job_documents')
+              .select('*, document_type:document_types(*)')
+              .eq('job_id', jobId)
+              .order('created_at', { ascending: true })
+            setJobDocCache(prev => ({ ...prev, [jobId]: data || [] }))
+            setExpandedJobDocs(prev => ({ ...prev, [jobId]: true }))
+          }
+          fetchWOLookup()
+        }}
       />
 
       {showPinPrompt && (

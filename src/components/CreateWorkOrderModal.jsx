@@ -748,6 +748,35 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
             }
           }
         }
+
+        // Snapshot current part-level documents onto the new job. Captures
+        // the document set as it exists at job creation time; later changes
+        // to the part's master docs do not retroactively affect this job.
+        const { data: partDocs } = await supabase
+          .from('part_documents')
+          .select('document_type_id, file_name, file_url, file_size, mime_type')
+          .eq('part_id', job.componentId)
+          .eq('is_current', true)
+        if (partDocs && partDocs.length > 0) {
+          const jobDocRows = partDocs.map(pd => ({
+            job_id: newJob.id,
+            document_type_id: pd.document_type_id,
+            file_name: pd.file_name,
+            file_url: pd.file_url,
+            file_size: pd.file_size,
+            mime_type: pd.mime_type,
+            uploaded_by: profile?.id ?? null,
+            status: 'approved',
+            source: 'part_pulled_forward',
+          }))
+          const { error: pullErr } = await supabase
+            .from('job_documents')
+            .insert(jobDocRows)
+          if (pullErr) {
+            // Non-fatal: job is created, compliance can manually upload at pre-mfg.
+            console.error('Failed to pull part documents into new job:', pullErr)
+          }
+        }
       }
     }
 

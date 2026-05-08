@@ -401,9 +401,8 @@ export default function Armory({ profile }) {
         is_active: true
       })
       const newPartType = activeTab === 'assemblies' ? 'assembly' : 'manufactured'
-      const isAssemblyPart = newPartType === 'assembly' || newPartType === 'finished_good'
       setRoutingSteps(
-        isAssemblyPart
+        newPartType === 'assembly'
           ? [{ step_name: 'Assemble', step_type: 'internal', default_station: '', notes: '' }]
           : []
       )
@@ -484,13 +483,11 @@ export default function Armory({ profile }) {
       return
     }
 
-    // Assembly/FG routes must begin with an internal "Assemble" step
-    const isAssemblyType =
-      partForm.part_type === 'assembly' || partForm.part_type === 'finished_good'
-    if (isAssemblyType && needsRouting && routingSteps.length > 0) {
+    // Assembly routes must begin with an internal "Assemble" step
+    if (partForm.part_type === 'assembly' && needsRouting && routingSteps.length > 0) {
       const first = routingSteps[0]
       if (first.step_name.trim().toLowerCase() !== 'assemble' || first.step_type !== 'internal') {
-        alert('Assembly and Finished Good routes must begin with an internal step named "Assemble".')
+        alert('Assembly routes must begin with an internal step named "Assemble".')
         return
       }
     }

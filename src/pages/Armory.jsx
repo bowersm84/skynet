@@ -22,7 +22,9 @@ import {
   BarChart2,
   PackageCheck,
   GripVertical,
-  Users
+  Users,
+  Power,
+  PowerOff
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
@@ -126,6 +128,14 @@ export default function Armory({ profile }) {
     vendor: '',
     notes: ''
   })
+  // Reference counts per material id, used to gate hard-delete.
+  const [materialRefCounts, setMaterialRefCounts] = useState({})
+  // Inline modal state for the Add/Edit Material modal: validation error + a
+  // staged inactive duplicate that the user can choose to reactivate.
+  const [materialModalError, setMaterialModalError] = useState('')
+  const [existingInactive, setExistingInactive] = useState(null)
+  // Material chosen for hard-delete; drives the delete confirmation modal.
+  const [materialToDelete, setMaterialToDelete] = useState(null)
   const [receivingForm, setReceivingForm] = useState({
     material_id: '',
     vendor: '',
@@ -140,11 +150,12 @@ export default function Armory({ profile }) {
   const [invFilterRack, setInvFilterRack] = useState('')
   const [invFilterVendor, setInvFilterVendor] = useState('')
   const [assigningRack, setAssigningRack] = useState(null)
+  // Receiving form only offers active materials; inactive ones are admin-only.
   const materialVendors = [...new Set(
-    materials.filter(m => m.vendor).map(m => m.vendor)
+    materials.filter(m => m.vendor && m.is_active).map(m => m.vendor)
   )].sort()
   const vendorMaterials = receivingForm.vendor
-    ? materials.filter(m => m.vendor === receivingForm.vendor)
+    ? materials.filter(m => m.vendor === receivingForm.vendor && m.is_active)
     : []
 
   // Loading states
@@ -199,13 +210,29 @@ export default function Armory({ profile }) {
       if (barSizesError) throw barSizesError
       setBarSizes(barSizesData || [])
 
-      // Fetch material master records
+      // Fetch material master records (active + inactive; sorted active-first, then by vendor)
       const { data: materialMasterData, error: materialMasterError } = await supabase
         .from('materials')
-        .select('*, material_type:material_types(name, short_code)')
-        .eq('is_active', true)
-        .order('created_at', { ascending: false })
+        .select(`
+          id, material_type_id, bar_size_inches, density_lbs_per_cubic_inch,
+          vendor, notes, is_active, created_at,
+          material_type:material_types ( id, name, short_code )
+        `)
+        .order('is_active', { ascending: false })
+        .order('vendor')
       if (!materialMasterError) setMaterials(materialMasterData || [])
+
+      // Reference counts: how many material_receiving + material_usage rows
+      // point at each material? Used to disable hard-delete on referenced rows.
+      const [{ data: receivingRefs }, { data: usageRefs }] = await Promise.all([
+        supabase.from('material_receiving').select('material_id'),
+        supabase.from('material_usage').select('material_id'),
+      ])
+      const refs = {}
+      for (const row of [...(receivingRefs || []), ...(usageRefs || [])]) {
+        if (row.material_id) refs[row.material_id] = (refs[row.material_id] || 0) + 1
+      }
+      setMaterialRefCounts(refs)
 
       // Fetch receiving log (all records)
       const { data: receivingData } = await supabase
@@ -897,13 +924,43 @@ export default function Armory({ profile }) {
 
   const handleSaveMaterialMaster = async () => {
     setSaving(true)
+    setMaterialModalError('')
+    setExistingInactive(null)
     try {
+      const vendorTrim = (materialMasterForm.vendor || '').trim()
+      const barSize = parseFloat(materialMasterForm.bar_size_inches)
+
+      // Duplicate check (case-insensitive vendor match; null vendors compared
+      // as null). Excludes the row currently being edited.
+      let dupQuery = supabase
+        .from('materials')
+        .select('id, vendor, is_active')
+        .eq('material_type_id', materialMasterForm.material_type_id)
+        .eq('bar_size_inches', barSize)
+      dupQuery = vendorTrim
+        ? dupQuery.ilike('vendor', vendorTrim)
+        : dupQuery.is('vendor', null)
+      if (editingMaterialMaster) {
+        dupQuery = dupQuery.neq('id', editingMaterialMaster.id)
+      }
+      const { data: existing, error: dupErr } = await dupQuery.maybeSingle()
+      if (dupErr) throw dupErr
+
+      if (existing) {
+        if (existing.is_active) {
+          setMaterialModalError('This material/vendor combination already exists and is active.')
+          return
+        }
+        setExistingInactive(existing)
+        return
+      }
+
       const payload = {
         material_type_id: materialMasterForm.material_type_id,
-        bar_size_inches: parseFloat(materialMasterForm.bar_size_inches),
+        bar_size_inches: barSize,
         density_lbs_per_cubic_inch: materialMasterForm.density_lbs_per_cubic_inch
           ? parseFloat(materialMasterForm.density_lbs_per_cubic_inch) : null,
-        vendor: materialMasterForm.vendor?.trim() || null,
+        vendor: vendorTrim || null,
         notes: materialMasterForm.notes?.trim() || null,
         updated_at: new Date().toISOString()
       }
@@ -914,7 +971,9 @@ export default function Armory({ profile }) {
           .eq('id', editingMaterialMaster.id)
         if (error) throw error
       } else {
-        const { error } = await supabase.from('materials').insert(payload)
+        const { error } = await supabase
+          .from('materials')
+          .insert({ ...payload, is_active: true })
         if (error) throw error
       }
       setShowMaterialMasterModal(false)
@@ -922,9 +981,62 @@ export default function Armory({ profile }) {
       setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' })
       await fetchData()
     } catch (err) {
-      alert('Error saving material: ' + err.message)
+      setMaterialModalError('Error saving material: ' + err.message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleToggleMaterialActive = async (material) => {
+    try {
+      const { error } = await supabase
+        .from('materials')
+        .update({ is_active: !material.is_active, updated_at: new Date().toISOString() })
+        .eq('id', material.id)
+      if (error) throw error
+      await fetchData()
+    } catch (err) {
+      alert('Failed to toggle material: ' + err.message)
+    }
+  }
+
+  const handleReactivateExisting = async () => {
+    if (!existingInactive) return
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('materials')
+        .update({ is_active: true, updated_at: new Date().toISOString() })
+        .eq('id', existingInactive.id)
+      if (error) throw error
+      setShowMaterialMasterModal(false)
+      setEditingMaterialMaster(null)
+      setExistingInactive(null)
+      setMaterialModalError('')
+      setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' })
+      await fetchData()
+    } catch (err) {
+      setMaterialModalError('Failed to reactivate: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDeleteMaterialMaster = async () => {
+    if (!materialToDelete) return
+    setDeleting(materialToDelete.id)
+    try {
+      const { error } = await supabase
+        .from('materials')
+        .delete()
+        .eq('id', materialToDelete.id)
+      if (error) throw error
+      setMaterialToDelete(null)
+      await fetchData()
+    } catch (err) {
+      alert('Failed to delete material: ' + err.message)
+    } finally {
+      setDeleting(null)
     }
   }
 
@@ -1370,7 +1482,7 @@ export default function Armory({ profile }) {
                 <h2 className="text-lg font-semibold text-white">Material Definitions</h2>
                 {canSeeTab('material_master') && (
                   <button
-                    onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setShowMaterialMasterModal(true) }}
+                    onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setMaterialModalError(''); setExistingInactive(null); setShowMaterialMasterModal(true) }}
                     className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
                   >
                     <Plus size={18} /> Add Material
@@ -1394,35 +1506,76 @@ export default function Armory({ profile }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-700">
-                      {materials.map(m => (
-                        <tr key={m.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
-                          <td className="px-4 py-3 text-white font-medium">{m.material_type?.name || '—'}</td>
+                      {materials.map(m => {
+                        const refCount = materialRefCounts[m.id] || 0
+                        const canDelete = refCount === 0
+                        return (
+                        <tr key={m.id} className={`bg-gray-900 hover:bg-gray-800 transition-colors ${m.is_active ? '' : 'opacity-50'}`}>
+                          <td className="px-4 py-3 text-white font-medium">
+                            {m.material_type?.name || '—'}
+                            {!m.is_active && (
+                              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
+                                Inactive
+                              </span>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-gray-300">{m.bar_size_inches}"</td>
                           <td className="px-4 py-3 text-gray-300">{m.density_lbs_per_cubic_inch ?? '—'}</td>
                           <td className="px-4 py-3 text-gray-300">{m.vendor || '—'}</td>
                           <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{m.notes || '—'}</td>
                           {canSeeTab('material_master') && (
                             <td className="px-4 py-3">
-                              <button
-                                onClick={() => {
-                                  setEditingMaterialMaster(m)
-                                  setMaterialMasterForm({
-                                    material_type_id: m.material_type_id,
-                                    bar_size_inches: String(m.bar_size_inches),
-                                    density_lbs_per_cubic_inch: m.density_lbs_per_cubic_inch != null ? String(m.density_lbs_per_cubic_inch) : '',
-                                    vendor: m.vendor || '',
-                                    notes: m.notes || ''
-                                  })
-                                  setShowMaterialMasterModal(true)
-                                }}
-                                className="p-1.5 text-gray-400 hover:text-white rounded transition-colors"
-                              >
-                                <Edit2 size={15} />
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => {
+                                    setEditingMaterialMaster(m)
+                                    setMaterialMasterForm({
+                                      material_type_id: m.material_type_id,
+                                      bar_size_inches: String(m.bar_size_inches),
+                                      density_lbs_per_cubic_inch: m.density_lbs_per_cubic_inch != null ? String(m.density_lbs_per_cubic_inch) : '',
+                                      vendor: m.vendor || '',
+                                      notes: m.notes || ''
+                                    })
+                                    setMaterialModalError('')
+                                    setExistingInactive(null)
+                                    setShowMaterialMasterModal(true)
+                                  }}
+                                  className="p-1.5 text-gray-400 hover:text-white rounded transition-colors"
+                                  title="Edit"
+                                >
+                                  <Edit2 size={15} />
+                                </button>
+                                <button
+                                  onClick={() => handleToggleMaterialActive(m)}
+                                  className={`p-1.5 rounded transition-colors ${
+                                    m.is_active
+                                      ? 'text-gray-400 hover:text-red-400 hover:bg-red-900/20'
+                                      : 'text-gray-400 hover:text-green-400 hover:bg-green-900/20'
+                                  }`}
+                                  title={m.is_active ? 'Deactivate' : 'Activate'}
+                                >
+                                  {m.is_active ? <PowerOff size={15} /> : <Power size={15} />}
+                                </button>
+                                <button
+                                  onClick={() => canDelete && setMaterialToDelete(m)}
+                                  disabled={!canDelete}
+                                  className={`p-1.5 rounded transition-colors ${
+                                    canDelete
+                                      ? 'text-gray-400 hover:text-red-400 hover:bg-red-900/20'
+                                      : 'text-gray-400 opacity-40 cursor-not-allowed'
+                                  }`}
+                                  title={canDelete
+                                    ? 'Delete'
+                                    : `Cannot delete — referenced in ${refCount} record(s). Deactivate instead.`}
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
                             </td>
                           )}
                         </tr>
-                      ))}
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2563,17 +2716,80 @@ export default function Armory({ profile }) {
               </div>
             </div>
 
+            {existingInactive ? (
+              <div className="border border-amber-700/50 bg-amber-900/20 rounded-lg p-3 text-sm text-amber-200 space-y-2">
+                <div>An inactive entry for this combination exists. Reactivate it instead of creating a duplicate?</div>
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setExistingInactive(null)}
+                    className="px-3 py-1.5 text-gray-300 hover:text-white text-xs"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleReactivateExisting}
+                    disabled={saving}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-medium rounded flex items-center gap-1"
+                  >
+                    {saving && <Loader2 size={12} className="animate-spin" />}
+                    Reactivate Existing
+                  </button>
+                </div>
+              </div>
+            ) : materialModalError ? (
+              <div className="border border-red-700/50 bg-red-900/20 rounded-lg p-3 text-sm text-red-200">
+                {materialModalError}
+              </div>
+            ) : null}
+
             <div className="flex justify-end gap-3 pt-2">
               <button onClick={() => setShowMaterialMasterModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">
                 Cancel
               </button>
               <button
                 onClick={handleSaveMaterialMaster}
-                disabled={saving || !materialMasterForm.material_type_id || !materialMasterForm.bar_size_inches}
+                disabled={saving || !materialMasterForm.material_type_id || !materialMasterForm.bar_size_inches || !!existingInactive}
                 className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}
                 {editingMaterialMaster ? 'Save Changes' : 'Add Material'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Material Confirmation Modal */}
+      {materialToDelete && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="text-red-400 flex-shrink-0 mt-0.5" size={20} />
+              <div className="space-y-2">
+                <h3 className="text-lg font-bold text-white">Permanently delete this material?</h3>
+                <div className="text-sm text-gray-300 space-y-0.5">
+                  <div><span className="text-gray-500">Type:</span> {materialToDelete.material_type?.name || '—'}</div>
+                  <div><span className="text-gray-500">Bar Size:</span> {materialToDelete.bar_size_inches}"</div>
+                  <div><span className="text-gray-500">Vendor:</span> {materialToDelete.vendor || '—'}</div>
+                </div>
+                <p className="text-sm text-red-300">This cannot be undone.</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setMaterialToDelete(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white"
+                disabled={deleting === materialToDelete.id}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteMaterialMaster}
+                disabled={deleting === materialToDelete.id}
+                className="px-6 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {deleting === materialToDelete.id && <Loader2 size={16} className="animate-spin" />}
+                Delete
               </button>
             </div>
           </div>

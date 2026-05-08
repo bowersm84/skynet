@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { FEATURES } from '../config'
+import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import PrintPackageModal from './PrintPackageModal'
 import { 
   ChevronDown, 
@@ -1108,6 +1109,12 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           })
           .eq('id', jobId)
         if (error) throw error
+        const workOrderId = jobs.find(j => j.id === jobId)?.work_order_id
+        const { error: releaseErr } = await releaseCOAllocationsIfWODead(supabase, {
+          workOrderId,
+          profileId: profile?.id,
+        })
+        if (releaseErr) console.error('Failed to release CO allocations after compliance reject:', releaseErr)
         onUpdate()
         return
       }
@@ -1232,6 +1239,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile }) {
           })
           .eq('id', job.id)
         if (error) throw error
+        const { error: releaseErr } = await releaseCOAllocationsIfWODead(supabase, {
+          workOrderId: job.work_order_id,
+          profileId: profile?.id,
+        })
+        if (releaseErr) console.error('Failed to release CO allocations after compliance reject:', releaseErr)
         onUpdate()
         return
         // No print for rejected jobs.

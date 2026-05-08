@@ -17,6 +17,7 @@ import CreatePinPromptModal from '../components/CreatePinPromptModal'
 import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import CustomerDisplay from '../components/CustomerDisplay'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
@@ -1189,6 +1190,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         console.error('Error cancelling job:', error)
         alert('Failed to cancel job')
       } else {
+        const { error: releaseErr } = await releaseCOAllocationsIfWODead(supabase, {
+          workOrderId: editingJob.work_order_id,
+          profileId: profile?.id,
+        })
+        if (releaseErr) console.error('Failed to release CO allocations after job cancel:', releaseErr)
         setEditingJob(null)
         setShowCancelConfirm(false)
         fetchData()
@@ -1288,9 +1294,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
 
   const handleWOLookupCancelConfirm = async () => {
     if (!cancellingJobId) return
-    
+
     setCancelSaving(true)
     try {
+      const { data: jobRow, error: jobReadErr } = await supabase
+        .from('jobs')
+        .select('work_order_id')
+        .eq('id', cancellingJobId)
+        .single()
+      if (jobReadErr) console.error('Failed to read job for WO lookup:', jobReadErr)
+
       const { error } = await supabase
         .from('jobs')
         .update({
@@ -1298,11 +1311,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           updated_at: new Date().toISOString()
         })
         .eq('id', cancellingJobId)
-      
+
       if (error) {
         console.error('Error cancelling job:', error)
         alert('Failed to cancel job')
       } else {
+        const { error: releaseErr } = await releaseCOAllocationsIfWODead(supabase, {
+          workOrderId: jobRow?.work_order_id,
+          profileId: profile?.id,
+        })
+        if (releaseErr) console.error('Failed to release CO allocations after job cancel:', releaseErr)
         setCancellingJobId(null)
         setCancelStep(0)
         fetchWOLookup()

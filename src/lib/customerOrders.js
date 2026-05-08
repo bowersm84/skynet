@@ -175,6 +175,46 @@ export async function getAllocationsForLine(supabase, lineId) {
   return data || []
 }
 
+// Job statuses that can still consume CO allocations. If a WO has zero jobs
+// in any of these states, its remaining allocations are stranded and should
+// be released back to the demand pool.
+export const VIABLE_JOB_STATUSES = [
+  'pending_compliance', 'ready', 'assigned',
+  'in_setup', 'in_progress',
+  'pending_passivation', 'in_passivation',
+]
+
+// Release this WO's active CO allocations iff no viable jobs remain. Call
+// after a job-cancellation status update succeeds. Matches the existing
+// 3-field deactivation pattern (is_active + deactivated_at + deactivated_by).
+// Does NOT touch work_orders.has_cancelled_allocation — that flag is for the
+// opposite scenario (CO line cancelled, WO alive).
+//
+// Returns { released, error }. Non-fatal: caller decides whether to surface.
+export async function releaseCOAllocationsIfWODead(supabase, { workOrderId, profileId }) {
+  if (!workOrderId) return { released: false, error: null }
+
+  const { data: remainingJobs, error: jobsErr } = await supabase
+    .from('jobs')
+    .select('id, status')
+    .eq('work_order_id', workOrderId)
+    .in('status', VIABLE_JOB_STATUSES)
+  if (jobsErr) return { released: false, error: jobsErr }
+  if (remainingJobs && remainingJobs.length > 0) return { released: false, error: null }
+
+  const { error: releaseErr } = await supabase
+    .from('customer_order_allocations')
+    .update({
+      is_active: false,
+      deactivated_at: new Date().toISOString(),
+      deactivated_by: profileId ?? null,
+    })
+    .eq('work_order_id', workOrderId)
+    .eq('is_active', true)
+  if (releaseErr) return { released: false, error: releaseErr }
+  return { released: true, error: null }
+}
+
 // All open CO lines across all parts. Used by the Demand view to aggregate
 // pending demand by part_number.
 export async function getAllOpenCOLines(supabase) {

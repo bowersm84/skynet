@@ -147,6 +147,11 @@ function PartCombobox({ value, onChange, parts }) {
             <>
               <span className="font-mono">{selected.part_number}</span>
               <span className="text-gray-400"> — {selected.description}</span>
+              {selected.is_active === false && (
+                <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
+                  Inactive — Pending Activation
+                </span>
+              )}
             </>
           ) : (
             <span className="text-gray-400">-- Select Part --</span>
@@ -188,6 +193,11 @@ function PartCombobox({ value, onChange, parts }) {
               >
                 <span className="font-mono text-white">{p.part_number}</span>
                 <span className="text-gray-400"> — {p.description}</span>
+                {p.is_active === false && (
+                  <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
+                    Inactive — Pending Activation
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -210,6 +220,7 @@ const newLine = () => ({
   due_date: '',
   priority: 'normal',
   notes: '',
+  components_needed: '',
 })
 
 export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, profile }) {
@@ -241,8 +252,7 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
           .order('customer_id', { ascending: true }),
         supabase
           .from('parts')
-          .select('id, part_number, description, part_type')
-          .eq('is_active', true)
+          .select('id, part_number, description, part_type, is_active')
           .in('part_type', ['assembly', 'finished_good'])
           .order('part_number', { ascending: true }),
         loadActiveSalespeople(),
@@ -353,6 +363,7 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
         due_date: l.due_date || null,
         priority: l.priority,
         notes: (l.notes || '').trim() || null,
+        components_needed: (l.components_needed || '').trim() || null,
       }))
 
       const { error: linesErr } = await supabase
@@ -494,8 +505,9 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
                 {lines.map((line, idx) => (
                   <div
                     key={idx}
-                    className="grid grid-cols-12 gap-2 items-start bg-gray-800/40 border border-gray-700/50 rounded p-2"
+                    className="bg-gray-800/40 border border-gray-700/50 rounded p-2"
                   >
+                  <div className="grid grid-cols-12 gap-2 items-start">
                     <div className="col-span-1 text-center text-gray-500 text-sm pt-2">
                       #{idx + 1}
                     </div>
@@ -556,6 +568,17 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
                         <Trash2 size={14} />
                       </button>
                     </div>
+                  </div>
+                  <div className="mt-2">
+                    <label className="block text-gray-500 text-xs mb-0.5">Components Needed</label>
+                    <textarea
+                      value={line.components_needed}
+                      onChange={(e) => updateLine(idx, { components_needed: e.target.value })}
+                      rows={2}
+                      className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent"
+                      placeholder="(optional — components needed for this product)"
+                    />
+                  </div>
                   </div>
                 ))}
               </div>

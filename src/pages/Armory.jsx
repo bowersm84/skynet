@@ -53,6 +53,7 @@ export default function Armory({ profile }) {
 
   // Data
   const [parts, setParts] = useState([])
+  const [pendingCOByPart, setPendingCOByPart] = useState({})
   const [materialTypes, setMaterialTypes] = useState([])
   const [barSizes, setBarSizes] = useState([])
   const [routingTemplates, setRoutingTemplates] = useState([])
@@ -189,6 +190,20 @@ export default function Armory({ profile }) {
 
       if (partsError) throw partsError
       setParts(partsData || [])
+
+      // Pending CO line count per part (open lines on non-cancelled COs).
+      // Used to sort inactive parts with pending demand to the top and badge them.
+      const { data: pendingCOLines } = await supabase
+        .from('customer_order_lines')
+        .select('part_id, status, customer_order_id, customer_orders!inner(status)')
+        .in('status', ['not_started', 'in_progress'])
+        .neq('customer_orders.status', 'cancelled')
+
+      const countByPart = {}
+      for (const row of (pendingCOLines || [])) {
+        countByPart[row.part_id] = (countByPart[row.part_id] || 0) + 1
+      }
+      setPendingCOByPart(countByPart)
 
       // Fetch material types
       const { data: materialsData, error: materialsError } = await supabase
@@ -352,6 +367,17 @@ export default function Armory({ profile }) {
     }
     return matchesSearch
   })
+
+  // When viewing Inactive, surface inactive parts that still have open CO demand
+  // at the top — they're the ones blocking real orders. Active filter is untouched.
+  const sortedParts = activeFilter === 'inactive'
+    ? [...filteredParts].sort((a, b) => {
+        const ac = pendingCOByPart[a.id] || 0
+        const bc = pendingCOByPart[b.id] || 0
+        if (ac !== bc) return bc - ac
+        return (a.part_number || '').localeCompare(b.part_number || '')
+      })
+    : filteredParts
 
   // Open part modal for create/edit
   const openPartModal = async (part = null) => {
@@ -1231,7 +1257,7 @@ export default function Armory({ profile }) {
             </div>
 
             {/* Parts List */}
-            {filteredParts.length === 0 ? (
+            {sortedParts.length === 0 ? (
               <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                 <Package size={48} className="mx-auto text-gray-600 mb-3" />
                 <p className="text-gray-400">No {activeTab} found</p>
@@ -1239,13 +1265,15 @@ export default function Armory({ profile }) {
               </div>
             ) : (
               <div className="space-y-2">
-                {filteredParts.map(part => (
+                {sortedParts.map(part => (
                   <div
                     key={part.id}
-                    className={`border rounded-lg p-4 transition-colors ${
+                    className={`rounded-lg p-4 transition-colors ${
                       part.is_active
-                        ? 'bg-gray-800/50 border-gray-700 hover:border-gray-600'
-                        : 'bg-gray-900/40 border-amber-900/30 hover:border-amber-800/50 opacity-75'
+                        ? 'border bg-gray-800/50 border-gray-700 hover:border-gray-600'
+                        : (pendingCOByPart[part.id] || 0) > 0
+                          ? 'border-2 bg-gray-800/60 border-purple-500 hover:border-purple-400 shadow-lg shadow-purple-900/30'
+                          : 'border bg-gray-900/40 border-amber-900/30 hover:border-amber-800/50 opacity-75'
                     }`}
                   >
                     <div className="flex items-start justify-between">
@@ -1254,6 +1282,11 @@ export default function Armory({ profile }) {
                           <span className="text-skynet-accent font-mono font-medium">{part.part_number}</span>
                           {!part.is_active && (
                             <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">Inactive — Pending Master Data</span>
+                          )}
+                          {!part.is_active && (pendingCOByPart[part.id] || 0) > 0 && (
+                            <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">
+                              {pendingCOByPart[part.id]} pending CO{pendingCOByPart[part.id] === 1 ? '' : 's'}
+                            </span>
                           )}
                           {part.part_type === 'assembly' && (
                             <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>

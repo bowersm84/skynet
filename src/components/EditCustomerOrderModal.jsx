@@ -158,6 +158,11 @@ function PartCombobox({ value, onChange, parts }) {
             <>
               <span className="font-mono">{selected.part_number}</span>
               <span className="text-gray-400"> — {selected.description}</span>
+              {selected.is_active === false && (
+                <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
+                  Inactive — Pending Activation
+                </span>
+              )}
             </>
           ) : (
             <span className="text-gray-400">-- Select Part --</span>
@@ -199,6 +204,11 @@ function PartCombobox({ value, onChange, parts }) {
               >
                 <span className="font-mono text-white">{p.part_number}</span>
                 <span className="text-gray-400"> — {p.description}</span>
+                {p.is_active === false && (
+                  <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
+                    Inactive — Pending Activation
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -273,8 +283,8 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           .from('customer_order_lines')
           .select(`
             id, line_number, quantity_ordered, quantity_fulfilled,
-            due_date, priority, status, notes, part_id,
-            parts ( id, part_number, description )
+            due_date, priority, status, notes, components_needed, part_id,
+            parts ( id, part_number, description, is_active )
           `)
           .eq('customer_order_id', coId)
           .order('line_number', { ascending: true })
@@ -307,8 +317,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
             .order('customer_id', { ascending: true }),
           supabase
             .from('parts')
-            .select('id, part_number, description, part_type')
-            .eq('is_active', true)
+            .select('id, part_number, description, part_type, is_active')
             .in('part_type', ['assembly', 'finished_good'])
             .order('part_number', { ascending: true }),
           loadActiveSalespeople(),
@@ -341,6 +350,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           due_date: l.due_date || '',
           priority: l.priority || 'normal',
           notes: l.notes || '',
+          components_needed: l.components_needed || '',
           // read-only refs
           original_part_id: l.part_id,
           original_quantity_ordered: l.quantity_ordered ?? 0,
@@ -356,6 +366,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           due_date: l.due_date,
           priority: l.priority,
           notes: l.notes,
+          components_needed: l.components_needed,
         }])))
 
         setCustomers(cust || [])
@@ -394,6 +405,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
         due_date: '',
         priority: 'normal',
         notes: '',
+        components_needed: '',
         original_part_id: null,
         original_quantity_ordered: 0,
         quantity_fulfilled: 0,
@@ -506,6 +518,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
         if ((l.due_date || null) !== (orig.due_date || null)) patch.due_date = l.due_date || null
         if (l.priority !== orig.priority) patch.priority = l.priority
         if ((l.notes || '') !== (orig.notes || '')) patch.notes = l.notes?.trim() || null
+        if ((l.components_needed || '') !== (orig.components_needed || '')) patch.components_needed = (l.components_needed || '').trim() || null
 
         if (Object.keys(patch).length === 0) continue
         const { error: uErr } = await supabase
@@ -526,6 +539,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           due_date: l.due_date || null,
           priority: l.priority,
           notes: (l.notes || '').trim() || null,
+          components_needed: (l.components_needed || '').trim() || null,
           status: 'not_started',
         }))
       if (newRows.length > 0) {
@@ -694,7 +708,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
                     return (
                       <div
                         key={line._tempId}
-                        className={`grid grid-cols-12 gap-2 items-start border rounded p-2 ${
+                        className={`border rounded p-2 ${
                           readOnly
                             ? 'bg-gray-900/40 border-gray-800'
                             : line._isNew
@@ -702,6 +716,7 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
                               : 'bg-gray-800/40 border-gray-700/50'
                         }`}
                       >
+                      <div className="grid grid-cols-12 gap-2 items-start">
                         <div className="col-span-1 text-center text-gray-500 text-sm pt-2">
                           #{line.line_number}
                         </div>
@@ -809,6 +824,18 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
                             {rowError}
                           </div>
                         )}
+                      </div>
+                      <div className="mt-2">
+                        <label className="block text-gray-500 text-xs mb-0.5">Components Needed</label>
+                        <textarea
+                          value={line.components_needed}
+                          onChange={(e) => updateLine(line._tempId, { components_needed: e.target.value })}
+                          disabled={readOnly}
+                          rows={2}
+                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent disabled:bg-gray-800 disabled:text-gray-400"
+                          placeholder="(optional — components needed for this product)"
+                        />
+                      </div>
                       </div>
                     )
                   })}

@@ -108,9 +108,9 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
         .from('customer_order_lines')
         .select(`
           id, customer_order_id, line_number, quantity_ordered, quantity_fulfilled,
-          due_date, priority, status, notes, cancel_reason, fulfilled_at,
+          due_date, priority, status, notes, components_needed, cancel_reason, fulfilled_at,
           part_id,
-          parts ( id, part_number, description )
+          parts ( id, part_number, description, is_active )
         `)
         .in('customer_order_id', coIds)
         .order('line_number', { ascending: true })
@@ -822,6 +822,14 @@ function CORow({
                               </td>
                             </tr>
                           )}
+                          {l.components_needed && (
+                            <tr className="border-t border-gray-900 bg-gray-950/60">
+                              <td colSpan={10} className="px-3 py-2">
+                                <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Components Needed</div>
+                                <div className="text-xs text-gray-300 whitespace-pre-wrap">{l.components_needed}</div>
+                              </td>
+                            </tr>
+                          )}
                         </Fragment>
                       )
                     })}
@@ -999,6 +1007,7 @@ function DemandView({ profile, setActionStatus }) {
         part_id: partId,
         part_number: partLines[0].part_number,
         part_description: partLines[0].part_description,
+        part_is_active: partLines[0].part_is_active !== false,
         lines: partLines,
         total_demand: totalDemand,
         line_count: partLines.length,
@@ -1192,8 +1201,15 @@ function DemandView({ profile, setActionStatus }) {
                     className="accent-purple-500 flex-shrink-0"
                   />
                   <div className="flex-1 min-w-0 grid grid-cols-[2fr_3fr_auto_auto_auto] gap-4 items-center">
-                    <div className="font-mono font-semibold text-purple-200 truncate">
-                      {group.part_number}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono font-semibold text-purple-200 truncate">
+                        {group.part_number}
+                      </span>
+                      {group.part_is_active === false && (
+                        <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
+                          Awaiting Activation
+                        </span>
+                      )}
                     </div>
                     <div className="text-gray-400 text-sm truncate">
                       {group.part_description}
@@ -1275,7 +1291,9 @@ function DemandView({ profile, setActionStatus }) {
         )}
       </div>
 
-      {selectedLineIds.size > 0 && (
+      {selectedLineIds.size > 0 && (() => {
+        const selectedGroupInactive = !!selectedPartId && !(groups.find(g => g.part_id === selectedPartId)?.part_is_active)
+        return (
         <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-purple-500/40 px-6 py-3 flex items-center justify-between z-40 shadow-2xl">
           <div className="text-sm text-gray-300">
             <span className="text-purple-300 font-medium">{selectedLineIds.size}</span> line{selectedLineIds.size !== 1 ? 's' : ''} selected
@@ -1293,13 +1311,16 @@ function DemandView({ profile, setActionStatus }) {
             </button>
             <button
               onClick={() => setShowCreateWO(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors"
+              disabled={selectedGroupInactive}
+              title={selectedGroupInactive ? 'Cannot create a work order for an inactive product. Activate the part in Armory first.' : undefined}
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus size={16} /> Create Work Order
             </button>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {showCreateWO && (
         <CreateWorkOrderModal

@@ -67,6 +67,7 @@ export async function getOpenCOLinesForPart(supabase, partId) {
       due_date,
       priority,
       status,
+      components_needed,
       customer_order_id,
       customer_orders!inner (
         id,
@@ -146,6 +147,7 @@ export async function getOpenCOLinesForPart(supabase, partId) {
     remaining,
     due_date: line.due_date || null,
     priority: line.priority,
+    components_needed: line.components_needed || null,
   }))
 }
 
@@ -229,7 +231,8 @@ export async function getAllOpenCOLines(supabase) {
       due_date,
       priority,
       status,
-      part:parts(id, part_number, description, part_type),
+      components_needed,
+      part:parts(id, part_number, description, part_type, is_active),
       customer_order:customer_orders!inner(
         id, co_number, po_number, status,
         customer:customers(name)
@@ -253,6 +256,8 @@ export async function getAllOpenCOLines(supabase) {
         part_id: line.part_id,
         part_number: line.part?.part_number,
         part_description: line.part?.description,
+        part_is_active: line.part?.is_active !== false,
+        components_needed: line.components_needed,
         co_id: line.customer_order.id,
         co_number: line.customer_order.co_number,
         customer_name: line.customer_order.customer?.name,

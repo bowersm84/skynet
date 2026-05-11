@@ -1298,38 +1298,46 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   const allocated = coLinesByAssembly[assemblyIndex].allocations[line.line_id] ?? 0
                                   const isChecked = allocated > 0
                                   return (
-                                    <div key={line.line_id} className="flex items-center gap-2 text-sm bg-gray-800/40 rounded px-2 py-1.5">
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={(e) => {
-                                          const checked = e.target.checked
-                                          setLineAllocation(assemblyIndex, line.line_id, checked ? line.remaining : 0)
-                                        }}
-                                        className="accent-purple-500"
-                                      />
-                                      <span className="font-mono text-purple-300 text-xs">{line.co_number}</span>
-                                      <span className="text-gray-400">·</span>
-                                      <span className="text-gray-300">{line.customer_name}</span>
-                                      <span className="text-gray-500 text-xs">Line {line.line_number}</span>
-                                      {line.due_date && (
-                                        <span className="text-gray-500 text-xs">due {new Date(line.due_date).toLocaleDateString()}</span>
-                                      )}
-                                      <div className="ml-auto flex items-center gap-2">
+                                    <div key={line.line_id} className="bg-gray-800/40 rounded px-2 py-1.5">
+                                      <div className="flex items-center gap-2 text-sm">
                                         <input
-                                          type="number"
-                                          min="0"
-                                          max={line.remaining}
-                                          value={allocated}
-                                          disabled={!isChecked}
+                                          type="checkbox"
+                                          checked={isChecked}
                                           onChange={(e) => {
-                                            const v = Math.max(0, Math.min(line.remaining, parseInt(e.target.value) || 0))
-                                            setLineAllocation(assemblyIndex, line.line_id, v)
+                                            const checked = e.target.checked
+                                            setLineAllocation(assemblyIndex, line.line_id, checked ? line.remaining : 0)
                                           }}
-                                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs disabled:opacity-40"
+                                          className="accent-purple-500"
                                         />
-                                        <span className="text-gray-500 text-xs">/ {line.remaining}</span>
+                                        <span className="font-mono text-purple-300 text-xs">{line.co_number}</span>
+                                        <span className="text-gray-400">·</span>
+                                        <span className="text-gray-300">{line.customer_name}</span>
+                                        <span className="text-gray-500 text-xs">Line {line.line_number}</span>
+                                        {line.due_date && (
+                                          <span className="text-gray-500 text-xs">due {new Date(line.due_date).toLocaleDateString()}</span>
+                                        )}
+                                        <div className="ml-auto flex items-center gap-2">
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max={line.remaining}
+                                            value={allocated}
+                                            disabled={!isChecked}
+                                            onChange={(e) => {
+                                              const v = Math.max(0, Math.min(line.remaining, parseInt(e.target.value) || 0))
+                                              setLineAllocation(assemblyIndex, line.line_id, v)
+                                            }}
+                                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs disabled:opacity-40"
+                                          />
+                                          <span className="text-gray-500 text-xs">/ {line.remaining}</span>
+                                        </div>
                                       </div>
+                                      {line.components_needed && (
+                                        <div className="mt-1.5 pl-6 pr-2 text-xs">
+                                          <span className="text-purple-400 uppercase tracking-wide text-[10px] mr-2">Components Needed:</span>
+                                          <span className="text-gray-300 whitespace-pre-wrap">{line.components_needed}</span>
+                                        </div>
+                                      )}
                                     </div>
                                   )
                                 })}

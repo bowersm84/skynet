@@ -21,6 +21,7 @@ import {
   getAllOpenCOLines,
   getAllocationsForLine,
 } from '../lib/customerOrders'
+import { loadActiveSalespeople } from '../lib/salespeople'
 
 const STATUS_FILTERS = [
   { value: 'all', label: 'All' },
@@ -40,6 +41,8 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [salespersonFilter, setSalespersonFilter] = useState('all')
+  const [salespeople, setSalespeople] = useState([])
   const [expanded, setExpanded] = useState(() => new Set())
   const [actionStatus, setActionStatus] = useState(null)
 
@@ -51,6 +54,14 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
   const [expandedAllocLineId, setExpandedAllocLineId] = useState(null)
   const [allocCache, setAllocCache] = useState({})       // { [lineId]: [allocations] }
   const [allocLoading, setAllocLoading] = useState({})   // { [lineId]: bool }
+
+  useEffect(() => {
+    let cancelled = false
+    loadActiveSalespeople().then(sp => {
+      if (!cancelled) setSalespeople(sp || [])
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const handleNavigateToWO = useCallback((woNumber) => {
     if (onNavigateToWO) {
@@ -177,6 +188,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
     const q = searchQuery.trim().toLowerCase()
     return orders.filter(co => {
       if (statusFilter !== 'all' && co.status !== statusFilter) return false
+      if (salespersonFilter !== 'all' && co.salesperson_id !== salespersonFilter) return false
       if (!q) return true
       if ((co.co_number || '').toLowerCase().includes(q)) return true
       if ((co.customers?.name || '').toLowerCase().includes(q)) return true
@@ -185,7 +197,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
       if (co.lines.some(l => (l.parts?.part_number || '').toLowerCase().includes(q))) return true
       return false
     })
-  }, [orders, statusFilter, searchQuery])
+  }, [orders, statusFilter, salespersonFilter, searchQuery])
 
   const toggleExpand = (coId) => {
     setExpanded(prev => {
@@ -379,6 +391,19 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
             placeholder="Search CO #, customer, PO #, Fishbowl ID, part #..."
             className="w-full pl-9 pr-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-purple-500"
           />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-500 whitespace-nowrap">Salesperson:</label>
+          <select
+            value={salespersonFilter}
+            onChange={(e) => setSalespersonFilter(e.target.value)}
+            className="px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-purple-500"
+          >
+            <option value="all">All</option>
+            {salespeople.map(sp => (
+              <option key={sp.id} value={sp.id}>{sp.full_name}</option>
+            ))}
+          </select>
         </div>
         <div className="flex gap-1 flex-wrap">
           {STATUS_FILTERS.map(f => (

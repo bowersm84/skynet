@@ -175,7 +175,7 @@ function MainApp() {
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
   const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service'].includes(profile?.role)
-  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service'].includes(profile?.role)
+  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service'].includes(profile?.role) || profile?.is_salesperson === true
 
   // Dashboards menu remains admin-only (distinct from Armory)
   const canAccessDashboards = profile?.role === 'admin'

@@ -470,8 +470,8 @@ export default function Finishing() {
           *,
           job:jobs(
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
-            is_standalone_finishing, source_description,
-            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes),
+            is_standalone_finishing, source_description, has_open_shortfall,
+            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
             component:parts!component_id(id, part_number, description, customer, part_type),
             assigned_machine:machines!assigned_machine_id(name)
           ),
@@ -490,8 +490,8 @@ export default function Finishing() {
           *,
           job:jobs(
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
-            is_standalone_finishing, source_description,
-            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes),
+            is_standalone_finishing, source_description, has_open_shortfall,
+            work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
             component:parts!component_id(id, part_number, description, customer, part_type),
             assigned_machine:machines!assigned_machine_id(name)
           ),
@@ -564,8 +564,8 @@ export default function Finishing() {
         .from('jobs')
         .select(`
           id, job_number, quantity, status, production_lot_number,
-          actual_start, actual_end, is_standalone_finishing,
-          work_order:work_orders(id, wo_number, customer, priority, due_date),
+          actual_start, actual_end, is_standalone_finishing, has_open_shortfall,
+          work_order:work_orders(id, wo_number, customer, priority, due_date, has_open_shortfall),
           component:parts!component_id(part_number, description, customer),
           assigned_machine:machines!assigned_machine_id(id, name, code, kiosk_enabled),
           finishing_sends(id, quantity, compliance_status)
@@ -1773,15 +1773,25 @@ export default function Finishing() {
                                       <span className="ml-2 px-2 py-0.5 rounded text-sm font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
                                     )}
                                   </p>
-                                  <p className="text-gray-400 text-sm">
-                                    {batch.job?.work_order?.wo_number || (batch.is_standalone
-                                      ? (() => {
-                                          const machine = batch.machine?.name || batch.job?.assigned_machine?.name
-                                          if (machine) return `Source: ${machine}`
-                                          if (batch.job?.source_description) return `Source: Received (${batch.job.source_description})`
-                                          return 'Source: Received'
-                                        })()
-                                      : '')}
+                                  <p className="text-gray-400 text-sm flex items-center gap-2 flex-wrap">
+                                    <span>
+                                      {batch.job?.work_order?.wo_number || (batch.is_standalone
+                                        ? (() => {
+                                            const machine = batch.machine?.name || batch.job?.assigned_machine?.name
+                                            if (machine) return `Source: ${machine}`
+                                            if (batch.job?.source_description) return `Source: Received (${batch.job.source_description})`
+                                            return 'Source: Received'
+                                          })()
+                                        : '')}
+                                    </span>
+                                    {batch.job?.has_open_shortfall && (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                                        title="This job has an unresolved shortfall — Scheduler review needed"
+                                      >
+                                        <AlertTriangle size={10} /> Shortfall
+                                      </span>
+                                    )}
                                   </p>
                                 </div>
                                 <div className={`w-3 h-3 rounded-full ${getPriorityColor(batch.job?.work_order?.priority)}`}

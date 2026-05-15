@@ -43,7 +43,6 @@ const ONGOING_STATUSES = [
 
 export default function Schedule({ user, profile, onNavigate, canEdit = false }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
-  const [incompleteJobs, setIncompleteJobs] = useState([]) // Jobs sent back from kiosk
   const [scheduledJobs, setScheduledJobs] = useState([])
   const [machines, setMachines] = useState([])
   const [partMachineDurations, setPartMachineDurations] = useState([])
@@ -213,7 +212,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation, has_open_shortfall),
           component:parts!component_id(id, part_number, description)
         `)
         .in('status', ['ready', 'pending_compliance'])
@@ -224,23 +223,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         console.error('Error fetching unassigned jobs:', unassignedError)
       } else {
         setUnassignedJobs(unassignedData || [])
-      }
-
-      // Fetch incomplete jobs (sent back from kiosk)
-      const { data: incompleteData, error: incompleteError } = await supabase
-        .from('jobs')
-        .select(`
-          *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation),
-          component:parts!component_id(id, part_number, description)
-        `)
-        .eq('status', 'incomplete')
-        .order('incomplete_at', { ascending: false })
-
-      if (incompleteError) {
-        console.error('Error fetching incomplete jobs:', incompleteError)
-      } else {
-        setIncompleteJobs(incompleteData || [])
       }
 
       // Fetch jobs scheduled within the visible week, AND any ongoing job
@@ -254,7 +236,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation, has_open_shortfall),
           component:parts!component_id(id, part_number, description),
           assigned_machine:machines(id, name, code)
         `)
@@ -653,8 +635,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   }
 
   const getFilteredJobs = () => {
-    // Combine ready and incomplete jobs
-    let filtered = [...unassignedJobs, ...incompleteJobs]
+    let filtered = [...unassignedJobs]
 
     if (searchQuery) {
       const query = searchQuery.toLowerCase()
@@ -685,13 +666,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         filtered.sort((a, b) => (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2))
         break
     }
-
-    // Always put incomplete jobs first (they need attention)
-    filtered.sort((a, b) => {
-      if (a.status === 'incomplete' && b.status !== 'incomplete') return -1
-      if (a.status !== 'incomplete' && b.status === 'incomplete') return 1
-      return 0
-    })
 
     return filtered
   }
@@ -1575,8 +1549,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     globalSearchTimerRef.current = setTimeout(async () => {
       const q = query.toLowerCase()
 
-      // Search unassigned + incomplete jobs (already loaded)
-      const poolResults = [...unassignedJobs, ...incompleteJobs].filter(job =>
+      // Search unassigned jobs (already loaded)
+      const poolResults = unassignedJobs.filter(job =>
         job.job_number?.toLowerCase().includes(q) ||
         job.work_order?.wo_number?.toLowerCase().includes(q) ||
         job.work_order?.customer?.toLowerCase().includes(q) ||
@@ -1650,7 +1624,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       setGlobalSearchResults(allResults)
       setShowGlobalResults(allResults.length > 0)
     }, 300) // 300ms debounce
-  }, [unassignedJobs, incompleteJobs, scheduledJobs])
+  }, [unassignedJobs, scheduledJobs])
 
   const navigateToJob = (job) => {
     setShowGlobalResults(false)
@@ -2028,12 +2002,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
               <Clock size={18} className="text-yellow-500" />
               Job Pool ({filteredJobs.length})
-              {incompleteJobs.length > 0 && (
-                <span className="ml-auto flex items-center gap-1 text-xs text-red-400 bg-red-900/30 px-2 py-0.5 rounded">
-                  <AlertTriangle size={12} />
-                  {incompleteJobs.length} needs reschedule
-                </span>
-              )}
             </h3>
             
             <div className="relative mb-3">
@@ -2096,11 +2064,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               filteredJobs.map(job => {
                 const machineOptions = getMachineOptionsForPart(job.component_id)
                 const hasPreferred = machineOptions.some(o => o.is_preferred)
-                const isIncomplete = job.status === 'incomplete'
-                const piecesRemaining = isIncomplete 
-                  ? job.quantity - (job.good_pieces || 0)
-                  : null
-                
+
                 return (
                   <div
                     key={job.id}
@@ -2111,28 +2075,25 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       cursor-grab active:cursor-grabbing hover:bg-gray-750 transition-all touch-manipulation
                       ${draggedJob?.id === job.id ? 'opacity-50 scale-95' : ''}
                       ${highlightedJobId === job.id ? 'ring-2 ring-skynet-accent animate-pulse' : ''}
-                      ${isIncomplete
-                        ? 'bg-red-900/20 border-red-600 ring-1 ring-red-800/50'
-                        : `bg-gray-800 ${getPriorityBorder(job.priority)}`
-                      }`}
+                      bg-gray-800 ${getPriorityBorder(job.priority)}`}
                   >
-                    {/* Incomplete job header */}
-                    {isIncomplete && (
-                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-red-800/50">
-                        <AlertTriangle size={14} className="text-red-400" />
-                        <span className="text-xs text-red-400 font-medium">Needs Rescheduling</span>
-                      </div>
-                    )}
-                    
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`font-mono font-semibold ${isIncomplete ? 'text-red-300' : 'text-white'}`}>
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <span className="font-mono font-semibold text-white">
                             {job.job_number}
                           </span>
                           <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
                           {hasPreferred && (
                             <Star size={12} className="text-yellow-500" title="Has preferred machine" />
+                          )}
+                          {job.has_open_shortfall && (
+                            <span
+                              className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                              title="This job has an unresolved shortfall — Scheduler review needed"
+                            >
+                              <AlertTriangle size={10} /> Shortfall
+                            </span>
                           )}
                         </div>
                         <p className="text-gray-400 text-sm truncate">{job.work_order?.wo_number}</p>
@@ -2147,26 +2108,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                             Compliance Pending
                           </span>
                         )}
-
-                        {/* Incomplete job details */}
-                        {isIncomplete && (
-                          <div className="mt-2 pt-2 border-t border-red-800/30 space-y-1">
-                            {job.incomplete_reason && (
-                              <p className="text-xs text-red-300 truncate" title={job.incomplete_reason}>
-                                Reason: {job.incomplete_reason}
-                              </p>
-                            )}
-                            <div className="flex items-center gap-2 text-xs">
-                              <span className="text-gray-500">Progress:</span>
-                              <span className="text-green-400">{job.good_pieces || 0} good</span>
-                              <span className="text-gray-600">/</span>
-                              <span className="text-red-400">{job.bad_pieces || 0} bad</span>
-                            </div>
-                            <p className="text-xs text-yellow-400">
-                              {piecesRemaining} pieces remaining
-                            </p>
-                          </div>
-                        )}
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <GripVertical size={16} className="text-gray-600" />
@@ -2175,22 +2116,20 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                             Due: {formatDate(job.work_order.due_date)}
                           </span>
                         )}
-                        {!isIncomplete && (
-                          job.estimated_minutes ? (
-                            <span className="text-xs text-gray-400">
-                              ~{Math.round(job.estimated_minutes / 60)}h
-                            </span>
-                          ) : machineOptions.length > 0 ? (
-                            <span className="text-xs text-blue-400 flex items-center gap-1">
-                              <Database size={10} />
-                              Has estimates
-                            </span>
-                          ) : (
-                            <span className="text-xs text-orange-500 flex items-center gap-1">
-                              <AlertCircle size={10} />
-                              No estimate
-                            </span>
-                          )
+                        {job.estimated_minutes ? (
+                          <span className="text-xs text-gray-400">
+                            ~{Math.round(job.estimated_minutes / 60)}h
+                          </span>
+                        ) : machineOptions.length > 0 ? (
+                          <span className="text-xs text-blue-400 flex items-center gap-1">
+                            <Database size={10} />
+                            Has estimates
+                          </span>
+                        ) : (
+                          <span className="text-xs text-orange-500 flex items-center gap-1">
+                            <AlertCircle size={10} />
+                            No estimate
+                          </span>
                         )}
                         <button
                           onClick={(e) => {

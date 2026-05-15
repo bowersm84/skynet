@@ -244,7 +244,7 @@ export default function OutsourcedJobs({ profile }) {
         )
       `)
       .eq('compliance_status', 'approved')
-      .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled,incomplete)')
+      .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled)')
       .order('compliance_approved_at', { ascending: true })
 
     if (batchErr) {

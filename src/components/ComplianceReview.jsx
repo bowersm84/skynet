@@ -536,7 +536,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       const jobId = send.job_id
       const { data: parentJob } = await supabase
         .from('jobs')
-        .select('status, quantity, component:parts!component_id(part_type)')
+        .select('status, quantity, good_pieces, component:parts!component_id(part_type)')
         .eq('id', jobId)
         .single()
 
@@ -550,7 +550,16 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         ?.filter(s => s.compliance_status !== 'rejected')
         .reduce((sum, s) => sum + (s.quantity || 0), 0) || 0
       const jobQty = parentJob?.quantity || send.job?.quantity || 0
-      const allQtySent = totalSentQty >= jobQty
+      // Effective target = the operator's confirmed good count from
+      // kiosk Complete (jobs.good_pieces). When the operator overrides
+      // below target (the short-job case), the job will never naturally
+      // reach jobQty through finishing — any makeup pieces ride on a
+      // re-queue job, not back through this one. Fall back to jobQty
+      // for in-flight multi-batch jobs where good_pieces is still NULL.
+      const effectiveTarget = (parentJob?.good_pieces != null && parentJob.good_pieces > 0)
+        ? parentJob.good_pieces
+        : jobQty
+      const allQtySent = totalSentQty >= effectiveTarget
       const canAdvance = allQtySent && ['in_progress', 'manufacturing_complete'].includes(parentJob?.status)
 
       if (canAdvance) {

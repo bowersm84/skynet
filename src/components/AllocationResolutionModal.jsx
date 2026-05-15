@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import {
-  X, Loader2, AlertTriangle, CheckCircle, RotateCcw, XCircle
+  X, Loader2, AlertTriangle, CheckCircle, RotateCcw
 } from 'lucide-react'
 
 const PRIORITY_RANK = { critical: 0, high: 1, normal: 2, low: 3 }
@@ -56,10 +56,10 @@ export default function AllocationResolutionModal({
   const [requeueQty, setRequeueQty] = useState('')
   const [requeueNotes, setRequeueNotes] = useState('')
 
-  // Cancel-shortfall reason (required)
-  const [cancelReason, setCancelReason] = useState('')
-  // Accept-short optional notes
-  const [acceptNotes, setAcceptNotes] = useState('')
+  // Accept-short reason (required) — replaces the old separate
+  // Cancel Shortfall option. The outcome is the same; the reason
+  // captures why the remaining qty is not being remade.
+  const [acceptReason, setAcceptReason] = useState('')
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
@@ -89,8 +89,7 @@ export default function AllocationResolutionModal({
     setResolution(initialResolution || 'accept_short')
     setRequeueQty(String(gap || ''))
     setRequeueNotes('')
-    setCancelReason('')
-    setAcceptNotes('')
+    setAcceptReason('')
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, shortfall?.id])
@@ -146,15 +145,14 @@ export default function AllocationResolutionModal({
   // Resolution-specific required fields
   const requeueQtyNumber = parseInt(requeueQty, 10)
   const requeueQtyValid = Number.isFinite(requeueQtyNumber) && requeueQtyNumber > 0
-  const cancelReasonValid = cancelReason.trim().length > 0
+  const acceptReasonValid = acceptReason.trim().length > 0
 
   const canSave =
     !submitting &&
     !hasRowErrors &&
     !overAllocated &&
-    (resolution === 'accept_short' ||
-      (resolution === 'requeue' && requeueQtyValid) ||
-      (resolution === 'cancel_shortfall' && cancelReasonValid))
+    ((resolution === 'accept_short' && acceptReasonValid) ||
+      (resolution === 'requeue' && requeueQtyValid))
 
   const handleSave = async () => {
     setSubmitting(true)
@@ -197,7 +195,14 @@ export default function AllocationResolutionModal({
         }
 
         // Decide whether to deactivate the allocation row.
-        const shouldDeactivate = allocated < existingAllocated
+        // For Re-queue, never deactivate — the new job created on this
+        // same WO will produce the remaining quantity, so the
+        // allocation stays committed and visible on the WO.
+        // For Accept Short, deactivate when the user allocated less
+        // than the original commitment (the remainder returns to the
+        // demand pool for future re-allocation).
+        const shouldDeactivate =
+          resolution !== 'requeue' && allocated < existingAllocated
         if (shouldDeactivate) {
           const { error: deactErr } = await supabase
             .from('customer_order_allocations')
@@ -222,11 +227,9 @@ export default function AllocationResolutionModal({
 
       // (4) Resolution row update — write the chosen resolution.
       const resolutionNotes =
-        resolution === 'cancel_shortfall'
-          ? cancelReason.trim()
-          : resolution === 'requeue'
-            ? requeueNotes.trim() || null
-            : acceptNotes.trim() || null
+        resolution === 'requeue'
+          ? requeueNotes.trim() || null
+          : acceptReason.trim()
 
       let newJobId = null
 
@@ -235,12 +238,18 @@ export default function AllocationResolutionModal({
       if (resolution === 'requeue') {
         const qty = requeueQtyNumber
 
-        // Look up the WOA (defines what part the WO produces) and the WO's
-        // own priority. WOA is the structural anchor — exists from WO
-        // creation regardless of job state.
+        // The new job must produce the SAME component as the shorting
+        // job — not necessarily the WOA's assembly_id, which for
+        // assembly WOs points to the parent assembly (D-S8-10).
+        const componentId = job?.component?.id
+        if (!componentId) {
+          throw new Error('Cannot determine component for new re-queue job: source job has no component.')
+        }
+
+        // WOA is still the structural anchor for work_order_assembly_id.
         const { data: woaRows, error: woaErr } = await supabase
           .from('work_order_assemblies')
-          .select('id, assembly_id')
+          .select('id')
           .eq('work_order_id', shortfall.work_order_id)
           .order('created_at', { ascending: true })
           .limit(1)
@@ -263,7 +272,7 @@ export default function AllocationResolutionModal({
             job_number: newJobNumber,
             work_order_id: shortfall.work_order_id,
             work_order_assembly_id: woa.id,
-            component_id: woa.assembly_id,
+            component_id: componentId,
             quantity: qty,
             status: 'pending_compliance',
             priority: woRow?.priority || 'normal',
@@ -276,11 +285,12 @@ export default function AllocationResolutionModal({
         if (newJobErr) throw newJobErr
         newJobId = newJob.id
 
-        // Auto-pull part_documents → job_documents
+        // Auto-pull part_documents → job_documents. Filter by the
+        // shorting job's component, NOT the WOA's assembly_id.
         const { data: partDocs } = await supabase
           .from('part_documents')
           .select('document_type_id, file_name, file_url, file_size, mime_type')
-          .eq('part_id', woa.assembly_id)
+          .eq('part_id', componentId)
           .eq('is_current', true)
         if (partDocs && partDocs.length > 0) {
           const jobDocRows = partDocs.map(pd => ({
@@ -297,11 +307,12 @@ export default function AllocationResolutionModal({
           await supabase.from('job_documents').insert(jobDocRows)
         }
 
-        // Auto-pull part_routing_steps → job_routing_steps
+        // Auto-pull part_routing_steps → job_routing_steps. Same
+        // correction: filter by the shorting job's component.
         const { data: partRouting } = await supabase
           .from('part_routing_steps')
           .select('*')
-          .eq('part_id', woa.assembly_id)
+          .eq('part_id', componentId)
           .eq('is_active', true)
           .order('step_order')
         if (partRouting && partRouting.length > 0) {
@@ -362,11 +373,8 @@ export default function AllocationResolutionModal({
               requeue_job_id: newJobId,
               requeue_quantity: requeueQtyNumber,
             } : {}),
-            ...(resolution === 'cancel_shortfall' ? {
-              cancel_reason: cancelReason.trim(),
-            } : {}),
-            ...(resolution === 'accept_short' && acceptNotes.trim() ? {
-              notes: acceptNotes.trim(),
+            ...(resolution === 'accept_short' ? {
+              accept_reason: acceptReason.trim(),
             } : {}),
           },
         })
@@ -559,16 +567,21 @@ export default function AllocationResolutionModal({
                       <CheckCircle size={14} /> Accept Short
                     </div>
                     <p className="text-xs text-gray-400 mt-1">
-                      Close the shortfall. Allocated CO lines fulfill per Step 1; excess goes to stock. Unfulfilled portion of any CO line returns to demand for future re-allocation.
+                      Close this shortfall. Allocated CO lines fulfill per Step 1; excess flows to stock. The remaining quantity will not be remade unless re-allocated separately later.
                     </p>
                     {resolution === 'accept_short' && (
-                      <textarea
-                        value={acceptNotes}
-                        onChange={(e) => setAcceptNotes(e.target.value)}
-                        placeholder="Optional notes…"
-                        rows={2}
-                        className="mt-2 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-emerald-500 focus:outline-none resize-none"
-                      />
+                      <div className="mt-3">
+                        <label className="block text-xs text-emerald-300 mb-1">
+                          Why are we not making the remaining quantity? <span className="text-red-400">Required.</span>
+                        </label>
+                        <textarea
+                          value={acceptReason}
+                          onChange={(e) => setAcceptReason(e.target.value)}
+                          placeholder="Required reason"
+                          rows={2}
+                          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-emerald-500 focus:outline-none resize-none"
+                        />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -619,43 +632,6 @@ export default function AllocationResolutionModal({
                 </div>
               </label>
 
-              {/* Cancel Shortfall */}
-              <label className={`block border rounded-lg p-3 cursor-pointer transition-colors ${
-                resolution === 'cancel_shortfall' ? 'border-red-700 bg-red-950/30' : 'border-gray-800 bg-gray-900/40 hover:border-gray-700'
-              }`}>
-                <div className="flex items-start gap-3">
-                  <input
-                    type="radio"
-                    name="resolution"
-                    value="cancel_shortfall"
-                    checked={resolution === 'cancel_shortfall'}
-                    onChange={() => setResolution('cancel_shortfall')}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="text-sm text-red-300 font-medium flex items-center gap-2">
-                      <XCircle size={14} /> Cancel Shortfall
-                    </div>
-                    <p className="text-xs text-gray-400 mt-1">
-                      Close this shortfall. Allocated CO lines fulfill per Step 1. Remaining unfulfilled CO portions and the stock gap will not be remade unless re-allocated separately later.
-                    </p>
-                    {resolution === 'cancel_shortfall' && (
-                      <div className="mt-3">
-                        <label className="block text-xs text-red-300 mb-1">
-                          Why are we not making the remaining quantity? <span className="text-red-400">Required.</span>
-                        </label>
-                        <textarea
-                          value={cancelReason}
-                          onChange={(e) => setCancelReason(e.target.value)}
-                          placeholder="Required reason"
-                          rows={2}
-                          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-red-500 focus:outline-none resize-none"
-                        />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </label>
             </div>
           </section>
 

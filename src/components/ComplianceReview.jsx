@@ -5,6 +5,7 @@ import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/travele
 import { FEATURES } from '../config'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { evaluateJobShortfall } from '../lib/shortfall'
+import { fulfillFromRequeueJob } from '../lib/coFulfillment'
 import { promoteToPartDocument } from '../lib/documents'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
@@ -591,6 +592,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           .update(jobUpdate)
           .eq('id', jobId)
         if (jobError) throw jobError
+
+        // If this is a re-queue job advancing past finishing-batch
+        // compliance, auto-fulfill the WO's active CO allocations from
+        // its good_pieces. Idempotent; no-ops for non-RQ jobs.
+        fulfillFromRequeueJob(jobId).catch(err =>
+          console.error('fulfillFromRequeueJob failed (non-blocking):', err)
+        )
       }
 
       await fetchPendingBatches()
@@ -1308,6 +1316,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         evaluateJobShortfall(jobId).catch(err =>
           console.error('evaluateJobShortfall failed (non-blocking):', err)
         )
+        fulfillFromRequeueJob(jobId).catch(err =>
+          console.error('fulfillFromRequeueJob failed (non-blocking):', err)
+        )
       }
       onUpdate()
     } catch (err) {
@@ -1469,6 +1480,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       if (job.status === 'pending_post_manufacturing' && job.id) {
         evaluateJobShortfall(job.id).catch(err =>
           console.error('evaluateJobShortfall failed (non-blocking):', err)
+        )
+        fulfillFromRequeueJob(job.id).catch(err =>
+          console.error('fulfillFromRequeueJob failed (non-blocking):', err)
         )
       }
 

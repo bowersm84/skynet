@@ -671,12 +671,6 @@ export default function ScheduleJobModal({
               job.priority === 'normal' ? 'bg-green-500' :
               'bg-gray-500'
             }`} />
-            {job.status === 'incomplete' && (
-              <span className="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded flex items-center gap-1">
-                <AlertTriangle size={10} />
-                Incomplete
-              </span>
-            )}
           </div>
           <p className="text-skynet-accent font-medium">{job.component?.part_number}</p>
           <div className="flex items-center gap-4 mt-1">

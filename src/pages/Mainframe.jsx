@@ -18,9 +18,11 @@ import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
+import { getWOFulfillmentSummary } from '../lib/woFulfillment'
 import AddJobDocumentModal from '../components/AddJobDocumentModal'
 import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
+import WOLookupShortfalls from '../components/WOLookupShortfalls'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const [machines, setMachines] = useState([])
@@ -66,8 +68,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const [overrideValue, setOverrideValue] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
   const [overrideSaving, setOverrideSaving] = useState(false)
-  const [orderLookupTab, setOrderLookupTab] = useState('work_orders') // 'work_orders' | 'customer_orders'
+  const [orderLookupTab, setOrderLookupTab] = useState('work_orders') // 'work_orders' | 'shortfalls' | 'customer_orders'
   const [woLookupData, setWOLookupData] = useState([])
+  const [woFulfillmentCache, setWOFulfillmentCache] = useState({}) // woId -> rows or 'loading'
   const [standaloneJobs, setStandaloneJobs] = useState([])
   const [showStandaloneSection, setShowStandaloneSection] = useState(false)
   const [woLookupLoading, setWOLookupLoading] = useState(false)
@@ -125,7 +128,6 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           assigned_machine:machines(id, name, code)
         `)
         .not('status', 'eq', 'complete')
-        .not('status', 'eq', 'incomplete')
         .not('status', 'eq', 'cancelled')
         .order('created_at', { ascending: true })
 
@@ -278,7 +280,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             )
           `)
           .eq('compliance_status', 'approved')
-          .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled,incomplete)'),
+          .not('job.status', 'in', '(ready_for_assembly,in_assembly,pending_tco,complete,cancelled)'),
         supabase
           .from('outbound_sends')
           .select('finishing_send_id, job_routing_step_id')
@@ -449,6 +451,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           order_quantity,
           stock_quantity,
           has_cancelled_allocation,
+          has_open_shortfall,
           created_at,
           work_order_assemblies (
             id,
@@ -485,6 +488,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             documents_deferred,
             documents_deferred_reason,
             documents_deferred_at,
+            has_open_shortfall,
             qty_override_by_profile:profiles!qty_override_by(full_name),
             component:parts!component_id(part_number, description),
             machine:assigned_machine_id(name),
@@ -686,7 +690,6 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       in_assembly: { label: 'In Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
       pending_tco: { label: 'Pending TCO', color: 'bg-amber-900/50 text-amber-300 border-amber-700' },
       complete: { label: 'Complete', color: 'bg-gray-800 text-gray-400 border-gray-700' },
-      incomplete: { label: 'Incomplete', color: 'bg-red-900/50 text-red-300 border-red-700' },
       cancelled: { label: 'Cancelled', color: 'bg-gray-800 text-gray-500 border-gray-700' }
     }
     return statusConfig[status] || { label: status, color: 'bg-gray-800 text-gray-400 border-gray-700' }
@@ -969,14 +972,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const finishingActive  = finishingSends.filter(s => s.status === 'in_finishing')
   const finishingPending = finishingSends.filter(s => s.status === 'pending_finishing')
 
-  // Job categorization - incomplete jobs included with unassigned
+  // Job categorization
   const pendingComplianceJobs = jobs.filter(job =>
     job.status === 'pending_compliance' || job.status === 'pending_post_manufacturing'
   )
-  const incompleteJobs = jobs.filter(job => job.status === 'incomplete')
   const readyJobs = jobs.filter(job => !job.assigned_machine_id && job.status === 'ready')
-  const unassignedJobs = [...incompleteJobs, ...readyJobs] // Incomplete first, then ready
-  const activeJobs = jobs.filter(job => 
+  const unassignedJobs = readyJobs
+  const activeJobs = jobs.filter(job =>
+
     job.assigned_machine_id && 
     (job.status === 'assigned' || job.status === 'in_setup' || job.status === 'in_progress')
   )
@@ -1017,7 +1020,6 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       case 'in_setup': return { text: 'Setup', color: 'text-yellow-400' }
       case 'in_progress': return { text: 'Running', color: 'text-green-400' }
       case 'assigned': return { text: 'Queued', color: 'text-blue-400' }
-      case 'incomplete': return { text: 'Incomplete', color: 'text-red-400' }
       default: return { text: status.replace('_', ' '), color: 'text-gray-400' }
     }
   }
@@ -1060,6 +1062,23 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       console.error('Unexpected error:', err)
     } finally {
       setEditSaving(false)
+    }
+  }
+
+  // Lazy-load WO fulfillment summary on expand; cached for the session.
+  const ensureWOFulfillment = async (woId) => {
+    if (!woId) return
+    if (woFulfillmentCache[woId] !== undefined) return
+    setWOFulfillmentCache(prev => ({ ...prev, [woId]: 'loading' }))
+    const rows = await getWOFulfillmentSummary(woId)
+    setWOFulfillmentCache(prev => ({ ...prev, [woId]: rows }))
+  }
+
+  const handleToggleWOExpand = (woId) => {
+    setExpandedWOs(prev => ({ ...prev, [woId]: !prev[woId] }))
+    if (!expandedWOs[woId]) {
+      // Was collapsed; now expanding — load fulfillment
+      ensureWOFulfillment(woId)
     }
   }
 
@@ -1204,6 +1223,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           profileId: profile?.id,
         })
         if (releaseErr) console.error('Failed to release CO allocations after job cancel:', releaseErr)
+        // Cancelled jobs never create shortfalls; nothing to evaluate.
         setEditingJob(null)
         setShowCancelConfirm(false)
         fetchData()
@@ -1330,6 +1350,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           profileId: profile?.id,
         })
         if (releaseErr) console.error('Failed to release CO allocations after job cancel:', releaseErr)
+        // Cancelled jobs never create shortfalls; nothing to evaluate.
         setCancellingJobId(null)
         setCancelStep(0)
         fetchWOLookup()
@@ -1487,10 +1508,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           id="unassigned"
           label="Unassigned"
           value={unassignedJobs.length}
-          colorClass={incompleteJobs.length > 0 ? 'text-red-500' : 'text-yellow-500'}
-          borderClass={incompleteJobs.length > 0 ? 'border-red-800' : (unassignedJobs.length > 0 ? 'border-yellow-800' : 'border-gray-800')}
+          colorClass="text-yellow-500"
+          borderClass={unassignedJobs.length > 0 ? 'border-yellow-800' : 'border-gray-800'}
           onClick={setSelectedView}
-          alert={incompleteJobs.length > 0}
         />
         <StatCard
           id="outsourced"
@@ -1801,112 +1821,74 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         </>
       )}
 
-      {/* Unassigned Jobs View - includes incomplete jobs */}
+      {/* Unassigned Jobs View */}
       {selectedView === 'unassigned' && (
-        <div className={`bg-gray-900 rounded-lg border p-4 ${incompleteJobs.length > 0 ? 'border-red-800' : 'border-yellow-800'}`}>
-          <h3 className={`font-semibold mb-3 flex items-center gap-2 ${incompleteJobs.length > 0 ? 'text-yellow-500' : 'text-yellow-500'}`}>
-            <span className={`w-2 h-2 rounded-full animate-pulse ${incompleteJobs.length > 0 ? 'bg-red-500' : 'bg-yellow-500'}`}></span>
+        <div className="bg-gray-900 rounded-lg border p-4 border-yellow-800">
+          <h3 className="font-semibold mb-3 flex items-center gap-2 text-yellow-500">
+            <span className="w-2 h-2 rounded-full animate-pulse bg-yellow-500"></span>
             Ready for Assignment ({unassignedJobs.length})
-            {incompleteJobs.length > 0 && (
-              <span className="ml-2 text-xs text-red-400 bg-red-900/30 px-2 py-0.5 rounded flex items-center gap-1">
-                <AlertTriangle size={12} />
-                {incompleteJobs.length} needs reschedule
-              </span>
-            )}
           </h3>
           {unassignedJobs.length === 0 ? (
             <p className="text-gray-500 text-center py-8">No jobs awaiting assignment</p>
           ) : (
             <div className="space-y-2">
-              {unassignedJobs.map(job => {
-                const isIncomplete = job.status === 'incomplete'
-                return (
-                  <div 
-                    key={job.id} 
-                    className={`rounded p-3 border-l-4 ${
-                      isIncomplete 
-                        ? 'bg-red-900/20 border-red-700 ring-1 ring-red-800/50' 
-                        : `bg-gray-800 ${getPriorityBorder(job.priority)}`
-                    }`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-4">
-                        <div className={`w-3 h-3 rounded-full mt-1 ${getPriorityColor(job.priority)}`}></div>
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className={`font-mono ${isIncomplete ? 'text-red-300' : 'text-white'}`}>{job.job_number}</span>
-                            <span className="text-gray-500">•</span>
-                            <span className="text-gray-400">{job.work_order?.wo_number}</span>
-                            {isIncomplete && (
-                              <span className="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded flex items-center gap-1">
-                                <AlertTriangle size={10} />
-                                Incomplete
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            <span className="text-skynet-accent">{job.component?.part_number}</span>
-                            <span className="mx-2">•</span>
-                            {(() => {
-                              const eq = getEffectiveQty(job)
-                              return eq.verified && eq.qty !== job.quantity
-                                ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
-                                : <span>Qty: {job.quantity}</span>
-                            })()}
-                          </div>
-                          {/* Incomplete job details */}
-                          {isIncomplete && job.incomplete_reason && (
-                            <div className="mt-2 text-xs text-red-300">
-                              Reason: {job.incomplete_reason}
-                            </div>
+              {unassignedJobs.map(job => (
+                <div
+                  key={job.id}
+                  className={`rounded p-3 border-l-4 bg-gray-800 ${getPriorityBorder(job.priority)}`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-4">
+                      <div className={`w-3 h-3 rounded-full mt-1 ${getPriorityColor(job.priority)}`}></div>
+                      <div>
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <span className="font-mono text-white">{job.job_number}</span>
+                          <span className="text-gray-500">•</span>
+                          <span className="text-gray-400">{job.work_order?.wo_number}</span>
+                          {job.has_open_shortfall && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                              title="This job has an unresolved shortfall — Scheduler review needed"
+                            >
+                              <AlertTriangle size={10} /> Shortfall
+                            </span>
                           )}
                         </div>
-                      </div>
-                      <div className="text-right flex flex-col items-end gap-2">
-                        {isIncomplete ? (
-                          <>
-                            <div className="text-sm text-gray-400">
-                              <span className="text-green-400">{job.good_pieces || 0}</span>
-                              <span className="text-gray-600"> / </span>
-                              <span className="text-red-400">{job.bad_pieces || 0}</span>
-                              <span className="text-gray-500 text-xs"> pcs</span>
-                            </div>
-                            <div className="text-xs text-gray-500">
-                              Remaining: <span className="text-yellow-400 font-medium">
-                                {job.quantity - (job.good_pieces || 0)}
-                              </span>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <span className="text-yellow-500 text-sm">Needs Assignment</span>
-                            {job.compliance_outcome === 'flag' && (
-                              <span className="inline-flex items-center gap-1 text-xs text-amber-400">
-                                <Flag size={10} /> Flagged
-                              </span>
-                            )}
-                            {job.compliance_outcome === 'rework' && (
-                              <span className="inline-flex items-center gap-1 text-xs text-amber-400">
-                                <AlertCircle size={10} /> Rework
-                              </span>
-                            )}
-                          </>
-                        )}
-                        {/* Edit button - only for ready jobs, not incomplete */}
-                        {!isIncomplete && (
-                          <button
-                            onClick={() => handleEditClick(job)}
-                            className="flex items-center gap-1 text-xs text-gray-400 hover:text-skynet-accent transition-colors px-2 py-1 rounded hover:bg-gray-700"
-                          >
-                            <Edit3 size={12} />
-                            Edit
-                          </button>
-                        )}
+                        <div className="text-sm text-gray-500">
+                          <span className="text-skynet-accent">{job.component?.part_number}</span>
+                          <span className="mx-2">•</span>
+                          {(() => {
+                            const eq = getEffectiveQty(job)
+                            return eq.verified && eq.qty !== job.quantity
+                              ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
+                              : <span>Qty: {job.quantity}</span>
+                          })()}
+                        </div>
                       </div>
                     </div>
+                    <div className="text-right flex flex-col items-end gap-2">
+                      <span className="text-yellow-500 text-sm">Needs Assignment</span>
+                      {job.compliance_outcome === 'flag' && (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                          <Flag size={10} /> Flagged
+                        </span>
+                      )}
+                      {job.compliance_outcome === 'rework' && (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-400">
+                          <AlertCircle size={10} /> Rework
+                        </span>
+                      )}
+                      <button
+                        onClick={() => handleEditClick(job)}
+                        className="flex items-center gap-1 text-xs text-gray-400 hover:text-skynet-accent transition-colors px-2 py-1 rounded hover:bg-gray-700"
+                      >
+                        <Edit3 size={12} />
+                        Edit
+                      </button>
+                    </div>
                   </div>
-                )
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -2147,6 +2129,29 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               >
                 Work Orders
               </button>
+              {(profile?.role === 'admin' || profile?.role === 'scheduler') && (
+                <button
+                  onClick={() => setOrderLookupTab('shortfalls')}
+                  className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+                    orderLookupTab === 'shortfalls'
+                      ? 'border-red-500 text-red-300'
+                      : 'border-transparent text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Shortfalls
+                  {(() => {
+                    const count = woLookupData.reduce(
+                      (acc, wo) => acc + (wo.jobs || []).filter(j => j.has_open_shortfall).length,
+                      0,
+                    )
+                    return count > 0 ? (
+                      <span className="px-1.5 py-0.5 text-[10px] bg-red-900/60 text-red-200 border border-red-700 rounded">
+                        {count}
+                      </span>
+                    ) : null
+                  })()}
+                </button>
+              )}
               <button
                 onClick={() => setOrderLookupTab('customer_orders')}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
@@ -2193,6 +2198,20 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                   onNavigateToWO={(woNumber) => {
                     setOrderLookupTab('work_orders')
                     setWOLookupSearch(woNumber)
+                  }}
+                />
+              </div>
+            ) : orderLookupTab === 'shortfalls' ? (
+              <div className="flex-1 overflow-y-auto">
+                <WOLookupShortfalls
+                  profile={profile}
+                  onNavigateToWO={(woNumber) => {
+                    setOrderLookupTab('work_orders')
+                    setWOLookupSearch(woNumber || '')
+                  }}
+                  onResolved={() => {
+                    fetchData()
+                    fetchWOLookup()
                   }}
                 />
               </div>
@@ -2331,7 +2350,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                         )}
                         {/* WO Header Row */}
                         <div
-                          onClick={() => setExpandedWOs(prev => ({ ...prev, [wo.id]: !prev[wo.id] }))}
+                          onClick={() => handleToggleWOExpand(wo.id)}
                           className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors cursor-pointer"
                         >
                           <div className="flex items-center gap-4">
@@ -2364,6 +2383,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                 {allJobsComplete && (
                                   <span className="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
                                     COMPLETE
+                                  </span>
+                                )}
+                                {(wo.jobs || []).some(j => j.has_open_shortfall) && (
+                                  <span
+                                    className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                                    title="A job on this WO has an unresolved shortfall — Scheduler review needed"
+                                  >
+                                    <AlertTriangle size={10} /> Shortfall
                                   </span>
                                 )}
                                 {readyForAssemblyCount === totalJobs && !allJobsComplete && (
@@ -2422,6 +2449,81 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                         {/* Expanded Assembly & Jobs Hierarchy */}
                         {isExpanded && (
                           <div className="border-t border-gray-700 bg-gray-900/50">
+                            {/* CO Fulfillment summary */}
+                            {(() => {
+                              const cached = woFulfillmentCache[wo.id]
+                              if (cached === undefined || cached === 'loading') {
+                                return (
+                                  <div className="px-4 py-2 bg-gray-900/40 border-b border-gray-800 text-xs text-gray-500 flex items-center gap-2">
+                                    <Loader2 size={12} className="animate-spin" />
+                                    Loading CO fulfillment…
+                                  </div>
+                                )
+                              }
+                              if (!Array.isArray(cached) || cached.length === 0) {
+                                return (
+                                  <div className="px-4 py-2 bg-gray-900/40 border-b border-gray-800 text-xs text-gray-500">
+                                    <span className="uppercase tracking-wide text-gray-600 font-medium mr-2">CO Fulfillment</span>
+                                    Stock build — no customer allocations
+                                  </div>
+                                )
+                              }
+                              // Compute produced per part_number across jobs on this WO.
+                              const producedByPart = {}
+                              for (const j of (wo.jobs || [])) {
+                                const part = j.component?.part_number
+                                if (!part) continue
+                                const eq = getEffectiveQty(j)
+                                producedByPart[part] = (producedByPart[part] || 0) + (eq?.qty || 0)
+                              }
+                              return (
+                                <div className="px-4 py-3 bg-gray-900/40 border-b border-gray-800">
+                                  <div className="text-[10px] uppercase tracking-wide text-gray-500 font-medium mb-2">CO Fulfillment</div>
+                                  <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                      <thead className="text-gray-500">
+                                        <tr className="border-b border-gray-800">
+                                          <th className="text-left font-medium py-1 pr-3">Customer</th>
+                                          <th className="text-left font-medium py-1 pr-3">PO #</th>
+                                          <th className="text-left font-medium py-1 pr-3">Line</th>
+                                          <th className="text-right font-medium py-1 pr-3">Ordered</th>
+                                          <th className="text-right font-medium py-1 pr-3">Allocated</th>
+                                          <th className="text-right font-medium py-1 pr-3">Fulfilled</th>
+                                          <th className="text-right font-medium py-1 pr-3">Remaining</th>
+                                          <th className="text-left font-medium py-1">Status</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {cached.map(row => {
+                                          const produced = producedByPart[row.part_number] || 0
+                                          let pill
+                                          if (row.satisfied) {
+                                            pill = <span className="px-2 py-0.5 rounded text-[10px] bg-green-900/40 text-green-300 border border-green-800">Satisfied</span>
+                                          } else if (row.remaining > 0 && produced < row.remaining) {
+                                            pill = <span className="px-2 py-0.5 rounded text-[10px] bg-amber-900/40 text-amber-300 border border-amber-800">At risk</span>
+                                          } else {
+                                            pill = <span className="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">Open</span>
+                                          }
+                                          return (
+                                            <tr key={row.allocation_id} className="border-b border-gray-800/60 last:border-b-0">
+                                              <td className="py-1 pr-3 text-gray-300">{row.customer_name || '—'}</td>
+                                              <td className="py-1 pr-3 text-gray-400">{row.po_number || '—'}</td>
+                                              <td className="py-1 pr-3 text-gray-400">#{row.line_number}</td>
+                                              <td className="py-1 pr-3 text-right text-gray-300">{row.ordered}</td>
+                                              <td className="py-1 pr-3 text-right text-gray-300">{row.allocated}</td>
+                                              <td className="py-1 pr-3 text-right text-gray-300">{row.fulfilled}</td>
+                                              <td className={`py-1 pr-3 text-right ${row.remaining > 0 ? 'text-amber-300' : 'text-gray-500'}`}>{row.remaining}</td>
+                                              <td className="py-1">{pill}</td>
+                                            </tr>
+                                          )
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              )
+                            })()}
+
                             {/* Show assemblies with their jobs */}
                             {wo.work_order_assemblies && wo.work_order_assemblies.length > 0 ? (
                               wo.work_order_assemblies.map(woa => {
@@ -2611,6 +2713,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                 <div className="col-span-2 flex items-center gap-1.5 flex-wrap">
                                                   <span className="text-white font-mono text-sm">{job.job_number}</span>
                                                   <DocsDeferredBadge job={job} />
+                                                  {job.has_open_shortfall && (
+                                                    <span
+                                                      className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                                                      title="This job has an unresolved shortfall — Scheduler review needed"
+                                                    >
+                                                      <AlertTriangle size={10} /> Shortfall
+                                                    </span>
+                                                  )}
                                                 </div>
                                                 <div className="col-span-2">
                                                   <div className="flex items-center gap-2">

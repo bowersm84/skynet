@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { evaluateJobShortfall } from '../lib/shortfall'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
@@ -115,8 +116,7 @@ export default function Kiosk() {
     good_pieces: 0,
     bad_pieces: 0
   })
-  const [showIncompleteConfirm, setShowIncompleteConfirm] = useState(false) // DEPRECATED - kept for compatibility
-  const [completionStep, setCompletionStep] = useState('form') // 'form', 'review_downtimes', 'materials', 'confirm_incomplete'
+  const [completionStep, setCompletionStep] = useState('form') // 'form', 'review_downtimes', 'materials'
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
   const [downtimeEdits, setDowntimeEdits] = useState({}) // {id: {end_time, duration_hours, duration_mins, use_duration}}
   const [validationErrors, setValidationErrors] = useState([])
@@ -144,8 +144,7 @@ export default function Kiosk() {
     duration_mins: 0,
     use_duration: false,
     good_pieces: 0,
-    bad_pieces: 0,
-    send_to_scheduling: false
+    bad_pieces: 0
   })
   const [downtimeLogs, setDowntimeLogs] = useState([])
   const [downtimeLogsLoading, setDowntimeLogsLoading] = useState(false)
@@ -157,7 +156,6 @@ export default function Kiosk() {
     duration_hours: 0,
     duration_mins: 0,
     use_duration: false,
-    send_to_scheduling: false,
     good_pieces: 0
   })
   
@@ -840,7 +838,7 @@ export default function Kiosk() {
           component:parts!component_id(id, part_number, description)
         `)
         .eq('assigned_machine_id', machine.id)
-        .in('status', ['manufacturing_complete', 'pending_post_manufacturing', 'ready_for_assembly', 'complete', 'incomplete'])
+        .in('status', ['manufacturing_complete', 'pending_post_manufacturing', 'ready_for_assembly', 'complete'])
         .order('actual_end', { ascending: false, nullsFirst: false })
         .limit(20)
 
@@ -1071,7 +1069,6 @@ export default function Kiosk() {
       duration_hours: duration.hours,
       duration_mins: duration.mins,
       use_duration: false,
-      send_to_scheduling: false,
       good_pieces: activeJob?.good_pieces || 0
     })
   }
@@ -1114,33 +1111,9 @@ export default function Kiosk() {
         .eq('id', editingDowntime.id)
       
       if (error) throw error
-      
-      // If sending to scheduling, update the job
-      if (editDowntimeForm.send_to_scheduling && activeJob) {
-        const goodPieces = parseInt(editDowntimeForm.good_pieces) || 0
-        const remainingQty = activeJob.quantity - goodPieces
-        
-        // Update job to incomplete and clear machine assignment
-        const { error: jobError } = await supabase
-          .from('jobs')
-          .update({
-            status: 'incomplete',
-            good_pieces: goodPieces,
-            actual_end: endTime.toISOString(),
-            assigned_machine_id: null,
-            scheduled_start: null,
-            scheduled_end: null,
-            incomplete_reason: `Downtime: ${editingDowntime.reason}. ${remainingQty} pieces remaining.`,
-            incomplete_by: operator?.id,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', activeJob.id)
-        
-        if (jobError) throw jobError
-      }
-      
+
       // If machine is DOWN, clear the status since downtime is now resolved
-      if (machine?.status === 'down' || editDowntimeForm.send_to_scheduling) {
+      if (machine?.status === 'down') {
         const { error: machineError } = await supabase
           .from('machines')
           .update({
@@ -1162,11 +1135,11 @@ export default function Kiosk() {
       }
       
       setEditingDowntime(null)
-      setEditDowntimeForm({ end_time: '', duration_hours: 0, duration_mins: 0, use_duration: false, send_to_scheduling: false, good_pieces: 0 })
-      
+      setEditDowntimeForm({ end_time: '', duration_hours: 0, duration_mins: 0, use_duration: false, good_pieces: 0 })
+
       // Refresh jobs and activity log
       await loadJobs()
-      if (activeJob && !editDowntimeForm.send_to_scheduling) {
+      if (activeJob) {
         await buildActivityLog(activeJob)
       }
     } catch (err) {
@@ -1190,7 +1163,7 @@ export default function Kiosk() {
           component:parts!component_id(id, part_number, description)
         `)
         .eq('assigned_machine_id', machine.id)
-        .in('status', ['manufacturing_complete', 'pending_post_manufacturing', 'ready_for_assembly', 'complete', 'incomplete'])
+        .in('status', ['manufacturing_complete', 'pending_post_manufacturing', 'ready_for_assembly', 'complete'])
         .order('actual_end', { ascending: false, nullsFirst: false })
         .limit(5)
 
@@ -1420,18 +1393,6 @@ export default function Kiosk() {
         duration: prodDurationStr ? `Production: ${prodDurationStr}` : null,
         icon: 'check',
         color: 'green'
-      })
-    }
-    
-    // Job sent to scheduling (incomplete)
-    if (job.status === 'incomplete' && job.incomplete_at) {
-      activities.push({
-        type: 'incomplete',
-        timestamp: job.incomplete_at,
-        label: 'Sent to Scheduling',
-        sublabel: job.incomplete_reason,
-        icon: 'send',
-        color: 'orange'
       })
     }
     
@@ -2870,14 +2831,10 @@ export default function Kiosk() {
       return
     }
 
-    // No materials - proceed with normal flow
-    // If good pieces < required quantity, ask about sending to scheduling
-    if (goodPieces < activeJob.quantity) {
-      setCompletionStep('confirm_incomplete')
-    } else {
-      // Complete normally
-      handleCompleteJob(false)
-    }
+    // No materials - proceed with completion. Shortfalls (good_pieces < target)
+    // are handled by the scheduler via the Shortfalls workflow; the operator
+    // always completes with whatever good_pieces they recorded.
+    handleCompleteJob()
   }
 
   // Handle materials confirmation and continue
@@ -2895,14 +2852,9 @@ export default function Kiosk() {
       }
     }
 
-    const goodPieces = parseInt(completeForm.good_pieces) || 0
-    
-    // Proceed with completion check
-    if (goodPieces < activeJob.quantity) {
-      setCompletionStep('confirm_incomplete')
-    } else {
-      handleCompleteJob(false)
-    }
+    // Shortfalls (good_pieces < target) are flagged downstream via the
+    // Shortfalls workflow; the operator always completes here.
+    handleCompleteJob()
   }
 
   // Fix ongoing downtimes and continue with completion
@@ -2976,75 +2928,12 @@ export default function Kiosk() {
         return
       }
 
-      // Now proceed with completion check
-      const goodPieces = parseInt(completeForm.good_pieces) || 0
-      
-      if (goodPieces < activeJob.quantity) {
-        setCompletionStep('confirm_incomplete')
-      } else {
-        await handleCompleteJob(false)
-      }
+      // Shortfalls are handled downstream by the scheduler; always proceed
+      // with completion.
+      await handleCompleteJob()
     } catch (err) {
       console.error('Error fixing downtimes:', err)
       alert('Failed to update downtimes: ' + err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  // Send incomplete job back to scheduling
-  const handleSendToScheduling = async () => {
-    setActionLoading(true)
-    try {
-      const goodPieces = parseInt(completeForm.good_pieces) || 0
-      const badPieces = parseInt(completeForm.bad_pieces) || 0
-      const piecesRemaining = activeJob.quantity - goodPieces
-
-      // Save material remaining values for this partial run
-      if (jobMaterials.length > 0) {
-        for (const material of jobMaterials) {
-          const barsRemaining = parseInt(materialRemaining[material.id]) || 0
-          const { error: matError } = await supabase
-            .from('job_materials')
-            .update({
-              bars_remaining: barsRemaining,
-              completed_by: operator.id,
-              completed_at: new Date().toISOString()
-            })
-            .eq('id', material.id)
-
-          if (matError) {
-            console.error('Error updating material:', matError)
-          }
-        }
-      }
-
-      const { error } = await supabase
-        .from('jobs')
-        .update({
-          status: 'incomplete',
-          actual_end: new Date(completeForm.actual_end).toISOString(),
-          good_pieces: goodPieces,
-          bad_pieces: badPieces,
-          incomplete_reason: `${piecesRemaining} pieces remaining`,
-          incomplete_at: new Date().toISOString(),
-          incomplete_by: operator.id,
-          assigned_machine_id: null,
-          scheduled_start: null,
-          scheduled_end: null,
-          notes: `Incomplete - ${piecesRemaining} of ${activeJob.quantity} pieces remaining.`,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', activeJob.id)
-
-      if (error) throw error
-      
-      resetCompleteModal()
-      await loadJobs()
-      await loadPreviousJobs()
-    } catch (err) {
-      console.error('Error sending job to scheduling:', err)
-      alert('Failed to send job to scheduling: ' + err.message)
     } finally {
       setActionLoading(false)
     }
@@ -3061,7 +2950,7 @@ export default function Kiosk() {
     setMaterialRemaining({})
   }
 
-  const handleCompleteJob = async (forceComplete = false) => {
+  const handleCompleteJob = async () => {
     if (!completeForm.actual_end) {
       alert('Please enter the actual end time')
       return
@@ -3159,6 +3048,15 @@ export default function Kiosk() {
         .eq('id', activeJob.id)
 
       if (error) throw error
+
+      // Fire-and-forget per-job shortfall evaluation. Idempotent; no-op
+      // when produced >= target.
+      if (activeJob.id) {
+        evaluateJobShortfall(activeJob.id).catch(err => {
+          console.error('evaluateJobShortfall failed (non-blocking):', err)
+        })
+      }
+
       resetCompleteModal()
       await loadJobs()
       await loadPreviousJobs()
@@ -3179,7 +3077,6 @@ export default function Kiosk() {
       end_time: '',
       reason: '',
       notes: '',
-      send_to_scheduling: false,
       good_pieces: activeJob?.good_pieces || 0,
       bad_pieces: activeJob?.bad_pieces || 0
     })
@@ -3209,7 +3106,7 @@ export default function Kiosk() {
     }
 
     // If no end time (ongoing downtime), show warning about flagging machine DOWN
-    if (!endTimeIso && !downtimeForm.send_to_scheduling) {
+    if (!endTimeIso) {
       setPendingDowntimeData({
         machine_id: machine.id,
         job_id: activeJob?.id || null,
@@ -3217,8 +3114,6 @@ export default function Kiosk() {
         end_time: null,
         reason: downtimeForm.reason,
         notes: downtimeForm.notes || null,
-        sent_to_scheduling: false,
-        sent_to_scheduling_at: null,
         logged_by: operator.id
       })
       setShowDownWarning(true)
@@ -3241,8 +3136,6 @@ export default function Kiosk() {
         end_time: endTimeIso,
         reason: downtimeForm.reason,
         notes: downtimeForm.notes || null,
-        sent_to_scheduling: downtimeForm.send_to_scheduling,
-        sent_to_scheduling_at: downtimeForm.send_to_scheduling ? new Date().toISOString() : null,
         logged_by: operator.id
       }
 
@@ -3278,45 +3171,17 @@ export default function Kiosk() {
         }
       }
 
-      // If sending to scheduling, mark job as incomplete
-      if (downtimeForm.send_to_scheduling && activeJob) {
-        const goodPieces = parseInt(downtimeForm.good_pieces) || 0
-        const badPieces = parseInt(downtimeForm.bad_pieces) || 0
-        const piecesRemaining = activeJob.quantity - goodPieces
-
-        const { error: jobError } = await supabase
-          .from('jobs')
-          .update({
-            status: 'incomplete',
-            good_pieces: goodPieces,
-            bad_pieces: badPieces,
-            incomplete_reason: downtimeForm.reason + (downtimeForm.notes ? `: ${downtimeForm.notes}` : ''),
-            incomplete_at: new Date().toISOString(),
-            incomplete_by: operator.id,
-            actual_end: new Date(downtimeForm.start_time).toISOString(),
-            notes: `Incomplete - ${piecesRemaining} pieces remaining. ${downtimeForm.notes || ''}`.trim(),
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', activeJob.id)
-
-        if (jobError) throw jobError
-      }
-
       setShowDowntimeModal(false)
       setDowntimeForm({
         start_time: '', end_time: '', reason: '', notes: '',
         duration_hours: 0, duration_mins: 0, use_duration: false,
-        send_to_scheduling: false, good_pieces: 0, bad_pieces: 0
+        good_pieces: 0, bad_pieces: 0
       })
       await loadJobs()
-      
+
       // Refresh activity log if we still have an active job
-      if (activeJob && !downtimeForm.send_to_scheduling) {
+      if (activeJob) {
         await buildActivityLog(activeJob)
-      }
-      
-      if (downtimeForm.send_to_scheduling) {
-        alert('Job has been sent back to scheduling.')
       }
     } catch (err) {
       console.error('Error logging downtime:', err)
@@ -3539,7 +3404,6 @@ export default function Kiosk() {
       case 'in_progress': return <span className="px-2 py-1 text-xs font-medium bg-green-500/20 text-green-400 rounded flex items-center gap-1"><Play size={12} /> Running</span>
       case 'manufacturing_complete': return <span className="px-2 py-1 text-xs font-medium bg-purple-500/20 text-purple-400 rounded">Mfg Complete</span>
       case 'complete': return <span className="px-2 py-1 text-xs font-medium bg-green-500/20 text-green-400 rounded">Complete</span>
-      case 'incomplete': return <span className="px-2 py-1 text-xs font-medium bg-red-500/20 text-red-400 rounded">Incomplete</span>
       default: return <span className="px-2 py-1 text-xs font-medium bg-gray-500/20 text-gray-400 rounded">{status}</span>
     }
   }
@@ -4693,11 +4557,19 @@ export default function Kiosk() {
                           )}
                           {jobIsMaintenance && (
                             <span className={`text-xs px-1.5 py-0.5 rounded ${
-                              job.work_order?.maintenance_type === 'unplanned' 
-                                ? 'bg-purple-900/50 text-purple-400' 
+                              job.work_order?.maintenance_type === 'unplanned'
+                                ? 'bg-purple-900/50 text-purple-400'
                                 : 'bg-blue-900/50 text-blue-400'
                             }`}>
                               {job.work_order?.maintenance_type === 'unplanned' ? 'Unplanned' : 'Planned'}
+                            </span>
+                          )}
+                          {job.has_open_shortfall && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                              title="This job has an unresolved shortfall — Scheduler review needed"
+                            >
+                              <AlertTriangle size={10} /> Shortfall
                             </span>
                           )}
                         </div>
@@ -4889,9 +4761,7 @@ export default function Kiosk() {
                             <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
                             <span className="text-white font-mono text-sm">{job.job_number}</span>
                           </div>
-                          {job.status === 'incomplete' ? (
-                            <span className="text-xs px-2 py-0.5 rounded bg-red-900/50 text-red-400">Incomplete</span>
-                          ) : job.status === 'complete' || job.status === 'manufacturing_complete' ? (
+                          {job.status === 'complete' || job.status === 'manufacturing_complete' ? (
                             <span className="text-xs px-2 py-0.5 rounded bg-green-900/50 text-green-400">Complete</span>
                           ) : (
                             <span className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-400">{job.status.replace('_', ' ')}</span>
@@ -6124,6 +5994,15 @@ export default function Kiosk() {
                       )}
                     </p>
                   </div>
+
+                  {(parseInt(completeForm.good_pieces) || 0) < activeJob.quantity && (
+                    <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 text-sm text-amber-200 flex items-start gap-2">
+                      <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                      <span>
+                        Good pieces ({parseInt(completeForm.good_pieces) || 0}) below target ({activeJob.quantity}). This will be flagged to the scheduler for shortfall review.
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
@@ -6366,55 +6245,6 @@ export default function Kiosk() {
               </div>
             )}
 
-            {/* Step 4: Confirm Incomplete */}
-            {completionStep === 'confirm_incomplete' && (
-              <div className="p-6 space-y-4">
-                <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="text-yellow-500 flex-shrink-0 mt-0.5" size={24} />
-                    <div>
-                      <h3 className="text-yellow-400 font-medium mb-1">Pieces Remaining</h3>
-                      <p className="text-gray-300 text-sm">
-                        You entered <span className="text-white font-medium">{parseInt(completeForm.good_pieces) || 0}</span> good pieces, 
-                        but the job requires <span className="text-white font-medium">{activeJob.quantity}</span>.
-                      </p>
-                      <p className="text-gray-400 text-sm mt-2">
-                        <span className="text-yellow-400 font-medium">{activeJob.quantity - (parseInt(completeForm.good_pieces) || 0)}</span> pieces remaining.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <p className="text-gray-300 text-center">
-                  Would you like to send this job back to scheduling to complete the remaining pieces?
-                </p>
-
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => handleCompleteJob(true)} 
-                    disabled={actionLoading} 
-                    className="flex-1 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-                  >
-                    {actionLoading ? <Loader2 size={20} className="animate-spin mx-auto" /> : 'No, Complete Job'}
-                  </button>
-                  <button 
-                    onClick={handleSendToScheduling} 
-                    disabled={actionLoading} 
-                    className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
-                  >
-                    {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <SendHorizontal size={20} />}
-                    Yes, Reschedule
-                  </button>
-                </div>
-
-                <button 
-                  onClick={() => setCompletionStep('form')} 
-                  className="w-full py-2 text-gray-400 hover:text-white text-sm transition-colors"
-                >
-                  ← Go Back
-                </button>
-              </div>
-            )}
             </>
             )}
           </div>
@@ -6671,59 +6501,19 @@ export default function Kiosk() {
                 </div>
               )}
 
-              {/* Send to Scheduling Option */}
-              {activeJob && (
-                <div className="border-t border-gray-700 pt-4">
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editDowntimeForm.send_to_scheduling}
-                      onChange={(e) => setEditDowntimeForm({...editDowntimeForm, send_to_scheduling: e.target.checked})}
-                      className="w-5 h-5 rounded bg-gray-800 border-gray-600 text-yellow-500 focus:ring-yellow-500"
-                    />
-                    <div>
-                      <span className="text-white font-medium">Send job back to scheduling</span>
-                      <p className="text-gray-500 text-xs">End this downtime and reschedule the job for later</p>
-                    </div>
-                  </label>
-
-                  {editDowntimeForm.send_to_scheduling && (
-                    <div className="mt-4 bg-yellow-900/20 border border-yellow-600/50 rounded-lg p-4">
-                      <div className="mb-3">
-                        <label className="block text-gray-400 text-sm mb-2">Good Pieces Completed</label>
-                        <input
-                          type="number"
-                          min="0"
-                          max={activeJob.quantity}
-                          value={editDowntimeForm.good_pieces}
-                          onChange={(e) => setEditDowntimeForm({...editDowntimeForm, good_pieces: parseInt(e.target.value) || 0})}
-                          className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-yellow-500 focus:outline-none"
-                        />
-                      </div>
-                      <p className="text-yellow-400 text-sm">
-                        {activeJob.quantity - (parseInt(editDowntimeForm.good_pieces) || 0)} pieces remaining to be rescheduled
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
               <button onClick={() => setEditingDowntime(null)} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">
                 Cancel
               </button>
-              <button 
-                onClick={handleSaveDowntimeEdit} 
-                disabled={actionLoading} 
-                className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 ${
-                  editDowntimeForm.send_to_scheduling 
-                    ? 'bg-yellow-600 hover:bg-yellow-500 text-white' 
-                    : 'bg-skynet-accent hover:bg-blue-600 text-white'
-                }`}
+              <button
+                onClick={handleSaveDowntimeEdit}
+                disabled={actionLoading}
+                className="flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 bg-skynet-accent hover:bg-blue-600 text-white"
               >
-                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : editDowntimeForm.send_to_scheduling ? <SendHorizontal size={20} /> : <Save size={20} />}
-                {editDowntimeForm.send_to_scheduling ? 'Send to Scheduling' : 'Save'}
+                {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Save size={20} />}
+                Save
               </button>
             </div>
           </div>
@@ -7118,34 +6908,6 @@ export default function Kiosk() {
                 <textarea value={downtimeForm.notes} onChange={(e) => setDowntimeForm({...downtimeForm, notes: e.target.value})} rows={3} placeholder="Additional details about the downtime..." className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-skynet-accent focus:outline-none resize-none" />
               </div>
 
-              {activeJob && (
-                <div className="border border-red-800 rounded-lg p-4 space-y-4">
-                  <div className="flex items-center gap-3">
-                    <input type="checkbox" id="sendToScheduling" checked={downtimeForm.send_to_scheduling} onChange={(e) => setDowntimeForm({...downtimeForm, send_to_scheduling: e.target.checked})} className="w-5 h-5 rounded border-gray-700 text-red-600 focus:ring-red-500" />
-                    <label htmlFor="sendToScheduling" className="text-white font-medium flex items-center gap-2"><SendHorizontal size={18} className="text-red-400" />Send Job Back to Scheduling</label>
-                  </div>
-
-                  {downtimeForm.send_to_scheduling && (
-                    <div className="pl-8 space-y-3">
-                      <p className="text-gray-400 text-sm">Enter pieces completed before downtime:</p>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-gray-500 text-xs mb-1">Good Pieces</label>
-                          <input type="number" min="0" value={downtimeForm.good_pieces} onChange={(e) => setDowntimeForm({...downtimeForm, good_pieces: e.target.value})} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center" />
-                        </div>
-                        <div>
-                          <label className="block text-gray-500 text-xs mb-1">Bad Pieces</label>
-                          <input type="number" min="0" value={downtimeForm.bad_pieces} onChange={(e) => setDowntimeForm({...downtimeForm, bad_pieces: e.target.value})} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center" />
-                        </div>
-                      </div>
-                      <div className="bg-gray-800 rounded p-2 text-center">
-                        <p className="text-gray-500 text-sm">Pieces Remaining: <span className="text-yellow-400 font-medium">{activeJob.quantity - (parseInt(downtimeForm.good_pieces) || 0)}</span></p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Recent Downtime Logs */}
               {downtimeLogs.length > 0 && (
                 <div>
@@ -7179,7 +6941,7 @@ export default function Kiosk() {
               <button onClick={() => setShowDowntimeModal(false)} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
               <button onClick={handleLogDowntime} disabled={actionLoading || !downtimeForm.reason || !downtimeForm.start_time} className="flex-1 py-3 bg-red-600 hover:bg-red-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <PauseCircle size={20} />}
-                {downtimeForm.send_to_scheduling ? 'Log & Send to Scheduling' : 'Log Downtime'}
+                Log Downtime
               </button>
             </div>
           </div>

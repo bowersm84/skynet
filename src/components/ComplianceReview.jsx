@@ -4,6 +4,7 @@ import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { FEATURES } from '../config'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
+import { evaluateJobShortfall } from '../lib/shortfall'
 import { promoteToPartDocument } from '../lib/documents'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
@@ -32,6 +33,7 @@ import {
   Pause,
   Flag,
   Package,
+  AlertTriangle,
   ExternalLink
 } from 'lucide-react'
 
@@ -150,7 +152,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         job:jobs(
           id, job_number, quantity, production_lot_number, status,
           work_order_assembly_id, is_standalone_finishing, source_description,
-          work_order:work_orders(wo_number, customer, priority, due_date, order_type),
+          has_open_shortfall,
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_open_shortfall),
           component:parts!component_id(id, part_number, description, customer, part_type),
           assigned_machine:machines!assigned_machine_id(name)
         ),
@@ -190,7 +193,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         *,
         job:jobs(
           id, job_number, quantity, is_standalone_finishing, source_description,
-          work_order:work_orders(wo_number, customer),
+          has_open_shortfall,
+          work_order:work_orders(id, wo_number, customer, has_open_shortfall),
           component:parts!component_id(part_number, description, customer),
           assigned_machine:machines!assigned_machine_id(name)
         )
@@ -1200,6 +1204,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           profileId: profile?.id,
         })
         if (releaseErr) console.error('Failed to release CO allocations after compliance reject:', releaseErr)
+        // Cancelled jobs never generate shortfalls — no evaluation here.
         onUpdate()
         return
       }
@@ -1284,6 +1289,17 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           },
         })
       }
+
+      // Post-mfg accept writes post_mfg_good_qty; evaluate this job's
+      // shortfall against that value. Idempotent; no-ops when produced
+      // >= target. Fires for any post-mfg accept regardless of nextStatus
+      // because compliance verification can land a job below target even
+      // when it routes onward (e.g. ready_for_outsourcing).
+      if (currentStatus === 'pending_post_manufacturing' && jobId) {
+        evaluateJobShortfall(jobId).catch(err =>
+          console.error('evaluateJobShortfall failed (non-blocking):', err)
+        )
+      }
       onUpdate()
     } catch (err) {
       console.error('Approve job error:', err)
@@ -1358,6 +1374,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           profileId: profile?.id,
         })
         if (releaseErr) console.error('Failed to release CO allocations after compliance reject:', releaseErr)
+        // Cancelled jobs never generate shortfalls — no evaluation here.
         onUpdate()
         return
         // No print for rejected jobs.
@@ -1437,6 +1454,15 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           },
         })
       }
+
+      // Post-mfg accept writes post_mfg_good_qty — evaluate this job's
+      // shortfall against that. Idempotent; no-ops when produced >= target.
+      if (job.status === 'pending_post_manufacturing' && job.id) {
+        evaluateJobShortfall(job.id).catch(err =>
+          console.error('evaluateJobShortfall failed (non-blocking):', err)
+        )
+      }
+
       onUpdate()
       setPrintPackageJob(job)
     } catch (err) {
@@ -1642,6 +1668,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         <span className="text-gray-400">{job.work_order?.wo_number}</span>
                         {job.work_order?.order_type === 'make_to_stock' && (
                           <span className="text-xs px-2 py-0.5 bg-green-900/50 text-green-400 rounded">Stock</span>
+                        )}
+                        {job.has_open_shortfall && (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-700"
+                            title="This job has an unresolved shortfall — Scheduler review needed"
+                          >
+                            <AlertTriangle size={10} /> Shortfall
+                          </span>
                         )}
                         <DocsDeferredBadge job={job} />
                       </div>

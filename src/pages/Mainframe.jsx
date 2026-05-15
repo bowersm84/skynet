@@ -2734,7 +2734,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                 <div className="col-span-1 text-center">
                                                   {(() => {
                                                     const eq = getEffectiveQty(job)
-                                                    const isAdmin = profile?.role === 'admin'
+                                                    const canOverrideQty = ['admin', 'compliance'].includes(profile?.role)
                                                     return (
                                                       <div className="flex flex-col items-center gap-0.5">
                                                         {eq.overridden ? (
@@ -2751,7 +2751,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                         ) : (
                                                           <span className="text-white text-sm">{job.quantity}</span>
                                                         )}
-                                                        {isAdmin && (
+                                                        {canOverrideQty && (
                                                           <button
                                                             onClick={() => handleOverrideStart(job)}
                                                             className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"
@@ -3063,7 +3063,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                         <div className="col-span-1 text-center">
                                           {(() => {
                                             const eq = getEffectiveQty(job)
-                                            const isAdmin = profile?.role === 'admin'
+                                            const canOverrideQty = ['admin', 'compliance'].includes(profile?.role)
                                             return (
                                               <div className="flex flex-col items-center gap-0.5">
                                                 {eq.overridden ? (
@@ -3080,7 +3080,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                 ) : (
                                                   <span className="text-white text-sm">{job.quantity}</span>
                                                 )}
-                                                {isAdmin && (
+                                                {canOverrideQty && (
                                                   <button
                                                     onClick={() => handleOverrideStart(job)}
                                                     className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"

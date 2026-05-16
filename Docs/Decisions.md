@@ -344,3 +344,108 @@ Added `https://test-skynet.skybolt.com` to `skynet-files-skybolt` bucket CORS du
 
 ### Test environment CHECK constraint drift
 Discovered + fixed during M9 regression: `job_shortfall_resolutions.resolution` CHECK on test was missing `'acknowledge_plan'` (prod had it). Plan-only shortfall "Acknowledge" button errored on test. Constraint updated on test to match prod. Same drift pattern flagged for `outbound_sends.source_type` (test missing NULL allowance) — pending fix, not user-visible today.
+
+---
+
+## 2026-05-16 — v3.3 Cleanup Release (S7 closeout)
+
+Bugfix-only release closing six items from the S7 backlog. No user-facing
+behavior change other than the compliance Additional Documents fix.
+
+**Shipped:**
+- **Issue 1** — Edge Function `audit_logs` column rename. `manage-users` and
+  `kiosk-authenticate` now write `event_type/operator_id/details` (correct
+  schema) instead of `action/actor_id/target_type/target_id` (nonexistent).
+  Errors are now captured and logged via `console.error` instead of silently
+  swallowed. Restored audit trail for every user-management and PIN-auth event.
+
+- **Issue 2** — ComplianceReview Pre-Mfg Additional Documents not displaying
+  modal-uploaded docs. **Root cause was different from what the backlog
+  recorded.** The backlog described it as a state-refresh miss in
+  `handleAdditionalUpload`. The actual bug was a filter contract mismatch:
+  the Pre-Mfg "Additional Documents" surface (line 2150 in
+  ComplianceReview.jsx) uses `AddJobDocumentModal` for uploads, which
+  forces a typed `document_type_id` on insert. The display filter at line
+  2167 only showed docs with NULL `document_type_id`, so every
+  modal-uploaded doc went into the DB successfully but never displayed.
+  Fix: broadened the filter to show any doc whose `document_type_id` is not
+  in the Required Documents list for this stage. As a side note, the
+  `handleAdditionalUpload` handler (lines 942-974) also got the
+  `fetchPendingBatches()`/`fetchRecentlyApprovedBatches()` calls added to
+  match the `handleDeleteDocument` pattern — harmless and consistent with
+  the other state-mutation handlers, kept in. The two other Additional
+  Documents surfaces (post-mfg batch context line 2807, post-mfg job context
+  line 3301) still use `handleAdditionalUpload` with inline file pickers
+  that insert NULL `document_type_id`, so their existing
+  `!d.document_type_id` filters remain correct.
+
+- **Issue 3** — Dropped duplicate SELECT policy `Allow authenticated read`
+  on `public.job_documents`. The M8 naming-convention policy
+  `job_documents_select_authenticated` remains.
+
+- **Issue 8** — `tools` / `tool_instances` tagged as dormant master data
+  (see entry below). No code or schema change.
+
+- **Issue 9** — Aligned test environment's `outbound_sends.source_type`
+  CHECK constraint to prod (NULL now permitted). Closed a test/prod drift
+  introduced at unknown date.
+
+- **Issue 11** — Wired `rls_guardrail.sql` into a GitHub Actions workflow
+  (`.github/workflows/rls-guardrail.yml`) that runs against the TEST
+  Supabase on every PR to `main` or `test` and on push to `main`. Build
+  fails if any public table has RLS disabled or zero policies (with the
+  service-role-only allowlist as the documented exception).
+
+**Deferred to a future auth-hardening sprint** (closely-coupled, will
+share a feature branch when scheduled):
+- Migrate `Finishing.jsx` to JWT-per-PIN auth pattern (matches Kiosk.jsx)
+- Move `audit_logs` INSERTs behind an Edge Function (Profile F → Profile E)
+- Narrow `profiles` SELECT to `auth.uid() = id` (blocked by the above + PIN hashing)
+
+**Process learning:** Backlog descriptions are working hypotheses, not
+diagnoses. The Issue 2 backlog entry described a state-refresh miss
+because that's what symptom-walking suggested at the time. The actual root
+cause (filter/upload-path contract mismatch on the Pre-Mfg surface) only
+surfaced when we ran the fix and the symptom persisted. Worth a habit:
+before declaring a backlog item "small," verify the upload path being
+clicked actually maps to the handler the entry names.
+
+---
+
+## 2026-05-16 — `tools` and `tool_instances` are dormant master data
+
+**Status:** Active in schema, dormant in workflow. Not vestigial; reserved
+for future resurrection.
+
+**Tables:**
+- `public.tools` — catalog of tool types (name, tool_type, description)
+- `public.tool_instances` — physical inventory per tool (serial_number,
+  status [good/bad/discarded], notes, logged_by, logged_at)
+
+**Original 3-tier model:**
+`tools` → `tool_instances` → `job_tools` (which physical tool on which job)
+
+**Current state:** `job_tools` is active and heavily used by `Kiosk.jsx`
+(20+ call sites including the tooling-override flow). It carries
+`tool_instance_id` as a nullable FK alongside its own free-text
+`tool_name`, `tool_type`, and `serial_number` columns. When tooling was
+removed from the active workflow, `job_tools` was relaxed to free-text
+entry, and the parent tables (`tools`, `tool_instances`) went dormant.
+
+**Why we don't drop them:**
+1. `job_tools.tool_instance_id` FK to `tool_instances` would force either
+   a constraint drop (leaving an orphan column) or a column drop
+   (destroying schema evidence of the original normalized design).
+2. Tooling is planned to be resurrected; dropping the master tables
+   means rebuilding the model from scratch later.
+
+**RLS posture:** Authenticated SELECT/INSERT/UPDATE/DELETE policies remain
+in place per the v1 access matrix default profile. No service-role-only
+move. Attack surface is small: no PII, no operational data, two
+near-empty tables.
+
+**When tooling is resurrected:** these tables already have the right
+shape. The work will be in `job_tools` (require `tool_instance_id` not
+null, deprecate the free-text columns or use them as fallback only) and
+the Kiosk UI (a real picker instead of free-text). No schema work needed
+on the master tables themselves.

@@ -1,0 +1,49 @@
+name: RLS Guardrail
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, test]
+  push:
+    branches: [main]
+
+jobs:
+  rls-baseline:
+    name: Verify RLS baseline on TEST Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y postgresql-client
+
+      - name: Run RLS guardrail against TEST database
+        env:
+          TEST_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$TEST_DB_URL" ]; then
+            echo "::error::TEST_SUPABASE_DB_URL secret is not set"
+            exit 1
+          fi
+
+          OUTPUT=$(psql "$TEST_DB_URL" \
+            -t -A -F'|' \
+            --no-psqlrc \
+            -v ON_ERROR_STOP=1 \
+            -f Docs/migrations/rls_guardrail.sql)
+
+          VIOLATIONS=$(printf '%s\n' "$OUTPUT" | sed '/^[[:space:]]*$/d')
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::RLS guardrail FAILED — public tables violating baseline:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "Each line is: table_name|rls_enabled|policy_count|violation_reason"
+            echo "See Docs/migrations/rls_guardrail.sql for fix guidance."
+            exit 1
+          fi
+
+          echo "✅ RLS guardrail passed — all public tables compliant"

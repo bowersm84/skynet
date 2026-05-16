@@ -157,474 +157,190 @@ Five distinct auth-flow attempts before settling on the working architecture:
 
 ---
 
-## Go-Live Hot-Fix Release (April 29, 2026)
+## Sprint 8 — Job-Level Shortfall & Allocation Resolution (May 15, 2026)
 
-Five hot-fixes plus four follow-up corrections shipped as a single coordinated release on go-live day. All five test cases verified on `test-skynet.skybolt.com` before promotion to prod. Migration file: `Docs/migrations/2026-04-29_golive_hotfixes.sql`.
+Sprint 8 supersedes the Sprint 6 WO-level shortfall feature. Shortfalls become a per-job concern: every job that completes with produced < target gets its own resolution row, and the scheduler resolves each short job through a unified Allocation modal. Spec bump v3.0 → v3.1.
 
-### Phased machine rollout via `kiosk_enabled` flag
-- **Decision:** Added boolean `kiosk_enabled` column to `machines`. Mazak 5 = true (Wave 1 pilot); all others default to false. New machines default false.
-- **Why:** Go-live changed from "kiosk-only on Mazak 5, all others paper" to "all machines schedulable, kiosk only on Mazak 5". Needed a way to distinguish kiosk-driven jobs (which auto-create finishing_sends on completion) from manual jobs (which need a separate pickup mechanism).
-- **Migration to next wave:** When a new machine gets a kiosk, flip the flag to true. No code change required — Wave 2/3/4 are config-only deploys.
+### D-S8-01 — Shortfall granularity: job-level
+- **Decision:** Each job with produced < target generates its own `job_shortfall_resolutions` row.
+- **Why:** The WO-level model required all jobs on a multi-job WO to reach near-terminal status before a shortfall surfaced. Scheduler couldn't intervene while sibling jobs were still running. Per-job rows surface immediately.
 
-### Manual finishing pickup queue for non-kiosk machines
-- **Decision:** New "Awaiting Pickup" section in the Finishing screen. Lists scheduled jobs whose machine has `kiosk_enabled = false` and remaining qty > 0. James clicks Send Batch, enters incoming qty + mandatory PLN, system creates a `finishing_sends` row with status `pending_finishing`. Standard finishing flow takes over from there.
-- **Why:** Non-kiosk machines have no automated path to finishing — parts arrive at James's station physically without any system event. The pickup queue gives him a way to register batches as they arrive without faking kiosk activity.
-- **Multiple-send handling:** Same job can be pulled multiple times for partial batches (parts arrive sporadically). Existing batch-label system (A/B/C) handles ordering by `sent_at`.
-- **Job status auto-flip:** When `assigned`/`ready` job gets first send, flip to `in_progress` and set `actual_start`. When total sent qty >= job qty, flip to `manufacturing_complete` and set `actual_end`. Mirrors what the kiosk does on Complete Job.
-- **Filter:** Excludes `is_standalone_finishing` jobs (those have their own Start New Job entry path).
+### D-S8-02 — Trigger states
+- **Decision:** Shortfall evaluation fires from (a) kiosk Complete Job after `good_pieces` is written, and (b) Compliance post-mfg Accept after `post_mfg_good_qty` is written. Cancelled jobs never trigger.
+- **Why:** These are the two moments where the produced count becomes authoritative. Pre-mfg or in-progress states don't have a meaningful "produced" value yet.
 
-### Mandatory PLN on Send Batch, sticky on parent job
-- **Decision:** Send Batch modal has a mandatory Production Lot # field. On Batch A, James types the PLN from the paper traveler. On submit, PLN is written to `jobs.production_lot_number` AND to the new `finishing_sends` row. On Batch B+, the field pre-fills from the job's stored PLN.
-- **Why:** Non-kiosk PLNs are hand-written by the machinist on the paper traveler — no automated PLN generation for these. James must capture them once per job, but typing the same number on every batch is tedious and error-prone. Sticky-on-job pattern means once captured, it inherits.
-- **Format:** No SkyNet enforcement — the PLN is whatever the machinist wrote. (Skybolt's pre-existing PLN formats predate SkyNet and won't match `PLN-YYMMDD-XXXX`.)
-- **Pattern for future fields:** "First entry sets the value on the parent record; subsequent entries inherit and pre-fill." Useful anywhere repeated entry across child rows is wasteful.
+### D-S8-03 — Produced calculation
+- **Decision:** `COALESCE(post_mfg_good_qty, good_pieces, 0)`. Compliance-verified count takes precedence over operator count.
+- **Why:** If Roger downgrades the count at post-mfg, that becomes the source of truth, even if it's below `good_pieces`.
 
-### FLN format change to global 6-digit sequence
-- **Decision:** New finishing lot numbers use format `FLN-NNNNNN` (e.g. FLN-100000, FLN-100001), backed by a Postgres sequence `finishing_lot_seq` starting at 100000. Existing FLN-YYMMDD-XXXX values in the DB remain valid; format change applies only to newly generated lot numbers.
-- **Why:** Compliance requested simpler, sequential FLNs that match how they're tracked elsewhere in their paperwork. The date-coded format wasn't aiding traceability; the global sequence is easier to reference and compare.
-- **Implementation:** New RPC `next_finishing_lot_number()` returns `nextval('finishing_lot_seq')`. JS formats as `FLN-${6-digit-padded}`. PLN format unchanged (still PLN-YYMMDD-XXXX).
-- **Backward compatibility:** Display logic doesn't care about format; existing batches with the old format continue to render and reference correctly.
+### D-S8-04 — WO target calculation
+- **Decision:** WO target = `stock_quantity + order_quantity`. Single-product WO assumed.
+- **Why:** No `total_quantity` column exists. Multi-product WO support is deferred (Section 13 backlog).
 
-### Standalone J-FIN batches skip post-mfg compliance
-- **Decision:** When a finishing batch with `is_standalone = true` completes its last stage, instead of setting `compliance_status = 'pending_compliance'`, auto-approve the batch (set `compliance_status = 'approved'`, `compliance_outcome = 'accepted'`, `compliance_good_qty = verified_count`, `compliance_approved_by = operator.id`, `compliance_approved_at = now`) and mark the parent J-FIN job `complete` with `actual_end = now`, `good_pieces = verified_count`.
-- **Why:** James's Start New Job feature creates J-FIN jobs for parts that arrived from outside (purchased springs, customer-supplied, vendor returns). These have no upstream Skybolt machining flow, so post-mfg compliance review has nothing to gate on — Roger has nothing to verify. Routing them to his queue created friction without value.
-- **Scope:** Applies only to `is_standalone = true` batches (i.e., created via the Start New Job modal). Standard kiosk-originated batches still go to compliance.
+### D-S8-05 — Allocation flow: manual entry
+- **Decision:** No pre-fill, no FIFO suggestions, no auto-distribute in the Allocation modal Step 1. Manual per-CO entry.
+- **Why:** Intentional friction. The scarcity decision (who gets cut when there isn't enough to go around) needs to be a conscious human choice, not an algorithm.
 
-### Auth listener deadlock fix
-- **Decision:** `onAuthStateChange` callback in `App.jsx` is no longer `async`. The `SIGNED_IN` body is wrapped in `setTimeout(0)` so async work runs outside Supabase's internal auth lock.
-- **Why:** Supabase's auth-js library acquires an internal mutex during `onAuthStateChange` callbacks. Awaiting another Supabase query inside the callback (e.g., `fetchProfile`) deadlocks because the query also needs the lock. Symptom: refresh hangs indefinitely at "Initializing SkyNet…" with the console showing `Fetching profile for: ...` and no completion log.
-- **Pattern for future listeners:** Keep `onAuthStateChange` callbacks synchronous (non-async). Wrap any async work inside `setTimeout(fn, 0)` to defer outside the lock.
-- **Documented at:** `https://supabase.com/docs/reference/javascript/auth-onauthstatechange` ("Avoid using async functions as callbacks. Limit the operations performed inside an async callback. Failing to do so may result in a deadlock.")
+### D-S8-06 — Excess handling
+- **Decision:** Allocated < produced → remainder auto-flows to stock implicitly. No explicit stock writes.
+- **Why:** Stock is residual on the WO (`stock_quantity` field). Whatever the scheduler doesn't allocate to a CO line is by definition stock.
 
-### Searchable product picker (Create Work Order)
-- **Decision:** Replaced native `<select>` with custom searchable combobox in `CreateWorkOrderModal.jsx`. Filters by part_number, description, and customer; groups results by part_type (Products / Finished Goods / Manufactured Parts).
-- **Why:** Native `<select>` was unusable at ~1000 products — April couldn't find what she needed. Combobox supports type-ahead filtering with the same grouping the original optgroups had.
-- **Layout fix:** Combobox required `min-w-0` on both the wrapper div and the button itself to allow text truncation. Without it, long descriptions forced the cell wider than its grid `1fr` allowance and pushed Order Qty / Stock fields off-screen. Native `<select>` had no problem because browsers handle overflow internally; custom controls have to declare it.
-- **Pattern:** Any custom button or input rendered inside a flex/grid cell needs `min-w-0` if its content can be longer than the cell's allotment. This applies anywhere we replace a native control with a custom one.
+### D-S8-07 — Partial allocation effect (REVISED mid-sprint)
+- **Decision:** Allocated < existing `quantity_allocated` → deactivate the allocation row (`is_active = false`) **EXCEPT** for Re-queue, which leaves the allocation active.
+- **Original ruling:** Always deactivate on partial — return remainder to demand pool.
+- **Why revised:** For Accept Short, deactivation is correct (this WO is not making the rest). For Re-queue, the user has just committed to making the rest from a new job *on this same WO*. Deactivating broke the demand-tracking story — the Miami test case made it visible. Allocations are WO→CO, so the new RQ job naturally inherits an active allocation; the bug was deactivating it.
+- **Fix shipped in v3.1.**
 
-### Citric Acid + Alkaline Mix lot fields in Start New Job
-- **Decision:** Added two text inputs to the Start New Job modal: Citric Acid Lot # and Alkaline Mix Lot #. Pre-fill from the most recent batch (same `getCurrentChemicalLot` / `getCurrentChemicalLot2` helpers Start Batch uses). User can edit if either drum has changed.
-- **Why:** The standalone job creation was silently writing the most recent chemical lot numbers without showing them — James had no visibility or control. When the chemicals actually changed, the wrong values got written invisibly. The visible-and-editable pattern matches what Start Batch already does for the kiosk-originated flow.
+### D-S8-08 — Resolution outcomes (REVISED mid-sprint)
+- **Decision:** Two outcomes: **Re-queue** (close + new job for the gap at `pending_compliance`) and **Accept Short** (close, required reason).
+- **Original ruling:** Three — Accept Short, Re-queue, Cancel Shortfall.
+- **Why revised:** Accept Short and Cancel Shortfall did the same thing to the data (commit allocations, deactivate partials, leave unfulfilled CO portions in demand). Only difference was reason-required ceremony. Merging removes a false subdivision and the more rigorous "reason required" behavior wins.
+- **DB compatibility:** The resolution CHECK constraint still accepts the legacy `cancel_shortfall` value so the 5 cleaned-up test artifacts (J-000003/05/07/16/17) don't violate; the modal just stops writing it.
 
-### Test/Prod sync discipline (process decision)
-- **Decision:** Every release with SQL migrations checks the migration into `Docs/migrations/YYYY-MM-DD_<release-name>.sql`. Same file is run on TEST Supabase first (with code merge to test branch), then on PROD Supabase (before code merge to main). Verification SELECTs included at the bottom of each migration file. Single source of truth.
-- **Why:** Prior to this discipline, schema drift between test and prod caused multiple late-stage debugging cycles. Encoding the rule "SQL and code travel as one unit" prevents the most common drift scenario (SQL ran on one but not both).
-- **Documented:** Updated `SkyNet_Test_Environment_Cheat_Sheet` to v1.1 with explicit Section 2.2 (CR with SQL Migration) and 2.3 (Coordinated Multi-Change Release) procedures.
+### D-S8-09 — Re-queue WO target
+- **Decision:** New job goes on the **same** WO. No "new WO" option.
+- **Why:** Sibling demand and stock targets live on the WO; a new WO would orphan them. The handful of cases where a new WO is genuinely warranted are rare enough to handle manually.
 
-### Multi-change release pattern (process decision)
-- **Decision:** When multiple fixes ship together as a coordinated release (this go-live, future sprint cutovers): use a single feature branch (e.g. `feature/golive-hotfixes`), commit each fix individually for clean history, consolidate all SQL into one migration file, validate ALL test cases on test before promoting any to prod, then merge feature branch to main as a single unit.
-- **Why:** Independent CRs each get their own merge-to-main cycle. A coordinated release wants one validation cycle and one rollback target. Treats the bundle as one release.
-- **Trap encountered:** During iteration on this go-live, four follow-up commits landed on `test` branch directly (not via the feature branch) and missed the initial main merge. Recovery was clean (`git merge test → main`), but the lesson is: always commit follow-ups to the feature branch, not directly to test, OR use `test → main` as the standard promotion path for releases.
+### D-S8-10 — Re-queue structural anchor
+- **Decision:** `work_order_assemblies` remains the structural anchor (provides `work_order_assembly_id` for the new job). However, the new job's `component_id` must come from the shorting job, NOT from `work_order_assemblies.assembly_id`. Same correction applies to the `part_documents` and `part_routing_steps` lookups feeding the new job.
+- **Why:** For assembly WOs, `WOA.assembly_id` points to the parent assembly, but jobs make components. Verified manually in the May 15 J-000018 manual split. The code originally used `woa.assembly_id` for both purposes, which is a latent assembly bug. Single-part WOs (test case SK212-12S) didn't expose it because component_id == assembly_id; assembly WOs would have.
+- **Fix shipped in v3.1 alongside D-S8-07.**
 
----
+### D-S8-11 — Re-queue documents pull-forward
+- **Decision:** Auto-pull current `part_documents` (`is_current = true`) into `job_documents` at `source = 'part_pulled_forward'`. Filtered by the shorting job's component_id (per D-S8-10).
 
-## Operational Notes (added April 29, 2026)
+### D-S8-12 — WO row badge derivation
+- **Decision:** Derived via EXISTS check against `job_shortfall_resolutions` where `status = 'open'`. `work_orders.has_open_shortfall` column deprecated, physical drop deferred.
+- **Why:** WO badge follows the underlying truth (any job on this WO has an open shortfall) instead of a denormalized flag that can drift.
 
-### Vite local dev environment variables
-- **Pattern:** `.env.local` at repo root with TEST credentials (URL, anon key, `VITE_ENV_LABEL=test`). Vite loads it automatically; `npm run dev` then hits TEST Supabase by default. The amber TEST banner renders in the browser as a visible safety indicator.
-- **Why test by default:** During go-live and active development, accidentally pointing local dev at prod is a real risk. Defaulting to test removes the "wait, am I about to delete prod data?" moment.
-- **Restart required:** Vite reloads code on save but does NOT reload env vars. Must Ctrl+C and `npm run dev` again after changing `.env.local`.
-- **Gitignore:** `.env`, `.env.local`, and `.env.*.local` must all be in `.gitignore`. Verified before creating the file.
+### D-S8-13 — Card action UX: single Allocate button
+- **Decision:** Each card has one Allocate button. Outcome chosen inside the modal at Step 2.
+- **Why:** Three buttons (Accept Short / Re-queue / Cancel) implied the outcome was decided before the user even saw the allocation table. The actual decision sequence is: see produced vs target, allocate the produced amount, then pick what to do with the gap.
 
-### Phased rollout — currently configured machines
-| Wave | Machines | kiosk_enabled |
-|------|----------|---------------|
-| Wave 1 | Mazak 5 | true |
-| Wave 2 (planned) | Patrick's machines | false (flip when tablets installed) |
-| Wave 3 (planned) | Jeff's machines | false |
-| Wave 4 (planned) | Carlos's machines | false |
-| Tavares | Mazak 7, Nexturn 1 | false (no current finishing path) |
+### D-S8-14 — Card visibility (job-centric)
+- **Decision:** Card primary line: `Job # · Part # · Machine`. Parent WO as secondary line. Chevron expands per-CO detail.
+- **Why:** The scheduler thinks in jobs, not WOs, when resolving a specific shortage.
 
-To advance a machine to kiosk-driven flow: `UPDATE machines SET kiosk_enabled = true WHERE name = '<machine name>';` Job assignments are not affected; only the finishing entry path changes.
+### D-S8-15 — Open Shortfalls KPI tile: removed
+- **Decision:** No KPI tile on Mainframe. Discovery via WO Lookup → Shortfalls tab only.
+- **Why:** Tiles compete for limited Mainframe real estate. Shortfalls are not a daily-frequency event; making them a tab destination is enough.
 
-### CC prompt for follow-up corrections (lessons from go-live day)
-- When a fix produces a follow-up bug (column doesn't exist, layout overflow), diagnose with browser console + targeted SQL before writing the next prompt. Skipping that step costs more iterations than it saves.
-- For React/CSS layout bugs in custom components replacing native ones: always check `min-width: auto` (default for flex/grid items) — explicit `min-w-0` is what allows truncation.
-- For Postgres `42703` errors (column does not exist): the column is on a related table, not the queried one. Check the join, drop the bare reference, keep the joined-table reference.
+### D-S8-16 — Finishing-batch advance: effective target = good_pieces (NEW)
+- **Decision:** `ComplianceReview.handleApproveBatch` advance check compares total sent to `jobs.good_pieces` (operator-confirmed count), falling back to `jobs.quantity` when `good_pieces` is null (in-flight multi-batch jobs).
+- **Why:** When the operator overrides at kiosk Complete (short job), `good_pieces < quantity`. The old `totalSentQty >= jobQty` check could never satisfy, leaving the job stranded at `manufacturing_complete` even after finishing + compliance accept. Exposed by Sprint 8 because Re-queue makes the override case routine; latent before then.
+
+### D-S8-17 — Auto-fulfill on RQ advance (DESIGNED, post-v3.1)
+- **Decision:** When a re-queue job (identified by `job_shortfall_resolutions.requeue_job_id`) advances past compliance review, auto-fulfill the WO's active CO allocations from its `good_pieces`. Distribution: FIFO by `due_date` asc, then priority (`critical > high > normal > low`). Per-allocation cap = min(remaining good_pieces, CO remaining, WO commitment remaining). Excess flows to stock.
+- **Idempotency:** Guarded by `job_shortfall_resolutions.fulfillment_applied_at` timestamp. Re-firing is a no-op.
+- **Status:** Schema column applied to prod May 15 (idempotency migration). Helper code (`src/lib/coFulfillment.js`) drafted but not shipped. Operational interim: RQ jobs leave CO commitments showing "Remaining" until manual SQL close (the LSI pattern). Roger and April briefed.
+
+### Multi-source CO caveat (noted, not yet a decision)
+- The auto-fulfill helper's per-WO commitment math assumes single-source COs (one allocation row per CO line). When the Shipping module brings multi-source COs into play, the formula `quantity_allocated − quantity_fulfilled` over-fulfills because it can't distinguish per-WO contribution.
+- Tracking as a known edge case until Shipping sprint addresses it.
 
 ---
 
-## Sprint 5 — Customer Orders & Demand Pool (May 1, 2026)
+## Operational Notes (Sprint 8 additions)
 
-Sprint completed end-to-end on TEST in a single day. Pending April sign-off Monday before promotion to PROD.
+### The May 15 deploy incident
+Mid-session push of in-flight allocation work to main and Amplify deployed it to prod. Prod broke (WOs invisible — frontend queried `job_shortfall_resolutions`, which didn't exist on prod). Recovery:
+1. Amplify rolled back to prior build artifact (no rebuild)
+2. `git reset` main to `bed451d`, force-push
+3. Clean `hotfix/compliance-qty-override` branch carrying ONLY the role-change content
+4. Merged hotfix → main as `5684a04`
+5. Test reset to match main
 
-### Why we built it
+**Lesson:** Direct prod-touching merges require the migration + code pair shipped together. The schema must be on prod *before* the code references it. Going forward: every cutover follows the apply-SQL-to-prod-first procedure even when the code change feels small.
 
-April manages customer orders entered into Fishbowl (their existing ERP) by hand. Production demand accumulates as multiple customer orders for the same part across different customers, which she then groups into a single production run on a single machine — the "lump multiple customer orders into one work order" pattern. Pre-Sprint 5, SkyNet had no concept of this: one Work Order = one customer's order, with customer name as a free-text field on the WO. The data model could not represent the lump-many-into-one workflow she described.
+### Mid-sprint design pivots
+Sprint 8 had two mid-sprint reversals (D-S8-07 and D-S8-08), both caught during real test scenarios on `test-skynet.skybolt.com`. Both were discovered by Matt running through realistic flows, not by static review. Reinforces: testing on the deployed environment with real data shapes catches things that local-dev-against-test does not.
 
-### Two-tier demand model — Customer Orders sit above Work Orders
+### Prod-touch discipline
+For Sprint 8 cutover, prod schema received the four S8 migrations (backfill, workflow, pivot, idempotency) ahead of the test→main git merge. RLS audit on the new `job_shortfall_resolutions` table confirmed all four DML policies (SELECT, INSERT, UPDATE, DELETE) present. The pivot brought 0 rows forward (no prior `wo_shortfall_resolutions` open rows on prod) — clean cutover, no data motion.
 
-- **Customer Orders** capture demand: what a customer asked for, quantity, due date, priority, PO number, Fishbowl reference.
-- **Work Orders** capture production decision: what we're running, when, on which machine, how many to make.
-- **Allocations** are the junction: one CO line can be split across multiple WOs (partial allocation); one WO can be fed by multiple CO lines from different customers (combined run).
+### Git hygiene after May 15
+- `feature/allocation-saved` was the branch name used for the Sprint 8 work — name predates the handoff's `feature/job-shortfall` rename suggestion. Cosmetic discrepancy; content is correct.
+- After this push, recommend collapsing `feature/allocation-saved`, `feature/allocation-standby`, and any other parked branches that have been fully merged. Single feature branch per sprint going forward.
+- The Google Drive repo location remains a latent risk. Migrating off it stays on the backlog.
 
-The WO/Job relationship is unchanged. COs sit *above* WOs and don't touch compliance, production, or finishing. This made the change scope-limited despite touching a fundamental data concept.
+## Sprint 7 — RLS Security Hardening (May 16, 2026)
 
-### Parent-child CO model with per-line allocation
+### Sprint scope and outcome
+- **8 migrations** shipped to test and prod in one day, zero rollbacks, zero user-facing breakage.
+- **11 tables** moved from RLS-disabled to RLS-enabled. New baseline: zero public tables without RLS.
+- **5 anon SELECT exposures** removed (customer_orders, customer_order_lines, customer_order_allocations, customers, job_documents). 2 intentional anon surfaces preserved (locations, machines — kiosk pre-auth).
+- **`wo_shortfall_resolutions`** dropped (deprecated by S8 pivot; zero refs in src/, zero rows on prod).
+- **Spec bumped** v3.1 → v3.2.
 
-A real Fishbowl purchase order can list multiple part numbers. Decision: model that as one Customer Order header with N line items, not three separate COs sharing a PO. This added master-detail complexity to the UI but matched the real-world data shape and avoided users having to invent multiple PO IDs for one PO.
+### D-S7-01 — Access matrix v1 (6 profiles)
+- **Decision:** Every public table maps to one of six policy profiles:
+  - **A** AUTH-FLAT — authenticated `USING(true)` for all 4 ops (default)
+  - **B** AUTH-FLAT + ANON-SELECT — adds intentional anon SELECT (kiosk pre-auth)
+  - **C** ROLE-RESTRICTED-CO — admin/scheduler/customer_service writes (customer family)
+  - **D** ROLE-RESTRICTED-ADMIN — admin-only writes (materials, tools, etc.)
+  - **E** SERVICE-ROLE-ONLY — no auth policies (`lot_number_sequences`, `import_*_staging`)
+  - **F** AUDIT-INTEGRITY — SELECT + INSERT only, no UPDATE/DELETE (`audit_logs`)
+- **Why:** Existing production already had role-based restrictions on 13 tables that the original plan would have flattened. Preserving them (per the "RLS mirrors UI gating" principle from S4) required broader profile taxonomy than the plan's single "AUTH-FLAT" default.
+- **Snapshot:** `Docs/RLS_Access_Matrix_v2.md` (committed). 43 tables mapped.
 
-Schema:
-- `customer_orders` (header): co_number, customer_id (FK), fishbowl_order_id, po_number, status, audit fields.
-- `customer_order_lines` (children): part_id, quantity_ordered, quantity_fulfilled, due_date, priority, line_status.
-- `customer_order_allocations` (junction): customer_order_line_id, work_order_id, quantity_allocated, is_active.
+### D-S7-02 — Drop `wo_shortfall_resolutions`
+- **Decision:** Drop the table entirely; the S8 pivot to job-level shortfalls superseded it.
+- **Why:** Zero src/ references (verified by grep), zero rows on prod at cutover, zero objects depending on it (FKs, views, functions). Maintaining policies on a dead table is technical debt.
+- **Verification before drop:** Cross-checked dependencies via `information_schema.table_constraints`, `pg_depend`, and `information_schema.routines`. All clean.
 
-The `is_active` flag on allocations (rather than DELETE on cancellation) preserves the historical record. Cancelled allocations stay queryable but are excluded from "active" totals.
+### D-S7-03 — `audit_logs` → Profile F (append-only integrity)
+- **Decision:** Auth users can SELECT and INSERT, but UPDATE and DELETE have no policies (denied for all non-service-role).
+- **Why:** AS9100 / FAA audit posture wants tamper resistance. With Profile F, no client (anon or auth) can alter or wipe audit records. Service role bypasses for legitimate admin cleanup. Profile E (full lockdown) was rejected because 11 frontend insert sites use the `from('audit_logs').insert(...)` pattern with the anon/auth key — refactoring them behind an Edge Function is out of scope. Profile F gets the integrity win without the refactor cost.
+- **Tradeoff acknowledged:** Forged INSERTs still possible (auth user can write a record claiming someone else did the action). Backlog item: move INSERTs behind an Edge Function, then graduate F → E.
 
-### Customers as foreign key, not free text
+### D-S7-04 — `lot_number_sequences` → Profile E (service-role-only writes)
+- **Decision:** Auth users can SELECT (read current sequence state). INSERT/UPDATE/DELETE service-role only. All writes happen via SECURITY DEFINER RPCs (`next_finishing_lot_number`, `next_lot_number`, `next_standalone_finishing_job_number`).
+- **Why:** Lot number generation must be atomic. Direct UPDATE access from the client defeats the atomicity guarantee. RPCs running as SECURITY DEFINER bypass RLS by design, so the lockdown doesn't break the kiosk's PLN generation or finishing's FLN generation.
+- **Prerequisite migration:** `next_lot_number` and `next_standalone_finishing_job_number` were not SECURITY DEFINER before S7. M7 includes `ALTER FUNCTION ... SECURITY DEFINER` for both, applied in the same transaction as the `lot_number_sequences` RLS lockdown.
 
-Pre-Sprint 5, `work_orders.customer` was free text. Decision: introduce a `customers` master table keyed by Fishbowl customer ID (1-6 numeric chars), referenced by FK from `customer_orders.customer_id`. Customer ID becomes the canonical key everywhere; the customer name is a denormalized convenience for display.
+### D-S7-05 — `profiles` SELECT scope: keep broad
+- **Decision:** `profiles` SELECT remains broad (`USING(true)` for authenticated). The redundant narrow policy ("Users can view own profile" / `auth.uid() = id`) was dropped.
+- **Why:** Narrow SELECT would break 4 paths: (1) finishing kiosk PIN auth, (2) main kiosk session restore, (3) admin Users tab, (4) salespeople dropdown on customer order forms. Eliminating those dependencies requires PIN hashing (S5 backlog) AND migrating Finishing.jsx to a JWT-per-PIN pattern (new S7 backlog). Until both land, narrow is not viable.
+- **Win that did happen:** RLS enabled means anon (the JS-bundle key) can no longer read profiles. Plain-text PIN exposure to authenticated users persists, but anon exposure (the larger attack surface) is closed.
 
-Workflow consequence: April uploads a one-time CSV export of all Fishbowl customers into the new Customers tab in Armory at go-live. New customer onboarding goes Fishbowl-first then SkyNet-first — Fishbowl is the source of truth, SkyNet mirrors.
+### D-S7-06 — Preserve role-based restrictions on 13 tables
+- **Decision:** Profile C, D, and A* (auth-flat with role overlay) preserved on customer_orders/lines/allocations/customers, materials, material_receiving, material_usage, tools, tool_instances, part_machine_durations, machine_downtime_logs, job_tools, work_order_assembly_routing_steps.
+- **Why:** Decisions.md §"Role-based UI gating" (S4) explicitly calls RLS the defense-in-depth mirror of UI role gating. Flattening to AUTH-FLAT would loosen these tables vs current production behavior. Preserving them required broader profile taxonomy in the access matrix (D-S7-01).
+- **Operational impact:** Adding a new role (e.g. future `shipping` role) requires updating the EXISTS-check policies on the 13 affected tables. Same speed-bump as adding the role to UI gating maps and to `kiosk-authenticate` `ALLOWED_ROLES` — not a new friction, just an explicit one.
 
-### CO number format: `CO-<custid>-<orderid>`
+### D-S7-07 — Anon access whitelist
+- **Decision:** Exactly 2 anon-readable tables: `machines` (`WHERE is_active = true`) and `locations`. Everything else loses anon access in S7.
+- **Why:** Both serve the kiosk PIN screen (which is pre-auth). After Sprint 6's `kiosk-authenticate` Edge Function rollout, all post-PIN kiosk traffic runs as authenticated, so no other table needs anon access.
+- **Future additions** to the anon whitelist require explicit Decisions.md justification.
 
-Mirrors the WO format pattern but uses real Fishbowl identifiers rather than a sequential SkyNet counter. Format example: `CO-1018-TEST5241`.
-
-Risks evaluated:
-- Manual entry friction → mitigated by typeahead in the customer picker.
-- Special characters in Fishbowl order IDs → strip non-alphanumeric on blur (`/[^A-Z0-9]/gi`).
-- Manual COs without Fishbowl record → workflow rule: "Fishbowl always first." Not enforced by the system; if April creates a CO with a fake order ID, the system accepts it.
-- Multi-part PO collision → resolved by parent-child model (one CO covers one Fishbowl order, regardless of part count).
-
-### Status simplified to four values, trigger-driven
-
-Both parent CO and lines use the same status set: `not_started`, `in_progress`, `complete`, `cancelled`. Status is denormalized on the row and maintained by triggers on allocation changes and line fulfillment events.
-
-Why triggers over computed views: the status drives UI filter chips, list grouping, and badge rendering. Computing it on every read at the join level is expensive; computing once at write time and caching denormalized is cheap. Triggers ensure every write path arrives at the same answer regardless of which surface initiated the change.
-
-Cancellation is sticky in the trigger logic — once a line or CO is cancelled, status doesn't recompute back. If un-cancellation is ever needed, it would be a manual SQL operation; we have not yet seen the need.
-
-### Demand-driven WO creation (mid-sprint pivot)
-
-Initial Batch C built a part-first flow inside the Create WO modal: pick a part, see open COs for that part, check the ones to include. Matt review identified that this is backwards from how schedulers actually think — they look at demand first, then decide what to run. Schedulers visualize the pool of pending demand across all customers, identify a part with enough total qty to justify a production run, and roll it. Forcing them to know the part first means they need a separate spreadsheet to track demand outside the system.
-
-Solution: added a Demand tab to the Customer Orders module. Lines aggregated by part, sorted by total demand descending. Each part group expands to show contributing CO lines. Multi-select within a single part group only (cross-part selection blocked with an inline warning). "Create Work Order from Selection" button feeds the modal with pre-selected lines.
-
-The original in-modal CO checklist was retained as a secondary path: if a user lands in Create WO via the Mainframe "New Work Order" button (typically for stock builds), and the chosen part happens to have open COs, they can still pick them in the modal. The Demand tab is the primary path for demand-driven runs; the modal in-line picker is the fallback for stock-build-mixed-with-demand.
-
-### Strip Customer/PO/Order Type from Create WO modal
-
-With CO linkage now the source of truth, manually entering customer or PO on a WO conflicts with derived data. Removed the manual fields entirely along with the MTO/MTS toggle. Values now derive from linked COs at WO insert time:
-- 0 COs linked → `order_type = 'make_to_stock'`, customer/po null, is_combined false.
-- 1 CO linked → `order_type = 'make_to_order'`, customer/po denormalized from the CO, is_combined false.
-- 2+ COs linked → `order_type = 'make_to_order'`, customer/po null (UI displays "Multi-Customer"), is_combined true.
-
-The orderQuantity field also becomes read-only when allocations are present — the sum of selected allocations is the order qty by definition. User can still add stock_quantity on top for "fulfill demand + build extra for inventory."
-
-### Allocation drill-down with WO deep-link
-
-April's review of the CO surface raised a UX question: seeing "Allocated: 450" on a CO line gave no path to the actual WO that allocation lives on. Added click-to-expand on part numbers in the CO line sub-table — the part number renders as a purple underlined button when allocations exist (plain gray when none). Expanded panel shows each active allocation with WO #, status, due date, qty. Clicking any WO row inside the panel deep-links to Order Lookup → Work Orders tab with the WO # pre-filled in search.
-
-The deep-link uses an `onNavigateToWO` prop pattern: when `CustomerOrders` is embedded inside Mainframe's Order Lookup, the parent passes a handler that flips tabs + sets search. When standalone, it falls back to a top-level navigation. Reuses existing UI rather than inventing a new WO detail surface.
-
-### Cancellation v1 (banner + manual ack; decision UI deferred)
-
-When a CO line is cancelled and had active allocations to live WOs:
-1. Line status flips to `cancelled` (sticky).
-2. All active allocations for that line flip `is_active = false`.
-3. Affected WOs flip `has_cancelled_allocation = true`.
-4. Mainframe WO Lookup, Schedule timeline, and Order Lookup show an amber banner / amber outline on those WOs.
-5. Admin/scheduler clicks Acknowledge → flag clears, audit log entry written.
-
-Deferred to Sprint 6: the 3-option decision flow (reduce remaining qty / convert to stock / keep as-is). For now the user manually decides and edits the WO themselves. Acceptable for go-live; April's expected cancellation rate is low.
-
-### Order Lookup rename + sub-tabs
-
-WO Lookup → Order Lookup with two sub-tabs: Work Orders (existing surface) and Customer Orders (embedded `CustomerOrders` component). Standalone Customer Orders page (top-level Mainframe nav for admin/scheduler/customer_service) also retained — gives April two entry points for the same data depending on whether she's already looking at a WO or starting from CO context.
-
-### What we did NOT change
-
-- Compliance flow.
-- Kiosk, Finishing, Outsourcing.
-- Job Traveler builder (only added a new section reading from the new tables).
-- WO/Job creation logic past the modal — assemblies/jobs still create the same way, routing copy-down still works the same way.
-- Effective qty / batch qty / outsourcing per-batch model.
-
-This containment was deliberate. Customer Orders are upstream of all production machinery; we did not want to risk regression in shipping floor surfaces.
-
-### Velocity & build pattern
-
-Original estimate 8–12 days. Compressed to one day through:
-- Aggressive scope cutting (cancellation decision UI deferred, per-shipment tracking deferred, customer detail page deferred).
-- Surgical-prompt CC pattern (read prior docs, exact files/lines, no rewrites).
-- Test-only deployment — no prod risk during build.
-- Three batches A/B/C with smoke tests between each, plus a mid-sprint Batch C revision when Matt review surfaced the demand-driven pivot.
-
-### Decision: continued use of Customers tab as Armory sub-tab vs top-level
-
-Customers data is master data. Master data lives in Armory. Customers tab joins Parts/Materials/Bar Sizes/Routing Templates/Material Master/Inventory/Receiving/Users as another sub-tab. Tab is gated to admin/scheduler/customer_service.
-
-### Decision: Customers can be deleted via DELETE policy, but should rarely be
-
-DELETE policy added for symmetry with other tables (RLS audit pattern requires all four cmd policies). In practice, a customer with any historical CO will have FK references, so DELETE will fail with FK violation. Soft delete (toggle `is_active = false`) is the intended path for retiring customers; DELETE is for cleanup of accidentally-created records before they're used.
-
-### Lessons added to the playbook
-
-1. **Two-tier demand model.** When data conflates "what was asked" with "what was decided," any aggregation case (combine multiple asks into one decision) breaks the model. Split early.
-2. **Derive, don't enter.** When a value is computable from linked records, don't ask the user. Customer/PO on WO is the canonical case here.
-3. **Trigger-driven status.** Denormalize status to the row, maintain via PL/pgSQL triggers on the events that change it. Every write path arrives at the same answer.
-4. **Demand-first UI beats part-first UI for schedulers.** They think in pools, not parts.
-5. **RLS audit pattern continues to pay.** Split policies by cmd; the standing pg_policies query catches missing ones.
-6. **Junction tables vs. parent FK.** When you need many-to-many or partial relationships, the junction is the right answer even if it adds UI complexity. Avoid FK-on-parent shortcuts that don't extend.
-
-## Post-Assembly Outsourcing & Assembly Routing (Sprint 6 — May 3, 2026)
-
-### Assemblies are now first-class routable entities
-- **Decision:** Assembly parts (`part_type IN ('assembly', 'finished_good')`) carry routing in `part_routing_steps` the same way components do. The first step is always `Assemble` (internal); additional steps (Paint, Heat Treatment, etc.) are added as needed in the master route.
-- **Why:** The fan-in pattern (components manufactured → converge at assembly) was implicit. Making the `Assemble` step explicit on a route lets us hang downstream steps (paint, engraving, future inspection) off the same routing engine that already handles component external steps. No special-casing — the routing engine just runs.
-- **Reused `part_routing_steps`** rather than building a parallel master table. The `part_id` FK is part-type-agnostic; we just start populating rows for assembly/FG part_ids. Backfill seeded the standard `Assemble` step on every existing assembly/FG part on May 3.
-
-### Runtime copy: `work_order_assembly_routing_steps`
-- **Decision:** Per-WOA routing copy lives in a parallel runtime table that mirrors `job_routing_steps` exactly (status, modification tracking, production data fields, FKs to profiles).
-- **Why:** WOA-level routing needs its own runtime because a WOA represents a distinct production unit from any single component job. Same status enum, same removal/addition workflow, same drag-and-drop reorder UI patterns can be reused.
-- **Backward compatibility:** WOAs without rows in this table fall through to the existing single-step Assemble flow (no behavior change for the 95% case).
-
-### Polymorphic `outbound_sends`
-- **Decision:** `outbound_sends.source_type` is constrained to `('finishing_send', 'work_order_assembly')` with `source_id` pointing to whichever entity. Legacy `finishing_send_id` and `job_routing_step_id` columns retained for backward compatibility but the polymorphic columns are the canonical path going forward.
-- **Why:** One outsourcing workflow, two upstream sources. Ashley's send-out and return UX is identical whether the box of parts came from finishing or from assembly. Doubling the table or building a parallel `assembly_sends` would force her to learn a second workflow for what is mechanically the same operation.
-- **Future-proof:** `source_type` enum can be extended (e.g., `'purchased_part'` for James's external passivation queue, item #104) without further schema migration.
-
-### Batch sending happens at the Assembly step (not OutsourcedJobs)
-- **Decision:** Jody sends partial qty to outsource directly from the Assembly module — same UX pattern as the kiosk's "Send to Finishing" button. Auto-creates an `outbound_sends` row with `source_type='work_order_assembly'`, `sent_at=NULL`, `vendor_name=NULL`. On Complete Assembly, the remaining qty auto-creates a final `outbound_sends` row.
-- **Why:** Mirrors the established kiosk → finishing batch flow, which Jody and the team already understand mentally. Ashley's OutsourcedJobs UI sees these as "Ready to Send" cards exactly like the existing finishing batches; she fills in vendor + sent_at when actually shipping.
-- **No intermediate `assembly_sends` table:** unlike finishing (which has its own multi-stage processing), assembly outsourcing has no in-house intermediate. The `outbound_sends` row IS the batch entity from the moment Jody marks it ready.
-
-### No post-assembly compliance gate
-- **Decision:** Assembly Complete branches directly to `ready_for_outsource` (if downstream external step exists) or `pending_tco` (if not). Roger does not review assemblies before they go to paint.
-- **Why:** Per April (04/15/26) and Matt's confirmation in S6 design discussion, the team doesn't gate finished assemblies before vendor send-out — that gate exists for finishing batches only. TCO covers final QC after parts return from the vendor.
-- **Implication:** Removing this from scope cut ~4 hours of UI/workflow work. Symmetry with the post-finishing compliance gate was tempting but not required by the actual workflow.
-
-### Assembly Lot Number — manual entry, automation deferred
-- **Decision:** New `assembly_lot_number text` column on `work_order_assemblies` plus tracking columns (`assembly_lot_entered_by`, `assembly_lot_entered_at`). Operator types the ALN from the existing manual logbook at Start Assembly. No `lot_number_sequences` row, no auto-generation in S6.
-- **Why:** The team currently maintains a paper logbook for assembly lot numbers. Forcing system-generated ALNs in S6 would mean operators would need to track *both* their handwritten book and the system number until adoption settled — a recipe for divergence. Capturing the existing book number digitally is the bridge step. Auto-generation will fold in later once the digital workflow is the source of truth.
-- **Vendor return lot:** Same pattern. Skybolt currently assigns 5-digit lot numbers manually when parts return from vendors. Captured manually in `outbound_sends.vendor_lot_number` (existing column) for now. Auto-generation deferred.
-
-### WOA status enum extended
-- **Decision:** `work_order_assemblies.status` CHECK now includes `ready_for_outsource`, `at_external_vendor`, `pending_tco` in addition to the original four (`pending`, `in_progress`, `paused`, `complete`).
-- **Why:** WOA status is the granular truth for the parent WO's post-assembly state. The WO-level status remains coarse (`in_assembly` / `complete`); WO Lookup surfaces the WOA detail line ("Out for Paint · Vendor Name") so Roger doesn't have to drill in.
-- **Status flow:**
-  - `in_assembly` → (assemble step complete + external step exists) → `ready_for_outsource`
-  - `ready_for_outsource` → (Ashley logs first send-out) → `at_external_vendor`
-  - `at_external_vendor` → (all sends returned) → `pending_tco`
-  - `pending_tco` → (TCO sign-off) → `complete`
-  - If no external step: `in_assembly` → `pending_tco` directly (existing flow, unchanged)
-
-### Routing templates split: component vs assembly
-- **Decision:** New `routing_templates.template_type` column with CHECK `('component','assembly')`. Existing 4 templates (Stainless, Steel, Heat-Treat Steel, Aluminium) defaulted to `'component'`. Three new assembly templates seeded: `Standard Assembly`, `Painted Assembly`, `Heat-Treated Assembly`.
-- **Why:** Same templates table, two distinct domains. The Armory Routing Templates tab toggles between Component and Assembly views. Component templates only show in component edit modal; Assembly templates only show in product edit modal. Keeps the master data UI from becoming a soup of unrelated routes.
-
-### What we did NOT change
-- Component-level routing flow (`job_routing_steps` and the kiosk → finishing → outsourcing pipeline).
-- Compliance review module (post-finishing compliance gate untouched).
-- TCO module (still the catch-all final gate).
-- Existing `outbound_sends` rows or workflow — legacy `finishing_send_id` column retained, polymorphic columns added alongside.
-- `routing_templates.material_category` semantics for component templates.
-
-This containment was deliberate. Post-assembly outsourcing is additive — it activates only when a WOA has an external routing step. Default Standard Assembly route (Assemble only) means the 95% case behaves exactly as it did before S6.
-
-### Lessons added to the playbook
-1. **Polymorphic source columns beat parallel tables** when one downstream workflow serves multiple upstream sources. Saved a table and a parallel UX in this sprint; will absorb the purchased-parts queue later.
-2. **Backward-compatible defaults are free with a backfill.** Seeding the standard "Assemble" step into every existing assembly/FG part means nothing breaks for in-flight WOAs.
-3. **Manual entry now, automation later.** Capturing existing paper-book numbers digitally is the lower-friction bridge to full automation. The schema accommodates both modes.
+### D-S7-08 — CI guardrail SQL
+- **Decision:** A SQL check that returns rows only for public tables violating the security baseline (RLS disabled, or zero policies + not on service-role-only allowlist). Wired into CI to fail builds.
+- **File:** `Docs/migrations/rls_guardrail.sql` (committed).
+- **Why:** Without an automated gate, new tables added in future sprints would silently drift back into the pre-S7 state. The guardrail is policy-as-code for the security baseline.
+- **Allowlist maintenance:** The two import_*_staging tables are intentional Profile E and listed in the guardrail's CTE. Adding new service-role-only tables requires updating the CTE AND adding a Decisions.md entry.
 
 ---
 
-## Assembly Module Feature Flag — Go-Live (May 4, 2026, revised)
+## Operational Notes (Sprint 7 additions)
 
-**Assembly module feature flag (May 2026, revised):** `FEATURES.ASSEMBLY_MODULE` in `src/config.js` controls whether the Assembly module is active. When false (go-live default), components route directly to `pending_tco` after their external work. **Post-assembly outsourcing (Paint, Heat Treat on the assembled product) is also off-system** — Skybolt handles those operations outside SkyNet, same as the physical assembly act. WOAs sit at `pending` while the flag is off; TCO closes them out as-is. When true, full S6 Jody-driven flow resumes (Jody starts assembly, sends batches, etc.) for new WOs. Flipping requires a code commit + Amplify redeploy.
+### One-day execution discipline
+Sprint 7 shipped 8 migrations across test and prod in a single Saturday session. Pattern that worked:
+- Single playbook doc (`Sprint7_Batch_C_Migrations.md`) with one section per migration, each self-contained (BEGIN/COMMIT, verification SELECT, regression checklist)
+- Strict order: test → regression → prod, one migration at a time
+- Verification numbers predicted in advance so deviation was immediately visible
+- Two near-misses (M9 prod-promotion gate initially run against test by mistake; M1 verification run without the migration block) — both caught by independent verification rather than blind trust
 
-### Why the revision
+### Schema dump aren't snapshot-perfect
+`Supabase_SQL_Database.txt` schema dumps from the SQL Editor format CHECK constraints differently than the underlying database, producing cosmetic diffs that look like drift but aren't. Real drift (two cases discovered during S7) needs CHECK constraint inspection, not text diff.
 
-An earlier draft of this flag had compliance auto-create `outbound_sends` rows for assembly-level external steps so Ashley could ship paint/HT batches without Jody. Two issues surfaced in test:
-1. The auto-row's `quantity` was `woa.quantity` (target), not the actual supply that survived component compliance — counts were wrong (e.g., 700 instead of 640).
-2. Auto-creation fired immediately when the last component was approved by compliance — but at that moment nothing has actually been physically assembled, so a "ready to send to paint" row is logically meaningless.
+### Edge Function audit log writes silently failing
+Discovered during S7 prep — Edge Function `audit_logs.insert(...)` calls use column names that don't exist in the schema (`actor_id`, `action`, `target_type`, `target_id` vs schema's `event_type`, `job_id`, `machine_id`, `operator_id`). The Supabase client's `insert()` returns `{ data, error }` but the Edge Functions don't check the error and don't await it as a throwing call, so every Edge Function audit log write since deployment has silently failed. Frontend `audit_logs` inserts use the correct schema columns and work. Bug logged in backlog; not S7 scope.
 
-If the assembly act itself is off-system while the flag is off, the post-assembly outsourcing must also be off-system. Both come back into SkyNet together when the flag flips.
+### Finishing kiosk auth model
+Discovered during S7 prep — `Finishing.jsx` is mounted on `/finishing` outside the `MainApp` authenticated route group, but operates as authenticated because the finishing computer has a persisted Supabase auth session from a prior login. PIN entry identifies the operator in React state, not Supabase auth. This means `audit_logs.actor_id` on finishing entries reflects the persisted session's user, not the PIN-identified operator. Backlog: migrate Finishing.jsx to a `kiosk-authenticate`-style Edge Function flow.
 
-### Hidden surfaces while flag is off
-- Mainframe Assembly KPI tile and view (placeholder shown if deep-linked).
-- OutsourcedJobs has no assembly-source rows (component-finishing rows unchanged).
-- WO Lookup still renders the assembly route (so Roger can see `Paint` as a step in the part definition), but no batch detail under it — that's the correct visual state for "off-system step."
+### S3 bucket CORS test origin
+Added `https://test-skynet.skybolt.com` to `skynet-files-skybolt` bucket CORS during S7 regression. Document upload from test was previously CORS-blocked. Now works on both environments.
 
-### Audit/compliance gap during flag-off
-Chemical traceability through finishing's per-job FLN scope is preserved. Assembly-level traceability for the off-system ops (ALN, vendor lots on the assembled product) is also off-system — known gap, resolved when the flag flips on.
-
-### Flag flip behavior
-The change is one line. Existing WOs at flip time keep behaving under the rules they were created with (no retro-routing). New WOs created after the flip get the full S6 Jody-driven flow.
-
----
-
-## Sprint 6 — Post-Assembly Outsourcing & Pre-Go-Live Hardening (May 3-4, 2026)
-
-S6 was originally scoped as the post-assembly outsourcing build (Jody-driven assembly module → outsource → return). Mid-sprint we made the call to ship **without the assembly module active**, behind a feature flag, because Jody and her team weren't trained yet. The post-assembly outsourcing capability is fully built and tested; it activates when `FEATURES.ASSEMBLY_MODULE` flips to `true`. The remainder of the sprint became pre-go-live hardening — a series of bugs surfaced during testing, most of them in the multi-batch flow path that the original code never anticipated.
-
-### Assembly module — feature-flagged for go-live
-
-- **Decision:** `src/config.js` exports `FEATURES.ASSEMBLY_MODULE`. Default `false`. Flipping requires a code commit + Amplify redeploy (no Armory toggle, no env var).
-- **Why hardcoded constant, not env var or DB toggle:** A constant lives in source, is searchable in `git log`, leaves a clean audit trail per flip, and has no out-of-band coordination step (env vars in Vite require both a build config update AND a rebuild). DB toggles invite accidental flips during a Jody shift. The flag will move once at most, maybe twice — the lightweight option is correct.
-- **What hides when off:** Assembly nav entry in Mainframe; Assembly KPI tile (and the `lg:grid-cols-7` grid auto-collapses to `lg:grid-cols-6`); the `selectedView === 'assembly'` route renders a polite "module disabled" placeholder for any deep-links.
-- **Status routing when off:** Components flow to `pending_tco` directly after their external work (instead of `ready_for_assembly`). Three sites in `ComplianceReview.jsx` and one in `OutsourcedJobs.jsx` carry the `(partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE) ? 'pending_tco' : 'ready_for_assembly'` branch.
-- **Post-assembly outsourcing also off when flag off:** Originally the system was going to auto-create assembly outbound_sends so Ashley could ship paint/HT batches without Jody. Two issues during testing — the auto-created qty was wrong (used `woa.quantity` target instead of actual supply), and creating the send right after compliance approval is logically premature (nothing has physically been assembled yet at that moment). Decision: skip post-assembly outsourcing entirely while the flag is off. Skybolt handles painting/HT of assembled products outside SkyNet during the flag-off period, same as how they handle the assembly act itself. WOAs sit at `pending` and TCO closes them out as-is. The `maybeCreateAssemblyOutboundSends` helper was deleted in the second pass, not just neutered behind the flag.
-
-### Multi-batch flow architecture (the sprint's hardest lessons)
-
-Three bugs surfaced during testing that traced to the same root cause: code paths assumed single-batch flow and broke when multiple batches arrived in the same routing step.
-
-- **`getEffectiveQty` path 1** returned only the most recent return's `quantity_returned` instead of summing across batches. WO Lookup showed 275/700 instead of 655/700 when two HT batches returned. **Fix:** Group returns by routing step, identify the latest step, sum `quantity_returned` for that step's batches. Single-step multi-batch case sums correctly; sequential ops case (HT → BO) only the latest op's batches matter.
-- **Premature `pending_tco` rollup on assembly outbound return** marked the assembly's external step `complete` and flipped WOA + jobs to `pending_tco` after the FIRST batch returned, even though more components were still being assembled. **Fix (Hotfix 4):** External routing steps don't get marked complete from returns alone — only when ALL routing steps are complete (Assemble + every external) does the WOA flip. The `Complete` handler in Assembly.jsx (Batch C C3) sweeps external steps when assembly is done.
-- **Late-arriving approved batches stranded** when their parent job had already rolled to `pending_tco` (e.g., earlier batches met the qty_override). `OutsourcedJobs.fetchReadyToSend` filtered those out. **Fix:** Filter relaxed to exclude only truly terminal statuses (`complete`, `cancelled`, `incomplete`). `handleLogSendOut` defensively reopens routing steps that were prematurely marked complete by earlier batches.
-
-**Pattern:** Multi-batch is the dominant case in this codebase, not the edge case. Future code that touches batch flow must explicitly handle: (a) sum across multiple batches at the same step, (b) don't close upstream gates while work may still arrive, (c) late batches on already-rolled-up jobs still need to flow through outsourcing.
-
-### Traveler external-step lot rendering
-
-- **Decision:** `src/lib/traveler.js` resolves external step lot numbers from the linked `outbound_sends.vendor_lot_number` first, falling back to `step.lot_number` only when no per-send value is available.
-- **Why:** Same root issue as Hotfix 3's WO Lookup fix — `step.lot_number` is a single field that holds only the most recent return's lot. When multiple batches return, it overwrites earlier values. Reading from `outbound_sends` per-batch keeps the traveler aligned with WO Lookup.
-
-### FLN scope — per-job, not per-active-bath (revised)
-
-- **Decision:** `finishing_lot_number` is per-job. All finishing batches of the same job share one FLN. Different jobs always get distinct FLNs.
-- **Why changed:** Originally the FLN persistence rule was "any batch in flight with an FLN → reuse it" — modeled on the chemical bath. This caused different jobs running simultaneously to share an FLN, which Skybolt's compliance team didn't want. The chemical-bath traceability is preserved separately via `chemical_lot_number` and `chemical_lot_number_2` on each batch (those continue to persist globally).
-- **Implementation:** `getCurrentFinishingLotForJob(jobId)` replaces `getCurrentFinishingLot()`. Filtered by `job_id`, ordered ascending so the canonical (first-issued) FLN for the job is returned.
-
-### Manual-pickup material lot — sticky on job, mandatory
-
-- **Decision:** The Manual Pickup ("Send Batch to Finishing") modal in `Finishing.jsx` requires a Material Lot # entry. Sticky on parent job: typed once on Batch A, pre-fills from `job_materials.lot_number` for Batch B+. Closes the lot chain of custody gap for non-kiosk machines.
-- **Why:** Mazak 5 is the only kiosk-enabled machine. For every other machine, James was the sole point of capture for material lot — but the modal didn't capture it; the field silently fell through to NULL. AS9100 traceability requires the material lot on every finishing record.
-- **Pre-fill fallback:** Query reads `job_materials` first, falls back to most recent `finishing_sends.material_lot_number` if no `job_materials` row exists. Self-heals legacy data (manual-pickup batches submitted before the fix have material_lot_number on the finishing_send but no job_materials row).
-
-### Date-only timezone parsing — fix `expected_return_at` rendering
-
-- **Decision:** `src/pages/Mainframe.jsx` uses `formatDateOnly` and `isPastToday` helpers (copied from `OutsourcedJobs.jsx`) to render date-only columns. Never use `new Date('YYYY-MM-DD')` directly — JavaScript parses that as UTC midnight, shifting one day in negative-offset timezones.
-- **Why:** `expected_return_at` is a `date` column, not `timestamptz`. PostgREST returns it as `'2026-05-04'`, which JS interprets as UTC midnight = May 3 7pm EST. WO Lookup OUTSOURCING displayed "Due May 3" for an outbound shipped May 4 with same-day expected return.
-- **Backlog:** Both `formatDateOnly`/`isPastToday` and `getEffectiveQty` are now duplicated across files. Post-go-live cleanup: extract to `src/lib/dateUtils.js` and `src/lib/qty.js`.
-
-### WO Lookup display refinements
-
-- **Available Qty line** added under the WOA header. Shows the count of physically-in-hand units ready to ship (component-only WOs render `woa.good_quantity`; WOAs with external steps show the LAST external step's returned qty). Auto-hides when 0.
-- **WO header total fixed** to handle mixed MTS+MTO — previously `Qty: 300` was shown for an MTS-tagged WO that also had an order_quantity > 0. Now always shows the total + breakdown when both components are non-zero.
-- **OUTSOURCING per-batch detail** under each external step: amber for queued, blue for at-vendor, green for returned. Step header shows running totals.
-
-### Finishing UI cleanups
-
-- **Batch Quantity field removed** from the expanded finishing batch card. The Incoming Count display already covers both numbers (`280 (sent: 300)`); the standalone Batch Quantity was redundant. Due Date moved into the now-empty grid slot next to Material Lot #.
-- **Collapse All / Expand All** buttons added to Active Batches header in Job view. Hidden in Station view.
-
-### Late patterns formalized
-
-- **`ready_for_outsourcing` → `ready_for_outsource`:** Alignment between `jobs.status` and `work_order_assemblies.status` enums. Some prior code paths used `ready_for_outsourcing` (with `-ing`); the canonical is `ready_for_outsource`. Used consistently in S6 code.
-- **Polymorphic `outbound_sends.source_id` cannot use PostgREST embeds:** Two-step fetch + JS hydrate pattern. Hotfix 1 introduced `hydrateAssemblySends(sends)` in `OutsourcedJobs.jsx` for this. Same pattern applied in `Mainframe.jsx` for the WOA outbound_sends pull.
-
-### S6 prod migration was verified on May 4, 2026 against the 12-point checklist. Keeps the audit trail tight for AS9100.
----
-
-## Post-S6 Hardening & Feature Expansion (May 7-8, 2026)
-
-This sprint-let between S6 go-live and the formal Sprint 7 RLS hardening absorbed a series of urgent fixes, security work, and feature expansions that surfaced as real users started exercising the system. Documented here because each decision encodes a "we learned this the hard way" lesson worth not relitigating.
-
-### Edge functions: source-controlled in repo, deployed manually via Dashboard
-
-- **Decision:** Every Supabase Edge Function lives at `supabase/functions/<name>/index.ts` in the repo. The file is canonical. Deployment is a manual paste-and-deploy into the Supabase Dashboard for each project (prod and test).
-- **Why:** Supabase has no auto-deploy from a connected repo. Without source control, the only copy of a function lives in the live Dashboard — one accidental delete and there is no way to restore. We hit this when the `manage-users` function had been edited multiple times in the Dashboard with no tracked history; when CC tried to make a small surgical edit, the file didn't exist locally to edit.
-- **Discipline going forward:** Edit the file first, commit, then paste into the Dashboard for both prod and test. Never edit only in the Dashboard. Every CC prompt that touches an edge function explicitly says "update the file in `supabase/functions/<name>/index.ts`." This is now a non-negotiable rule.
-
-### Kiosk authentication: real Supabase JWT, not anon
-
-- **Decision:** New edge function `kiosk-authenticate` validates a kiosk operator's PIN server-side and mints a real Supabase-format HS256 JWT with `aud='authenticated'`, `role='authenticated'`, 8-hour lifetime. The client calls `supabase.auth.setSession(...)` with that token, then `supabase.auth.stopAutoRefresh()`. The kiosk runs as an authenticated user for the rest of the shift.
-- **Why:** The previous design ran kiosks as anon, which forced every kiosk-readable table to have a permissive anon policy. That blast radius was unacceptable as the schema grew. With kiosks authenticated, anon access on the database tightens to only what's needed pre-PIN: `machines` (active only) and `locations`.
-- **Fail-closed PIN matching:** Lookup pulls up to 2 rows. 0 matches OR ≥2 matches → 401 "Invalid credentials." Collision (≥2 matches with the same PIN) is logged to `audit_logs` as `kiosk_pin_collision` so admins can spot when a PIN reset is needed. Never silently picks one operator out of multiple — AS9100 / FAA traceability requires positive identification.
-- **JWT_SECRET, not SUPABASE_JWT_SECRET:** Supabase reserves the `SUPABASE_` prefix for its auto-injected secrets. We use `JWT_SECRET` (no prefix) as the env var name, populated from the project's Legacy JWT Secret (Project Settings → API → JWT Keys → Legacy JWT Secret). Each project's secret is different — test and prod have separate values.
-- **Modern projects use JWKS but legacy secret still works for signing.** New Supabase projects default to asymmetric (JWKS) JWT signing keys, but the legacy HMAC secret is retained for verification. Our HS256-signed tokens are accepted because Supabase verifies against the legacy secret. If the legacy secret is ever rotated out, the function will need to switch to RS256 with the project's signing key.
-
-### Per-device kiosk session binding
-
-- **Decision:** `kiosk_sessions` keyed by (operator_id, machine_id, device_id) with a partial unique index on `is_active = true`. New `device_id` column populated client-side from `localStorage.skynet.kiosk.device_id` (UUID generated via `crypto.randomUUID()` on first kiosk load, persisted forever).
-- **Why:** Original design keyed sessions by (operator_id, machine_id) only. If Roger logged in on the iPad at Mazak 5, then Patrick walked up with a different iPad and opened the same kiosk URL, Patrick's view inherited Roger's active session — wrong operator attribution on every subsequent kiosk action. Per-device binding eliminates that.
-- **Migration:** Dropped two old uniqueness constraints (`kiosk_sessions_operator_id_machine_id_key` and `kiosk_sessions_operator_machine_unique`) which both blocked multi-device sessions. Wiped legacy active rows with NULL device_id (`UPDATE ... SET is_active=false WHERE device_id IS NULL`) so no device auto-restores under a previous operator.
-- **`kiosk_sessions` schema clarification:** No `logged_out_at` column exists. Sessions terminate via `is_active = false` only. This came up multiple times in the session and is worth recording.
-
-### AWS Amplify SPA rewrite — proper 200, not 404→200
-
-- **Decision:** Replaced the `404-200` rewrite rule with a status-200 regex that matches everything except static assets. Cache headers added: `index.html` no-cache, `/assets/**` `max-age=31536000`.
-- **Why:** Iframe icons on iPads loaded the route via the native browser; the old `404-200` rule returned a soft-404 that some user-agents handled inconsistently. Status 200 with the regex pattern serves `index.html` directly for any route without an asset extension. Stable across iOS Safari, iPad home-screen icons, and direct-URL navigation.
-- **Pattern:** `</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>`
-
-### No-email user accounts + admin-set passwords
-
-- **Decision:** New `invite_no_email` action on `manage-users` creates a user with email `<username>@skynet.local` (a non-routable placeholder) and a temp password chosen by the admin. New `set_password` action lets an admin change any user's password directly. Both flows set `profiles.must_change_password = true`; the user is forced through a `/force-change-password` flow on next login.
-- **Why:** Some operators (especially shop-floor staff) don't have a Skybolt email and don't need one. Forcing every user to have a real inbox just to receive an invite link adds friction. The placeholder-email pattern keeps Supabase Auth happy (it requires a unique email per user) without requiring a deliverable inbox. Admin-set passwords also handle the practical case where someone forgets their credentials and there's no one nearby to walk them through the recovery flow — admin sets a known temp, force-change picks up on first login.
-- **Login lookup via SECURITY DEFINER RPC:** New `get_email_by_username(p_username text)` RPC returns the email for a username. Granted to anon. Lets the Login form resolve "mbowers" to "mbowers@skybolt.com" or "mbowers@skynet.local" without exposing the profiles table to anonymous selects.
-
-### Salesperson tracking via flag on user, not separate table
-
-- **Decision:** `profiles.is_salesperson boolean` flags which users can be assigned to a customer order. `customer_orders.salesperson_id` (nullable, FK to profiles, ON DELETE SET NULL) records the assignment. Mandatory on Create CO and Edit CO modals. Visible as a column on the Customer Orders list and in Order Lookup. NOT on the traveler.
-- **Why:** Adding a separate Salespeople table would have created a parallel set of name-management CRUD with no real upside — most salespeople either are or will be SkyNet users (some have CS roles, others may eventually log in). Tying salesperson identity to the existing user account avoids duplication and lets future features (notifications, dashboards, commission reporting) key off the same identity.
-- **Stale dropdown handling on Edit CO:** When a CO has `salesperson_id` pointing at someone who is no longer flagged as salesperson (or is_active=false), the Edit modal renders a yellow "Previously assigned salesperson is no longer active. Please select a new one." warning and blocks save until a new pick is made. Historical attribution preserved (the FK stays) but the user is forced to refresh the assignment.
-- **Trigger doesn't auto-pick up new metadata fields.** When invite-by-email fires `auth.admin.inviteUserByEmail` with `is_salesperson` in user_metadata, the existing `handle_new_user` trigger doesn't read that field — it only knows about the original set (role, full_name, can_float, can_approve_compliance). Solution: after the invite call succeeds, the edge function does a follow-up `UPDATE profiles SET is_salesperson = ...` patch using the service role key. Same pattern as `invite_no_email` already used. This will be needed for any future profile fields added without simultaneously updating the trigger.
-
-### Multi-CO customer + due-date display
-
-- **Decision:** New helper module `src/lib/workOrderDisplay.js` exports `summarizeWOAllocations(wo, allocations)` and `formatWODueDate(...)`. Used by Order Lookup, EditWorkOrderModal, and Finishing batch cards.
-- **Why:** A single WO can be allocated against multiple customer orders (especially for stock builds that get partially committed). Showing only one customer name on the row hid the full customer footprint. The new display: "CHI AVIATION + 2 more" with a click-to-expand popover listing all customers + due dates per allocation. Earliest due date is the displayed due date; all dates visible in the expanded popover.
-- **Traveler exception:** The traveler shows the comma-separated full list of customer names with no "+N more" abbreviation. Physical paper has no popover — printing the abbreviated form would lose data.
-- **Earliest due date as fallback when wo.due_date is null:** `formatWODueDate` returns the earliest CO line's due_date when the WO header has none.
-
-### WO cancellation: there is no WO-level cancel; allocation release is job-cancel-scoped
-
-- **Decision:** No "Cancel Work Order" surface exists in the UI. All cancellation happens at the job level. Four code paths cancel jobs: `handleCancelJob` (Mainframe edit modal), `handleWOLookupCancelConfirm` (WO Lookup), Compliance reject (initial run), Compliance reject (TCO/post-mfg). After any job cancellation, the system checks whether any viable jobs remain on the parent WO (statuses: pending_compliance, ready, assigned, in_setup, in_progress, pending_passivation, in_passivation). If none remain, all active `customer_order_allocations` for that WO are deactivated (`is_active=false, deactivated_at, deactivated_by` — matches the existing 3-field pattern from EditWorkOrderModal cancel-line and CustomerOrders cancelLine).
-- **Why scoped to "last viable job," not blanket deactivate-on-job-cancel:** A WO can hold multiple jobs (multiple parts × multiple quantities). Cancelling one job in a multi-job WO should NOT release the entire WO's allocations — other jobs are still backing that demand. The "no viable jobs remaining" guard is what makes the rule safe in both single-job and multi-job WOs.
-- **`has_cancelled_allocation` flag is unrelated and untouched.** That column tracks the opposite scenario (CO line cancelled, WO alive); this code path doesn't read or write it.
-- **A proper "Cancel WO" surface is a Sprint 7+ candidate** — would consolidate the cascade (set work_orders.status='cancelled', cancel all viable jobs, deactivate all allocations) into one user-visible action. Today's job-level path covers the actual operational need.
-
-### Document management — anytime upload, defer-with-note, auto-pull-forward
-
-This is the largest single feature in the session. Four sub-decisions:
-
-#### Auto-pull-forward at job creation (forward-only)
-
-- **Decision:** When a new `jobs` row is INSERTed, the job creation flow immediately reads all current `part_documents` (where `is_current=true`) for that part and copies them into `job_documents` for the new job. Marker column `job_documents.source = 'part_pulled_forward'` distinguishes auto-pulled rows from operator uploads.
-- **Why:** Roger had been re-uploading the same drawing (and Production Log Blank, master spec, etc.) on every job for the same part. Wasted compliance time. The auto-pull means part-level docs are present from the moment the job exists; Roger only needs to upload genuinely-new (lot-cert, batch-specific) docs at compliance.
-- **Forward-only:** Existing in-flight jobs are not retroactively populated. Roger has been managing those manually so far; auto-injecting docs into mid-flight jobs could conflict with what's already attached. New jobs from this point forward get the auto-pull.
-- **Versioning preserved through snapshots:** When a part document gets replaced, jobs created before that replacement keep their snapshot copy (job_documents row references the older file_url). Only NEW jobs from the replacement onward see the new version. This matches the existing snapshot pattern and avoids retroactively rewriting documents on jobs that are mid-flight or completed.
-
-#### Required-slot uploads at compliance auto-promote; ad-hoc uploads use opt-in checkbox
-
-- **Decision:** Documents uploaded into a Required Documents slot at pre-mfg compliance (Drawing, Production Log Blank, etc.) ALWAYS auto-promote to `part_documents` with versioning. No checkbox. Documents uploaded to the Additional Documents free-form slot at compliance, OR via the new AddJobDocumentModal in WO Lookup, present a "Also save as part-level document for future jobs" checkbox (default UNCHECKED). When checked, the upload writes to both `job_documents` and `part_documents`; when unchecked, only `job_documents`.
-- **Why split the behavior:** Required-slot uploads are by definition part-level — there is no scenario where Roger uploads "the Drawing" into the Drawing slot and doesn't want it to apply to the next job for the same part. Forcing him to tick a checkbox there is decision-fatigue with no real choice behind it. Ad-hoc uploads are genuinely ambiguous (could be anything from a one-off lot cert to a part-level master spec) — explicit choice is appropriate.
-- **Versioning helper:** `getNextVersionLetter(prev)` in `src/lib/documents.js` computes Rev A → B → C from the previous `part_documents.version` value. When an upload promotes, the previous current row flips to `is_current=false` and a new row inserts as current with the next letter.
-- **Future polish (NOT done now):** Add `is_part_level` flag on `document_types` so the catalog itself encodes which types are inherently part-level (Drawing → always, Lot Cert → never). Defers the per-upload decision entirely. Skipped for now until the doc type catalog stabilizes.
-
-#### Defer documents at pre-mfg compliance with required reason
-
-- **Decision:** A "Defer documents — approve without all required documents" toggle appears under the Compliance Outcome buttons at pre-mfg, BUT only when at least one required document for the `compliance_review` phase is missing. When toggled on, a textarea is shown for the reason (required); approval proceeds without enforcing the doc-completeness gate. The job carries `documents_deferred=true` plus `documents_deferred_reason / _by / _at` for audit. The deferral auto-clears (sets `documents_deferred=false`, but preserves the historical reason/by/at) when ALL `compliance_review`-phase requirements are subsequently satisfied — not all phases, just compliance_review.
-- **Why phase-filtered:** `part_document_requirements.required_at` distinguishes pre-mfg ('compliance_review') from post-mfg ('manufacturing_complete'). The deferred flag is a pre-mfg concept; it should clear when pre-mfg is satisfied, not wait for post-mfg docs that legitimately don't exist yet.
-- **Why hide the defer toggle when nothing's missing:** The earlier draft rendered the toggle unconditionally. This caused confusion at the compliance screen — "All required documents approved ✓" was shown right above a defer toggle that had nothing to defer. Now the toggle only appears when there's an actual gap.
-- **Visibility:** Yellow "Docs Deferred" badge renders next to job_number on every surface where jobs are displayed (Mainframe row, Compliance queue, kiosk, finishing). Compliance dashboard widget "Jobs awaiting deferred documentation" lists deferred jobs sorted by `documents_deferred_at` ascending; widget hides when count = 0.
-
-#### "Other" document type dedupe
-
-- **Decision:** Removed the synthetic "Other (use Notes)" option from the document type dropdown. Use only the real `document_types.name='Other'` row. When that real type is selected, the Notes field becomes required (label gets a red asterisk, placeholder changes to "Required — describe the document," and the form blocks save with empty notes).
-- **Why:** The original prompt added a synthetic option without realizing the document_types table already had an "Other" row, so two appeared in the dropdown. Cleaning up to use only the canonical entry. The required-Notes UX hangs off whether the real "Other" type is selected.
-
-### Materials hard-delete + deactivate (planned)
-
-- **Decision:** Materials can be hard-deleted only when zero references exist in `material_receiving` AND `material_usage`. Otherwise the Delete button renders disabled with a tooltip showing the reference count. A separate Deactivate button is always enabled (and reversible — toggles `is_active`). Inactive rows stay visible in the Raw Material list but render greyed with an "Inactive" badge. Active rows sort first.
-- **Duplicate prevention at DB level:** `materials_unique_type_size_vendor` partial unique index on `(material_type_id, bar_size_inches, LOWER(TRIM(vendor)))`. Case-insensitive on vendor. Frontend pre-checks before INSERT; if a duplicate exists and is INACTIVE, prompts "Reactivate Existing" instead of allowing a new row.
-- **Why a/k/a aerospace traceability rationale:** A material that was ever received and consumed in a part that shipped must remain auditable forever. Hard-delete is reserved for the case where nothing has ever touched it (created in error, test data, etc.). The `is_active` flag soft-deletes from operator-facing dropdowns (Receiving, etc.) without touching history.
-- **Test data cleanup precedent:** During this session we hard-deleted three materials that had come over from test (303SS Danforth Metals 0.5", 6061-T6 Alro 0.5", 303SS Test Vendor 0.375"). Reference check confirmed zero rows in either ref table. The pattern (diagnostic SELECT on refs → DELETE if all zero) is now codified in the UI button behavior. The `job_materials` table uses a text `material_type` column, NOT an FK to `materials.id`, so it does NOT block deletion — only `material_receiving` and `material_usage` are real blockers.
-
-### Smaller fixes worth recording
-
-- **Edit Work Order: add CO + add Component, with multi-CO support.** EditWorkOrderModal can add new CO line allocations to an existing WO (Option B math: stock first, grow total if short) and add new components to existing assemblies (BOM-scoped per assembly_bom, manufactured-only via part_type='manufactured', existing components excluded from picker). Total field allows stock to go negative during typing (no clamp); validation on save with red border + inline error + disabled Save button. The picker dedupe required adding a defensive re-fetch of jobs with explicit `component_id` so newly-added rows match existing.
-- **Edit Customer Order modal.** Add new lines, edit headers, edit existing lines. Quantity floor for each line = `quantity_fulfilled + active_allocated`. Part swap allowed only when `activeAllocated=0 AND quantity_fulfilled=0`. Existing RLS policies sufficient.
-- **Compliance officer Finished Goods save.** Validation rule "Assembly and Finished Good routes must begin with an internal step named Assemble" was over-applied — Finished Goods often go straight to Finishing or have other route shapes. Restricted the rule to `part_type === 'assembly'` only. Finished Goods can have any route.
-- **assembly_bom DELETE policy was missing.** Confirmed via `pg_policies` — the table had SELECT, INSERT, UPDATE policies but no DELETE. Postgres returned 204 with zero rows affected (not an error), supabase-js didn't surface it, so the UI silently re-fetched and the row reappeared. Added: `CREATE POLICY "assembly_bom_delete_authenticated" ON public.assembly_bom FOR DELETE TO authenticated USING (true)`. Sprint 7 RLS audit will verify every public table has all four CRUD policies — this should be the last one-off of this kind.
-- **App refresh redirected to splash screen.** Race condition in `App.jsx` initializeAuth — Supabase fired SIGNED_IN before getSession resolved, bypassing the `hasSignedInRef` guard. Fixed by claiming the ref synchronously before the await; reset only if no session.
-- **Stale profile state on role change.** When April's role was changed from customer_service to scheduler mid-session, her client cached the old role in React state until logout. Re-login forced a fresh profile fetch and resolved it. Future polish: realtime subscription on `profiles` filtered to current user id, triggers re-fetch on row update. Logged on the post-go-live polish list — not urgent.
-
-### Test environment parity discipline
-
-Every SQL change, edge function update, and (where applicable) Amplify config change made on prod during this session was replicated to test. Two key reminders:
-- Test Supabase has its own Legacy JWT Secret — different from prod's. The `JWT_SECRET` env var on test's `kiosk-authenticate` must be set from test's Project Settings → API → JWT Keys → Legacy JWT Secret, not prod's.
-- Edge function deploys are independent per project. Re-paste the same source from `supabase/functions/<name>/index.ts` into both Dashboards.
+### Test environment CHECK constraint drift
+Discovered + fixed during M9 regression: `job_shortfall_resolutions.resolution` CHECK on test was missing `'acknowledge_plan'` (prod had it). Plan-only shortfall "Acknowledge" button errored on test. Constraint updated on test to match prod. Same drift pattern flagged for `outbound_sends.source_type` (test missing NULL allowance) — pending fix, not user-visible today.

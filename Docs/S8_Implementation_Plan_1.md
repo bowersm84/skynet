@@ -327,3 +327,96 @@ Run in order. Each batch is independently testable. Read `Decisions.md` and this
 - Amplify deploy succeeds, prod Shortfalls tab renders without error.
 - A fresh kiosk Complete Job below target on prod generates a job-level shortfall row automatically.
 - Spec v3.1 generated. Decisions.md updated. Migration SQL committed under `Docs/migrations/`.
+
+
+---
+
+## 13. Sprint Closure (Closed May 15, 2026)
+
+This section documents what actually shipped versus what was planned. Sprint 8 closed with the core scope delivered to production plus two deltas from the original plan and one item carried forward to a Sprint 8.1 patch.
+
+### 13.1 What shipped to prod (May 15, 2026)
+
+**Schema migrations applied to prod Supabase (chronological):**
+
+1. `2026-05-13_shortfall_backfill.sql`
+2. `2026-05-13_shortfall_workflow.sql`
+3. `2026-05-14_job_shortfall_pivot.sql`
+4. `2026-05-15_co_fulfillment_idempotency.sql` (forward-staged for Sprint 8.1)
+
+Backfill on prod: 0 rows migrated from `wo_shortfall_resolutions` to `job_shortfall_resolutions` (no pre-existing open WO-level shortfalls on prod). Clean cutover.
+
+RLS audit on prod's `job_shortfall_resolutions`: all four DML policies present (SELECT, INSERT, UPDATE, DELETE). No silent-failure risk.
+
+**Code deployed via Amplify build of `main` branch:**
+
+- 2-option allocation modal (Re-queue + Accept Short with required reason) — see D-S8-08 revision in Decisions.md
+- `AllocationResolutionModal` Re-queue path keeps partial allocations active (D-S8-07 revision)
+- New job's `component_id` and document/routing lookups pull from the shorting job, not the WOA's `assembly_id` (D-S8-10 latent fix)
+- `ComplianceReview.handleApproveBatch` advance check uses `jobs.good_pieces` as the effective target (D-S8-16, new)
+- Full S8 plumbing from the original plan: `evaluateJobShortfall` helper, job-centric Shortfalls tab, WO row badge derivation, KPI tile removal
+
+**Git lineage:** Work landed on `feature/allocation-saved` (the parked branch from the May 15 recovery) rather than the originally-named `feature/job-shortfall`. Branch name is cosmetic; content matches the plan. Branch merged to `test` cleanly (auto-merge, no conflicts), then `test` → `main` cleanly, then Amplify auto-deployed.
+
+### 13.2 Deltas from the original plan
+
+| Plan item | What changed | Why |
+|---|---|---|
+| D-S8-07 (partial allocation deactivation) | Gated on `resolution !== 'requeue'`. Original ruling applied to all paths. | Real-world test (Miami CO on WO-2605-0020) exposed that deactivating the allocation on Re-queue orphans the demand from the WO view. The new RQ job ends up on a WO with no demand context. Re-queue must keep allocations active. |
+| D-S8-08 (three resolution outcomes) | Collapsed to two: Re-queue and Accept Short (required reason). | Cancel Shortfall and Accept Short did the same thing to the data; the only difference was reason-required ceremony. Merging removes false subdivision. The legacy `cancel_shortfall` enum value stays in the CHECK constraint for backwards-compat. |
+| Re-queue `component_id` (D-S8-10) | Latent assembly bug fixed in code (use `job.component.id`, not `woa.assembly_id`). | The bug was identified in the handoff and not in the original plan as a code change. Folded into this sprint while AllocationResolutionModal was being touched. |
+| Finishing-batch advance check (D-S8-16, new) | Added: use `good_pieces` as the effective target. | Discovered during testing on WO-2605-0021. J-000029 was overridden at kiosk to 500 good pieces, then sat stuck at `manufacturing_complete` after finishing + compliance accept because the advance check compared total sent (500) against `jobs.quantity` (1000). Latent before Sprint 8; exposed because Re-queue makes the override case routine. |
+
+### 13.3 Carried forward to Sprint 8.1
+
+**Auto-fulfill on RQ advance (D-S8-17):**
+
+- Design and CC prompt complete; helper file `src/lib/coFulfillment.js` drafted but not run/tested.
+- Schema column `job_shortfall_resolutions.fulfillment_applied_at` is already on **both** test and prod (idempotency migration ran on prod despite original plan to defer it). When 8.1 ships the helper, no further schema change is needed.
+- **Operational interim:** any RQ flow on prod will leave the original WO's CO commitments showing "Remaining" until manually closed via SQL (the LSI pattern documented in Sprint 8 chat history). Roger and April briefed.
+
+**Other follow-ups not in original plan:**
+
+- `acknowledge_plan` CHECK constraint mismatch: turned out to be a non-issue. The S8 migration created `job_shortfall_resolutions.resolution` with `acknowledge_plan` already in the CHECK list. Verified on prod schema dump. No code change needed.
+- **RQ-13750298 anomaly:** test-data-only artifact; not prod-impacting. Investigation deferred.
+- Drop of `wo_shortfall_resolutions` table: deferred. Both prod and test still have the legacy table preserved with `DROP TABLE … CASCADE` commented out in Section 6.3. Plan to drop after one stability cycle on prod.
+
+### 13.4 Test scenarios that exercised the cutover
+
+Run on `test-skynet.skybolt.com` against test Supabase before prod cutover:
+
+| WO | Scenario | Result |
+|---|---|---|
+| WO-2605-0020 | Two COs (Mather 500, Miami 200), short job 600/1000, Re-queue 400 | Initial test exposed D-S8-07 bug (Miami deactivated). Fix applied; re-test confirmed Miami stays active at 200/100/100 on the WO. |
+| WO-2605-0020 (J-000029 stuck) | Short job 500/1000 advanced through finishing + compliance, sat at manufacturing_complete | Exposed D-S8-16 bug. Fix applied; subsequent RQ jobs advance to Pending TCO automatically. |
+| WO-2605-0021 | Two COs (LSI 500, Robert M 300), short job 500/1000 with allocations 200/300, Re-queue 500 | Re-queue path created RQ-73920391 on same WO with correct qty. Exposed D-S8-17 gap (CO line `quantity_fulfilled` not auto-updated when RQ completes). Manually closed LSI via SQL. Auto-fulfill deferred to 8.1. |
+
+### 13.5 Prod smoke test (post-cutover)
+
+Standard smoke test passed:
+- Login works (no auth listener regression)
+- Order Lookup opens, Work Orders and Shortfalls tabs render
+- Shortfalls tab empty (expected — no production short jobs yet)
+- Allocation modal opens on test WO with the 2-option layout
+
+### 13.6 Definition of Done — status
+
+| Item | Status |
+|---|---|
+| All test cases in Section 9 pass on test | ✅ Adjusted for the D-S8-07 / D-S8-08 / D-S8-16 deltas; verified |
+| Schema migration applied to prod | ✅ All four migrations applied in chronological order |
+| Feature branch merged to main | ✅ `feature/allocation-saved` → `test` → `main` |
+| Amplify deploy succeeds | ✅ Green build on `main` |
+| Fresh prod kiosk Complete Job below target generates a shortfall row automatically | ⏳ Validated on test; awaits a real prod short job to confirm |
+| Spec v3.1 generated | ✅ |
+| Decisions.md updated | ✅ |
+| Migration SQL committed under Docs/migrations/ | ✅ Four files |
+
+---
+
+## 14. Lessons & Pattern Reinforcements
+
+- **Diagnose before fix.** Three of the four code deltas in this sprint came from running real flows on `test-skynet.skybolt.com` and being honest about what looked wrong. The D-S8-07 deactivation bug looked like a React state issue at first; an SQL verification query (showing the deactivated Miami row) confirmed it was business logic, not state management.
+- **Surgical fixes over rewrites.** All three code changes that shipped were narrow Find/Replace patches. No file rewrites. The two helper files (`shortfall.js`, `coFulfillment.js`) are the only "new" components, and both are small.
+- **Schema-first cutover discipline.** Pre-merge prod schema verification (S8 tables exist, RLS complete, row counts sane) is what made the cutover boring instead of repeating the May 15 incident.
+- **Spec lives in `.docx`, but truth lives in Decisions.md.** The spec is the public-facing doc; Decisions.md is the running record of "what did we choose and why, including reversals." Two D-S8 entries (07 and 08) revised mid-sprint — captured both the original ruling and the revision so the audit trail is intact.

@@ -100,9 +100,9 @@ Deno.serve(async (req) => {
     // Mint JWT with the project's auth secret. The Supabase API
     // accepts any HS256 token signed with this secret as a valid
     // user session, so claims must mirror what gotrue would issue.
-    const jwtSecret = Deno.env.get('SUPABASE_JWT_SECRET') ?? ''
+    const jwtSecret = Deno.env.get('JWT_SECRET') ?? ''
     if (!jwtSecret) {
-      console.error('SUPABASE_JWT_SECRET not configured')
+      console.error('JWT_SECRET not configured')
       return jsonResponse({ error: 'Server configuration error' }, 500)
     }
 

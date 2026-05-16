@@ -103,6 +103,29 @@ Deno.serve(async (req) => {
           return jsonResponse({ error: error.message }, 400)
         }
 
+        // Defensive: handle_new_user trigger doesn't pick up newer
+        // metadata fields (is_salesperson). Patch the profile row to
+        // ensure all flags are correctly applied. The trigger creates
+        // the profiles row synchronously, so it exists by now.
+        if (data.user?.id) {
+          const { error: patchErr } = await adminClient
+            .from('profiles')
+            .update({
+              role: payload.role,
+              full_name: payload.full_name,
+              home_location_id: payload.home_location_id ?? null,
+              can_float: payload.can_float ?? false,
+              can_approve_compliance: payload.can_approve_compliance ?? false,
+              is_salesperson: payload.is_salesperson ?? false,
+            })
+            .eq('id', data.user.id)
+          if (patchErr) {
+            console.error('Profile patch after invite failed:', patchErr)
+            // Non-fatal: invite was sent, user can still accept; admin
+            // can edit profile after.
+          }
+        }
+
         await adminClient.from('audit_logs').insert({
           actor_id: caller.id,
           action: 'user_invited',

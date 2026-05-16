@@ -126,13 +126,18 @@ Deno.serve(async (req) => {
           }
         }
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'user_invited',
-          target_type: 'user',
-          target_id: data.user?.id ?? null,
-          details: { email: payload.email, role: payload.role, full_name: payload.full_name },
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'user_invited',
+          details: {
+            email: payload.email,
+            role: payload.role,
+            full_name: payload.full_name,
+            target_type: 'user',
+            target_id: data.user?.id ?? null,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true, user: data.user })
       }
@@ -203,13 +208,18 @@ Deno.serve(async (req) => {
           return jsonResponse({ error: `Profile setup failed: ${patchErr.message}` }, 500)
         }
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'user_invited_no_email',
-          target_type: 'user',
-          target_id: created.user.id,
-          details: { username, role: payload.role, full_name: payload.full_name },
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'user_invited_no_email',
+          details: {
+            username,
+            role: payload.role,
+            full_name: payload.full_name,
+            target_type: 'user',
+            target_id: created.user.id,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true, user_id: created.user.id })
       }
@@ -221,13 +231,16 @@ Deno.serve(async (req) => {
         const { data, error } = await adminClient.auth.admin.inviteUserByEmail(email)
         if (error) return jsonResponse({ error: error.message }, 400)
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'invite_resent',
-          target_type: 'user',
-          target_id: data.user?.id ?? null,
-          details: { email },
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'invite_resent',
+          details: {
+            email,
+            target_type: 'user',
+            target_id: data.user?.id ?? null,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true })
       }
@@ -247,12 +260,15 @@ Deno.serve(async (req) => {
         })
         if (sendError) return jsonResponse({ error: sendError.message }, 400)
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'password_reset_sent',
-          target_type: 'user',
-          details: { email },
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'password_reset_sent',
+          details: {
+            email,
+            target_type: 'user',
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true })
       }
@@ -277,12 +293,15 @@ Deno.serve(async (req) => {
           .eq('id', user_id)
         if (flagErr) return jsonResponse({ error: flagErr.message }, 400)
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'password_set_by_admin',
-          target_type: 'user',
-          target_id: user_id,
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'password_set_by_admin',
+          details: {
+            target_type: 'user',
+            target_id: user_id,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true })
       }
@@ -297,12 +316,15 @@ Deno.serve(async (req) => {
           .eq('id', user_id)
         if (error) return jsonResponse({ error: error.message }, 400)
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'pin_reset',
-          target_type: 'user',
-          target_id: user_id,
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'pin_reset',
+          details: {
+            target_type: 'user',
+            target_id: user_id,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true })
       }
@@ -337,13 +359,16 @@ Deno.serve(async (req) => {
           .eq('id', user_id)
         if (error) return jsonResponse({ error: error.message }, 400)
 
-        await adminClient.from('audit_logs').insert({
-          actor_id: caller.id,
-          action: 'profile_updated',
-          target_type: 'user',
-          target_id: user_id,
-          details: safeUpdates,
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'profile_updated',
+          details: {
+            ...safeUpdates,
+            target_type: 'user',
+            target_id: user_id,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
         return jsonResponse({ success: true })
       }

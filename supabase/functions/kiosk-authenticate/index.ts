@@ -69,12 +69,16 @@ Deno.serve(async (req) => {
     if (!matches || matches.length === 0 || matches.length > 1) {
       // Audit collisions so admins can spot when a PIN reset is needed.
       if (matches && matches.length > 1) {
-        await adminClient.from('audit_logs').insert({
-          action: 'kiosk_pin_collision',
-          target_type: 'machine',
-          target_id: machineId,
-          details: { matched_count: matches.length, device_id: deviceId },
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          event_type: 'kiosk_pin_collision',
+          details: {
+            matched_count: matches.length,
+            device_id: deviceId,
+            target_type: 'machine',
+            target_id: machineId,
+          },
         })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
       }
       return jsonResponse({ error: 'Invalid credentials' }, 401)
     }
@@ -147,13 +151,17 @@ Deno.serve(async (req) => {
     // stopAutoRefresh() right after to prevent it from being used.
     const refreshToken = crypto.randomUUID() + crypto.randomUUID()
 
-    await adminClient.from('audit_logs').insert({
-      actor_id: profile.id,
-      action: 'kiosk_authenticated',
-      target_type: 'machine',
-      target_id: machineId,
-      details: { device_id: deviceId, expires_in_seconds: SHIFT_SECONDS },
+    const { error: auditErr } = await adminClient.from('audit_logs').insert({
+      operator_id: profile.id,
+      event_type: 'kiosk_authenticated',
+      details: {
+        device_id: deviceId,
+        expires_in_seconds: SHIFT_SECONDS,
+        target_type: 'machine',
+        target_id: machineId,
+      },
     })
+    if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
     return jsonResponse({
       success: true,

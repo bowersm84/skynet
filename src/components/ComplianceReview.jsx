@@ -966,6 +966,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
 
       const freshDetails = await fetchJobDetails(jobId)
       setJobDetails(prev => ({ ...prev, [jobId]: freshDetails }))
+      await fetchPendingBatches()
+      await fetchRecentlyApprovedBatches()
     } catch (err) {
       console.error('Additional upload error:', err)
       alert('Failed to upload document: ' + err.message)
@@ -2162,7 +2164,16 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                           </button>
                         </div>
                         {(details?.jobDocs || [])
-                          .filter(d => !d.document_type_id)
+                          .filter(d => {
+                            // Show docs that aren't already slotted as a
+                            // Required Document at this stage. Legacy docs
+                            // with null document_type_id pass through; docs
+                            // whose type matches a stageReqs entry are
+                            // rendered above in Required Documents and must
+                            // be excluded here to avoid duplication.
+                            if (!d.document_type_id) return true
+                            return !stageReqs.some(r => r.document_type_id === d.document_type_id)
+                          })
                           .map(doc => (
                             <div key={doc.id} className="flex items-center justify-between p-3 rounded border border-gray-700 bg-gray-800 mb-2">
                               <div className="flex items-center gap-3">

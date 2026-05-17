@@ -19,12 +19,23 @@ export default function ProductionDisplay() {
   const [openCOCount, setOpenCOCount] = useState(0)
 
   // ---- Date helpers (local timezone) ----
+  // Skybolt is closed Sat/Sun. "Yesterday" means the most recent business day:
+  // viewing on Sun/Mon → Friday; Tue → Monday; Wed-Fri → previous day; Sat → Friday.
+  // Walks backward from today until it hits a weekday (1-5).
+  const lastBusinessDay = () => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() - 1)
+    while (d.getDay() === 0 || d.getDay() === 6) {
+      d.setDate(d.getDate() - 1)
+    }
+    return d
+  }
   const yesterdayBounds = () => {
-    const now = new Date()
-    const today00 = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const yesterday00 = new Date(today00)
-    yesterday00.setDate(yesterday00.getDate() - 1)
-    return { start: yesterday00.toISOString(), end: today00.toISOString() }
+    const start = lastBusinessDay()
+    const end = new Date(start)
+    end.setDate(end.getDate() + 1)
+    return { start: start.toISOString(), end: end.toISOString() }
   }
   const fiveDaysAgoISO = () => {
     const d = new Date()
@@ -32,11 +43,10 @@ export default function ProductionDisplay() {
     return d.toISOString()
   }
   const formatDate = (s) => s ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
-  const yesterdayLabel = (() => {
-    const d = new Date()
-    d.setDate(d.getDate() - 1)
-    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
-  })()
+  const yesterdayLabel = lastBusinessDay().toLocaleDateString('en-US', {
+    weekday: 'long', month: 'short', day: 'numeric'
+  })
+  const yesterdayHeading = `${lastBusinessDay().toLocaleDateString('en-US', { weekday: 'long' })}'s Output`
 
   // ---- Loaders ----
   const loadYesterday = useCallback(async () => {
@@ -194,7 +204,7 @@ export default function ProductionDisplay() {
 
         {/* Yesterday's Output */}
         <div className="col-span-3 bg-gray-900 rounded-xl border border-gray-800 p-5">
-          <h2 className="text-xl font-bold text-skynet-accent mb-1">Yesterday's Output</h2>
+          <h2 className="text-xl font-bold text-skynet-accent mb-1">{yesterdayHeading}</h2>
           <p className="text-gray-500 text-xs font-mono mb-5">{yesterdayLabel}</p>
 
           <div className="mb-5">
@@ -218,7 +228,7 @@ export default function ProductionDisplay() {
           <div className="border-t border-gray-800 pt-4">
             <p className="text-gray-400 text-xs uppercase tracking-wide mb-2">Parts through finishing</p>
             {yesterdayPassed.byPart.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">No parts passed yesterday</p>
+              <p className="text-gray-600 text-sm italic">No parts passed</p>
             ) : (
               <div className="space-y-1.5">
                 {yesterdayPassed.byPart.map(p => (

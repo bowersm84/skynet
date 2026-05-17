@@ -604,3 +604,20 @@ Two small fixes after testing the prior SKY16 work:
 - **Part Type onChange reset:** in the Part modal create flow, changing Part Type (e.g., Manufactured → Purchased) now resets docRequirements to match the new type. Manufactured pre-populates the 3 defaults; everything else clears. Edit mode is left alone so existing user configurations aren't blown away. The default-computation logic was factored into a `computeDefaultDocRequirements(partType)` helper at the top of the Armory component so both the modal open and the onChange share one source of truth.
 
 Corrected backfill SQL is in `Docs/migrations/2026-05-17_sky16_doc_requirements_backfill.sql` (idempotent — adds the missing material_cert row to any manufactured part that was given drawing + production_log_blank by the previous buggy version).
+
+---
+
+## 2026-05-18 — Production Dashboard: "Yesterday" = last business day
+
+**Problem.** Production Dashboard "Yesterday's Output" section pulled literal `now - 1 day`. Viewing on Sunday May 17 looked at Saturday May 16 data, which was always zero — Skybolt is closed weekends. Operators saw zeros and assumed the dashboard was broken.
+
+**Fix.** Replaced the `yesterdayBounds()` and `yesterdayLabel` helpers with a single `lastBusinessDay()` function that walks backward from today until it lands on a weekday (Mon-Fri). Resulting mapping:
+- Viewed Sun → shows Friday's data
+- Viewed Mon → shows Friday's data
+- Viewed Tue → shows Monday's data
+- Viewed Wed-Fri → shows previous day
+- Viewed Sat → shows Friday's data
+
+Added a `yesterdayHeading` constant so the section title is dynamic ("Friday's Output" / "Monday's Output" / etc.) — viewers always know which day's data they're looking at without parsing the small date subtitle.
+
+**Not handled.** Federal holidays. If Skybolt closes for Memorial Day (Mon May 26), Tuesday will still show "Monday's Output" with zeros. Punt — Matt can add a holiday list later if it becomes a pattern.

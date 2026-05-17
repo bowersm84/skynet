@@ -13,12 +13,14 @@ import Finishing from './pages/Finishing'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
+import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
 import ForceChangePassword from './components/ForceChangePassword'
 
 const DASHBOARDS = [
+  { label: 'Production Dashboard', path: '/dashboards/production' },
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
 ]
 
@@ -449,6 +451,7 @@ function App() {
 
         {/* Assembly display - TV dashboard, no login required */}
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
+        <Route path="/dashboards/production" element={<ProductionDisplay />} />
 
         {/* Print traveler route - opens in new tab */}
         <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />

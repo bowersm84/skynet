@@ -398,6 +398,20 @@ export default function BOMUpload({ onComplete, onCancel }) {
     const results = { created: [], linked: [], errors: [] }
 
     try {
+      // SKY16: Look up document_type IDs for auto-creating the 3 standard
+      // requirements (drawing, production log blank, material certification)
+      // on every new manufactured component. Lookup is fire-and-forget — if
+      // it fails, part creation still proceeds, just without auto-requirements.
+      const { data: docTypes, error: docTypesErr } = await supabase
+        .from('document_types')
+        .select('id, code')
+        .in('code', ['drawing', 'production_log_blank', 'material_cert'])
+      const docTypeIds = {}
+      ;(docTypes || []).forEach(dt => { docTypeIds[dt.code] = dt.id })
+      if (docTypesErr) {
+        console.warn('Failed to load document types for SKY16 auto-requirements:', docTypesErr)
+      }
+
       let assemblyId = bomData.assembly.existingId
 
       // Create or get assembly part
@@ -408,7 +422,7 @@ export default function BOMUpload({ onComplete, onCancel }) {
             part_number: bomData.assembly.part_number,
             description: bomData.assembly.description,
             part_type: 'assembly',
-            is_active: true
+            is_active: false
           })
           .select()
           .single()
@@ -439,7 +453,7 @@ export default function BOMUpload({ onComplete, onCancel }) {
               description: comp.description,
               part_type: comp.part_type || 'manufactured',
               requires_passivation: comp.requires_passivation || false,
-              is_active: true
+              is_active: false
             })
             .select()
             .single()
@@ -450,6 +464,32 @@ export default function BOMUpload({ onComplete, onCancel }) {
           }
           componentId = newComp.id
           results.created.push(`Component: ${comp.part_number}`)
+
+          // SKY16: For manufactured components only, auto-create the 3 standard
+          // pre-mfg compliance doc requirements. Other part types (purchased,
+          // etc.) skip. Roger can edit per-part later via Armory > Parts modal.
+          const newPartType = comp.part_type || 'manufactured'
+          if (newPartType === 'manufactured') {
+            const reqRows = []
+            for (const code of ['drawing', 'production_log_blank', 'material_cert']) {
+              if (docTypeIds[code]) {
+                reqRows.push({
+                  part_id: componentId,
+                  document_type_id: docTypeIds[code],
+                  is_required: true,
+                  required_at: 'compliance_review'
+                })
+              }
+            }
+            if (reqRows.length > 0) {
+              const { error: reqErr } = await supabase
+                .from('part_document_requirements')
+                .insert(reqRows)
+              if (reqErr) {
+                results.errors.push(`Doc requirements for ${comp.part_number}: ${reqErr.message}`)
+              }
+            }
+          }
         } else {
           results.linked.push(`Component: ${comp.part_number} (already exists)`)
         }

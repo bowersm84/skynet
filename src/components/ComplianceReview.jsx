@@ -1688,7 +1688,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                     <div className={"w-3 h-3 rounded-full " + dotClass}></div>
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-white font-mono">{job.job_number}</span>
+                        <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span>
                         <span className="text-gray-500">•</span>
                         <span className="text-gray-400">{job.work_order?.wo_number}</span>
                         {job.work_order?.order_type === 'make_to_stock' && (
@@ -1705,7 +1705,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         <DocsDeferredBadge job={job} />
                       </div>
                       <div className="text-sm text-gray-500">
-                        <span className="text-skynet-accent">{job.component?.part_number}</span>
+                        <span className="text-skynet-accent font-mono">{job.job_number}</span>
                         <span className="mx-2">•</span>
                         <span>Qty: {job.quantity}</span>
                         {job.work_order?.customer && (
@@ -2483,7 +2483,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                           }
                           <div>
                             <div className="flex items-center gap-2">
-                              <span className="text-white font-mono">{send.job?.job_number}</span>
+                              <span className="text-white font-mono">{send.job?.component?.part_number || send.job?.job_number}</span>
                               {send.job?.is_standalone_finishing && (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
                                   <Package size={10} />
@@ -2500,7 +2500,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               <span className="text-gray-400">{send.job?.work_order?.wo_number || (send.job?.is_standalone_finishing ? 'Standalone' : '—')}</span>
                             </div>
                             <div className="text-sm text-gray-500">
-                              <span className="text-skynet-accent">{send.job?.component?.part_number}</span>
+                              <span className="text-skynet-accent font-mono">{send.job?.job_number}</span>
                               <span className="mx-2">&middot;</span>
                               <span>Qty: {send.quantity}</span>
                               {(send.job?.work_order?.customer || send.job?.component?.customer) && (
@@ -3033,7 +3033,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         <div className={"w-3 h-3 rounded-full " + dotClass}></div>
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-white font-mono">{job.job_number}</span>
+                            <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span>
                             <span className="text-gray-500">&middot;</span>
                             <span className="text-gray-400">{job.work_order?.wo_number}</span>
                             {job.work_order?.order_type === 'make_to_stock' && (
@@ -3041,7 +3041,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                             )}
                           </div>
                           <div className="text-sm text-gray-500">
-                            <span className="text-skynet-accent">{job.component?.part_number}</span>
+                            <span className="text-skynet-accent font-mono">{job.job_number}</span>
                             <span className="mx-2">&middot;</span>
                             <span>Qty: {job.quantity}</span>
                             {job.work_order?.customer && (
@@ -3457,7 +3457,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                   <div className={`w-3 h-3 rounded-full ${getPriorityColor(job.priority)}`}></div>
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-white font-mono">{job.job_number}</span>
+                      <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span>
                       <span className="text-gray-500">·</span>
                       <span className="text-gray-400">{job.work_order?.wo_number}</span>
                       <span className="text-gray-500">·</span>
@@ -3471,7 +3471,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         <span className="px-1.5 py-0.5 text-xs font-bold rounded bg-orange-900 text-orange-300">MAINT</span>
                       )}
                       <span className="text-gray-500">·</span>
-                      <span className="text-skynet-accent">{job.component?.part_number}</span>
+                      <span className="text-skynet-accent font-mono">{job.job_number}</span>
                     </div>
                     <div className="text-sm text-gray-500">
                       <span>Qty: {job.quantity}</span>
@@ -3558,13 +3558,13 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
 
                   return (
                     <div key={send.id} className="grid grid-cols-6 gap-2 text-sm bg-gray-800 rounded p-3 items-center">
-                      <span className="text-white font-mono">{send.job?.job_number}</span>
+                      <span className="text-white font-mono">{send.job?.component?.part_number || send.job?.job_number}</span>
                       <span>{showLabel ? (
                         <span className="text-xs px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 border border-cyan-700 rounded font-mono">{label}</span>
                       ) : (
                         <span className="text-gray-600">—</span>
                       )}</span>
-                      <span className="text-skynet-accent">{send.job?.component?.part_number}</span>
+                      <span className="text-skynet-accent font-mono">{send.job?.job_number}</span>
                       <span className="text-gray-300">{send.quantity} pcs</span>
                       <span className="text-gray-400">
                         {new Date(send.compliance_approved_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
@@ -3613,8 +3613,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                     className="grid grid-cols-6 gap-2 text-sm bg-gray-800 rounded p-3 items-center"
                   >
                     <span className="text-gray-300">{job.work_order?.wo_number}</span>
-                    <span className="text-white font-mono">{job.job_number}</span>
-                    <span className="text-skynet-accent">{job.component?.part_number}</span>
+                    <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span>
+                    <span className="text-skynet-accent font-mono">{job.job_number}</span>
                     <span className="text-gray-400">{formatDate(job.created_at)}</span>
                     <span className="text-gray-400">{formatDate(job.updated_at)}</span>
                     <span>{getStatusBadge(job.status)}</span>

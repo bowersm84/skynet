@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
+import { getMachineQueue, computeRemovalCascade, applyUnschedule } from '../lib/scheduling'
 
 const ONGOING_STATUSES = [
   'in_setup',
@@ -75,6 +76,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   
   // Unschedule confirmation
   const [unscheduleConfirm, setUnscheduleConfirm] = useState(null)
+  const [closeGap, setCloseGap] = useState(true)
   
   // Cancel/Complete maintenance modal
   const [cancelMaintenanceConfirm, setCancelMaintenanceConfirm] = useState(null)
@@ -245,7 +247,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .not('status', 'eq', 'cancelled')
         .or(
           `and(scheduled_start.gte.${weekStartIso},scheduled_start.lte.${weekEndIso}),` +
-          `and(scheduled_start.lt.${weekStartIso},status.in.(${ongoingList}))`
+          `and(scheduled_start.lt.${weekStartIso},scheduled_end.gte.${weekStartIso}),` +
+          `and(scheduled_start.lt.${weekStartIso},scheduled_end.is.null,status.in.(${ongoingList}))`
         )
         .order('scheduled_start', { ascending: true })
 
@@ -751,28 +754,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     return { date: dateStr, startTime: timeStr }
   }
 
-  // List view drop handler — insert after a specific job (resequence)
-  const handleListDropAfterJob = (e, precedingJob) => {
-    if (!canEdit) return
-    e.preventDefault()
-    setListDropTarget(null)
-
-    const job = draggedJob || draggedScheduledJob
-    if (!job) return
-
-    const { date, startTime } = snapAfterJob(precedingJob)
-
-    setScheduleClickJob(job)
-    setScheduleClickEditMode(!!draggedScheduledJob)
-    setScheduleClickDefaults({
-      date,
-      machineId: precedingJob.assigned_machine_id,
-      startTime
-    })
-    setDraggedJob(null)
-    setDraggedScheduledJob(null)
-  }
-
   // List view drop handler — drop onto machine card (reassign or append)
   const handleListDropOnMachine = (e, machineId) => {
     if (!canEdit) return
@@ -841,65 +822,44 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     setDraggedScheduledJob(null)
   }
 
-  // Unschedule a job - return it to the pool
-  // Return a scheduled job to the unassigned pool from inside the reschedule modal
-  const handleReturnToQueue = async (job) => {
+  // Unschedule a job - route through the Unschedule Confirmation modal so the
+  // user gets the gap-closing option (handled in handleUnschedule below).
+  const handleReturnToQueue = (job) => {
     if (!job) return
-    try {
-      await supabase
-        .from('jobs')
-        .update({
-          assigned_machine_id: null,
-          scheduled_start: null,
-          scheduled_end: null,
-          status: job.status === 'pending_compliance'
-            ? 'pending_compliance'
-            : 'ready',
-          scheduled_by: null,
-          scheduled_at: null,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', job.id)
-
-      setScheduleClickJob(null)
-      setScheduleClickEditMode(false)
-      setScheduleClickDefaults(null)
-      fetchData()
-      loadAllScheduledJobs()
-    } catch (err) {
-      console.error('Failed to return job to queue:', err)
-    }
+    setScheduleClickJob(null)
+    setScheduleClickEditMode(false)
+    setScheduleClickDefaults(null)
+    setCloseGap(true)
+    setUnscheduleConfirm(job)
   }
 
   const handleUnschedule = async () => {
     if (!unscheduleConfirm) return
-    
+
     setUnscheduling(true)
-    
+
     try {
-      const { error } = await supabase
-        .from('jobs')
-        .update({
-          assigned_machine_id: null,
-          scheduled_start: null,
-          scheduled_end: null,
-          status: unscheduleConfirm.status === 'pending_compliance'
-            ? 'pending_compliance'
-            : 'ready',
-          scheduled_by: null,
-          scheduled_at: null
-        })
-        .eq('id', unscheduleConfirm.id)
-      
-      if (error) {
-        console.error('Error unscheduling job:', error)
-      } else {
-        setUnscheduleConfirm(null)
-        setSelectedJob(null)
-        fetchData()
+      // Compute cascade if closeGap is checked AND there's a machine assigned
+      let cascadeChanges = []
+      if (closeGap && unscheduleConfirm.assigned_machine_id) {
+        const queue = getMachineQueue(scheduledJobs, unscheduleConfirm.assigned_machine_id)
+        const removal = computeRemovalCascade(queue, unscheduleConfirm.id)
+        cascadeChanges = removal.changes
       }
+
+      await applyUnschedule({
+        supabase,
+        job: unscheduleConfirm,
+        cascadeChanges
+      })
+
+      setUnscheduleConfirm(null)
+      setSelectedJob(null)
+      setCloseGap(true)
+      fetchData()
+      loadAllScheduledJobs()
     } catch (error) {
-      console.error('Unexpected error:', error)
+      console.error('Error unscheduling job:', error)
     } finally {
       setUnscheduling(false)
     }
@@ -2079,9 +2039,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1 flex-wrap">
-                          <span className="font-mono font-semibold text-white">
-                            {job.job_number}
+                        <div className="flex items-center gap-2 mb-1 flex-wrap min-w-0">
+                          <span className="font-mono font-semibold text-white truncate">
+                            {job.component?.part_number || job.job_number}
                           </span>
                           <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
                           {hasPreferred && (
@@ -2097,7 +2057,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                           )}
                         </div>
                         <p className="text-gray-400 text-sm truncate">{job.work_order?.wo_number}</p>
-                        <p className="text-skynet-accent text-sm truncate">{job.component?.part_number}</p>
+                        <p className="text-skynet-accent text-xs font-mono truncate">{job.job_number}</p>
                         <p className="text-gray-400 text-xs">Qty: {job.quantity}</p>
                         {job.work_order?.customer && (
                           <p className="text-gray-500 text-xs truncate">{job.work_order.customer}</p>
@@ -2715,52 +2675,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                               </div>
                             ) : (
                               <div>
-                                {/* Drop zone: insert before first job */}
-                                {anyDragActive && jobs.length > 0 && (
-                                  <div
-                                    onDragOver={(e) => {
-                                      e.stopPropagation()
-                                      if (!anyDragActive) return
-                                      if (draggedScheduledJob?.id === jobs[0].id) return
-                                      e.preventDefault()
-                                      setListDropTarget({ type: 'after', jobId: 'FIRST_' + machine.id })
-                                    }}
-                                    onDragLeave={(e) => {
-                                      if (!e.currentTarget.contains(e.relatedTarget)) {
-                                        setListDropTarget(null)
-                                      }
-                                    }}
-                                    onDrop={(e) => {
-                                      e.stopPropagation()
-                                      e.preventDefault()
-                                      const job = draggedJob || draggedScheduledJob
-                                      if (!job) return
-                                      setListDropTarget(null)
-                                      // Place at the start of this machine's schedule:
-                                      // use first job's date, no startTime so modal
-                                      // auto-calcs from beginning of that day
-                                      const firstDate = new Date(jobs[0].scheduled_start)
-                                      const dateStr = firstDate.toISOString().split('T')[0]
-                                      setScheduleClickJob(job)
-                                      setScheduleClickEditMode(!!draggedScheduledJob)
-                                      setScheduleClickDefaults({
-                                        date: dateStr,
-                                        machineId: machine.id
-                                      })
-                                      setDraggedJob(null)
-                                      setDraggedScheduledJob(null)
-                                    }}
-                                    className={`mx-2 rounded-md transition-all duration-100 flex items-center justify-center text-xs font-medium h-8 my-0.5 border-2 border-dashed ${
-                                      listDropTarget?.jobId === 'FIRST_' + machine.id
-                                        ? 'border-skynet-accent text-skynet-accent bg-skynet-accent/15 h-10 my-1'
-                                        : 'border-gray-700 text-gray-600'
-                                    }`}
-                                  >
-                                    {listDropTarget?.jobId === 'FIRST_' + machine.id
-                                      ? '↑ Insert first'
-                                      : '· · ·'}
-                                  </div>
-                                )}
                                 {jobs.map((job, idx) => {
                                   const priority = job.work_order?.priority || 'normal'
                                   const isOverdue = job.work_order?.due_date
@@ -2849,39 +2763,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                               : '—'}
                                           </div>
                                         </div>
-                                      </div>
-
-                                      {/* Drop zone: insert after this job */}
-                                      <div
-                                        onDragOver={(e) => {
-                                          e.stopPropagation()
-                                          if (!anyDragActive) return
-                                          if (draggedScheduledJob?.id === job.id) return
-                                          e.preventDefault()
-                                          setListDropTarget({ type: 'after', jobId: job.id })
-                                        }}
-                                        onDragLeave={(e) => {
-                                          if (!e.currentTarget.contains(e.relatedTarget)) {
-                                            setListDropTarget(null)
-                                          }
-                                        }}
-                                        onDrop={(e) => {
-                                          e.stopPropagation()
-                                          handleListDropAfterJob(e, job)
-                                        }}
-                                        className={`mx-2 rounded-md transition-all duration-100 flex items-center justify-center select-none text-xs font-medium pointer-events-none ${anyDragActive ? 'pointer-events-auto' : ''} ${
-                                          anyDragActive
-                                            ? listDropTarget?.type === 'after' &&
-                                              listDropTarget?.jobId === job.id
-                                              ? 'h-10 my-1 bg-skynet-accent/15 border-2 border-skynet-accent text-skynet-accent'
-                                              : 'h-8 my-0.5 border-2 border-dashed border-gray-700 text-gray-600'
-                                            : 'h-0 overflow-hidden border-0'
-                                        }`}
-                                      >
-                                        {listDropTarget?.type === 'after' &&
-                                         listDropTarget?.jobId === job.id
-                                          ? '↓ Insert here'
-                                          : anyDragActive ? '· · ·' : null}
                                       </div>
                                     </div>
                                   )
@@ -3126,57 +3007,79 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       )}
 
       {/* Unschedule Confirmation Modal */}
-      {unscheduleConfirm && (
-        <div 
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setUnscheduleConfirm(null)}
-        >
-          <div 
-            className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-sm w-full mx-4 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
+      {unscheduleConfirm && (() => {
+        const queue = unscheduleConfirm.assigned_machine_id
+          ? getMachineQueue(scheduledJobs, unscheduleConfirm.assigned_machine_id)
+          : []
+        const cascade = computeRemovalCascade(queue, unscheduleConfirm.id)
+        const downstreamCount = cascade.changes.length
+        return (
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+            onClick={() => { setUnscheduleConfirm(null); setCloseGap(true) }}
           >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-red-600/20 flex items-center justify-center">
-                <Trash2 size={20} className="text-red-500" />
+            <div
+              className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-sm w-full mx-4 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-red-600/20 flex items-center justify-center">
+                  <Trash2 size={20} className="text-red-500" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Unschedule Job?</h3>
+                  <p className="text-gray-400 text-sm">{unscheduleConfirm.job_number}</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-lg font-bold text-white">Unschedule Job?</h3>
-                <p className="text-gray-400 text-sm">{unscheduleConfirm.job_number}</p>
+
+              <p className="text-gray-300 mb-4">
+                This will remove the job from the schedule and return it to the unassigned pool. You can reschedule it later.
+              </p>
+
+              {downstreamCount > 0 && (
+                <label className="flex items-start gap-2 mb-6 cursor-pointer p-2 -mx-2 rounded hover:bg-gray-800/50">
+                  <input
+                    type="checkbox"
+                    checked={closeGap}
+                    onChange={(e) => setCloseGap(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 rounded border-gray-700 bg-gray-800 text-skynet-accent focus:ring-skynet-accent focus:ring-offset-0 cursor-pointer"
+                  />
+                  <span className="text-sm text-gray-300">
+                    Close the gap — {downstreamCount} downstream job{downstreamCount === 1 ? '' : 's'} will move forward to fill the empty slot.
+                  </span>
+                </label>
+              )}
+              {downstreamCount === 0 && <div className="mb-2" />}
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={() => { setUnscheduleConfirm(null); setCloseGap(true) }}
+                  className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleUnschedule}
+                  disabled={unscheduling}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {unscheduling ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Removing...
+                    </>
+                  ) : (
+                    <>
+                      <Undo2 size={16} />
+                      Yes, Unschedule
+                    </>
+                  )}
+                </button>
               </div>
-            </div>
-
-            <p className="text-gray-300 mb-6">
-              This will remove the job from the schedule and return it to the unassigned pool. You can reschedule it later.
-            </p>
-
-            <div className="flex items-center justify-end gap-3">
-              <button
-                onClick={() => setUnscheduleConfirm(null)}
-                className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleUnschedule}
-                disabled={unscheduling}
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded transition-colors disabled:opacity-50"
-              >
-                {unscheduling ? (
-                  <>
-                    <Loader2 size={16} className="animate-spin" />
-                    Removing...
-                  </>
-                ) : (
-                  <>
-                    <Undo2 size={16} />
-                    Yes, Unschedule
-                  </>
-                )}
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Close Maintenance Modal */}
       {cancelMaintenanceConfirm && (

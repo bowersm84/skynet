@@ -133,9 +133,24 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
 
       if (jobsError) {
         console.error('❌ Error fetching jobs:', jobsError)
+        setJobs([])
       } else {
         console.log('✅ Jobs fetched:', jobsData?.length || 0, 'jobs')
-        setJobs(jobsData || [])
+        // Sum compliance_good_qty from accepted finishing_sends per job
+        // so MachineCard can show Finished: X/Y on running tiles.
+        const finishedByJob = {}
+        if (jobsData.length > 0) {
+          const { data: finishedData, error: finishedErr } = await supabase
+            .from('finishing_sends')
+            .select('job_id, compliance_good_qty')
+            .eq('compliance_outcome', 'accepted')
+            .in('job_id', jobsData.map(j => j.id))
+          if (finishedErr) console.error('❌ Error fetching finished rollup:', finishedErr)
+          ;(finishedData || []).forEach(row => {
+            finishedByJob[row.job_id] = (finishedByJob[row.job_id] || 0) + (row.compliance_good_qty || 0)
+          })
+        }
+        setJobs(jobsData.map(j => ({ ...j, finished_qty: finishedByJob[j.id] || 0 })))
       }
 
       // NEW: Fetch ongoing downtimes (end_time IS NULL)
@@ -977,7 +992,10 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     job.status === 'pending_compliance' || job.status === 'pending_post_manufacturing'
   )
   const readyJobs = jobs.filter(job => !job.assigned_machine_id && job.status === 'ready')
-  const unassignedJobs = readyJobs
+  // SKY21: scheduler needs to see pending_compliance jobs alongside ready ones
+  // so she can plan the queue before compliance approves them.
+  const unassignedPendingCompliance = jobs.filter(job => !job.assigned_machine_id && job.status === 'pending_compliance')
+  const unassignedJobs = [...readyJobs, ...unassignedPendingCompliance]
   const activeJobs = jobs.filter(job =>
 
     job.assigned_machine_id && 
@@ -1744,13 +1762,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                       )}
                       <div>
                         <div className="flex items-center gap-2">
-                          <span className="text-white font-mono">{job.job_number}</span>
+                          <span className="text-white font-mono">
+                            {isMaintenance ? job.job_number : (job.component?.part_number || job.job_number)}
+                          </span>
                           <span className="text-gray-500">•</span>
                           <span className="text-gray-400">{job.work_order?.wo_number}</span>
                           {isMaintenance && (
                             <span className={`text-xs px-1.5 py-0.5 rounded ${
-                              maintenanceType === 'unplanned' 
-                                ? 'bg-purple-600 text-white' 
+                              maintenanceType === 'unplanned'
+                                ? 'bg-purple-600 text-white'
                                 : 'bg-blue-600 text-white'
                             }`}>
                               {maintenanceType === 'unplanned' ? 'UNPLANNED' : 'PLANNED'}
@@ -1764,7 +1784,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                             </span>
                           ) : (
                             <>
-                              <span className="text-skynet-accent">{job.component?.part_number}</span>
+                              <span className="text-skynet-accent font-mono">{job.job_number}</span>
                               <span className="mx-2">•</span>
                               {(() => {
                                 const eq = getEffectiveQty(job)
@@ -1842,7 +1862,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                       <div className={`w-3 h-3 rounded-full mt-1 ${getPriorityColor(job.priority)}`}></div>
                       <div>
                         <div className="flex items-center gap-2 mb-1 flex-wrap">
-                          <span className="font-mono text-white">{job.job_number}</span>
+                          <span className="font-mono text-white">{job.component?.part_number || job.job_number}</span>
                           <span className="text-gray-500">•</span>
                           <span className="text-gray-400">{job.work_order?.wo_number}</span>
                           {job.has_open_shortfall && (
@@ -1853,9 +1873,17 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                               <AlertTriangle size={10} /> Shortfall
                             </span>
                           )}
+                          {job.status === 'pending_compliance' && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400 border border-amber-700"
+                              title="Awaiting compliance approval — not yet ready for the floor"
+                            >
+                              <Clock size={10} /> Pending Compliance
+                            </span>
+                          )}
                         </div>
                         <div className="text-sm text-gray-500">
-                          <span className="text-skynet-accent">{job.component?.part_number}</span>
+                          <span className="text-skynet-accent font-mono">{job.job_number}</span>
                           <span className="mx-2">•</span>
                           {(() => {
                             const eq = getEffectiveQty(job)

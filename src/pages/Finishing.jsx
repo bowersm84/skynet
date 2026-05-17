@@ -1728,7 +1728,7 @@ export default function Finishing() {
                           className={`w-full flex items-center gap-3 px-4 py-3 bg-gray-800 hover:bg-gray-750 transition-colors text-left border-l-4 ${getPriorityBorder(batch.job?.work_order?.priority)}`}
                         >
                           <ChevronDown size={16} className={`text-gray-500 flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : 'rotate-0'}`} />
-                          <span className="text-white font-mono">{batch.job?.job_number || 'No Job #'}</span>
+                          <span className="text-white font-mono">{batch.job?.component?.part_number || batch.job?.job_number || 'No Job #'}</span>
                           {batch.is_standalone && (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
                               <Package size={10} />
@@ -1738,7 +1738,8 @@ export default function Finishing() {
                           {batchLabels[batch.id] && (
                             <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">Batch {batchLabels[batch.id]}</span>
                           )}
-                          <span className="text-gray-400 text-sm truncate">{batch.job?.component?.part_number} — {batch.job?.component?.description}</span>
+                          <span className="text-skynet-accent font-mono text-sm">{batch.job?.job_number || 'No Job #'}</span>
+                          <span className="text-gray-400 text-sm truncate">— {batch.job?.component?.description}</span>
                           <span className="ml-auto flex items-center gap-2 flex-shrink-0">
                             <span className="px-2 py-0.5 rounded text-xs font-medium bg-cyan-600 text-white flex items-center gap-1">
                               {currentStageDef && <currentStageDef.icon size={10} />}
@@ -1762,7 +1763,7 @@ export default function Finishing() {
                               <div className="flex items-start justify-between mb-2">
                                 <div>
                                   <p className="text-white font-mono text-lg flex items-center gap-2">
-                                    {batch.job?.job_number || 'No Job #'}
+                                    {batch.job?.component?.part_number || batch.job?.job_number || 'No Job #'}
                                     {batch.is_standalone && (
                                       <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-xs">
                                         <Package size={10} />
@@ -1774,6 +1775,8 @@ export default function Finishing() {
                                     )}
                                   </p>
                                   <p className="text-gray-400 text-sm flex items-center gap-2 flex-wrap">
+                                    <span className="text-skynet-accent font-mono">{batch.job?.job_number || 'No Job #'}</span>
+                                    <span className="text-gray-600">·</span>
                                     <span>
                                       {batch.job?.work_order?.wo_number || (batch.is_standalone
                                         ? (() => {
@@ -2124,8 +2127,8 @@ export default function Finishing() {
 
                   const renderBatchCard = (batch) => (
                     <div key={batch.id} className={`bg-gray-900 rounded p-3 border-l-2 ${getPriorityBorder(batch.job?.work_order?.priority)}`}>
-                      <p className="text-white font-mono text-sm flex items-center gap-1">
-                        {batch.job?.job_number || 'No Job #'}
+                      <p className="text-white font-mono text-sm flex items-center gap-1 truncate">
+                        {batch.job?.component?.part_number || batch.job?.job_number || 'No Job #'}
                         {batch.is_standalone && (
                           <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-cyan-900/30 text-cyan-300 border border-cyan-700 rounded text-[10px]">
                             <Package size={8} />
@@ -2135,7 +2138,7 @@ export default function Finishing() {
                           <span className="ml-1 px-1 py-0.5 rounded text-xs font-medium bg-cyan-900/50 text-cyan-300">{batchLabels[batch.id]}</span>
                         )}
                       </p>
-                      <p className="text-gray-400 text-xs truncate">{batch.job?.component?.part_number}</p>
+                      <p className="text-skynet-accent text-xs font-mono truncate">{batch.job?.job_number || 'No Job #'}</p>
                       <div className="flex items-center justify-between mt-2">
                         <span className="text-white text-sm">Qty: {batch.quantity}</span>
                         <span className="text-gray-400 text-xs font-mono flex items-center gap-1">
@@ -2266,9 +2269,9 @@ export default function Finishing() {
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-white font-mono text-sm">{j.job_number}</span>
+                              <span className="text-white font-mono text-sm">{j.component?.part_number || j.job_number}</span>
                               <span className="text-gray-600">·</span>
-                              <span className="text-cyan-400 font-mono text-sm">{j.component?.part_number || '—'}</span>
+                              <span className="text-cyan-400 font-mono text-sm">{j.job_number}</span>
                               {j.work_order?.priority === 'urgent' && (
                                 <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 rounded">URGENT</span>
                               )}

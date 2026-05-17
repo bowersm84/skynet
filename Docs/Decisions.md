@@ -449,3 +449,158 @@ shape. The work will be in `job_tools` (require `tool_instance_id` not
 null, deprecate the free-text columns or use them as fallback only) and
 the Kiosk UI (a real picker instead of free-text). No schema work needed
 on the master tables themselves.
+
+---
+
+## 2026-05-17 — Part number is primary across machinist & scheduler surfaces
+
+**Decision:** On Mainframe (machine view + Active/Unassigned/Compliance detail lists), Schedule list view, Kiosk job lineup, and ComplianceReview row displays, `part_number` occupies the primary white-font-mono slot. `job_number` is demoted to a smaller `text-skynet-accent font-mono` secondary slot. Maintenance jobs (no part_number) continue to show `job_number` in the primary slot.
+
+**Why:** Operators identify work by part number; job numbers are auto-generated and carry no meaning to the shop floor or CS team. Closes SKY27 and SKY37 from the go-live issue list.
+
+**Side decision — Finished: X/Y badge (SKY38):** On the Mainframe MachineCard's active-job tile, a small badge in the top-right shows `Finished: X/Y` where X = sum of `compliance_good_qty` for finishing_sends with `compliance_outcome = 'accepted'` for that job, Y = `job.quantity`. Job-level (not WO-level) per Matt's confirmation. Maintenance jobs and jobs with quantity 0 do not render the badge.
+
+**Data path:** Mainframe `fetchData` now issues an extra query against `finishing_sends` filtered by accepted outcome and the active job IDs, then attaches `finished_qty` to each job before `setJobs`. One additional round-trip per dashboard refresh; payload is small (one int per active job).
+
+**Addendum — same date:** Extended scope to the Kiosk active job header, Kiosk Previous Jobs section, and all four Finishing station surfaces (batch row, batch detail, kanban card, pickup table). Customer name on the Kiosk active job header now derives from `customer_order_allocations` via `summarizeWOAllocations`/`CustomerDisplay` (the existing CO-derived display helpers in `lib/workOrderDisplay.js`), with the legacy `work_order.customer` text field retained as fallback. This closes the customer-visibility ask in SKY03 (the legacy field is empty for newly-created WOs from COs, so the previous "already shows customer" assessment was incorrect for current data).
+
+---
+
+## 2026-05-17 — Production Dashboard (SKY47) Batch A — scaffold and 3 sections
+
+**Decision:** New `/dashboards/production` route, listed first in the `DASHBOARDS` menu in `App.jsx`. Refresh interval is 60s via `setInterval` polling (no Supabase realtime channels — meeting-cadence display, not transactional). Layout is a fixed 12-column grid: top row 3/6/3 (Yesterday / Today / Machine Status), bottom strip 12 (Quality). No scrolling — designed for a 1920×1080 TV at Leesburg.
+
+**"Parts made" measurement:** Per Matt, the "post-dry verified" count (`finishing_sends.verified_count` where `verified_at IS NOT NULL`) is the authoritative number, not `jobs.good_pieces` (machinist-entered at job complete) or `finishing_sends.quantity` (machinist-entered when sending). Finishing staff verify the count after the dry step, before compliance handoff — this is the trusted signal. Used for both Yesterday's "Passed finishing" counter and (in Batch B) the active-job target indicator. Distinct from the MachineCard "Finished: X/Y" badge introduced earlier today, which uses `compliance_good_qty` (compliance-verified, end-of-line truth). Both are correct for their context.
+
+**Machine scope:** `machine_type != 'finishing' AND is_active = true` produces the 4 status tiles. Inactive production machines (currently BM-6, on order from OEM) render in a separate "Offline" strip below the tiles so they're visible but don't pollute the live status counts. State priority: down → setup → running → idle.
+
+**Quality window:** Calendar 5 days back via `compliance_approved_at >= NOW() - INTERVAL '5 days'`. Capped at 5 rows per outcome column (rejected/rework). No pagination — short window keeps the meeting focused on recent events.
+
+**Today's Production section is a placeholder in Batch A** with three dashed boxes for the active-jobs panel, changeovers panel, and a working "Demand" counter (open customer orders). Batch B fills in the active-jobs target indicator, changeovers logic, and finalizes the section.
+
+---
+
+## 2026-05-17 — Scheduling rebuild: order-positioned, not datetime-positioned (Batch A foundation)
+
+**Decision:** The scheduler will no longer enter datetimes. The new paradigm is: scheduler picks a machine, picks a position in that machine's queue, and enters an estimated duration (days + hours). The system derives `scheduled_start`/`scheduled_end` by propagating from the previous job's `scheduled_end`. This rebuild ships in three batches — A (quick wins, this entry), B (new Schedule modal), C (drag-drop integration + in-modal reorder).
+
+**Why now:** April (scheduler) has consistently struggled with the existing datetime-entry modal because she doesn't know clock times for upcoming jobs, only their relative order. The existing model also produces zero-duration data in PROD (`scheduled_start = scheduled_end`), which breaks multi-week grid visibility (the Image 1/Image 2 bug Matt flagged on May 17).
+
+**Batch A — what shipped today:**
+
+- **SKY21 — Mainframe Unassigned includes pending-compliance jobs.** Filter expanded from `status='ready'` to also include `status='pending_compliance' AND assigned_machine_id IS NULL`. Detail view gains a small amber "Pending Compliance" badge so the scheduler can distinguish unapproved-but-plannable jobs from ready-to-go jobs at a glance. Schedule.jsx already did this — Mainframe was the asymmetry.
+- **Issue 1 — multi-week grid filter.** Schedule grid query switched from "scheduled_start within the week" to interval overlap: a job appears in week W if `[scheduled_start, scheduled_end]` overlaps `[week_start, week_end]`. Legacy carryover for ongoing-status jobs with NULL `scheduled_end` is preserved as a third OR branch.
+
+**Known limitation (Batch A):** Existing PROD data has zero-duration jobs (`scheduled_start = scheduled_end`). Interval overlap does not help these — they continue to display only in the week their `scheduled_start` falls in. The visibility fix takes effect for jobs scheduled under the new Batch B flow once it ships and real durations are entered.
+
+**Batches B and C will receive their own Decisions entries when they ship.**
+
+---
+
+## 2026-05-17 — Scheduling rebuild Batch B — new 3-step Schedule modal
+
+**Decision:** `ScheduleJobModal.jsx` fully rewritten as a 3-step flow: (1) pick machine, (2) pick position in the machine's queue, (3) enter estimated duration in days + hours. The system computes `scheduled_start`/`scheduled_end` via forward propagation from the running job (or now if no running job). The scheduler never enters a datetime. Old datetime-entry modal (~1000 lines) is replaced entirely.
+
+**Helper module:** `src/lib/scheduling.js` (new) is the single source of truth for the queue model — `getMachineQueue`, `isJobRunning`, `jobDuration`, `buildPropagatedQueue`, `formatDurationDH`, `applySchedule`. Pure functions plus one async DB-write helper. Reused by Batch C's drag-drop integration and any future shift handling.
+
+**Propagation model:** Sequential client-side updates. Cascade jobs first (push downstream out of the way), then write the target job's slot. Non-atomic. Acceptable risk at Skybolt's scale (single active scheduler). Promote to a Postgres RPC if races appear.
+
+**Modal entry points (Batch B):**
+- Schedule button on an Unassigned-bucket job → opens at Step 1 (full machine picker)
+- "Reschedule" on an existing scheduled job (edit mode) → opens at Step 2 with current machine pre-selected and current queue position pre-highlighted; duration pre-filled from `estimated_minutes` (or the diff between `scheduled_end` and `scheduled_start` if `estimated_minutes` is null)
+- Drag-drop from list view onto a machine cell (Batch C will wire this) → opens at Step 2 with the drop-target machine pre-selected (works today via the existing `defaults.machineId` prop, but the drop UX itself is Batch C)
+
+**Legacy data handling:** When the propagation walker encounters a job whose duration cannot be derived (`estimated_minutes` null AND `scheduled_end === scheduled_start`), the walker keeps that job's existing times unchanged and advances the cursor to its existing `scheduled_end`. Downstream cascading past such a job may produce overlap until the legacy job is itself rescheduled under the new flow. Documented limitation.
+
+**Status transitions preserved:**
+- `pending_compliance` → stays `pending_compliance` after scheduling (just gains machine + times)
+- All other statuses → become `assigned`
+
+**Schedule.jsx wire-up:** No changes required. The existing `<ScheduleJobModal>` invocation already passes all props the new modal consumes (`isOpen`, `onClose`, `onSuccess`, `job`, `machines`, `partMachineDurations`, `scheduledJobs`, `profile`, `editMode`, `defaults`, `onReturnToQueue`). The `defaults.date` / `defaults.startTime` fields are now ignored (the modal only reads `defaults.machineId`); the existing drag-drop code paths in Schedule.jsx that set them still work, just with the date/time fields unused.
+
+**Out of scope, deferred to Batch C:**
+- Drag-drop UX rebuild (drop-on-machine-row → modal Step 2)
+- In-modal drag-reorder for already-queued jobs
+- Editing a queued job's duration triggers downstream propagation (currently only "Reschedule" via the modal does this — direct duration edits TBD)
+
+---
+
+## 2026-05-17 — Batch B hotfix: propagation correctness + Step 1 brand grouping
+
+**Two fixes from user testing of the Batch B Schedule modal:**
+
+**Fix 1 — Propagation: pre-insertion jobs no longer shift.**
+The walker in `buildPropagatedQueue` previously started its cursor at the running job's `scheduled_end` (or "now" if no running job) and re-timed all jobs in the proposed array — including jobs that were positioned BEFORE the insertion point. Symptom: inserting SK244-42 between SK4C5S and SK4C2P caused SK4C5S to also report as shifting in the Downstream Impact preview. SK4C5S (and all pre-insertion jobs) should remain untouched.
+
+New behavior: pre-insertion jobs keep their current `scheduled_start`/`scheduled_end` exactly. The cursor for the target job's start time is `currentQueue[insertionIndex - 1].scheduled_end`, or "now" only when inserting at index 0 of an empty (or no-running) queue. Post-insertion jobs propagate forward from the target's end.
+
+**Fix 2 — machines.machine_type repurposed Lathe/Mill/Roller → brand values.**
+SQL migration `Docs/migrations/2026-05-17_machine_type_to_brand.sql` updates the column in-place: rows are now `'Mazak'`, `'Nexturn'`, `'Ganesh'`, `'Bolt Master'`, or `'finishing'` (unchanged). The only code paths that referenced `machine_type` filtered on `=== 'finishing'` vs `!= 'finishing'`, so this change is non-breaking. Brand grouping is the only meaningful axis for the scheduler — Lathe/Mill/Roller categories carried no operational information.
+
+**Fix 3 — Step 1 layout: location → brand sections, natural-sorted by name.**
+Step 1 machine picker now groups machines by location (Leesburg Main Facility first, then Taveres Facility, then any others alphabetically), with brand sub-headers within each location (alphabetical by machine_type), and machines within each brand natural-sorted by name (Mazak 1, 2, 3, ..., 10). The previous "preferred first, queue-depth ascending" sort is removed entirely — operators identify machines by name, not by current availability. The Preferred badge still renders on individual cards; it just no longer affects sort order.
+
+**Side observation (not fixed in this hotfix):** the Tavares facility is stored as "Taveres Facility" (missing the second 'a') in the locations table. Display strings throughout the app reflect this. Worth a one-line SQL UPDATE if desired but not blocking.
+
+---
+
+## 2026-05-17 — Batch B follow-up: close-the-gap option on unschedule
+
+**Decision:** When a job is unscheduled, the user can opt to pull downstream jobs forward to close the gap left behind. This is the symmetric operation to the insert-and-propagate fix shipped earlier today — same propagation engine, inverse direction.
+
+**Helpers added to `src/lib/scheduling.js`:**
+- `computeRemovalCascade(currentQueue, removedJobId)` — returns the list of jobs after the removed one whose times need to be shifted forward, walking from the previous job's `scheduled_end` (or the removed job's `scheduled_start` if it was first in queue).
+- `applyUnschedule({ supabase, job, cascadeChanges })` — persists the cascade (if any) and then clears the target job's machine + scheduled times in a single helper. Same status transition logic as the old direct-update code: `pending_compliance` stays `pending_compliance`; everything else becomes `ready`.
+
+**UX:**
+- The Unschedule Confirmation modal gains a checkbox: "Close the gap — N downstream jobs will move forward to fill the empty slot." Default CHECKED.
+- The checkbox is hidden when there are no downstream jobs (unscheduling the last job in a queue, or a job not yet on a machine).
+- The "Return to queue" button inside ScheduleJobModal (edit mode) no longer writes to the DB directly. It now routes through the same Unschedule Confirmation modal, so the gap-closing option appears for that flow too. One UI, one code path.
+
+**Legacy data handling:** Same as the insert cascade — when the removal walker encounters a job with no derivable duration, the walker keeps that job's existing times and advances the cursor to its `scheduled_end`. Subsequent jobs propagate from there.
+
+---
+
+## 2026-05-17 — List-view drag-drop UX simplified (Batch B follow-up)
+
+**Removed the inline "Insert here" and "Insert first" drop zones from the list view.** Pre-rebuild, dragging a job onto a machine row in list view expanded the queue to show per-job insertion slots — the user picked the position inline, before the modal opened. Now that the modal's Step 2 is the canonical position-picker, those inline slots produce a double position-pick (once in the list, once in the modal). They added visual noise and confused the flow.
+
+**New behavior in list view:** dragging a job onto a machine row opens the Schedule modal at Step 2 with the machine pre-selected. The user picks the queue position in the modal. Symmetric for dragging an already-scheduled job between machines (edit mode, machine swap).
+
+**Removed code:** the FIRST_ insertion slot block, the per-job insertion slot block, and the now-orphaned `handleListDropAfterJob` handler. The machine-level drop zone (`handleListDropOnMachine`) is preserved as the single drop target per machine.
+
+**Note:** the timeline (grid) view drag-drop has its own separate handlers (`handleDragOver` / `handleDrop` per cell). Those are untouched by this change and will be revisited in the broader timeline-drag-drop pass (Batch C of the scheduling rebuild).
+
+---
+
+## 2026-05-17 — Group 4: Initial product upload / compliance setup (SKY16 + SKY23)
+
+**Two compliance-setup changes shipped together.**
+
+**SKY23 — All newly-created parts default to is_active=false (BOMUpload only).**
+Applies to assemblies, finished goods, manufactured components, and purchased parts created via the BOM upload flow. The existing Sprint 7 "Awaiting Activation" workflow (Armory > Products inactive filter, DemandView "Awaiting Activation" badge, blocked Create WO on inactive parts) handles them from there. Roger/Tom activate parts once setup is verified.
+
+NOTE: Manual part creation via Armory > Parts is unchanged — those still default to is_active=true (the user explicitly picked the toggle). SKY23 specifically targets the bulk-import path because that's where the "imported but unverified" problem originates.
+
+**SKY16 — Manufactured parts auto-receive 3 doc requirements on creation (any path), implemented in JS.**
+
+Two code paths, both write the same 3 rows to `part_document_requirements`:
+1. **BOMUpload.jsx** — `handleSave` looks up the 3 `document_types` IDs once at the top of the try block, then after creating each new manufactured component, inserts 3 rows: `drawing`, `production_log_blank`, `material_cert`, all `required_at='compliance_review'`, `is_required=true`.
+2. **Armory.jsx** — `openPartModal` for a new manufactured part pre-populates `docRequirements` state with the same 3 entries. They render in the Document Requirements section as soon as the modal opens. User can edit/remove/add before saving. `savePart` already persists whatever's in state, so no save-side changes were needed.
+
+**Why JS not a trigger:** the original approach was a Postgres trigger AFTER INSERT on `parts` WHEN part_type='manufactured'. That fired correctly but couldn't pre-populate the Armory modal before save — the user opened the form and saw an empty Document Requirements section, since DB rows didn't exist yet. Moving the logic to JS makes "what you see in the modal is what gets saved" the single mental model, at the cost of two code paths instead of one. The trigger was dropped via `Docs/migrations/2026-05-17_sky16_drop_trigger.sql`.
+
+**Modal limitation:** pre-population happens on modal open based on the part_type at that moment. Changing part_type inside the modal (e.g., from Manufactured to Purchased) does NOT auto-adjust the requirements — user removes/adds manually. Acceptable trade-off; mid-modal part_type changes are rare.
+
+**Optional backfill SQL** for the ~933 existing parts is in `Docs/migrations/2026-05-17_sky16_doc_requirements_backfill.sql`. Idempotent — apply on TEST then PROD if Roger wants the catalog uniform with new parts going forward.
+
+---
+
+## 2026-05-17 — SKY16 follow-up: code name correction + Part Type onChange reset
+
+Two small fixes after testing the prior SKY16 work:
+
+- **Code name:** the 'cert' document_type code is `material_cert`, not `material_certification` (that string doesn't exist in the document_types table — only 2 of 3 requirements were appearing on new manufactured parts). Fixed in `Armory.jsx`, `BOMUpload.jsx`, and the backfill SQL.
+- **Part Type onChange reset:** in the Part modal create flow, changing Part Type (e.g., Manufactured → Purchased) now resets docRequirements to match the new type. Manufactured pre-populates the 3 defaults; everything else clears. Edit mode is left alone so existing user configurations aren't blown away. The default-computation logic was factored into a `computeDefaultDocRequirements(partType)` helper at the top of the Armory component so both the modal open and the onChange share one source of truth.
+
+Corrected backfill SQL is in `Docs/migrations/2026-05-17_sky16_doc_requirements_backfill.sql` (idempotent — adds the missing material_cert row to any manufactured part that was given drawing + production_log_blank by the previous buggy version).

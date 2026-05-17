@@ -35,6 +35,7 @@ import {
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
+import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
@@ -794,12 +795,12 @@ export default function Kiosk() {
         .from('jobs')
         .select(`
           *,
-          work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
+          work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type, notes),
           component:parts!component_id(id, part_number, description, requires_passivation)
         `)
         .in('status', statusFilter)
         .order('scheduled_start', { ascending: true })
-      
+
       // For secondary stations, show ALL jobs with that status (not filtered by machine)
       // For production machines, filter by assigned machine
       if (!secondaryConfig) {
@@ -809,13 +810,40 @@ export default function Kiosk() {
       const { data, error } = await query
 
       if (error) throw error
+
+      // Hydrate active CO allocations per WO so the header customer display
+      // can show actual customer names (not just the legacy work_order.customer field).
+      const woIds = Array.from(new Set((data || []).map(j => j.work_order?.id).filter(Boolean)))
+      if (woIds.length > 0) {
+        const { data: allocsData, error: allocsErr } = await supabase
+          .from('customer_order_allocations')
+          .select(`
+            work_order_id, quantity_allocated,
+            customer_order_lines (
+              id, due_date, part_id,
+              customer_orders ( co_number, customers ( id, name ) )
+            )
+          `)
+          .in('work_order_id', woIds)
+          .eq('is_active', true)
+        if (allocsErr) console.error('Error hydrating WO allocations:', allocsErr)
+        const byWo = {}
+        for (const a of allocsData || []) {
+          if (!byWo[a.work_order_id]) byWo[a.work_order_id] = []
+          byWo[a.work_order_id].push(a)
+        }
+        for (const j of data || []) {
+          if (j.work_order) j.work_order.active_allocations = byWo[j.work_order.id] || []
+        }
+      }
+
       setJobs(data || [])
-      
+
       // Find active job
       const activeStatus = secondaryConfig ? secondaryConfig.inProgressStatus : ['in_setup', 'in_progress']
-      const active = data?.find(j => 
-        Array.isArray(activeStatus) 
-          ? activeStatus.includes(j.status) 
+      const active = data?.find(j =>
+        Array.isArray(activeStatus)
+          ? activeStatus.includes(j.status)
           : j.status === activeStatus
       )
       setActiveJob(active || null)
@@ -3659,8 +3687,8 @@ export default function Kiosk() {
                         <div className="flex items-center gap-4">
                           <div className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></div>
                           <div>
-                            <div className="flex items-center gap-2"><span className="text-white font-mono">{job.job_number}</span>{getStatusBadge(job.status)}</div>
-                            <p className="text-gray-500 text-sm">{job.component?.part_number} • {job.work_order?.wo_number}</p>
+                            <div className="flex items-center gap-2"><span className="text-white font-mono">{job.component?.part_number || job.job_number}</span>{getStatusBadge(job.status)}</div>
+                            <p className="text-gray-500 text-sm"><span className="text-skynet-accent font-mono">{job.job_number}</span> • {job.work_order?.wo_number}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-4">
@@ -4022,14 +4050,37 @@ export default function Kiosk() {
                     <div>
                       <div className="flex items-center gap-3 mb-1">
                         <span className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)}`}></span>
-                        <span className="text-2xl font-bold text-white font-mono">{activeJob.job_number}</span>
+                        <span className="text-2xl font-bold text-white font-mono">{activeJob.component?.part_number || activeJob.job_number}</span>
                         {activeJob.paused_at && (
                           <span className="px-2 py-0.5 bg-yellow-600/20 text-yellow-400 text-xs font-bold rounded border border-yellow-600/50 flex items-center gap-1">
                             <PauseCircle size={12} />PAUSED
                           </span>
                         )}
                       </div>
-                      <p className="text-gray-400">{activeJob.work_order?.wo_number} • {activeJob.work_order?.customer}</p>
+                      {(() => {
+                        const summary = summarizeWOAllocations(activeJob.work_order?.active_allocations)
+                        const fallbackCustomer = activeJob.work_order?.customer || ''
+                        const customerText = summary.hasAllocations
+                          ? summary.customerList.join(', ')
+                          : fallbackCustomer
+                        return (
+                          <p className="text-gray-400 flex items-center gap-2 flex-wrap">
+                            {activeJob.component?.part_number && (
+                              <>
+                                <span className="text-skynet-accent font-mono">{activeJob.job_number}</span>
+                                <span className="text-gray-600">·</span>
+                              </>
+                            )}
+                            <span>{activeJob.work_order?.wo_number}</span>
+                            {customerText && (
+                              <>
+                                <span className="text-gray-600">·</span>
+                                <span>{customerText}</span>
+                              </>
+                            )}
+                          </p>
+                        )
+                      })()}
                       {activeJob.production_lot_number && (
                         <div className="flex items-center gap-2 mt-1">
                           <span className="text-gray-500 text-sm">Production Lot:</span>
@@ -4550,7 +4601,7 @@ export default function Kiosk() {
                             <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
                           )}
                           <span className={`font-mono text-sm ${jobIsMaintenance ? maintColors.text : 'text-white'}`}>
-                            {job.job_number}
+                            {jobIsMaintenance ? job.job_number : (job.component?.part_number || job.job_number)}
                           </span>
                           {job.status === 'assigned' && isFirstInQueue && !jobIsMaintenance && (
                             <span className="text-xs bg-green-900/50 text-green-400 px-1.5 py-0.5 rounded">Next</span>
@@ -4588,7 +4639,7 @@ export default function Kiosk() {
                           <p className="text-gray-400 text-xs mb-1">{job.work_order?.notes || job.notes || 'No description'}</p>
                         </>
                       ) : (
-                        <p className="text-skynet-accent text-sm font-mono mb-1">{job.component?.part_number}</p>
+                        <p className="text-skynet-accent text-xs font-mono mb-1">{job.job_number}</p>
                       )}
                       <div className="flex items-center justify-between text-xs text-gray-500">
                         {jobIsMaintenance ? (
@@ -4759,7 +4810,7 @@ export default function Kiosk() {
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2">
                             <span className={`w-2 h-2 rounded-full ${getPriorityColor(job.priority)}`}></span>
-                            <span className="text-white font-mono text-sm">{job.job_number}</span>
+                            <span className="text-white font-mono text-sm">{job.component?.part_number || job.job_number}</span>
                           </div>
                           {job.status === 'complete' || job.status === 'manufacturing_complete' ? (
                             <span className="text-xs px-2 py-0.5 rounded bg-green-900/50 text-green-400">Complete</span>
@@ -4767,7 +4818,7 @@ export default function Kiosk() {
                             <span className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-400">{job.status.replace('_', ' ')}</span>
                           )}
                         </div>
-                        <p className="text-skynet-accent text-sm font-mono mb-1">{job.component?.part_number}</p>
+                        <p className="text-skynet-accent text-xs font-mono mb-1">{job.job_number}</p>
                         <div className="flex items-center justify-between text-xs text-gray-500">
                           <span>
                             <span className="text-green-400">{job.good_pieces || 0}</span>

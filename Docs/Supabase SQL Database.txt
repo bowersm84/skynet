@@ -719,25 +719,6 @@ CREATE TABLE public.tools (
   updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT tools_pkey PRIMARY KEY (id)
 );
-CREATE TABLE public.wo_shortfall_resolutions (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  work_order_id uuid NOT NULL,
-  shortfall_type text NOT NULL CHECK (shortfall_type = ANY (ARRAY['demand'::text, 'plan_only'::text])),
-  target_quantity integer NOT NULL,
-  produced_quantity integer NOT NULL,
-  shortfall_quantity integer NOT NULL,
-  resolution text CHECK (resolution IS NULL OR (resolution = ANY (ARRAY['accept_short'::text, 'requeue'::text, 'cancel_shortfall'::text, 'acknowledge_plan'::text]))),
-  resolution_notes text,
-  resolved_by uuid,
-  resolved_at timestamp with time zone,
-  requeue_job_id uuid,
-  status text NOT NULL DEFAULT 'open'::text CHECK (status = ANY (ARRAY['open'::text, 'resolved'::text])),
-  created_at timestamp with time zone NOT NULL DEFAULT now(),
-  CONSTRAINT wo_shortfall_resolutions_pkey PRIMARY KEY (id),
-  CONSTRAINT wo_shortfall_resolutions_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
-  CONSTRAINT wo_shortfall_resolutions_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES public.profiles(id),
-  CONSTRAINT wo_shortfall_resolutions_requeue_job_id_fkey FOREIGN KEY (requeue_job_id) REFERENCES public.jobs(id)
-);
 CREATE TABLE public.work_order_assemblies (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   work_order_id uuid NOT NULL,

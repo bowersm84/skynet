@@ -379,6 +379,23 @@ export default function Armory({ profile }) {
       })
     : filteredParts
 
+  // SKY16: Helper to compute the default doc requirements for a given part_type.
+  // Used by openPartModal (on create) and the Part Type onChange (when user
+  // switches type in create mode). Returns [] for non-manufactured types.
+  const computeDefaultDocRequirements = (partType) => {
+    if (partType !== 'manufactured') return []
+    const defaultCodes = ['drawing', 'production_log_blank', 'material_cert']
+    return defaultCodes
+      .map(code => documentTypes.find(dt => dt.code === code))
+      .filter(Boolean)
+      .map(dt => ({
+        document_type_id: dt.id,
+        required_at: 'compliance_review',
+        is_required: true,
+        notes: ''
+      }))
+  }
+
   // Open part modal for create/edit
   const openPartModal = async (part = null) => {
     if (part) {
@@ -441,10 +458,11 @@ export default function Armory({ profile }) {
       }
     } else {
       setEditingPart(null)
+      const newPartType = activeTab === 'assemblies' ? 'assembly' : 'manufactured'
       setPartForm({
         part_number: '',
         description: '',
-        part_type: activeTab === 'assemblies' ? 'assembly' : 'manufactured',
+        part_type: newPartType,
         customer: '',
         specification: '',
         requires_passivation: false,
@@ -453,14 +471,18 @@ export default function Armory({ profile }) {
         drawing_revision: '',
         is_active: true
       })
-      const newPartType = activeTab === 'assemblies' ? 'assembly' : 'manufactured'
       setRoutingSteps(
         newPartType === 'assembly'
           ? [{ step_name: 'Assemble', step_type: 'internal', default_station: '', notes: '' }]
           : []
       )
-      setDocRequirements([])
-      setShowDocRequirements(false)
+
+      // SKY16: Pre-populate the 3 standard pre-mfg compliance doc requirements
+      // when creating a new manufactured part. User can still edit/add/remove
+      // before saving. Other part types start empty.
+      const defaults = computeDefaultDocRequirements(newPartType)
+      setDocRequirements(defaults)
+      setShowDocRequirements(defaults.length > 0)
       setPreferredMachineId(null)
       setSecondaryMachineIds([])
     }
@@ -1892,7 +1914,18 @@ export default function Armory({ profile }) {
                   <label className="block text-gray-400 text-sm mb-1">Part Type</label>
                   <select
                     value={partForm.part_type}
-                    onChange={(e) => setPartForm({ ...partForm, part_type: e.target.value })}
+                    onChange={(e) => {
+                      const newType = e.target.value
+                      setPartForm({ ...partForm, part_type: newType })
+                      // SKY16: In create mode, keep docRequirements in sync with part_type.
+                      // Manufactured → 3 defaults; anything else → empty. Edit mode never
+                      // auto-resets so we don't blow away user data.
+                      if (!editingPart) {
+                        const defaults = computeDefaultDocRequirements(newType)
+                        setDocRequirements(defaults)
+                        setShowDocRequirements(defaults.length > 0)
+                      }
+                    }}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
                   >
                     {editingPart ? (

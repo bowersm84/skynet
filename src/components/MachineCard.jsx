@@ -133,7 +133,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
           }`}>
             <div className="flex items-center justify-between mb-2">
               <span className={`font-mono text-sm ${
-                isMaintenanceActive 
+                isMaintenanceActive
                   ? maintenanceType === 'unplanned' ? 'text-purple-400' : 'text-blue-400'
                   : 'text-skynet-accent'
               }`}>
@@ -146,14 +146,33 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
                   activeJob.status === 'in_setup' ? 'SETUP' : 'RUNNING'
                 )}
               </span>
-              {!isMaintenanceActive && (
-                <div className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)} animate-pulse`}></div>
-              )}
+              <div className="flex items-center gap-2">
+                {!isMaintenanceActive && activeJob.quantity > 0 && (
+                  <span
+                    className="text-[11px] font-mono text-gray-300 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded"
+                    title="Parts accepted from finishing / Job quantity"
+                  >
+                    Finished: {activeJob.finished_qty || 0}/{activeJob.quantity}
+                  </span>
+                )}
+                {!isMaintenanceActive && (
+                  <div className={`w-3 h-3 rounded-full ${getPriorityColor(activeJob.priority)} animate-pulse`}></div>
+                )}
+              </div>
             </div>
-            <p className="text-white font-semibold">{activeJob.job_number}</p>
-            <p className="text-gray-400 text-sm">{activeJob.work_order?.wo_number}</p>
-            {activeJob.component?.part_number && (
-              <p className="text-skynet-accent text-sm font-mono">{activeJob.component.part_number}</p>
+            {isMaintenanceActive ? (
+              <>
+                <p className="text-white font-semibold">{activeJob.job_number}</p>
+                <p className="text-gray-400 text-sm">{activeJob.work_order?.wo_number}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-white font-semibold font-mono">{activeJob.component?.part_number || activeJob.job_number}</p>
+                <p className="text-gray-400 text-sm">{activeJob.work_order?.wo_number}</p>
+                {activeJob.component?.part_number && (
+                  <p className="text-skynet-accent text-xs font-mono">{activeJob.job_number}</p>
+                )}
+              </>
             )}
             {isMaintenanceActive && activeJob.maintenance_description && (
               <p className="text-gray-400 text-xs mt-1 line-clamp-2">{activeJob.maintenance_description}</p>
@@ -173,12 +192,12 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
             <div className="space-y-1">
               {queuedJobs.slice(0, 3).map(job => (
                 <div key={job.id} className="flex items-center justify-between text-sm">
-                  <span className={`font-mono ${
+                  <span className={`font-mono truncate ${
                     job.status === 'pending_compliance'
                       ? 'text-amber-400/70'
-                      : 'text-gray-400'
+                      : 'text-gray-300'
                   }`}>
-                    {job.job_number}
+                    {job.component?.part_number || job.job_number}
                   </span>
                   {job.status === 'pending_compliance' ? (
                     <span className="flex items-center gap-1 text-[9px] font-bold text-amber-400 bg-amber-900/50 border border-amber-700/50 px-1.5 py-0.5 rounded">

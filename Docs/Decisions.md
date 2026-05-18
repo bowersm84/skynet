@@ -830,8 +830,18 @@ Multi-part Production Dashboard cleanup pre-meeting.
 
 **All active jobs render** — previous 8-row cap with "+N more active" footer removed. If 16 machines are running, all 16 rows render. Density is a tradeoff Matt accepted vs hiding rows behind a footer.
 
-**Down Machines ETA subpanel** added below the Machine Status tiles. Pulls each currently-down machine's most recent open downtime log entry and shows the `end_time` as the estimated return. Open = `end_time IS NULL OR end_time > now`. Sorted by earliest ETA first; entries with no estimate show "TBD". Panel hides entirely when no machines are down. Red-tinted header matches the Down tile aesthetic.
+**Down Machines ETA subpanel** added below the Machine Status tiles. For each currently-down machine, finds the active DTU (downtime unit) job — a `jobs` row with `job_number LIKE 'DTU-%'`, status non-terminal, whose `scheduled_start ... scheduled_end` window contains NOW. Displays the DTU number (e.g., DTU-000018), the MO description from `work_orders.notes`, an "UNPLANNED" purple badge when `work_orders.maintenance_type = 'unplanned'`, and `scheduled_end` as the estimated return. MO number itself omitted — DTU + description + ETA carry the signal. Sorted by earliest ETA first; machines down with no active DTU in window still render with TBD placeholder so "machine is down" signal survives. Panel hides when zero machines are down. (Initial draft used `machine_downtime_logs.end_time` — replaced because the DTU job's `scheduled_end` is the authoritative scheduling-side ETA April sets when planning the maintenance window.)
 
 **Helper consolidation.** `formatRelativeStart` (used by UP NEXT column) replaces the deleted `formatChangeoverCountdown`. Same shape, simpler logic — collapses hours-and-minutes down to a single rounded unit ("in 3h", "in 2d").
 
 **Machine codes as a grid.** Each Machine Status tile's code list switched from inline `·`-separated to a CSS `grid-cols-3` layout. Codes line up in clean rows/columns rather than wrapping mid-paragraph; far more legible at the dashboard's typical glance-distance use. Empty tiles still show `—` as before.
+
+**Active Jobs row treatment rebuilt (post-review).** The colored left-border traffic-light strip (green/amber/red/gray) and the ON TRACK / SLIPPING / BEHIND legend at top right are gone. The four-state traffic light wasn't drawing the eye to what mattered — the production meeting's actual questions are "what's behind?" and "what's changing over this week?" Row styling now answers both directly via the whole-row tint:
+- **Behind** (`trafficLight === 'red'`): red-tinted background (`bg-red-950/30`), 2px red border (`border-red-500/60`), `BEHIND` badge in red next to the RUNNING/SETUP status pill.
+- **This-week changeover** (`next_up.is_this_week`): amber-tinted background (`bg-amber-950/20`), 2px amber border (`border-amber-500/50`). No badge — UP NEXT cell already labels it.
+- **Both qualify**: behind wins the background/border (more urgent); UP NEXT cell still gets its amber treatment internally.
+- **Neither**: standard gray background, gray border.
+
+Pace signal for non-red states (green / amber / grey) no longer surfaces visually — Matt's call that those three don't justify a discriminator when only "behind" is actionable. Underlying `trafficLight` enrichment kept in the loader so the row can branch on `=== 'red'` without recomputation.
+
+**Machine code elevated to part-number prominence.** Was small gray text under the part number; now bold, white, same font size, on the same line as the part number. The machine name (e.g., "Mazak 5") drops to a small gray subtitle below.

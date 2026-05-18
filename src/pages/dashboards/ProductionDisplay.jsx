@@ -157,9 +157,14 @@ export default function ProductionDisplay() {
     setMachineGroups(groups)
   }, [])
 
-  // Down machines + their estimated return (end_time of the most recent open
-  // downtime log). "Open" means end_time IS NULL OR end_time > now — the
-  // downtime hasn't been resolved yet.
+  // For each currently-down machine, find the active DTU (downtime unit) job —
+  // a job_number LIKE 'DTU-%' on a non-terminal status whose scheduled window
+  // contains NOW. Display the DTU number, the MO description (work_orders.notes),
+  // an UNPLANNED badge when maintenance_type='unplanned', and scheduled_end as
+  // the estimated return.
+  //
+  // Machines flagged down with no active DTU still appear with TBD / — so the
+  // signal "machine is down" survives even when no maintenance order is logged.
   const loadDownMachineETAs = useCallback(async () => {
     const machinesRes = await supabase
       .from('machines')
@@ -181,34 +186,44 @@ export default function ProductionDisplay() {
     }
 
     const ids = downMachines.map(m => m.id)
-    const { data: logs, error } = await supabase
-      .from('machine_downtime_logs')
-      .select('id, machine_id, start_time, end_time, reason')
-      .in('machine_id', ids)
-      .order('start_time', { ascending: false })
+    const { data: dtus, error } = await supabase
+      .from('jobs')
+      .select(`
+        id, job_number, status, scheduled_start, scheduled_end, assigned_machine_id,
+        work_order:work_orders(wo_number, notes, maintenance_type, order_type)
+      `)
+      .ilike('job_number', 'DTU-%')
+      .in('assigned_machine_id', ids)
+      .in('status', ['pending_compliance', 'ready', 'assigned', 'in_setup', 'in_progress'])
 
     if (error) {
-      console.error('loadDownMachineETAs/logs error:', error)
+      console.error('loadDownMachineETAs/dtus error:', error)
       setDownMachineETAs([])
       return
     }
 
-    const nowIso = new Date().toISOString()
-    const openLogByMachine = {}
-    for (const log of (logs || [])) {
-      if (openLogByMachine[log.machine_id]) continue
-      const isOpen = !log.end_time || log.end_time > nowIso
-      if (isOpen) openLogByMachine[log.machine_id] = log
+    const now = Date.now()
+    const candidatesByMachine = {}
+    for (const d of (dtus || [])) {
+      if (!d.scheduled_start || !d.scheduled_end) continue
+      const startMs = new Date(d.scheduled_start).getTime()
+      const endMs = new Date(d.scheduled_end).getTime()
+      if (now < startMs || now > endMs) continue
+      if (!candidatesByMachine[d.assigned_machine_id]) candidatesByMachine[d.assigned_machine_id] = []
+      candidatesByMachine[d.assigned_machine_id].push(d)
     }
 
     const result = downMachines.map(m => {
-      const log = openLogByMachine[m.id]
+      const candidates = candidatesByMachine[m.id] || []
+      candidates.sort((a, b) => new Date(a.scheduled_end) - new Date(b.scheduled_end))
+      const primary = candidates[0]
       return {
         machine_code: m.code,
         machine_name: m.name,
-        reason: log?.reason || '—',
-        estimated_return: log?.end_time || null,
-        start_time: log?.start_time || null,
+        dtu_number: primary?.job_number || null,
+        description: primary?.work_order?.notes || null,
+        maintenance_type: primary?.work_order?.maintenance_type || null,
+        estimated_return: primary?.scheduled_end || null,
       }
     }).sort((a, b) => {
       const aEnd = a.estimated_return ? new Date(a.estimated_return).getTime() : Infinity
@@ -531,16 +546,9 @@ export default function ProductionDisplay() {
 
           {/* ===== Active Jobs ===== */}
           <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 mb-4">
-            <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">
-              <p className="text-gray-400 text-xs uppercase tracking-wide">
-                Active Jobs · {activeJobs.length} running
-              </p>
-              <div className="flex items-center gap-3 text-[10px] text-gray-500 font-mono">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" />ON TRACK</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" />SLIPPING</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" />BEHIND</span>
-              </div>
-            </div>
+            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">
+              Active Jobs · {activeJobs.length} running
+            </p>
             {activeJobs.length === 0 ? (
               <p className="text-gray-600 text-sm italic">No active jobs — all machines idle</p>
             ) : (
@@ -575,15 +583,25 @@ export default function ProductionDisplay() {
                 {downMachineETAs.map(d => (
                   <div key={d.machine_code} className="bg-gray-900/60 border border-gray-800 rounded px-3 py-2">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-white font-mono text-sm font-semibold">{d.machine_code}</span>
-                      <span className="text-red-400/80 font-mono text-[10px] uppercase tracking-wider">
+                      <div className="flex items-baseline gap-2 min-w-0">
+                        <span className="text-white font-mono text-sm font-semibold">{d.machine_code}</span>
+                        {d.dtu_number && (
+                          <span className="text-blue-400 font-mono text-[10px]">{d.dtu_number}</span>
+                        )}
+                        {d.maintenance_type === 'unplanned' && (
+                          <span className="bg-purple-900/40 text-purple-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded">
+                            Unplanned
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-red-400/80 font-mono text-[10px] uppercase tracking-wider shrink-0">
                         {d.estimated_return
                           ? new Date(d.estimated_return).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                           : 'TBD'}
                       </span>
                     </div>
-                    <div className="text-gray-500 text-xs font-mono mt-1 truncate">
-                      {d.reason}
+                    <div className="text-gray-400 text-xs mt-1 truncate">
+                      {d.description || '—'}
                     </div>
                   </div>
                 ))}
@@ -645,12 +663,17 @@ function StatusTile({ color, label, count, machines }) {
 }
 
 function ActiveJobRow({ job }) {
-  const borderColor = {
-    red:   'border-l-red-500',
-    amber: 'border-l-amber-500',
-    green: 'border-l-green-500',
-    grey:  'border-l-gray-600',
-  }[job.trafficLight] || 'border-l-gray-600'
+  // Row-level highlight states (replaces the old colored left-border traffic light).
+  // Behind wins over this-week for background/border when both apply — it's more
+  // urgent. UP NEXT cell still gets its own amber treatment internally either way.
+  const isBehind = job.trafficLight === 'red'
+  const isThisWeek = job.next_up?.is_this_week === true
+
+  const containerClasses = isBehind
+    ? 'border-2 border-red-500/60 bg-red-950/30'
+    : isThisWeek
+      ? 'border-2 border-amber-500/50 bg-amber-950/20'
+      : 'border border-gray-800 bg-gray-900/60'
 
   const statusLabel = job.status === 'in_setup' ? 'SETUP' : 'RUNNING'
   const statusColor = job.status === 'in_setup' ? 'text-amber-400' : 'text-green-400'
@@ -664,25 +687,37 @@ function ActiveJobRow({ job }) {
     : '—'
 
   return (
-    <div className={`flex items-center gap-3 bg-gray-900/60 border-l-4 ${borderColor} px-3 py-2 rounded`}>
+    <div className={`flex items-center gap-3 ${containerClasses} px-3 py-2 rounded`}>
       <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-3 flex-wrap">
           <span className="text-white font-mono text-base font-semibold truncate">
             {job.component?.part_number || '—'}
           </span>
-          <span className="text-skynet-accent font-mono text-xs">{job.job_number}</span>
+          <span className="text-white font-mono text-base font-semibold">
+            {job.machine?.code || '—'}
+          </span>
+          <span className="text-blue-400 font-mono text-xs">{job.job_number}</span>
         </div>
-        <div className="text-gray-500 text-xs font-mono mt-0.5">
-          {job.machine?.code || '—'}{job.machine?.name ? ` · ${job.machine.name}` : ''}
-        </div>
+        {job.machine?.name && (
+          <div className="text-gray-500 text-xs font-mono mt-0.5">
+            {job.machine.name}
+          </div>
+        )}
       </div>
-      <div className="text-right shrink-0 min-w-[110px]">
-        <div className={`text-xs font-mono font-semibold ${statusColor}`}>{statusLabel}</div>
+      <div className="text-right shrink-0 min-w-[120px]">
+        <div className="flex items-center justify-end gap-2">
+          <span className={`text-xs font-mono font-semibold ${statusColor}`}>{statusLabel}</span>
+          {isBehind && (
+            <span className="bg-red-900/60 text-red-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded">
+              Behind
+            </span>
+          )}
+        </div>
         <div className="text-gray-300 text-sm font-mono mt-0.5">
           {(job.finished || 0).toLocaleString()} / {(job.targetQty || 0).toLocaleString()}
         </div>
         <div className="w-full bg-gray-800 rounded-full h-1 mt-1 overflow-hidden">
-          <div className="h-full bg-skynet-accent" style={{ width: `${progressPct}%` }} />
+          <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />
         </div>
       </div>
       <div className="text-right shrink-0 min-w-[80px]">

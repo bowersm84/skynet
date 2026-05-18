@@ -22,6 +22,7 @@ import {
   getAllocationsForLine,
 } from '../lib/customerOrders'
 import { loadActiveSalespeople } from '../lib/salespeople'
+import { isReadOnlyRole } from '../lib/roles'
 
 const STATUS_FILTERS = [
   { value: 'all', label: 'All' },
@@ -34,7 +35,7 @@ const STATUS_FILTERS = [
 const CAN_EDIT_ROLES = ['admin', 'scheduler', 'customer_service']
 
 export default function CustomerOrders({ profile, onNavigate, embedded = false, onNavigateToWO = null }) {
-  const canEdit = CAN_EDIT_ROLES.includes(profile?.role)
+  const canEdit = CAN_EDIT_ROLES.includes(profile?.role) && !isReadOnlyRole(profile?.role)
 
   const [coTab, setCoTab] = useState('orders') // 'orders' | 'demand'
   const [orders, setOrders] = useState([])

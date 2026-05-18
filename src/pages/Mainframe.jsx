@@ -23,8 +23,10 @@ import AddJobDocumentModal from '../components/AddJobDocumentModal'
 import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
 import WOLookupShortfalls from '../components/WOLookupShortfalls'
+import { isReadOnlyRole } from '../lib/roles'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
+  const canWrite = !isReadOnlyRole(profile?.role)
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1906,13 +1908,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                           <AlertCircle size={10} /> Rework
                         </span>
                       )}
-                      <button
-                        onClick={() => handleEditClick(job)}
-                        className="flex items-center gap-1 text-xs text-gray-400 hover:text-skynet-accent transition-colors px-2 py-1 rounded hover:bg-gray-700"
-                      >
-                        <Edit3 size={12} />
-                        Edit
-                      </button>
+                      {canWrite && (
+                        <button
+                          onClick={() => handleEditClick(job)}
+                          className="flex items-center gap-1 text-xs text-gray-400 hover:text-skynet-accent transition-colors px-2 py-1 rounded hover:bg-gray-700"
+                        >
+                          <Edit3 size={12} />
+                          Edit
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2731,7 +2735,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                           </div>
                                         </div>
                                         {assemblyJobs.map(job => {
-                                          const canCancel = !['complete', 'cancelled'].includes(job.status)
+                                          const canCancel = !['complete', 'cancelled'].includes(job.status) && canWrite
                                           return (
                                             <div 
                                               key={job.id} 

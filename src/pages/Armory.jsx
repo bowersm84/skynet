@@ -30,10 +30,14 @@ import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
+import { isReadOnlyRole } from '../lib/roles'
 
 export default function Armory({ profile }) {
+  const canWrite = !isReadOnlyRole(profile?.role)
   // Per-role tab visibility. Single source of truth.
   // Order in each array determines the default tab for that role (first item).
+  // Read-only roles (president, viewer) get the read-relevant tab set
+  // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
     admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving', 'customers', 'users'],
     compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving'],
@@ -41,6 +45,8 @@ export default function Armory({ profile }) {
     machinist:        ['inventory'],
     scheduler:        ['customers'],
     customer_service: ['customers'],
+    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'customers'],
+    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'customers'],
   }
   const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -1259,7 +1265,7 @@ export default function Armory({ profile }) {
                 })}
               </div>
               <div className="flex items-center gap-2">
-                {activeTab === 'assemblies' && (
+                {activeTab === 'assemblies' && canWrite && (
                   <button
                     onClick={() => setShowBOMUpload(true)}
                     className="flex items-center gap-2 px-4 py-2 bg-green-700 hover:bg-green-600 text-white font-medium rounded-lg transition-colors"
@@ -1268,13 +1274,15 @@ export default function Armory({ profile }) {
                     Upload BOM
                   </button>
                 )}
-                <button
-                  onClick={() => openPartModal()}
-                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
-                >
-                  <Plus size={18} />
-                  Add {activeTab === 'assemblies' ? 'Product' : 'Part'}
-                </button>
+                {canWrite && (
+                  <button
+                    onClick={() => openPartModal()}
+                    className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
+                  >
+                    <Plus size={18} />
+                    Add {activeTab === 'assemblies' ? 'Product' : 'Part'}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1360,36 +1368,38 @@ export default function Armory({ profile }) {
                         )}
                       </div>
                       
-                      <div className="flex items-center gap-2">
-                        {part.part_type === 'assembly' && (
-                          <button
-                            onClick={() => openBOMModal(part)}
-                            className="p-2 text-purple-400 hover:text-purple-300 hover:bg-purple-900/20 rounded transition-colors"
-                            title="Manage BOM"
-                          >
-                            <Layers size={18} />
-                          </button>
-                        )}
-                        <button
-                          onClick={() => openPartModal(part)}
-                          className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
-                          title="Edit"
-                        >
-                          <Edit2 size={18} />
-                        </button>
-                        <button
-                          onClick={() => handleDeletePart(part.id)}
-                          disabled={deleting === part.id}
-                          className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
-                          title="Delete"
-                        >
-                          {deleting === part.id ? (
-                            <Loader2 size={18} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={18} />
+                      {canWrite && (
+                        <div className="flex items-center gap-2">
+                          {part.part_type === 'assembly' && (
+                            <button
+                              onClick={() => openBOMModal(part)}
+                              className="p-2 text-purple-400 hover:text-purple-300 hover:bg-purple-900/20 rounded transition-colors"
+                              title="Manage BOM"
+                            >
+                              <Layers size={18} />
+                            </button>
                           )}
-                        </button>
-                      </div>
+                          <button
+                            onClick={() => openPartModal(part)}
+                            className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+                            title="Edit"
+                          >
+                            <Edit2 size={18} />
+                          </button>
+                          <button
+                            onClick={() => handleDeletePart(part.id)}
+                            disabled={deleting === part.id}
+                            className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+                            title="Delete"
+                          >
+                            {deleting === part.id ? (
+                              <Loader2 size={18} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={18} />
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1403,13 +1413,15 @@ export default function Armory({ profile }) {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <p className="text-gray-400">Manage material types for manufacturing tracking</p>
-              <button
-                onClick={() => openMaterialModal()}
-                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
-              >
-                <Plus size={18} />
-                Add Material
-              </button>
+              {canWrite && (
+                <button
+                  onClick={() => openMaterialModal()}
+                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
+                >
+                  <Plus size={18} />
+                  Add Material
+                </button>
+              )}
             </div>
 
             {materialTypes.length === 0 ? (
@@ -1434,25 +1446,27 @@ export default function Armory({ profile }) {
                           <p className="text-gray-500 text-xs mt-1">Category: {mat.category}</p>
                         )}
                       </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => openMaterialModal(mat)}
-                          className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
-                        >
-                          <Edit2 size={14} />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteMaterial(mat.id)}
-                          disabled={deleting === mat.id}
-                          className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded disabled:opacity-50"
-                        >
-                          {deleting === mat.id ? (
-                            <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={14} />
-                          )}
-                        </button>
-                      </div>
+                      {canWrite && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => openMaterialModal(mat)}
+                            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteMaterial(mat.id)}
+                            disabled={deleting === mat.id}
+                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded disabled:opacity-50"
+                          >
+                            {deleting === mat.id ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={14} />
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1466,13 +1480,15 @@ export default function Armory({ profile }) {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <p className="text-gray-400">Manage standard bar sizes for material tracking</p>
-              <button
-                onClick={() => openBarSizeModal()}
-                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
-              >
-                <Plus size={18} />
-                Add Bar Size
-              </button>
+              {canWrite && (
+                <button
+                  onClick={() => openBarSizeModal()}
+                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
+                >
+                  <Plus size={18} />
+                  Add Bar Size
+                </button>
+              )}
             </div>
 
             {barSizes.length === 0 ? (
@@ -1495,25 +1511,27 @@ export default function Armory({ profile }) {
                         )}
                         <p className="text-gray-600 text-xs capitalize">{bs.shape}</p>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => openBarSizeModal(bs)}
-                          className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
-                        >
-                          <Edit2 size={14} />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteBarSize(bs.id)}
-                          disabled={deleting === bs.id}
-                          className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded disabled:opacity-50"
-                        >
-                          {deleting === bs.id ? (
-                            <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={14} />
-                          )}
-                        </button>
-                      </div>
+                      {canWrite && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => openBarSizeModal(bs)}
+                            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteBarSize(bs.id)}
+                            disabled={deleting === bs.id}
+                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded disabled:opacity-50"
+                          >
+                            {deleting === bs.id ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={14} />
+                            )}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

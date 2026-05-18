@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart } from 'lucide-react'
 import Login from './pages/Login'
@@ -14,6 +14,8 @@ import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
+import PresidentsBridge from './pages/dashboards/PresidentsBridge'
+import { isReadOnlyRole } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -22,6 +24,7 @@ import ForceChangePassword from './components/ForceChangePassword'
 const DASHBOARDS = [
   { label: 'Production Dashboard', path: '/dashboards/production' },
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
+  { label: "President's Bridge", path: '/bridge' },
 ]
 
 // Main authenticated app component
@@ -168,16 +171,18 @@ function MainApp() {
   }
 
   // Roles that can VIEW the Command/Schedule page
-  const canAccessSchedule = ['admin', 'scheduler', 'compliance', 'finishing', 'machinist'].includes(profile?.role)
+  // Read-only roles (president, viewer) see it but cannot edit (see canEditSchedule).
+  const canAccessSchedule = ['admin', 'scheduler', 'compliance', 'finishing', 'machinist', 'president', 'viewer'].includes(profile?.role)
 
   // Roles that can EDIT the schedule (drag jobs, schedule maintenance, reschedule)
   // Also gates work order creation buttons in Mainframe
+  // Read-only roles intentionally excluded.
   const canEditSchedule = ['admin', 'scheduler'].includes(profile?.role)
 
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
-  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service'].includes(profile?.role)
-  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service'].includes(profile?.role) || profile?.is_salesperson === true
+  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role)
+  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role) || profile?.is_salesperson === true
 
   // Dashboards menu remains admin-only (distinct from Armory)
   const canAccessDashboards = profile?.role === 'admin'
@@ -228,6 +233,13 @@ function MainApp() {
         }}
       />
     )
+  }
+
+  // President auto-redirects to Bridge ONLY from root.
+  // This lets Ned click "BROWSE SKYNET" on the Bridge to enter the read-only
+  // main shell without bouncing back. Once on any other path, he stays there.
+  if (profile?.role === 'president' && window.location.pathname === '/') {
+    return <Navigate to="/bridge" replace />
   }
 
   return (
@@ -452,6 +464,9 @@ function App() {
         {/* Assembly display - TV dashboard, no login required */}
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
         <Route path="/dashboards/production" element={<ProductionDisplay />} />
+
+        {/* President's Bridge - auth + role gated (president + admin) */}
+        <Route path="/bridge" element={<PresidentsBridge />} />
 
         {/* Print traveler route - opens in new tab */}
         <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />

@@ -646,3 +646,27 @@ Section heading is now dynamic — "Friday's Output" / "Monday's Output" / etc. 
 - MZ-5 with queue, no active job → **Ready**
 - Any other machine with queue, no active job → **Staged**
 - When more kiosks come online, those machines will flip from Staged to Ready automatically — no code change needed, just the `machines.kiosk_enabled` toggle.
+
+---
+
+## 2026-05-18 — President's Bridge launched + read-only roles (`president`, `viewer`)
+
+**President's Bridge.** Apollo-themed dashboard at `/bridge`, built for Ned Bowers (Skybolt founder, Apollo program alumnus). Six KPI panels tagged with Apollo flight-controller stations (FLIGHT / GUIDANCE / RETRO / CAPCOM / SURGEON / EECOM). Mission Elapsed Time counts from Skybolt founding day, 23 March 1982. Five parallel Supabase queries on 60s poll: open work orders, machines status, compliance queue, finishing queue, and one master jobs query that derives both the trajectory pipeline and the priority queue. Coming-soon treatment for On-Time Delivery; Assembly panel wakes up when `FEATURES.ASSEMBLY_MODULE` flips true.
+
+**Two new roles in `profiles_role_check`:**
+- `president` — Ned. Auto-redirects to `/bridge` on landing at `/`. Once he clicks "BROWSE SKYNET" the redirect doesn't fire again (it's keyed to `window.location.pathname === '/'`). He has read-only access to the main shell.
+- `viewer` — generic leadership read-only role. No Bridge access. Lands on the main shell like any other user, sees the read-relevant tab set, all action buttons hidden.
+
+**Read-only enforcement is UI-only.** `src/lib/roles.js` exports `READ_ONLY_ROLES = ['president', 'viewer']` and an `isReadOnlyRole(role)` helper. Main shell renders an amber "READ-ONLY ACCESS" banner across the top for these roles. Primary action buttons (Create WO, Schedule Job, Send Batch, Approve Compliance, etc.) are conditionally rendered via `!isReadOnlyRole(profile?.role)`. RLS policies are not modified — protection is cosmetic. If a read-only user found a way to fire a write directly (browser devtools, API call), RLS would still allow it because their role isn't in the deny path. Acceptable for the threat model: trusted internal viewers, not adversaries.
+
+**Tab visibility for read-only roles:** Mainframe, Schedule, Armory, Compliance, Finishing (status), Customer Orders, Quality, Reports. Hidden: Receiving form, Kiosk routes, Users admin.
+
+**Manual step post-deploy.** Update Ned's profile in PROD: `role = 'president'`, `full_name = 'Ned Bowers'`. Subsequent leadership viewers get `role = 'viewer'`.
+
+**Replaces backlog items:** SKY35 (generic viewer role) — shipped as part of this work.
+
+---
+
+## 2026-05-18 — Read-only banner removed
+
+Per Matt's preference, the amber "READ-ONLY ACCESS" banner that rendered above the main shell for `president` / `viewer` roles is removed. It stacked awkwardly against the existing "TEST ENVIRONMENT — NOT LIVE DATA" banner on TEST, and the action-button gating already provides clear signal that writes aren't available. The `isReadOnlyRole` helper and all button-level gating remain in place.

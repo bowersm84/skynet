@@ -7,6 +7,7 @@ import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { fulfillFromRequeueJob } from '../lib/coFulfillment'
 import { promoteToPartDocument } from '../lib/documents'
+import { isReadOnlyRole } from '../lib/roles'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
 import DeferredDocsWidget from './DeferredDocsWidget'
@@ -40,6 +41,7 @@ import {
 
 
 export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateToWO }) {
+  const canWrite = !isReadOnlyRole(profile?.role)
   const [expandedJob, setExpandedJob] = useState(null)
   const [jobDetails, setJobDetails] = useState({})
   const [uploading, setUploading] = useState(null)
@@ -2123,7 +2125,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                                         </label>
                                       )}
 
-                                      {doc.status === 'pending' && (
+                                      {doc.status === 'pending' && canWrite && (
                                         <button
                                           onClick={() => handleApproveDocument(doc.id, job.id)}
                                           disabled={approving === doc.id}
@@ -2232,7 +2234,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                       </div>
                     )}
 
-                    {/* Footer — outcome selector + submit actions */}
+                    {/* Footer — outcome selector + submit actions. Hidden for read-only roles. */}
+                    {canWrite && (
                     <div className="mt-4 pt-4 border-t border-gray-700">
                       <div className="space-y-2 mb-3">
                         {jobCanApprove ? (
@@ -2394,6 +2397,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         )
                       })()}
                     </div>
+                    )}
                   </div>
                   )
                 })()}
@@ -2948,7 +2952,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                             )
                           })()}
 
-                          {/* Outcome selector + submit */}
+                          {/* Outcome selector + submit. Hidden for read-only roles. */}
+                          {canWrite && (
                           <div className="pt-2">
                             {renderOutcomeSelector({
                               outcome: batchReviewData[send.id]?.outcome,
@@ -2964,7 +2969,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               disabled: isApproving,
                             })}
                           </div>
-                          {(() => {
+                          )}
+                          {canWrite && (() => {
                             const outcome = batchReviewData[send.id]?.outcome
                             const outcomeNote = (batchReviewData[send.id]?.notes || '').trim()
                             const outcomeValid = outcome === 'accepted'

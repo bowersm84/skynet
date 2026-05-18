@@ -10,6 +10,8 @@ const ROLE_OPTIONS = [
   { value: 'scheduler', label: 'Scheduler' },
   { value: 'customer_service', label: 'Customer Service' },
   { value: 'assembly', label: 'Assembly' },
+  { value: 'president', label: 'President (Bridge + read-only)' },
+  { value: 'viewer', label: 'Viewer (read-only)' },
 ]
 
 export default function UsersTab({ profile }) {

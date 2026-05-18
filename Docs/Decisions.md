@@ -844,4 +844,8 @@ Multi-part Production Dashboard cleanup pre-meeting.
 
 Pace signal for non-red states (green / amber / grey) no longer surfaces visually — Matt's call that those three don't justify a discriminator when only "behind" is actionable. Underlying `trafficLight` enrichment kept in the loader so the row can branch on `=== 'red'` without recomputation.
 
+**BEHIND logic simplified to past-due only.** The progress-vs-pace heuristic (good_pieces vs elapsed-time%) is gone entirely — it was flagging every RUNNING job with 0 good_pieces as BEHIND regardless of due date, which masked the actual past-due jobs in a sea of false positives. New logic: `trafficLight = 'red'` iff `scheduled_end < today's midnight`. Jobs with no `scheduled_end` default to not-behind. `SETUP_RED_AFTER_MS`, `estimated_minutes`, `good_pieces`-based progress checks all removed from the trafficLight branch. Elapsed time is still computed and displayed in the ELAPSED column — it just doesn't drive the BEHIND signal anymore.
+
+**10-day forward filter on Active Jobs.** The loader now only emits jobs whose `scheduled_end` is in the past (past-due, BEHIND) or within the next 10 days. Anything scheduled further out is hidden — the TV-projected list stays digestible (8-12 rows typical vs. potentially 40+ if every future-scheduled job rendered). Jobs with NULL `scheduled_end` are kept defensively. Header count (`activeJobs.length`) reflects the visible filtered total, not a hidden global active count — intentional: the dashboard reflects what's visible.
+
 **Machine code elevated to part-number prominence.** Was small gray text under the part number; now bold, white, same font size, on the same line as the part number. The machine name (e.g., "Mazak 5") drops to a small gray subtitle below.

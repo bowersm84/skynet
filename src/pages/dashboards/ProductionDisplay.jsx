@@ -331,41 +331,30 @@ export default function ProductionDisplay() {
     }
 
     const now = Date.now()
-    const SETUP_RED_AFTER_MS = 2 * 60 * 60 * 1000  // 2h hard threshold
+
+    // BEHIND = scheduled_end is in the past (before today's midnight). The
+    // earlier progress-vs-pace heuristic surfaced too many false positives —
+    // any RUNNING job with 0 good_pieces flagged as BEHIND regardless of due
+    // date. Past-due is the signal the production meeting actually wants.
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+    const todayStartMs = todayStart.getTime()
 
     const enriched = list.map(j => {
       const finished = finishingByJob[j.id] || 0
       const targetQty = j.qty_override ?? j.quantity ?? 0
-      let trafficLight = 'grey'
       let elapsedMs = 0
 
-      if (j.status === 'in_setup') {
-        if (j.setup_start) {
-          elapsedMs = now - new Date(j.setup_start).getTime()
-          trafficLight = elapsedMs > SETUP_RED_AFTER_MS ? 'red' : 'amber'
-        } else {
-          trafficLight = 'amber'
-        }
-      } else if (j.status === 'in_progress') {
-        if (j.production_start && j.estimated_minutes) {
-          elapsedMs = now - new Date(j.production_start).getTime()
-          const estimatedMs = j.estimated_minutes * 60 * 1000
-          const elapsedPct = elapsedMs / estimatedMs
-          const progressPct = targetQty > 0 ? (j.good_pieces || 0) / targetQty : 0
-          if (elapsedPct <= 0) {
-            trafficLight = 'grey'
-          } else if (progressPct >= elapsedPct - 0.05) {
-            trafficLight = 'green'
-          } else if (progressPct >= elapsedPct - 0.25) {
-            trafficLight = 'amber'
-          } else {
-            trafficLight = 'red'
-          }
-        } else if (j.production_start) {
-          elapsedMs = now - new Date(j.production_start).getTime()
-          trafficLight = 'grey'  // running but no estimate — no signal
-        }
+      if (j.status === 'in_setup' && j.setup_start) {
+        elapsedMs = now - new Date(j.setup_start).getTime()
+      } else if (j.status === 'in_progress' && j.production_start) {
+        elapsedMs = now - new Date(j.production_start).getTime()
       }
+
+      const isBehind = j.scheduled_end
+        ? new Date(j.scheduled_end).getTime() < todayStartMs
+        : false
+      const trafficLight = isBehind ? 'red' : 'green'
 
       return { ...j, finished, targetQty, trafficLight, elapsedMs }
     })
@@ -415,15 +404,29 @@ export default function ProductionDisplay() {
       }
     }
 
+    // 10-day forward filter. Past-due rows + jobs scheduled within the next
+    // 10 days stay; anything further out is hidden so the TV-projected list
+    // stays digestible. Jobs with NULL scheduled_end are kept defensively so
+    // they don't fall through a hole.
+    const tenDaysOut = new Date()
+    tenDaysOut.setHours(23, 59, 59, 999)
+    tenDaysOut.setDate(tenDaysOut.getDate() + 10)
+    const tenDaysOutMs = tenDaysOut.getTime()
+
+    const filtered = enriched.filter(j => {
+      if (!j.scheduled_end) return true
+      return new Date(j.scheduled_end).getTime() <= tenDaysOutMs
+    })
+
     // Sort by scheduled_end ascending — earliest deadline first.
     // Jobs with no scheduled_end sort to the bottom.
-    enriched.sort((a, b) => {
+    filtered.sort((a, b) => {
       const aEnd = a.scheduled_end ? new Date(a.scheduled_end).getTime() : Infinity
       const bEnd = b.scheduled_end ? new Date(b.scheduled_end).getTime() : Infinity
       return aEnd - bEnd
     })
 
-    setActiveJobs(enriched)
+    setActiveJobs(filtered)
   }, [])
 
   const loadAll = useCallback(async () => {

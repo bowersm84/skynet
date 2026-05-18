@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import { FEATURES } from '../../config'
+import { deriveMachineStatus } from '../../lib/machineStatus'
 
 // Ned's T-0: Skybolt founding day, 23 March 1982 (Apollo program alumnus, founded Skybolt 7 years after Apollo-Soyuz)
 const LAUNCH_DATE = new Date('1982-03-23T00:00:00')
@@ -28,8 +29,10 @@ export default function PresidentsBridge() {
   const [profile, setProfile] = useState(null)
   const [data, setData] = useState({
     ordersInFlight: 0,
-    machinesActive: 0,
+    machinesProducing: 0,
     machinesTotal: 0,
+    machinesDown: 0,
+    machinesIdle: 0,
     complianceQueue: 0,
     finishingQueue: 0,
     trajectory: { preLaunch: 0, production: 0, cruise: 0, approach: 0, splashdown: 0 },
@@ -93,17 +96,23 @@ export default function PresidentsBridge() {
 
     async function loadData() {
       try {
-        const [woRes, machinesRes, complianceRes, finishingRes, jobsRes] = await Promise.all([
+        const [woRes, machinesRes, machineJobsRes, complianceRes, finishingRes, jobsRes] = await Promise.all([
           // 1. Orders in flight — open work orders
           supabase
             .from('work_orders')
             .select('id', { count: 'exact', head: true })
             .not('status', 'in', '(complete,shipped,closed,cancelled)'),
-          // 2. Machines status
+          // 2. Machines (status + kiosk_enabled needed for derived taxonomy)
           supabase
             .from('machines')
-            .select('id, status')
+            .select('id, status, kiosk_enabled')
             .eq('is_active', true),
+          // 2b. Jobs assigned to machines, in active/queued states — feeds deriveMachineStatus
+          supabase
+            .from('jobs')
+            .select('id, status, assigned_machine_id')
+            .in('status', ['in_setup', 'in_progress', 'ready', 'assigned'])
+            .not('assigned_machine_id', 'is', null),
           // 3. Compliance queue — jobs awaiting compliance
           supabase
             .from('jobs')
@@ -120,7 +129,8 @@ export default function PresidentsBridge() {
             .select(`
               id, quantity, status,
               work_order:work_orders(wo_number, customer, due_date),
-              component:parts!component_id(part_number)
+              component:parts!component_id(part_number),
+              machine:machines!assigned_machine_id(code, name)
             `)
             .not('status', 'in', '(complete,incomplete,cancelled)'),
         ])
@@ -138,25 +148,42 @@ export default function PresidentsBridge() {
           }
         })
 
-        // Priority parts: top 3 by quantity
+        // Priority parts: top 5 by quantity
         const priorityParts = (jobsRes.data || [])
           .filter(j => j.component?.part_number && (j.quantity || 0) > 0)
           .sort((a, b) => (b.quantity || 0) - (a.quantity || 0))
-          .slice(0, 3)
+          .slice(0, 5)
           .map(j => ({
             part_number: j.component.part_number,
             quantity: j.quantity || 0,
             customer: j.work_order?.customer || '—',
             due_date: j.work_order?.due_date || null,
+            machine_code: j.machine?.code || null,
           }))
 
-        const machinesTotal = (machinesRes.data || []).length
-        const machinesActive = (machinesRes.data || []).filter(m => m.status === 'in_use').length
+        // Machine taxonomy: derive Down/Setup/Running/Ready/Staged/Idle per machine
+        // using the shared helper so Bridge and Mainframe stay in lockstep.
+        const machines = machinesRes.data || []
+        const machineJobs = machineJobsRes.data || []
+        const jobsByMachine = {}
+        for (const j of machineJobs) {
+          if (!jobsByMachine[j.assigned_machine_id]) jobsByMachine[j.assigned_machine_id] = []
+          jobsByMachine[j.assigned_machine_id].push(j)
+        }
+        const stateCounts = { down: 0, setup: 0, running: 0, ready: 0, staged: 0, idle: 0 }
+        for (const m of machines) {
+          const state = deriveMachineStatus(m, jobsByMachine[m.id] || [])
+          stateCounts[state]++
+        }
+        const machinesProducing = stateCounts.setup + stateCounts.running + stateCounts.ready + stateCounts.staged
+        const machinesTotal = machines.length
 
         setData({
           ordersInFlight: woRes.count || 0,
-          machinesActive,
+          machinesProducing,
           machinesTotal,
+          machinesDown: stateCounts.down,
+          machinesIdle: stateCounts.idle,
           complianceQueue: complianceRes.count || 0,
           finishingQueue: finishingRes.count || 0,
           trajectory,
@@ -315,10 +342,18 @@ export default function PresidentsBridge() {
               <span className="kpi-station">GUIDANCE</span>
             </div>
             <div className="kpi-value">
-              {data.machinesActive}
+              {data.machinesProducing}
               <span className="kpi-suffix">/{data.machinesTotal}</span>
             </div>
-            <div className="kpi-meta">IN USE · LEESBURG + TAVERES</div>
+            <div className="kpi-meta">
+              {data.machinesDown > 0 && (
+                <>
+                  <span style={{ color: 'var(--amber)' }}>{data.machinesDown} DOWN</span>
+                  {' · '}
+                </>
+              )}
+              {data.machinesIdle} IDLE · LEESBURG + TAVERES
+            </div>
           </div>
 
           <div className="kpi-panel soon">
@@ -357,7 +392,7 @@ export default function PresidentsBridge() {
               {FEATURES.ASSEMBLY_MODULE ? data.trajectory.approach : 'STBY'}
             </div>
             <div className="kpi-meta">
-              {FEATURES.ASSEMBLY_MODULE ? 'JODY ON STATION' : 'MODULE OFFLINE · AWAITING ACTIVATION'}
+              {FEATURES.ASSEMBLY_MODULE ? 'JODY ON STATION' : 'COMING SOON · ASSEMBLY MODULE'}
             </div>
           </div>
         </div>
@@ -400,7 +435,12 @@ export default function PresidentsBridge() {
                   {p.quantity.toLocaleString()}<span className="unit">PCS</span>
                 </div>
                 <div className="priority-meta">
-                  {(p.customer || '—').toUpperCase()} · DUE {formatDue(p.due_date)}
+                  {(p.customer || '—').toUpperCase()}
+                  {' · '}
+                  <span className={`priority-machine ${p.machine_code ? '' : 'unassigned'}`}>
+                    {p.machine_code || '— UNASSIGNED'}
+                  </span>
+                  {' · DUE '}{formatDue(p.due_date)}
                 </div>
               </div>
             ))}
@@ -516,7 +556,7 @@ const styles = `
   --amber: #fbbf24;
   --amber-glow: rgba(251, 191, 36, 0.45);
   --white: #f1f5f9;
-  --muted: #64748b;
+  --muted: #94a3b8;
 
   position: relative;
   min-height: 100vh;
@@ -921,6 +961,15 @@ const styles = `
   letter-spacing: 1.5px;
   min-width: 180px;
   text-align: right;
+}
+.priority-machine {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--phosphor-dim);
+}
+.priority-machine.unassigned {
+  color: var(--amber);
 }
 .priority-empty {
   padding: 24px;

@@ -1,4 +1,5 @@
 import { Monitor, AlertTriangle, Wrench, Clock } from 'lucide-react'
+import { deriveMachineStatus } from '../lib/machineStatus'
 
 export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDowntime, activeMaintenanceJob }) {
   const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
@@ -21,20 +22,9 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
 
   const downReason = isDown ? getDownReason() : null
 
-  // Derive a single status string from machine + job state.
-  // Priority: Down > Setup > Running > Ready/Staged > Idle.
-  // Ready vs Staged depends on whether the machine is kiosk-enabled —
-  // a Staged machine has work queued but no kiosk to launch from yet
-  // (waiting on phased rollout).
-  const derivedStatus = (() => {
-    if (isDown) return 'down'
-    if (activeJob?.status === 'in_setup') return 'setup'
-    if (activeJob?.status === 'in_progress') return 'running'
-    if (queuedJobs.length > 0) {
-      return machine.kiosk_enabled ? 'ready' : 'staged'
-    }
-    return 'idle'
-  })()
+  // Single source of truth: src/lib/machineStatus.js. isDown captures
+  // database status + ongoing downtime + active unplanned maintenance.
+  const derivedStatus = deriveMachineStatus(machine, jobs, isDown)
 
   const getStatusColor = (status) => {
     switch (status) {

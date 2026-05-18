@@ -670,3 +670,45 @@ Section heading is now dynamic — "Friday's Output" / "Monday's Output" / etc. 
 ## 2026-05-18 — Read-only banner removed
 
 Per Matt's preference, the amber "READ-ONLY ACCESS" banner that rendered above the main shell for `president` / `viewer` roles is removed. It stacked awkwardly against the existing "TEST ENVIRONMENT — NOT LIVE DATA" banner on TEST, and the action-button gating already provides clear signal that writes aren't available. The `isReadOnlyRole` helper and all button-level gating remain in place.
+
+---
+
+## 2026-05-18 — SKY47 Batch B: Active Jobs + Upcoming Changeovers panels
+
+Closes out the middle "Today's Production" column on the Production Dashboard. Both placeholder boxes from Batch A are now real panels reading live data.
+
+**Active Jobs panel.** Per-job traffic light (red / amber / green / grey) computed in JS after fetch:
+- `in_progress` job: `progress_pct = good_pieces / quantity`, `elapsed_pct = (now − production_start) / estimated_minutes`. Green ≥ elapsed − 5%; amber ≥ elapsed − 25%; else red. Grey when no estimate exists.
+- `in_setup` job: amber by default; flips red after 2h elapsed setup. No per-part setup estimate exists today, so this is a global hard cutoff — revisit if/when setup duration becomes a tracked attribute.
+
+Sort: red → amber → green → grey, secondary by elapsed-time descending (problem jobs surface first). Visible cap 8; overflow footer "+N more active." Row design: part_number (white, primary), job_number (skynet-accent blue), machine code · name, status badge (SETUP / RUNNING), progress as good/qty plus thin bar, elapsed time, left-border color = traffic light.
+
+**Upcoming Changeovers panel (Interpretation A).** For each machine currently running, show the imminent swap to its next queued job. Two-step query:
+1. All `in_setup`/`in_progress` jobs with `assigned_machine_id` + `scheduled_end`.
+2. For those machines, all `'ready'` or `'assigned'` jobs with `scheduled_start`, ordered ascending; group by machine in JS, take earliest each.
+
+Pair them; sort by `scheduled_end − now`; cap at 6. Countdown formatting: `Xm` / `Xh Ym` / `Xd Yh`; "OVERDUE" when negative; amber when <1h to changeover.
+
+**Empty states.** Active Jobs: "No active jobs — all machines idle." Changeovers: "No imminent changeovers."
+
+**Polling unchanged at 60s.** The two new loaders join the existing `Promise.all` in `loadAll`.
+
+**Deferred:** per-part setup duration tracking (would make the in_setup traffic light data-driven instead of a 2h global threshold); holiday-aware countdown (currently wall-clock, not business hours). Both fine for v1.
+
+---
+
+## 2026-05-18 — President's Bridge polish pass (post-launch)
+
+Six small changes following Matt's first walkthrough of the live Bridge.
+
+**Machine derived-status helper.** `src/lib/machineStatus.js` exports `deriveMachineStatus(machine, jobsOnMachine, downtimeSignal)` returning one of `down / setup / running / ready / staged / idle`. Logic extracted from `MachineCard.jsx` (now imports the helper) so the Bridge and Mainframe stay in sync on the taxonomy. Single source of truth — future taxonomy changes update both surfaces automatically.
+
+**Drafting divergence noted.** The original prompt drafted the helper's "queued" predicate as `status IN ('ready', 'assigned')`. MachineCard's truth is broader — any job in its input array that isn't `in_setup`/`in_progress` counts as queued, including `pending_compliance`. Mainframe passes `['pending_compliance', 'assigned', 'in_setup', 'in_progress']` jobs to MachineCard, so a `pending_compliance` job on a kiosk-enabled machine surfaces as Ready (correct existing behavior). Helper preserves this — callers control breadth via what they put in `jobsOnMachine`. Bridge passes `['in_setup', 'in_progress', 'ready', 'assigned']` (`pending_compliance` is counted separately in the Compliance Queue KPI).
+
+**Bridge MACHINES ACTIVE panel** now counts machines in Setup + Running + Ready + Staged as "producing" (was: `status = 'in_use'` from the raw DB column, which the May-18 taxonomy decision already retired for Mainframe). Subtitle calls out idle + down counts. Down count tints amber when non-zero.
+
+**Coming Soon standardization.** Assembly Active Jobs panel subtitle changed from "MODULE OFFLINE · AWAITING ACTIVATION" to "COMING SOON · ASSEMBLY MODULE", matching the On-Time Delivery panel's existing "COMING SOON" copy.
+
+**Priority queue.** Expanded from top 3 to top 5 active jobs by quantity. Added the assigned machine code per row (phosphor-dim styling); shows "— UNASSIGNED" in amber for jobs not yet on a machine.
+
+**Dim text legibility.** Bumped the `--muted` CSS var from `#64748b` to `#94a3b8` to lift all the subtitle/footer dim text. Same character of dimness, just less hard to read on the cinema-dark background.

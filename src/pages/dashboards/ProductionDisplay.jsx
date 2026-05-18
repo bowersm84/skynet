@@ -718,7 +718,7 @@ function ActiveJobRow({ job }) {
 
   const dueDate = job.work_order?.due_date
     ? new Date(job.work_order.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : null
+    : '—'
 
   return (
     <div className={`flex items-center gap-3 bg-gray-900/60 border-l-4 ${borderColor} px-3 py-2 rounded`}>
@@ -731,7 +731,6 @@ function ActiveJobRow({ job }) {
         </div>
         <div className="text-gray-500 text-xs font-mono mt-0.5">
           {job.machine?.code || '—'}{job.machine?.name ? ` · ${job.machine.name}` : ''}
-          {dueDate && <> · DUE {dueDate}</>}
         </div>
       </div>
       <div className="text-right shrink-0 min-w-[110px]">
@@ -743,8 +742,13 @@ function ActiveJobRow({ job }) {
           <div className="h-full bg-skynet-accent" style={{ width: `${progressPct}%` }} />
         </div>
       </div>
-      <div className="text-gray-400 text-xs font-mono shrink-0 min-w-[60px] text-right">
-        {formatElapsed(job.elapsedMs)}
+      <div className="text-right shrink-0 min-w-[80px]">
+        <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider">Elapsed</div>
+        <div className="text-gray-300 text-sm font-mono">{formatElapsed(job.elapsedMs)}</div>
+      </div>
+      <div className="text-right shrink-0 min-w-[90px] border-l border-gray-800 pl-3">
+        <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider">Due</div>
+        <div className="text-white text-sm font-mono font-semibold">{dueDate}</div>
       </div>
     </div>
   )

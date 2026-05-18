@@ -776,3 +776,11 @@ New `machines.is_commissioned` boolean column (default TRUE, NOT NULL) distingui
 **Rationale for new column vs reusing existing.** `is_active` is already overloaded for soft-delete and would lose that semantic if mixed with commissioning. Extending `status` to a new `'on_order'` value would mix "is this machine in service" with "what is its current operational state" — they're independent concerns. A dedicated boolean is clearest and survives transitions cleanly.
 
 **Migration:** `Docs/migrations/2026-05-18_machine_is_commissioned.sql`. Idempotent (`ADD COLUMN IF NOT EXISTS`); verify SELECT returns exactly one row (BM-6) post-apply.
+
+---
+
+## 2026-05-18 — Active Jobs row: due date promoted, elapsed labeled
+
+Following Matt's review of the Production Dashboard before tomorrow's meeting: due date moved out of the buried machine-code subtitle and into a dedicated labeled column at the far right of each ActiveJobRow. Elapsed time also relabeled with an "ELAPSED" header so the two right-edge metrics read clearly. Due date renders in white (vs gray for elapsed) and font-semibold to read as the headline metric — "are we still on track to make that date?" is the production meeting's core question. Jobs missing a `work_order.due_date` show `—` for Due.
+
+Optional follow-up (deferred unless asked): tint due dates amber within 3 days, red when overdue.

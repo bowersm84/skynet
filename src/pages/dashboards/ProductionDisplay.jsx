@@ -53,7 +53,6 @@ export default function ProductionDisplay() {
   const [rejected, setRejected] = useState([])
   const [rework, setRework] = useState([])
 
-  const [demand, setDemand] = useState([])
 
   const [activeJobs, setActiveJobs] = useState([])
   const [changeovers, setChangeovers] = useState([])
@@ -185,60 +184,6 @@ export default function ProductionDisplay() {
     setRework(all.filter(r => r.compliance_outcome === 'rework').slice(0, 5))
   }, [])
 
-  // Top parts by remaining demand across open CO lines.
-  // Filters to lines whose parent CO is also open and that have positive
-  // remaining qty. Aggregates by part, sorts descending, keeps top 10.
-  const loadDemand = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('customer_order_lines')
-      .select(`
-        id, quantity_ordered, quantity_fulfilled, due_date,
-        part:parts(id, part_number, description),
-        customer_order:customer_orders(id, status, co_number)
-      `)
-      .in('status', ['not_started', 'in_progress'])
-
-    if (error) {
-      console.error('loadDemand error:', error)
-      setDemand([])
-      return
-    }
-
-    const openLines = (data || []).filter(line => {
-      const coStatus = line.customer_order?.status
-      if (coStatus !== 'not_started' && coStatus !== 'in_progress') return false
-      const remaining = (line.quantity_ordered || 0) - (line.quantity_fulfilled || 0)
-      return remaining > 0
-    })
-
-    const byPart = {}
-    for (const line of openLines) {
-      const partKey = line.part?.id
-      if (!partKey) continue
-      const remaining = (line.quantity_ordered || 0) - (line.quantity_fulfilled || 0)
-      if (!byPart[partKey]) {
-        byPart[partKey] = {
-          part_number: line.part.part_number,
-          description: line.part.description,
-          qty_remaining: 0,
-          earliest_due: null,
-          co_count: 0,
-        }
-      }
-      byPart[partKey].qty_remaining += remaining
-      byPart[partKey].co_count += 1
-      if (line.due_date && (!byPart[partKey].earliest_due || line.due_date < byPart[partKey].earliest_due)) {
-        byPart[partKey].earliest_due = line.due_date
-      }
-    }
-
-    const topDemand = Object.values(byPart)
-      .sort((a, b) => b.qty_remaining - a.qty_remaining)
-      .slice(0, 10)
-
-    setDemand(topDemand)
-  }, [])
-
   // Active jobs row data.
   //   Displayed metric  = pieces passed finishing  /  target qty
   //     pieces_passed_finishing := SUM(verified_count) from finishing_sends w/ status='finishing_complete'
@@ -248,26 +193,95 @@ export default function ProductionDisplay() {
   //     lags by hours — the displayed total changed, but urgency keeps the
   //     more-immediate source so a slipping job doesn't go green just because
   //     its first batch hasn't finished drying yet.
+  //
+  // Staged-machine handling. Until the kiosk rollout completes (currently only
+  // Mazak 5 is on kiosks), non-kiosk machines with queued work won't show as
+  // in_progress in the DB even when an operator is physically working on the
+  // staged job. We synthesize the earliest queued job per `staged` machine as
+  // if it were in_progress, with production_start = scheduled_start.
+  //
+  // J-FIN standalone finishing jobs are excluded — they're not manufacturing.
+  //
+  // Due-date fallback: work_orders.due_date → earliest active
+  // customer_order_allocations → customer_order_lines.due_date → null.
   const loadActiveJobs = useCallback(async () => {
-    const { data: jobs, error: e1 } = await supabase
+    const machinesRes = await supabase
+      .from('machines')
+      .select('id, status, kiosk_enabled')
+      .eq('is_active', true)
+      .eq('is_commissioned', true)
+
+    const jobsRes = await supabase
       .from('jobs')
       .select(`
         id, job_number, status, quantity, qty_override, good_pieces, bad_pieces,
-        estimated_minutes, setup_start, production_start, scheduled_end,
+        estimated_minutes, setup_start, production_start, scheduled_start, scheduled_end,
+        assigned_machine_id,
         component:parts!component_id(part_number, description),
         machine:machines!assigned_machine_id(code, name),
-        work_order:work_orders(wo_number, due_date)
+        work_order:work_orders(
+          wo_number,
+          due_date,
+          allocations:customer_order_allocations(
+            is_active,
+            customer_order_line:customer_order_lines(due_date)
+          )
+        )
       `)
-      .in('status', ['in_setup', 'in_progress'])
-      .order('production_start', { ascending: true, nullsFirst: false })
+      .in('status', ['in_setup', 'in_progress', 'ready', 'assigned'])
+      .not('assigned_machine_id', 'is', null)
+      .not('job_number', 'ilike', 'J-FIN-%')
 
-    if (e1) {
-      console.error('loadActiveJobs error:', e1)
+    if (machinesRes.error || jobsRes.error) {
+      console.error('loadActiveJobs error:', machinesRes.error, jobsRes.error)
       setActiveJobs([])
       return
     }
 
-    const activeJobIds = (jobs || []).map(j => j.id)
+    const machines = machinesRes.data || []
+    const allJobs = jobsRes.data || []
+
+    const jobsByMachine = {}
+    for (const j of allJobs) {
+      if (!jobsByMachine[j.assigned_machine_id]) jobsByMachine[j.assigned_machine_id] = []
+      jobsByMachine[j.assigned_machine_id].push(j)
+    }
+
+    const effectiveDueDate = (job) => {
+      const wo = job.work_order
+      if (wo?.due_date) return wo.due_date
+      const fallbacks = (wo?.allocations || [])
+        .filter(a => a.is_active && a.customer_order_line?.due_date)
+        .map(a => a.customer_order_line.due_date)
+        .sort()
+      return fallbacks[0] || null
+    }
+
+    const list = []
+    for (const j of allJobs) {
+      if (j.status === 'in_setup' || j.status === 'in_progress') {
+        list.push({ ...j, effective_due_date: effectiveDueDate(j) })
+      }
+    }
+    for (const m of machines) {
+      const onMachine = jobsByMachine[m.id] || []
+      const derived = deriveMachineStatus(m, onMachine)
+      if (derived !== 'staged') continue
+
+      const earliestQueued = onMachine
+        .filter(j => (j.status === 'ready' || j.status === 'assigned') && j.scheduled_start)
+        .sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))[0]
+      if (!earliestQueued) continue
+
+      list.push({
+        ...earliestQueued,
+        status: 'in_progress',
+        production_start: earliestQueued.scheduled_start,
+        effective_due_date: effectiveDueDate(earliestQueued),
+      })
+    }
+
+    const activeJobIds = list.map(j => j.id)
     const finishingByJob = {}
     if (activeJobIds.length > 0) {
       const { data: finishingRows, error: e2 } = await supabase
@@ -288,7 +302,7 @@ export default function ProductionDisplay() {
     const now = Date.now()
     const SETUP_RED_AFTER_MS = 2 * 60 * 60 * 1000  // 2h hard threshold
 
-    const enriched = (jobs || []).map(j => {
+    const enriched = list.map(j => {
       const finished = finishingByJob[j.id] || 0
       const targetQty = j.qty_override ?? j.quantity ?? 0
       let trafficLight = 'grey'
@@ -414,13 +428,12 @@ export default function ProductionDisplay() {
       loadYesterday(),
       loadMachineStatus(),
       loadQuality(),
-      loadDemand(),
       loadActiveJobs(),
       loadUpcomingChangeovers(),
     ])
     setLastUpdated(new Date())
     setLoading(false)
-  }, [loadYesterday, loadMachineStatus, loadQuality, loadDemand, loadActiveJobs, loadUpcomingChangeovers])
+  }, [loadYesterday, loadMachineStatus, loadQuality, loadActiveJobs, loadUpcomingChangeovers])
 
   useEffect(() => {
     loadAll()
@@ -573,33 +586,6 @@ export default function ProductionDisplay() {
             )}
           </div>
 
-          <div className="bg-gray-950 border border-gray-800 rounded-lg p-4">
-            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">
-              Demand · Top {demand.length}
-            </p>
-            {demand.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">No open demand</p>
-            ) : (
-              <div className="space-y-1">
-                {demand.map(d => (
-                  <div key={d.part_number} className="flex items-baseline justify-between gap-3 text-sm">
-                    <div className="flex items-baseline gap-2 min-w-0">
-                      <span className="text-skynet-accent font-mono shrink-0">{d.part_number}</span>
-                      <span className="text-gray-500 text-xs truncate">{d.description || ''}</span>
-                    </div>
-                    <div className="text-right shrink-0 flex items-baseline gap-3">
-                      <span className="text-white font-mono">{d.qty_remaining.toLocaleString()}</span>
-                      <span className="text-gray-500 font-mono text-xs">
-                        {d.earliest_due
-                          ? new Date(d.earliest_due + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                          : '—'}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Machine Status */}
@@ -716,8 +702,8 @@ function ActiveJobRow({ job }) {
     ? Math.min(100, (job.finished / job.targetQty) * 100)
     : 0
 
-  const dueDate = job.work_order?.due_date
-    ? new Date(job.work_order.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const dueDate = job.effective_due_date
+    ? new Date(job.effective_due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     : '—'
 
   return (

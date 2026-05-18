@@ -784,3 +784,22 @@ New `machines.is_commissioned` boolean column (default TRUE, NOT NULL) distingui
 Following Matt's review of the Production Dashboard before tomorrow's meeting: due date moved out of the buried machine-code subtitle and into a dedicated labeled column at the far right of each ActiveJobRow. Elapsed time also relabeled with an "ELAPSED" header so the two right-edge metrics read clearly. Due date renders in white (vs gray for elapsed) and font-semibold to read as the headline metric — "are we still on track to make that date?" is the production meeting's core question. Jobs missing a `work_order.due_date` show `—` for Due.
 
 Optional follow-up (deferred unless asked): tint due dates amber within 3 days, red when overdue.
+
+---
+
+## 2026-05-18 — Production Dashboard polish: staged jobs included, Demand removed
+
+Operational adjustments after Matt's pre-meeting review.
+
+**Staged machines treated as actively running.** Until the kiosk rollout completes (currently only Mazak 5 is on kiosks), non-kiosk machines with queued work won't show as `in_progress` in the DB even when the operator is physically working on the staged job. Active Jobs list now includes the earliest queued job per `staged` machine (derived state from `deriveMachineStatus`), synthesizing the job as `in_progress` with `production_start = scheduled_start`. Traffic-light logic falls through unchanged — a staged job whose scheduled_start is in the past will register elapsed time and a pace check; a future-scheduled job shows grey. Loader now does a separate machines query alongside the jobs query, groups jobs by machine, and feeds them to `deriveMachineStatus` to identify staged machines.
+
+**J-FIN standalone finishing jobs excluded** from Active Jobs (filter `job_number NOT ILIKE 'J-FIN-%'`). These are finishing-only batches and don't belong in a manufacturing-progress view.
+
+**Due-date fallback chain.** Active Jobs rows previously showed `—` for jobs whose `work_orders.due_date` was null. The loader now resolves an `effective_due_date` per job in JS:
+1. `work_orders.due_date` if set
+2. Otherwise the earliest active `customer_order_allocations → customer_order_lines.due_date`
+3. Otherwise `—`
+
+Implemented by nesting `allocations:customer_order_allocations(is_active, customer_order_line:customer_order_lines(due_date))` inside the existing work_order join, then resolving in a small `effectiveDueDate()` helper. The ActiveJobRow now reads `job.effective_due_date` instead of `job.work_order.due_date`.
+
+**Demand panel removed.** Not pulling its weight for the production meeting — too much surface area for too little signal once the headline is "are active jobs on track to meet their due dates." Middle column now contains just Active Jobs + Upcoming Changeovers. `loadDemand` loader, `demand` state, `loadAll` reference, and the entire Demand tile JSX deleted. Demand-related grep returns clean.

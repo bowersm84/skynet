@@ -715,22 +715,28 @@ Six small changes following Matt's first walkthrough of the live Bridge.
 
 ---
 
-## 2026-05-18 — Conditional chemical lot fields (passivation chemicals are stainless-only)
+## 2026-05-18 — Conditional chemical lot fields (routing-based)
 
-Citric Acid and Alkaline Mix lot fields in the Finishing Station Start Batch modal (and the Compliance review screen) now hide for parts whose material category doesn't require passivation chemicals. Operational truth: only stainless-based parts go through the citric/alkaline passivation. Steel and aluminum skip the chemicals entirely. Previously every batch showed and required the two lot fields, forcing operators to fake-fill them for non-stainless batches — a real data-integrity issue.
+Citric Acid and Alkaline Mix lot fields in the Finishing Station Start Batch modal and the Compliance review screen now hide for batches whose job routing does not include a passivation step. Previously every batch required both fields, forcing operators to fake-fill them for non-stainless work — a real data-integrity issue.
 
-**Predicate.** `src/lib/materials.js` exports `REQUIRES_CHEMICALS_CATEGORIES = ['Stainless', 'Pre-Formed']` and `requiresChemicals(part)`. Pre-Formed (blank studs) is included because the blanks are stainless underneath. Categories explicitly NOT requiring chemicals: Steel, Aluminum, Brass, Titanium. Defensive default: if the category can't be determined (NULL `material_type_id` or missing join), return `true` so the operator is prompted to verify rather than the system silently skipping required data.
+**Predicate.** `src/lib/routing.js` exports `batchRequiresChemicals(routingSteps)` — returns true iff the job's routing has an active step whose `step_name` contains 'passivation' (case-insensitive). "Active" means `status NOT IN ('skipped', 'removed')`. Pending, in_progress, and complete all count — what matters is whether the routing PLANS to include passivation.
 
-**Schema.** No migration. `finishing_sends.chemical_lot_number` and `chemical_lot_number_2` were already nullable. When chemicals aren't required, the form persists NULL for both — not empty strings — so the DB stays clean.
+**Why routing-based, not material-based.** Earlier same-day draft keyed off `parts.material_type.category`. Broke for Pre-Formed (blank studs are sometimes steel, sometimes stainless underneath) and didn't handle parts whose specific job routing diverges from typical material flow. The routing is the operational truth — if Wash → Passivation → Dry is on the traveler, chemicals are needed; if Wash → Dry only, they aren't.
 
-**Query enrichment.** Every place that loads a job with its part for the finishing flow now joins `material_type:material_types(category, name, short_code)` so the predicate can resolve without an extra fetch. Touched queries: `Finishing.jsx` pending + active batch loaders, `ComplianceReview.jsx` pending-batches loader, and `Mainframe.jsx`'s top-level jobs loader (the source that feeds ComplianceReview the manufacturing-complete job objects).
+**Defensive default.** If routing data is missing or empty (shouldn't happen in PROD but possible during edge fetches), return `true` so chemicals appear and the operator is prompted to verify rather than silently skipping required data.
 
-**Compliance gets the same rule.** Roger's review surface hides the chemical fields for non-stainless batches; the predicate is identical (`requiresChemicals` from the same helper). Applied in both display sites: per-batch traceability grid and per-job latest-send grid.
+**Schema unchanged.** Both `finishing_sends.chemical_lot_number` and `chemical_lot_number_2` were already nullable. Form persists NULL (not empty string) when hidden.
 
-**Optional helper text** rendered in place of the hidden fields: "Chemical lot tracking not required for [steel/aluminum/...] parts." Subtle, italic, fits existing kiosk helper-text style.
+**Query enrichment.** Every place that loads a finishing batch (or the parent job) for surfaces that show or require chemical lots now joins `routing_steps:job_routing_steps(step_name, status, step_order)`. Applied in `Finishing.jsx` pending + active batch loaders and `ComplianceReview.jsx` pending-batches loader. The per-job manufacturing-complete view in ComplianceReview re-uses the already-fetched `details.routingSteps` array, so no additional fetch.
 
-**Validation.** The Start Batch button now blocks when `needsChemicals && (!citricAcidLot || !alkalineMixLot)`. Pre-fix the button was already only gated on incoming count — chemical lots were merely warned-on. Tightening this side along with the hiding so stainless batches actually require the values they're prompted for.
+**Compliance gets the same rule.** Roger's review surface hides the chemical fields for non-passivation batches; identical predicate. Applied in both display sites: per-batch traceability grid and per-job latest-send grid.
 
-**Future-proofing.** Adding a new category to the chemicals-required set (e.g., a custom alloy that needs the same passivation) is a one-line edit to `REQUIRES_CHEMICALS_CATEGORIES`. No code changes elsewhere.
+**Optional helper text** rendered in place of the hidden fields: "Chemical lot tracking not required — this job's routing does not include passivation." Subtle, italic, matches existing kiosk helper-text style.
 
-**Resolves blocked workflow:** J-000025 (SK4-6P, -6 Stud Steel) which was sitting in James's Incoming Queue unable to start because the chemical fields were required for a part that doesn't need them.
+**Validation.** The Start Batch button now blocks when `needsChemicals && (!citricAcidLot || !alkalineMixLot)`. Pre-fix the button was already only gated on incoming count — chemical lots were merely warned-on. Tightening this so passivation batches actually require the values they're prompted for.
+
+**Future-proofing.** If passivation step naming ever drifts (e.g., "Citric Passivation", "Nitric Passivation"), the substring match continues to catch it. If naming changes entirely, single point of update in `routing.js`.
+
+**Replaces:** the material-based predicate from the earlier same-day entry. Decision rationale documented above.
+
+**Resolves blocked workflow:** J-000025 (SK4-6P, -6 Stud Steel) which was stuck in James's queue. SK4-6P's routing is Wash → Dry, no Passivation, so chemicals correctly hide.

@@ -126,7 +126,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         .select(`
           *,
           work_order:work_orders(wo_number, customer, priority, due_date, order_type, maintenance_type, notes, order_quantity, stock_quantity),
-          component:parts!component_id(id, part_number, description, part_type, requires_passivation, material_type:material_types(category, name, short_code)),
+          component:parts!component_id(id, part_number, description, part_type, requires_passivation),
           assigned_machine:machines(id, name, code)
         `)
         .not('status', 'eq', 'complete')

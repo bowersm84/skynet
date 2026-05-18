@@ -8,7 +8,7 @@ import { evaluateJobShortfall } from '../lib/shortfall'
 import { fulfillFromRequeueJob } from '../lib/coFulfillment'
 import { promoteToPartDocument } from '../lib/documents'
 import { isReadOnlyRole } from '../lib/roles'
-import { requiresChemicals } from '../lib/materials'
+import { batchRequiresChemicals } from '../lib/routing'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
 import DeferredDocsWidget from './DeferredDocsWidget'
@@ -158,8 +158,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           work_order_assembly_id, is_standalone_finishing, source_description,
           has_open_shortfall,
           work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_open_shortfall),
-          component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
-          assigned_machine:machines!assigned_machine_id(name)
+          component:parts!component_id(id, part_number, description, customer, part_type),
+          assigned_machine:machines!assigned_machine_id(name),
+          routing_steps:job_routing_steps(step_name, status, step_order)
         ),
         sent_by_profile:profiles!sent_by(full_name),
         finishing_operator:profiles!finishing_operator_id(full_name)
@@ -2552,7 +2553,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               <p className="text-gray-500 text-xs">Material Lot #</p>
                               <p className="text-white">{send.material_lot_number || '—'}</p>
                             </div>
-                            {requiresChemicals(send.job?.component) && (
+                            {batchRequiresChemicals(send.job?.routing_steps) && (
                               <>
                                 <div>
                                   <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
@@ -3080,7 +3081,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               <p className="text-gray-500 text-xs">Material Lot #</p>
                               <p className="text-white">{details.latestSend.material_lot_number || '—'}</p>
                             </div>
-                            {requiresChemicals(job.component) && (
+                            {batchRequiresChemicals(details.routingSteps) && (
                               <>
                                 <div>
                                   <p className="text-gray-500 text-xs">Citric Acid Lot #</p>

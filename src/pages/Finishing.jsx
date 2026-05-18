@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
-import { requiresChemicals } from '../lib/materials'
+import { batchRequiresChemicals } from '../lib/routing'
 import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
@@ -473,8 +473,9 @@ export default function Finishing() {
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description, has_open_shortfall,
             work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
-            component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
-            assigned_machine:machines!assigned_machine_id(name)
+            component:parts!component_id(id, part_number, description, customer, part_type),
+            assigned_machine:machines!assigned_machine_id(name),
+            routing_steps:job_routing_steps(step_name, status, step_order)
           ),
           sent_by_profile:profiles!sent_by(full_name)
         `)
@@ -493,8 +494,9 @@ export default function Finishing() {
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description, has_open_shortfall,
             work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
-            component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
-            assigned_machine:machines!assigned_machine_id(name)
+            component:parts!component_id(id, part_number, description, customer, part_type),
+            assigned_machine:machines!assigned_machine_id(name),
+            routing_steps:job_routing_steps(step_name, status, step_order)
           ),
           sent_by_profile:profiles!sent_by(full_name),
           machine:machines!machine_id(id, name, code)
@@ -2648,7 +2650,7 @@ export default function Finishing() {
 
       {/* Start Batch Modal */}
       {showStartModal && startModalSend && (() => {
-        const needsChemicals = requiresChemicals(startModalSend.job?.component)
+        const needsChemicals = batchRequiresChemicals(startModalSend.job?.routing_steps)
         return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
@@ -2713,8 +2715,8 @@ export default function Finishing() {
               </div>
 
               {/* Chemical Lots — citric acid + alkaline mix.
-                  Hidden when this part's material category doesn't require passivation chemicals
-                  (e.g. steel, aluminum). See lib/materials.js. */}
+                  Hidden when this job's routing does not include a passivation step.
+                  See lib/routing.js (batchRequiresChemicals). */}
               {needsChemicals ? (
                 <div className="space-y-3">
                   <div>
@@ -2760,7 +2762,7 @@ export default function Finishing() {
                 </div>
               ) : (
                 <p className="text-xs text-gray-500 italic">
-                  Chemical lot tracking not required for {startModalSend.job?.component?.material_type?.category?.toLowerCase() || 'this material'} parts.
+                  Chemical lot tracking not required — this job's routing does not include passivation.
                 </p>
               )}
 

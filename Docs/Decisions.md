@@ -803,3 +803,11 @@ Operational adjustments after Matt's pre-meeting review.
 Implemented by nesting `allocations:customer_order_allocations(is_active, customer_order_line:customer_order_lines(due_date))` inside the existing work_order join, then resolving in a small `effectiveDueDate()` helper. The ActiveJobRow now reads `job.effective_due_date` instead of `job.work_order.due_date`.
 
 **Demand panel removed.** Not pulling its weight for the production meeting — too much surface area for too little signal once the headline is "are active jobs on track to meet their due dates." Middle column now contains just Active Jobs + Upcoming Changeovers. `loadDemand` loader, `demand` state, `loadAll` reference, and the entire Demand tile JSX deleted. Demand-related grep returns clean.
+
+---
+
+## 2026-05-18 — Production Dashboard Active Jobs: scheduled-end as DUE; days+hours formatter
+
+DUE column on Active Jobs now sources from `jobs.scheduled_end` (April's scheduled machining finish date) rather than the work order or customer order line due date. The customer-due fallback chain shipped this morning was removed — for a production meeting, "are we on pace to finish by the scheduled date?" is the actionable signal; customer due date is a separate downstream concern. `work_order` nested join with `allocations` / `customer_order_lines` removed from the loader; `effectiveDueDate` helper deleted.
+
+Elapsed-time formatter extended to days + hours for long-running jobs. 170h 45m now reads as 7d 3h, rounded to the nearest hour for legibility. Jobs under 24h still show Xh Ym; jobs under 1h still show Xm. Matches the at-a-glance scan pattern of the dashboard rather than expecting the viewer to mentally divide by 24.

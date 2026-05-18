@@ -218,15 +218,7 @@ export default function ProductionDisplay() {
         estimated_minutes, setup_start, production_start, scheduled_start, scheduled_end,
         assigned_machine_id,
         component:parts!component_id(part_number, description),
-        machine:machines!assigned_machine_id(code, name),
-        work_order:work_orders(
-          wo_number,
-          due_date,
-          allocations:customer_order_allocations(
-            is_active,
-            customer_order_line:customer_order_lines(due_date)
-          )
-        )
+        machine:machines!assigned_machine_id(code, name)
       `)
       .in('status', ['in_setup', 'in_progress', 'ready', 'assigned'])
       .not('assigned_machine_id', 'is', null)
@@ -247,20 +239,10 @@ export default function ProductionDisplay() {
       jobsByMachine[j.assigned_machine_id].push(j)
     }
 
-    const effectiveDueDate = (job) => {
-      const wo = job.work_order
-      if (wo?.due_date) return wo.due_date
-      const fallbacks = (wo?.allocations || [])
-        .filter(a => a.is_active && a.customer_order_line?.due_date)
-        .map(a => a.customer_order_line.due_date)
-        .sort()
-      return fallbacks[0] || null
-    }
-
     const list = []
     for (const j of allJobs) {
       if (j.status === 'in_setup' || j.status === 'in_progress') {
-        list.push({ ...j, effective_due_date: effectiveDueDate(j) })
+        list.push(j)
       }
     }
     for (const m of machines) {
@@ -277,7 +259,6 @@ export default function ProductionDisplay() {
         ...earliestQueued,
         status: 'in_progress',
         production_start: earliestQueued.scheduled_start,
-        effective_due_date: effectiveDueDate(earliestQueued),
       })
     }
 
@@ -702,8 +683,8 @@ function ActiveJobRow({ job }) {
     ? Math.min(100, (job.finished / job.targetQty) * 100)
     : 0
 
-  const dueDate = job.effective_due_date
-    ? new Date(job.effective_due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const dueDate = job.scheduled_end
+    ? new Date(job.scheduled_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     : '—'
 
   return (
@@ -765,10 +746,17 @@ function ChangeoverRow({ co }) {
 
 function formatElapsed(ms) {
   if (!ms || ms < 0) return '—'
-  const minutes = Math.floor(ms / 60000)
-  const h = Math.floor(minutes / 60)
-  const m = minutes % 60
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
+  const totalMinutes = Math.floor(ms / 60000)
+  if (totalMinutes < 60) return `${totalMinutes}m`
+  const totalHours = Math.round(ms / 3600000)
+  if (totalHours < 24) {
+    const h = Math.floor(totalMinutes / 60)
+    const m = totalMinutes % 60
+    return `${h}h ${m}m`
+  }
+  const d = Math.floor(totalHours / 24)
+  const h = totalHours % 24
+  return h > 0 ? `${d}d ${h}h` : `${d}d`
 }
 
 function formatChangeoverCountdown(ms) {

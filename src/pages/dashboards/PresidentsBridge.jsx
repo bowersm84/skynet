@@ -102,11 +102,14 @@ export default function PresidentsBridge() {
             .from('work_orders')
             .select('id', { count: 'exact', head: true })
             .not('status', 'in', '(complete,shipped,closed,cancelled)'),
-          // 2. Machines (status + kiosk_enabled needed for derived taxonomy)
+          // 2. Machines (status + kiosk_enabled needed for derived taxonomy).
+          // is_commissioned filters out machines on order but not yet on the floor
+          // (e.g., BM-6) so they don't dilute the active count.
           supabase
             .from('machines')
             .select('id, status, kiosk_enabled')
-            .eq('is_active', true),
+            .eq('is_active', true)
+            .eq('is_commissioned', true),
           // 2b. Jobs assigned to machines, in active/queued states — feeds deriveMachineStatus
           supabase
             .from('jobs')

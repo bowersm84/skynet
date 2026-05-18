@@ -173,12 +173,14 @@ export default function BOMUpload({ onComplete, onCancel }) {
   const fileInputRef = useRef(null)
   const canvasRef = useRef(null)
 
-  // Fetch machines on mount
+  // Fetch machines on mount. is_commissioned filters out machines on order
+  // (BM-6) so a BOM can't route to a machine that doesn't exist yet.
   useEffect(() => {
     const fetchMachines = async () => {
       const { data } = await supabase
         .from('machines')
         .select('id, name, locations(name)')
+        .eq('is_commissioned', true)
         .order('name')
       if (data) setMachines(data)
     }

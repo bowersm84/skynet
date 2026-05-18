@@ -265,6 +265,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           location:locations(id, name, code)
         `)
         .eq('is_active', true)
+        .eq('is_commissioned', true)
         .order('display_order')
 
       if (machinesError) {

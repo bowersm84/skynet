@@ -194,6 +194,7 @@ export default function Finishing() {
         .select('id, name, code, status, status_reason, machine_type')
         .eq('machine_type', 'finishing')
         .eq('is_active', true)
+        .eq('is_commissioned', true)
 
       if (error) throw error
       setFinishingMachines(data || [])
@@ -296,6 +297,7 @@ export default function Finishing() {
           .from('machines')
           .select('id, name, code')
           .eq('is_active', true)
+          .eq('is_commissioned', true)
           .order('name'),
         getCurrentChemicalLot(),
         getCurrentChemicalLot2(),
@@ -706,6 +708,7 @@ export default function Finishing() {
           .select('id')
           .eq('machine_type', 'finishing')
           .eq('is_active', true)
+          .eq('is_commissioned', true)
           .limit(1)
           .single()
         return data?.id
@@ -835,6 +838,7 @@ export default function Finishing() {
           .select('id')
           .eq('machine_type', 'finishing')
           .eq('is_active', true)
+          .eq('is_commissioned', true)
           .limit(1)
           .single()
 

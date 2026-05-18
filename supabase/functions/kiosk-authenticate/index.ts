@@ -89,12 +89,14 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'Invalid credentials' }, 401)
     }
 
-    // Verify machine
+    // Verify machine. is_commissioned blocks kiosk launch on a machine that
+    // hasn't been physically delivered yet (e.g., BM-6 on order).
     const { data: machine, error: machineErr } = await adminClient
       .from('machines')
       .select('id, is_active')
       .eq('id', machineId)
       .eq('is_active', true)
+      .eq('is_commissioned', true)
       .maybeSingle()
 
     if (machineErr || !machine) {

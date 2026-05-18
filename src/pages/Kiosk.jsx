@@ -743,11 +743,14 @@ export default function Kiosk() {
     }
 
     try {
+      // is_commissioned blocks kiosk launch on a machine that's on order
+      // but not yet physically delivered (e.g., BM-6).
       let { data, error } = await supabase
         .from('machines')
         .select('*, location:locations(name, code)')
         .ilike('code', searchTerm)
         .eq('is_active', true)
+        .eq('is_commissioned', true)
         .maybeSingle()
 
       if (!data && !error) {
@@ -756,6 +759,7 @@ export default function Kiosk() {
           .select('*, location:locations(name, code)')
           .ilike('name', searchTerm)
           .eq('is_active', true)
+          .eq('is_commissioned', true)
           .maybeSingle()
 
         if (nameError) throw nameError

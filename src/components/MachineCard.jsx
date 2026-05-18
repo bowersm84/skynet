@@ -2,6 +2,29 @@ import { Monitor, AlertTriangle, Wrench, Clock } from 'lucide-react'
 import { deriveMachineStatus } from '../lib/machineStatus'
 
 export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDowntime, activeMaintenanceJob }) {
+  // Coming Soon: machine record exists but the physical machine isn't here yet.
+  // Render a stripped-down placeholder with no interaction so operators can see
+  // it's on its way but can't assign work or launch a kiosk against it.
+  if (machine.is_commissioned === false) {
+    return (
+      <div className="bg-gray-900/40 rounded-lg border border-dashed border-gray-700 overflow-hidden opacity-60">
+        <div className="px-4 py-3 border-b border-dashed border-gray-700 flex items-center justify-between">
+          <div>
+            <h3 className="text-gray-400 font-semibold">{machine.name}</h3>
+            <p className="text-gray-500 text-sm font-mono">{machine.code}</p>
+          </div>
+          <span className="text-amber-400 text-[10px] font-mono uppercase tracking-wider">
+            Coming Soon
+          </span>
+        </div>
+        <div className="p-4 text-center">
+          <p className="text-gray-600 text-xs uppercase tracking-wider">On Order</p>
+          <p className="text-gray-500 text-xs mt-1 italic">Not yet available</p>
+        </div>
+      </div>
+    )
+  }
+
   const activeJob = jobs.find(j => j.status === 'in_progress' || j.status === 'in_setup')
   const queuedJobs = jobs.filter(j => j.status !== 'in_progress' && j.status !== 'in_setup')
 

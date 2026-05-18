@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
+import { deriveMachineStatus } from '../../lib/machineStatus'
 import { AlertOctagon, Wrench, Power } from 'lucide-react'
 
 // ---- Date helpers (module-level, pure, local timezone) ----
@@ -39,8 +40,11 @@ export default function ProductionDisplay() {
   const [loading, setLoading] = useState(true)
   const [lastUpdated, setLastUpdated] = useState(null)
 
-  const [yesterdaySent, setYesterdaySent] = useState({ total: 0, batches: 0, byPart: [] })
-  const [yesterdayPassed, setYesterdayPassed] = useState({ total: 0, batches: 0, byPart: [] })
+  const [outputData, setOutputData] = useState({
+    passedTotal: 0, passedBatches: 0,
+    acceptedTotal: 0, acceptedBatches: 0,
+    partsAccepted: []
+  })
 
   const [machineGroups, setMachineGroups] = useState({
     running: [], setup: [], down: [], idle: [], inactive: []
@@ -49,7 +53,7 @@ export default function ProductionDisplay() {
   const [rejected, setRejected] = useState([])
   const [rework, setRework] = useState([])
 
-  const [openCOCount, setOpenCOCount] = useState(0)
+  const [demand, setDemand] = useState([])
 
   const [activeJobs, setActiveJobs] = useState([])
   const [changeovers, setChangeovers] = useState([])
@@ -71,46 +75,62 @@ export default function ProductionDisplay() {
   const selectedDateHeading = `${selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}'s Output`
 
   // ---- Loaders ----
+  // Output for the selected date.
+  //   Passed Finishing = batches with status='finishing_complete' that completed that day.
+  //                      Quantity = verified_count (the count after Dry-stage verification).
+  //   Accepted         = batches that cleared compliance review with outcome='accepted' that day.
+  //                      Quantity = compliance_good_qty (qty Roger marked good).
+  // Both metrics reflect actual flow through quality gates, not batch creation volume.
   const loadYesterday = useCallback(async () => {
     const { start, end } = dateBounds(selectedDate)
 
-    const [sentRes, passedRes] = await Promise.all([
-      supabase.from('finishing_sends')
-        .select('quantity, job:jobs(component:parts!component_id(part_number))')
-        .gte('sent_at', start).lt('sent_at', end),
+    const [passedRes, acceptedRes] = await Promise.all([
       supabase.from('finishing_sends')
         .select('verified_count, job:jobs(component:parts!component_id(part_number))')
-        .not('verified_at', 'is', null)
-        .gte('verified_at', start).lt('verified_at', end)
+        .eq('status', 'finishing_complete')
+        .gte('finishing_completed_at', start).lt('finishing_completed_at', end),
+      supabase.from('finishing_sends')
+        .select('compliance_good_qty, job:jobs(component:parts!component_id(part_number))')
+        .eq('compliance_outcome', 'accepted')
+        .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
     ])
 
-    if (sentRes.error) console.error('Error loading sent-yesterday:', sentRes.error)
-    if (passedRes.error) console.error('Error loading passed-yesterday:', passedRes.error)
+    if (passedRes.error) console.error('Error loading passed-finishing:', passedRes.error)
+    if (acceptedRes.error) console.error('Error loading accepted:', acceptedRes.error)
 
-    const aggregate = (rows, qtyField) => {
-      const total = (rows || []).reduce((s, r) => s + (r[qtyField] || 0), 0)
-      const batches = (rows || []).length
-      const map = {}
-      ;(rows || []).forEach(r => {
-        const pn = r.job?.component?.part_number
-        if (pn) map[pn] = (map[pn] || 0) + (r[qtyField] || 0)
-      })
-      const byPart = Object.entries(map)
-        .map(([part_number, qty]) => ({ part_number, qty }))
-        .sort((a, b) => b.qty - a.qty)
-        .slice(0, 5)
-      return { total, batches, byPart }
+    const passedRows = passedRes.data || []
+    const acceptedRows = acceptedRes.data || []
+
+    const passedTotal = passedRows.reduce((s, r) => s + (r.verified_count || 0), 0)
+    const passedBatches = passedRows.length
+    const acceptedTotal = acceptedRows.reduce((s, r) => s + (r.compliance_good_qty || 0), 0)
+    const acceptedBatches = acceptedRows.length
+
+    const acceptedByPart = {}
+    for (const r of acceptedRows) {
+      const pn = r.job?.component?.part_number || '—'
+      acceptedByPart[pn] = (acceptedByPart[pn] || 0) + (r.compliance_good_qty || 0)
     }
+    const partsAccepted = Object.entries(acceptedByPart)
+      .map(([part_number, qty]) => ({ part_number, qty }))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, 6)
 
-    setYesterdaySent(aggregate(sentRes.data, 'quantity'))
-    setYesterdayPassed(aggregate(passedRes.data, 'verified_count'))
+    setOutputData({ passedTotal, passedBatches, acceptedTotal, acceptedBatches, partsAccepted })
   }, [selectedDate])
 
+  // Uses the shared deriveMachineStatus helper (src/lib/machineStatus.js) so
+  // Production / Bridge / Mainframe stay aligned on classification. Bucket map:
+  //   Running = derived running + ready + staged  (staged work counts as actively producing)
+  //   Setup   = derived setup
+  //   Down    = derived down
+  //   Idle    = derived idle  (truly idle — no queued or active work)
   const loadMachineStatus = useCallback(async () => {
     const { data: machines, error: mErr } = await supabase
       .from('machines')
-      .select('id, name, code, status, status_reason, is_active, machine_type')
+      .select('id, name, code, status, status_reason, is_active, machine_type, kiosk_enabled')
       .neq('machine_type', 'finishing')
+      .eq('is_commissioned', true)
       .order('display_order', { ascending: true })
     if (mErr) { console.error('Error loading machines:', mErr); return }
 
@@ -118,29 +138,33 @@ export default function ProductionDisplay() {
       .from('machine_downtime_logs')
       .select('machine_id, reason, notes')
       .is('end_time', null)
-    const downtimeByMachine = new Map()
-    ;(downtimes || []).forEach(d => downtimeByMachine.set(d.machine_id, d))
+    const downtimeByMachine = new Set((downtimes || []).map(d => d.machine_id))
 
-    const { data: activeJobs } = await supabase
+    // Pull the active + queued window deriveMachineStatus expects. Includes
+    // 'pending_compliance' so a kiosk-enabled machine with only a pending-
+    // compliance job correctly surfaces as Ready (matches MachineCard truth).
+    const { data: jobsForMachines, error: jErr } = await supabase
       .from('jobs')
       .select('id, status, assigned_machine_id')
-      .in('status', ['in_setup', 'in_progress'])
-    const jobByMachine = new Map()
-    ;(activeJobs || []).forEach(j => {
-      if (j.assigned_machine_id) jobByMachine.set(j.assigned_machine_id, j)
-    })
+      .in('status', ['pending_compliance', 'assigned', 'ready', 'in_setup', 'in_progress'])
+      .not('assigned_machine_id', 'is', null)
+    if (jErr) console.error('Error loading machine jobs:', jErr)
+
+    const jobsByMachine = {}
+    for (const j of (jobsForMachines || [])) {
+      if (!jobsByMachine[j.assigned_machine_id]) jobsByMachine[j.assigned_machine_id] = []
+      jobsByMachine[j.assigned_machine_id].push(j)
+    }
 
     const groups = { running: [], setup: [], down: [], idle: [], inactive: [] }
-    ;(machines || []).forEach(m => {
-      if (!m.is_active) { groups.inactive.push(m); return }
-      if (downtimeByMachine.has(m.id) || m.status === 'down' || m.status === 'offline') {
-        groups.down.push(m); return
-      }
-      const job = jobByMachine.get(m.id)
-      if (job?.status === 'in_setup') groups.setup.push(m)
-      else if (job?.status === 'in_progress') groups.running.push(m)
+    for (const m of (machines || [])) {
+      if (!m.is_active) { groups.inactive.push(m); continue }
+      const derived = deriveMachineStatus(m, jobsByMachine[m.id] || [], downtimeByMachine.has(m.id))
+      if (derived === 'down') groups.down.push(m)
+      else if (derived === 'setup') groups.setup.push(m)
+      else if (derived === 'running' || derived === 'ready' || derived === 'staged') groups.running.push(m)
       else groups.idle.push(m)
-    })
+    }
     setMachineGroups(groups)
   }, [])
 
@@ -161,37 +185,112 @@ export default function ProductionDisplay() {
     setRework(all.filter(r => r.compliance_outcome === 'rework').slice(0, 5))
   }, [])
 
-  const loadOpenCOs = useCallback(async () => {
-    const { count, error } = await supabase
-      .from('customer_orders')
-      .select('id', { count: 'exact', head: true })
+  // Top parts by remaining demand across open CO lines.
+  // Filters to lines whose parent CO is also open and that have positive
+  // remaining qty. Aggregates by part, sorts descending, keeps top 10.
+  const loadDemand = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('customer_order_lines')
+      .select(`
+        id, quantity_ordered, quantity_fulfilled, due_date,
+        part:parts(id, part_number, description),
+        customer_order:customer_orders(id, status, co_number)
+      `)
       .in('status', ['not_started', 'in_progress'])
-    if (error) { console.error('Error loading open COs:', error); return }
-    setOpenCOCount(count || 0)
+
+    if (error) {
+      console.error('loadDemand error:', error)
+      setDemand([])
+      return
+    }
+
+    const openLines = (data || []).filter(line => {
+      const coStatus = line.customer_order?.status
+      if (coStatus !== 'not_started' && coStatus !== 'in_progress') return false
+      const remaining = (line.quantity_ordered || 0) - (line.quantity_fulfilled || 0)
+      return remaining > 0
+    })
+
+    const byPart = {}
+    for (const line of openLines) {
+      const partKey = line.part?.id
+      if (!partKey) continue
+      const remaining = (line.quantity_ordered || 0) - (line.quantity_fulfilled || 0)
+      if (!byPart[partKey]) {
+        byPart[partKey] = {
+          part_number: line.part.part_number,
+          description: line.part.description,
+          qty_remaining: 0,
+          earliest_due: null,
+          co_count: 0,
+        }
+      }
+      byPart[partKey].qty_remaining += remaining
+      byPart[partKey].co_count += 1
+      if (line.due_date && (!byPart[partKey].earliest_due || line.due_date < byPart[partKey].earliest_due)) {
+        byPart[partKey].earliest_due = line.due_date
+      }
+    }
+
+    const topDemand = Object.values(byPart)
+      .sort((a, b) => b.qty_remaining - a.qty_remaining)
+      .slice(0, 10)
+
+    setDemand(topDemand)
   }, [])
 
+  // Active jobs row data.
+  //   Displayed metric  = pieces passed finishing  /  target qty
+  //     pieces_passed_finishing := SUM(verified_count) from finishing_sends w/ status='finishing_complete'
+  //     target_qty := qty_override ?? quantity   (qty_override is a REPLACEMENT for the job's total)
+  //   Pacing input      = machinist's good_pieces / target_qty
+  //     We keep the machinist count for the traffic light because finishing yield
+  //     lags by hours — the displayed total changed, but urgency keeps the
+  //     more-immediate source so a slipping job doesn't go green just because
+  //     its first batch hasn't finished drying yet.
   const loadActiveJobs = useCallback(async () => {
-    const { data, error } = await supabase
+    const { data: jobs, error: e1 } = await supabase
       .from('jobs')
       .select(`
-        id, job_number, status, quantity, good_pieces, bad_pieces,
+        id, job_number, status, quantity, qty_override, good_pieces, bad_pieces,
         estimated_minutes, setup_start, production_start, scheduled_end,
         component:parts!component_id(part_number, description),
-        machine:machines!assigned_machine_id(code, name)
+        machine:machines!assigned_machine_id(code, name),
+        work_order:work_orders(wo_number, due_date)
       `)
       .in('status', ['in_setup', 'in_progress'])
       .order('production_start', { ascending: true, nullsFirst: false })
 
-    if (error) {
-      console.error('loadActiveJobs error:', error)
+    if (e1) {
+      console.error('loadActiveJobs error:', e1)
       setActiveJobs([])
       return
+    }
+
+    const activeJobIds = (jobs || []).map(j => j.id)
+    const finishingByJob = {}
+    if (activeJobIds.length > 0) {
+      const { data: finishingRows, error: e2 } = await supabase
+        .from('finishing_sends')
+        .select('job_id, verified_count')
+        .in('job_id', activeJobIds)
+        .eq('status', 'finishing_complete')
+
+      if (e2) {
+        console.error('loadActiveJobs/finishing error:', e2)
+      } else {
+        for (const r of (finishingRows || [])) {
+          finishingByJob[r.job_id] = (finishingByJob[r.job_id] || 0) + (r.verified_count || 0)
+        }
+      }
     }
 
     const now = Date.now()
     const SETUP_RED_AFTER_MS = 2 * 60 * 60 * 1000  // 2h hard threshold
 
-    const enriched = (data || []).map(j => {
+    const enriched = (jobs || []).map(j => {
+      const finished = finishingByJob[j.id] || 0
+      const targetQty = j.qty_override ?? j.quantity ?? 0
       let trafficLight = 'grey'
       let elapsedMs = 0
 
@@ -207,7 +306,7 @@ export default function ProductionDisplay() {
           elapsedMs = now - new Date(j.production_start).getTime()
           const estimatedMs = j.estimated_minutes * 60 * 1000
           const elapsedPct = elapsedMs / estimatedMs
-          const progressPct = (j.good_pieces || 0) / (j.quantity || 1)
+          const progressPct = targetQty > 0 ? (j.good_pieces || 0) / targetQty : 0
           if (elapsedPct <= 0) {
             trafficLight = 'grey'
           } else if (progressPct >= elapsedPct - 0.05) {
@@ -223,7 +322,7 @@ export default function ProductionDisplay() {
         }
       }
 
-      return { ...j, trafficLight, elapsedMs }
+      return { ...j, finished, targetQty, trafficLight, elapsedMs }
     })
 
     // Sort: red, amber, green, grey; within each, longest elapsed first
@@ -315,13 +414,13 @@ export default function ProductionDisplay() {
       loadYesterday(),
       loadMachineStatus(),
       loadQuality(),
-      loadOpenCOs(),
+      loadDemand(),
       loadActiveJobs(),
       loadUpcomingChangeovers(),
     ])
     setLastUpdated(new Date())
     setLoading(false)
-  }, [loadYesterday, loadMachineStatus, loadQuality, loadOpenCOs, loadActiveJobs, loadUpcomingChangeovers])
+  }, [loadYesterday, loadMachineStatus, loadQuality, loadDemand, loadActiveJobs, loadUpcomingChangeovers])
 
   useEffect(() => {
     loadAll()
@@ -392,30 +491,30 @@ export default function ProductionDisplay() {
           <p className="text-gray-500 text-xs font-mono mb-5">{selectedDateLabel}</p>
 
           <div className="mb-5">
-            <p className="text-gray-400 text-sm">Sent to finishing</p>
+            <p className="text-gray-400 text-sm">Passed Finishing</p>
             <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-white font-bold text-4xl">{yesterdaySent.total.toLocaleString()}</span>
+              <span className="text-white font-bold text-4xl">{outputData.passedTotal.toLocaleString()}</span>
               <span className="text-gray-500 text-sm">parts</span>
             </div>
-            <p className="text-gray-600 text-xs">{yesterdaySent.batches} batch{yesterdaySent.batches !== 1 ? 'es' : ''}</p>
+            <p className="text-gray-600 text-xs">{outputData.passedBatches} batch{outputData.passedBatches !== 1 ? 'es' : ''}</p>
           </div>
 
           <div className="mb-5">
-            <p className="text-gray-400 text-sm">Passed finishing</p>
+            <p className="text-gray-400 text-sm">Accepted</p>
             <div className="flex items-baseline gap-2 mt-1">
-              <span className="text-green-400 font-bold text-4xl">{yesterdayPassed.total.toLocaleString()}</span>
+              <span className="text-green-400 font-bold text-4xl">{outputData.acceptedTotal.toLocaleString()}</span>
               <span className="text-gray-500 text-sm">parts</span>
             </div>
-            <p className="text-gray-600 text-xs">{yesterdayPassed.batches} batch{yesterdayPassed.batches !== 1 ? 'es' : ''} · post-dry verified</p>
+            <p className="text-gray-600 text-xs">{outputData.acceptedBatches} batch{outputData.acceptedBatches !== 1 ? 'es' : ''} · compliance approved</p>
           </div>
 
           <div className="border-t border-gray-800 pt-4">
-            <p className="text-gray-400 text-xs uppercase tracking-wide mb-2">Parts through finishing</p>
-            {yesterdayPassed.byPart.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">No parts passed</p>
+            <p className="text-gray-400 text-xs uppercase tracking-wide mb-2">Parts Accepted</p>
+            {outputData.partsAccepted.length === 0 ? (
+              <p className="text-gray-600 text-sm italic">None yet today</p>
             ) : (
               <div className="space-y-1.5">
-                {yesterdayPassed.byPart.map(p => (
+                {outputData.partsAccepted.map(p => (
                   <div key={p.part_number} className="flex items-center justify-between">
                     <span className="text-skynet-accent font-mono text-sm">{p.part_number}</span>
                     <span className="text-white text-sm">{p.qty.toLocaleString()}</span>
@@ -474,12 +573,32 @@ export default function ProductionDisplay() {
             )}
           </div>
 
-          <div className="bg-gray-950 border border-gray-800 rounded-lg p-5">
-            <p className="text-gray-400 text-sm uppercase tracking-wide mb-2">Demand</p>
-            <div className="flex items-baseline gap-2">
-              <span className="text-white font-bold text-4xl">{openCOCount}</span>
-              <span className="text-gray-500">open customer orders</span>
-            </div>
+          <div className="bg-gray-950 border border-gray-800 rounded-lg p-4">
+            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">
+              Demand · Top {demand.length}
+            </p>
+            {demand.length === 0 ? (
+              <p className="text-gray-600 text-sm italic">No open demand</p>
+            ) : (
+              <div className="space-y-1">
+                {demand.map(d => (
+                  <div key={d.part_number} className="flex items-baseline justify-between gap-3 text-sm">
+                    <div className="flex items-baseline gap-2 min-w-0">
+                      <span className="text-skynet-accent font-mono shrink-0">{d.part_number}</span>
+                      <span className="text-gray-500 text-xs truncate">{d.description || ''}</span>
+                    </div>
+                    <div className="text-right shrink-0 flex items-baseline gap-3">
+                      <span className="text-white font-mono">{d.qty_remaining.toLocaleString()}</span>
+                      <span className="text-gray-500 font-mono text-xs">
+                        {d.earliest_due
+                          ? new Date(d.earliest_due + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -593,9 +712,13 @@ function ActiveJobRow({ job }) {
   const statusLabel = job.status === 'in_setup' ? 'SETUP' : 'RUNNING'
   const statusColor = job.status === 'in_setup' ? 'text-amber-400' : 'text-green-400'
 
-  const progressPct = job.quantity > 0
-    ? Math.min(100, ((job.good_pieces || 0) / job.quantity) * 100)
+  const progressPct = job.targetQty > 0
+    ? Math.min(100, (job.finished / job.targetQty) * 100)
     : 0
+
+  const dueDate = job.work_order?.due_date
+    ? new Date(job.work_order.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : null
 
   return (
     <div className={`flex items-center gap-3 bg-gray-900/60 border-l-4 ${borderColor} px-3 py-2 rounded`}>
@@ -608,12 +731,13 @@ function ActiveJobRow({ job }) {
         </div>
         <div className="text-gray-500 text-xs font-mono mt-0.5">
           {job.machine?.code || '—'}{job.machine?.name ? ` · ${job.machine.name}` : ''}
+          {dueDate && <> · DUE {dueDate}</>}
         </div>
       </div>
       <div className="text-right shrink-0 min-w-[110px]">
         <div className={`text-xs font-mono font-semibold ${statusColor}`}>{statusLabel}</div>
         <div className="text-gray-300 text-sm font-mono mt-0.5">
-          {(job.good_pieces || 0).toLocaleString()} / {(job.quantity || 0).toLocaleString()}
+          {(job.finished || 0).toLocaleString()} / {(job.targetQty || 0).toLocaleString()}
         </div>
         <div className="w-full bg-gray-800 rounded-full h-1 mt-1 overflow-hidden">
           <div className="h-full bg-skynet-accent" style={{ width: `${progressPct}%` }} />

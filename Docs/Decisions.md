@@ -740,3 +740,39 @@ Citric Acid and Alkaline Mix lot fields in the Finishing Station Start Batch mod
 **Replaces:** the material-based predicate from the earlier same-day entry. Decision rationale documented above.
 
 **Resolves blocked workflow:** J-000025 (SK4-6P, -6 Stud Steel) which was stuck in James's queue. SK4-6P's routing is Wash → Dry, no Passivation, so chemicals correctly hide.
+
+---
+
+## 2026-05-18 — Production Dashboard accuracy + content overhaul (SKY47 Batch C)
+
+Production Dashboard rewritten across four panels after Matt observed the live dashboard was reporting inaccurate numbers (150K "sent to finishing" was summing batch quantities indiscriminately, including the J-000023 legacy 96,625-piece batch and J-FIN standalone batches).
+
+**Output panel (left column).** "Sent to finishing" / "Passed finishing" replaced with "Passed Finishing" / "Accepted." Passed Finishing = `SUM(verified_count)` from `finishing_sends` where `finishing_completed_at` falls within the selected day and `status = 'finishing_complete'`. Accepted = `SUM(compliance_good_qty)` where `compliance_approved_at` falls within the selected day and `compliance_outcome = 'accepted'`. Both metrics reflect actual flow through Skybolt's quality gates rather than batch creation volume. Parts list below shows top 6 parts accepted that day, grouped by part_number, sorted by qty.
+
+**Machine Status panel (right column).** Now uses `deriveMachineStatus()` from `src/lib/machineStatus.js` (the shared helper created during the Bridge polish work), giving Production / Bridge / Mainframe a single source of truth on machine classification. Buckets adjusted per Matt's call: Running = derived `running + ready + staged` (staged work counts as actively producing); Setup, Down, Idle stay as separate buckets. Idle now means truly idle — no queued or active work. Loader feeds the helper a wide active+queued window (`pending_compliance`, `assigned`, `ready`, `in_setup`, `in_progress`) so a kiosk-enabled machine with only a `pending_compliance` job surfaces as Ready (matching MachineCard truth). Open downtime logs are passed through as the `downtimeSignal` arg.
+
+**Demand panel (middle column, bottom tile).** Replaced "53 open customer orders" count with a top-10 list of parts by remaining demand. Sources `customer_order_lines` rows on open COs, filters to lines with positive remaining qty (`quantity_ordered - quantity_fulfilled > 0`), aggregates by part, sorts descending. Each row shows part number, description (truncated), remaining qty, and earliest due date across the contributing COs. More operationally useful than a raw count — answers "what do we need to make next?" at a glance.
+
+**Active Jobs panel (middle column, top tile).** Two enhancements: (1) delivery date shown per row (from `work_orders.due_date`, appended to the machine-code subtitle as "· DUE Jun 29"); (2) progress metric changed from machinist's `good_pieces / quantity` to `pieces_passed_finishing / target_qty`. `pieces_passed_finishing` is a parallel `SUM(verified_count)` query over `finishing_sends` keyed by `job_id`. `target_qty` resolves as `qty_override ?? quantity` — `qty_override` is a REPLACEMENT for the job's total when set, not a subtraction (corrected from the prompt's draft formula `quantity - qty_override`, verified against Mainframe.jsx line 824). The new displayed metric reflects end-to-end yield rather than just machine output. Note: traffic-light pacing still uses the machinist's `good_pieces / target_qty` as input because finishing yield lags by hours; the displayed number changed, but the urgency signal kept its more-immediate source so a slipping job doesn't go green just because its first batch hasn't finished drying yet.
+
+**Shared helper reuse.** Both Production and Bridge now consume `deriveMachineStatus` from `src/lib/machineStatus.js` — any future taxonomy change updates all three surfaces (Mainframe, Bridge, Production) automatically.
+
+**Known density consequence.** The middle column got denser — Active Jobs now has more columns, Demand is now a list rather than a single tile. Matt acknowledged this trade-off; spatial polish deferred to a follow-up if needed.
+
+---
+
+## 2026-05-18 — Machine commissioning state (BM-6 on order)
+
+New `machines.is_commissioned` boolean column (default TRUE, NOT NULL) distinguishes physical-machine-in-service from `is_active` (soft-delete) and `status` (operational state). A machine can be commissioned + currently down (broken), or not yet commissioned (on order, awaiting physical arrival).
+
+**BM-6** marked `is_commissioned = false` — on order, not yet on the floor.
+
+**Filter rules.** All operational machine queries (Bridge MACHINES ACTIVE, Production Machine Status, Schedule drag-drop targets, kiosk launch lookups, BOM-upload machine picker, Finishing-station machine list) filter `is_commissioned = true`. Master-data surfaces (Armory > Machines, Mainframe grid) show all machines including non-commissioned, with appropriate UI distinction.
+
+**Mainframe treatment.** Non-commissioned machines render with a "Coming Soon" tile — dashed border, 60% opacity, amber "Coming Soon" label, "On Order · Not yet available" body. Implemented as an early-return branch at the top of `MachineCard.jsx` so all interaction (Launch Kiosk button, queue display, status badge, downtime treatment) is naturally precluded — operators can't try to assign work to a machine that doesn't exist.
+
+**Lifecycle.** When BM-6 arrives, flip the flag: `UPDATE machines SET is_commissioned = true WHERE code = 'BM-6';` — no status change needed because the operational `status` is already managed independently. Machine immediately joins counters, becomes draggable on Schedule, and renders as a normal Mainframe card.
+
+**Rationale for new column vs reusing existing.** `is_active` is already overloaded for soft-delete and would lose that semantic if mixed with commissioning. Extending `status` to a new `'on_order'` value would mix "is this machine in service" with "what is its current operational state" — they're independent concerns. A dedicated boolean is clearest and survives transitions cleanly.
+
+**Migration:** `Docs/migrations/2026-05-18_machine_is_commissioned.sql`. Idempotent (`ADD COLUMN IF NOT EXISTS`); verify SELECT returns exactly one row (BM-6) post-apply.

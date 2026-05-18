@@ -811,3 +811,27 @@ Implemented by nesting `allocations:customer_order_allocations(is_active, custom
 DUE column on Active Jobs now sources from `jobs.scheduled_end` (April's scheduled machining finish date) rather than the work order or customer order line due date. The customer-due fallback chain shipped this morning was removed — for a production meeting, "are we on pace to finish by the scheduled date?" is the actionable signal; customer due date is a separate downstream concern. `work_order` nested join with `allocations` / `customer_order_lines` removed from the loader; `effectiveDueDate` helper deleted.
 
 Elapsed-time formatter extended to days + hours for long-running jobs. 170h 45m now reads as 7d 3h, rounded to the nearest hour for legibility. Jobs under 24h still show Xh Ym; jobs under 1h still show Xm. Matches the at-a-glance scan pattern of the dashboard rather than expecting the viewer to mentally divide by 24.
+
+---
+
+## 2026-05-18 — Active Jobs polish: due-date sort, UP NEXT inline, Quality + Changeovers removed, Down ETA panel
+
+Multi-part Production Dashboard cleanup pre-meeting.
+
+**Active Jobs sort by scheduled_end ascending** — earliest deadlines surface to the top. Traffic-light coloring stays as the left-border accent (pace signal) but no longer drives row order.
+
+**UP NEXT column inline** — each row shows the next queued part on the same machine (status `ready` or `assigned` with `scheduled_start`), with relative time ("in 2h", "in 1d"). Machines with no follow-on job show `—`. Same-row self-duplication is avoided by filtering `q.id !== row.id` (catches the staged-synthesized case where the row's underlying job is also in the queue).
+
+**This-week highlight.** When the next queued job's `scheduled_start` falls within Mon-Fri of the current week, the UP NEXT cell amber-tints (header reads "UP NEXT · THIS WK", part number and relative-time switch to amber). Makes it easy to scan the dashboard for "which changeovers are happening this week" without leaving the Active Jobs list. Week range is computed once per render — Monday 00:00 → Friday 23:59:59 local time.
+
+**Upcoming Changeovers panel deleted** — its data is now inline per row, eliminating duplication. Middle column now contains just one panel: Active Jobs.
+
+**Quality & Inspection panel deleted** — not pulling its weight for the production meeting. The 5-day rejected/rework view is better consumed in the dedicated Quality tab when needed. `loadQuality`, `rejected`/`rework` state, `fiveDaysAgoISO`/`formatDate` helpers, `QualityRow`, and the bottom-strip JSX all removed.
+
+**All active jobs render** — previous 8-row cap with "+N more active" footer removed. If 16 machines are running, all 16 rows render. Density is a tradeoff Matt accepted vs hiding rows behind a footer.
+
+**Down Machines ETA subpanel** added below the Machine Status tiles. Pulls each currently-down machine's most recent open downtime log entry and shows the `end_time` as the estimated return. Open = `end_time IS NULL OR end_time > now`. Sorted by earliest ETA first; entries with no estimate show "TBD". Panel hides entirely when no machines are down. Red-tinted header matches the Down tile aesthetic.
+
+**Helper consolidation.** `formatRelativeStart` (used by UP NEXT column) replaces the deleted `formatChangeoverCountdown`. Same shape, simpler logic — collapses hours-and-minutes down to a single rounded unit ("in 3h", "in 2d").
+
+**Machine codes as a grid.** Each Machine Status tile's code list switched from inline `·`-separated to a CSS `grid-cols-3` layout. Codes line up in clean rows/columns rather than wrapping mid-paragraph; far more legible at the dashboard's typical glance-distance use. Empty tiles still show `—` as before.

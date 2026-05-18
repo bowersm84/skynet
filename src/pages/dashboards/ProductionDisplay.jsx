@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { deriveMachineStatus } from '../../lib/machineStatus'
-import { AlertOctagon, Wrench, Power } from 'lucide-react'
+import { Power } from 'lucide-react'
 
 // ---- Date helpers (module-level, pure, local timezone) ----
 // Skybolt is closed Sat/Sun. "Last business day" walks backward from today
@@ -50,24 +50,14 @@ export default function ProductionDisplay() {
     running: [], setup: [], down: [], idle: [], inactive: []
   })
 
-  const [rejected, setRejected] = useState([])
-  const [rework, setRework] = useState([])
-
-
   const [activeJobs, setActiveJobs] = useState([])
-  const [changeovers, setChangeovers] = useState([])
+  const [downMachineETAs, setDownMachineETAs] = useState([])
 
   // Date being viewed in the "Output" section. Defaults to the most recent
   // business day; user can override via the date picker in the section header.
   const [selectedDate, setSelectedDate] = useState(() => lastBusinessDay())
 
   // ---- In-component date derivations ----
-  const fiveDaysAgoISO = () => {
-    const d = new Date()
-    d.setDate(d.getDate() - 5)
-    return d.toISOString()
-  }
-  const formatDate = (s) => s ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
   const selectedDateLabel = selectedDate.toLocaleDateString('en-US', {
     weekday: 'long', month: 'short', day: 'numeric'
   })
@@ -167,21 +157,66 @@ export default function ProductionDisplay() {
     setMachineGroups(groups)
   }, [])
 
-  const loadQuality = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('finishing_sends')
-      .select(`
-        id, compliance_outcome, compliance_approved_at, compliance_bad_qty, compliance_notes,
-        job:jobs(job_number, component:parts!component_id(part_number))
-      `)
-      .in('compliance_outcome', ['rejected', 'rework'])
-      .gte('compliance_approved_at', fiveDaysAgoISO())
-      .order('compliance_approved_at', { ascending: false })
-      .limit(20)
-    if (error) { console.error('Error loading quality:', error); return }
-    const all = data || []
-    setRejected(all.filter(r => r.compliance_outcome === 'rejected').slice(0, 5))
-    setRework(all.filter(r => r.compliance_outcome === 'rework').slice(0, 5))
+  // Down machines + their estimated return (end_time of the most recent open
+  // downtime log). "Open" means end_time IS NULL OR end_time > now — the
+  // downtime hasn't been resolved yet.
+  const loadDownMachineETAs = useCallback(async () => {
+    const machinesRes = await supabase
+      .from('machines')
+      .select('id, code, name, status')
+      .eq('is_active', true)
+      .eq('is_commissioned', true)
+      .eq('status', 'down')
+
+    if (machinesRes.error) {
+      console.error('loadDownMachineETAs/machines error:', machinesRes.error)
+      setDownMachineETAs([])
+      return
+    }
+
+    const downMachines = machinesRes.data || []
+    if (downMachines.length === 0) {
+      setDownMachineETAs([])
+      return
+    }
+
+    const ids = downMachines.map(m => m.id)
+    const { data: logs, error } = await supabase
+      .from('machine_downtime_logs')
+      .select('id, machine_id, start_time, end_time, reason')
+      .in('machine_id', ids)
+      .order('start_time', { ascending: false })
+
+    if (error) {
+      console.error('loadDownMachineETAs/logs error:', error)
+      setDownMachineETAs([])
+      return
+    }
+
+    const nowIso = new Date().toISOString()
+    const openLogByMachine = {}
+    for (const log of (logs || [])) {
+      if (openLogByMachine[log.machine_id]) continue
+      const isOpen = !log.end_time || log.end_time > nowIso
+      if (isOpen) openLogByMachine[log.machine_id] = log
+    }
+
+    const result = downMachines.map(m => {
+      const log = openLogByMachine[m.id]
+      return {
+        machine_code: m.code,
+        machine_name: m.name,
+        reason: log?.reason || '—',
+        estimated_return: log?.end_time || null,
+        start_time: log?.start_time || null,
+      }
+    }).sort((a, b) => {
+      const aEnd = a.estimated_return ? new Date(a.estimated_return).getTime() : Infinity
+      const bEnd = b.estimated_return ? new Date(b.estimated_return).getTime() : Infinity
+      return aEnd - bEnd
+    })
+
+    setDownMachineETAs(result)
   }, [])
 
   // Active jobs row data.
@@ -320,101 +355,72 @@ export default function ProductionDisplay() {
       return { ...j, finished, targetQty, trafficLight, elapsedMs }
     })
 
-    // Sort: red, amber, green, grey; within each, longest elapsed first
-    const lightOrder = { red: 0, amber: 1, green: 2, grey: 3 }
-    enriched.sort((a, b) => {
-      const o = lightOrder[a.trafficLight] - lightOrder[b.trafficLight]
-      if (o !== 0) return o
-      return b.elapsedMs - a.elapsedMs
-    })
-
-    setActiveJobs(enriched)
-  }, [])
-
-  const loadUpcomingChangeovers = useCallback(async () => {
-    // 1. Currently running/setup jobs with a scheduled_end on a machine
-    const { data: running, error: e1 } = await supabase
-      .from('jobs')
-      .select(`
-        id, scheduled_end, assigned_machine_id,
-        component:parts!component_id(part_number),
-        machine:machines!assigned_machine_id(code, name)
-      `)
-      .in('status', ['in_setup', 'in_progress'])
-      .not('assigned_machine_id', 'is', null)
-      .not('scheduled_end', 'is', null)
-
-    if (e1) {
-      console.error('loadUpcomingChangeovers/running error:', e1)
-      setChangeovers([])
-      return
+    // UP NEXT enrichment. For each active row, find the next queued job on
+    // the same machine. Filter out the row's own id so a staged-synthesized
+    // row (which appears in both the active list AND queuedByMachine via the
+    // original ready/assigned job) doesn't show itself as "up next."
+    const queuedByMachine = {}
+    for (const j of allJobs) {
+      if (j.status !== 'ready' && j.status !== 'assigned') continue
+      if (!j.scheduled_start) continue
+      if (!queuedByMachine[j.assigned_machine_id]) queuedByMachine[j.assigned_machine_id] = []
+      queuedByMachine[j.assigned_machine_id].push(j)
+    }
+    for (const queue of Object.values(queuedByMachine)) {
+      queue.sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
     }
 
-    const machineIds = [...new Set((running || []).map(j => j.assigned_machine_id))]
-    if (machineIds.length === 0) {
-      setChangeovers([])
-      return
-    }
+    // Current work-week range (Mon 00:00 → Fri 23:59:59 local) for the
+    // THIS WK highlight. Computed once; cheap.
+    const weekRange = (() => {
+      const wNow = new Date()
+      const dayOfWeek = wNow.getDay()                  // 0=Sun, 1=Mon, ..., 6=Sat
+      const daysSinceMonday = (dayOfWeek + 6) % 7      // 0 if Mon, 6 if Sun
+      const monday = new Date(wNow)
+      monday.setHours(0, 0, 0, 0)
+      monday.setDate(wNow.getDate() - daysSinceMonday)
+      const friday = new Date(monday)
+      friday.setDate(monday.getDate() + 4)
+      friday.setHours(23, 59, 59, 999)
+      return { start: monday.getTime(), end: friday.getTime() }
+    })()
 
-    // 2. Next queued job per machine — 'ready' or 'assigned' with a scheduled_start
-    const { data: queued, error: e2 } = await supabase
-      .from('jobs')
-      .select(`
-        id, scheduled_start, assigned_machine_id,
-        component:parts!component_id(part_number)
-      `)
-      .in('status', ['ready', 'assigned'])
-      .in('assigned_machine_id', machineIds)
-      .not('scheduled_start', 'is', null)
-      .order('scheduled_start', { ascending: true })
-
-    if (e2) {
-      console.error('loadUpcomingChangeovers/queued error:', e2)
-      setChangeovers([])
-      return
-    }
-
-    // 3. Group queued by machine, keep earliest only
-    const nextByMachine = {}
-    for (const q of (queued || [])) {
-      if (!nextByMachine[q.assigned_machine_id]) {
-        nextByMachine[q.assigned_machine_id] = q
+    for (const row of enriched) {
+      const queueList = queuedByMachine[row.assigned_machine_id] || []
+      const nextCandidate = queueList.filter(q => q.id !== row.id)[0] || null
+      if (nextCandidate) {
+        const startMs = new Date(nextCandidate.scheduled_start).getTime()
+        row.next_up = {
+          part_number: nextCandidate.component?.part_number || '—',
+          scheduled_start: nextCandidate.scheduled_start,
+          is_this_week: startMs >= weekRange.start && startMs <= weekRange.end,
+        }
+      } else {
+        row.next_up = null
       }
     }
 
-    // 4. Pair running with its next, compute countdown, sort, cap
-    const now = Date.now()
-    const pairs = (running || [])
-      .map(r => {
-        const next = nextByMachine[r.assigned_machine_id]
-        if (!next) return null
-        return {
-          machine_code: r.machine?.code || '—',
-          machine_name: r.machine?.name || '',
-          current_part: r.component?.part_number || '—',
-          next_part: next.component?.part_number || '—',
-          changeover_at: r.scheduled_end,
-          ms_until: new Date(r.scheduled_end).getTime() - now,
-        }
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.ms_until - b.ms_until)
-      .slice(0, 6)
+    // Sort by scheduled_end ascending — earliest deadline first.
+    // Jobs with no scheduled_end sort to the bottom.
+    enriched.sort((a, b) => {
+      const aEnd = a.scheduled_end ? new Date(a.scheduled_end).getTime() : Infinity
+      const bEnd = b.scheduled_end ? new Date(b.scheduled_end).getTime() : Infinity
+      return aEnd - bEnd
+    })
 
-    setChangeovers(pairs)
+    setActiveJobs(enriched)
   }, [])
 
   const loadAll = useCallback(async () => {
     await Promise.all([
       loadYesterday(),
       loadMachineStatus(),
-      loadQuality(),
       loadActiveJobs(),
-      loadUpcomingChangeovers(),
+      loadDownMachineETAs(),
     ])
     setLastUpdated(new Date())
     setLoading(false)
-  }, [loadYesterday, loadMachineStatus, loadQuality, loadActiveJobs, loadUpcomingChangeovers])
+  }, [loadYesterday, loadMachineStatus, loadActiveJobs, loadDownMachineETAs])
 
   useEffect(() => {
     loadAll()
@@ -539,29 +545,8 @@ export default function ProductionDisplay() {
               <p className="text-gray-600 text-sm italic">No active jobs — all machines idle</p>
             ) : (
               <div className="space-y-2">
-                {activeJobs.slice(0, 8).map(j => (
+                {activeJobs.map(j => (
                   <ActiveJobRow key={j.id} job={j} />
-                ))}
-                {activeJobs.length > 8 && (
-                  <p className="text-gray-600 text-xs italic pt-1">
-                    +{activeJobs.length - 8} more active
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* ===== Upcoming Changeovers ===== */}
-          <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 mb-4">
-            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">
-              Upcoming Changeovers · {changeovers.length}
-            </p>
-            {changeovers.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">No imminent changeovers</p>
-            ) : (
-              <div className="space-y-2">
-                {changeovers.map(c => (
-                  <ChangeoverRow key={`${c.machine_code}-${c.changeover_at}`} co={c} />
                 ))}
               </div>
             )}
@@ -581,6 +566,31 @@ export default function ProductionDisplay() {
             <StatusTile color="gray"  label="Idle"    count={machineGroups.idle.length}    machines={machineGroups.idle} />
           </div>
 
+          {downMachineETAs.length > 0 && (
+            <div className="bg-gray-950 border border-red-900/40 rounded-lg p-4 mt-4">
+              <p className="text-red-400 text-xs uppercase tracking-wide mb-3">
+                Down Machine ETA · {downMachineETAs.length}
+              </p>
+              <div className="space-y-2">
+                {downMachineETAs.map(d => (
+                  <div key={d.machine_code} className="bg-gray-900/60 border border-gray-800 rounded px-3 py-2">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-white font-mono text-sm font-semibold">{d.machine_code}</span>
+                      <span className="text-red-400/80 font-mono text-[10px] uppercase tracking-wider">
+                        {d.estimated_return
+                          ? new Date(d.estimated_return).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          : 'TBD'}
+                      </span>
+                    </div>
+                    <div className="text-gray-500 text-xs font-mono mt-1 truncate">
+                      {d.reason}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {machineGroups.inactive.length > 0 && (
             <div className="border-t border-gray-800 pt-3 mt-3">
               <div className="flex items-center gap-2 mb-2">
@@ -599,44 +609,6 @@ export default function ProductionDisplay() {
               ))}
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Quality & Inspection — full width */}
-      <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-xl font-bold text-skynet-accent">Quality &amp; Inspection</h2>
-          <p className="text-gray-500 text-xs font-mono">Last 5 days · {rejected.length + rework.length} event{rejected.length + rework.length !== 1 ? 's' : ''}</p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-6">
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <AlertOctagon size={16} className="text-red-400" />
-              <span className="text-red-400 font-bold uppercase tracking-wide text-sm">Rejected · {rejected.length}</span>
-            </div>
-            {rejected.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">None in the last 5 days</p>
-            ) : (
-              <div className="space-y-2">
-                {rejected.map(r => <QualityRow key={r.id} record={r} formatDate={formatDate} />)}
-              </div>
-            )}
-          </div>
-
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <Wrench size={16} className="text-amber-400" />
-              <span className="text-amber-400 font-bold uppercase tracking-wide text-sm">Rework · {rework.length}</span>
-            </div>
-            {rework.length === 0 ? (
-              <p className="text-gray-600 text-sm italic">None in the last 5 days</p>
-            ) : (
-              <div className="space-y-2">
-                {rework.map(r => <QualityRow key={r.id} record={r} formatDate={formatDate} />)}
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </div>
@@ -659,11 +631,15 @@ function StatusTile({ color, label, count, machines }) {
         </div>
         <span className="text-white font-bold text-lg">{count}</span>
       </div>
-      <div className="text-gray-200 text-base font-mono leading-relaxed min-h-[2rem] break-words">
-        {machines.length === 0
-          ? <span className="text-gray-600 italic">—</span>
-          : machines.map(m => m.code).join(' · ')}
-      </div>
+      {machines.length === 0 ? (
+        <div className="text-gray-600 font-mono text-sm italic min-h-[2rem]">—</div>
+      ) : (
+        <div className="grid grid-cols-3 gap-x-2 gap-y-1 text-gray-200 font-mono text-sm min-h-[2rem]">
+          {machines.map(m => (
+            <span key={m.id} className="truncate">{m.code}</span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -717,28 +693,28 @@ function ActiveJobRow({ job }) {
         <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider">Due</div>
         <div className="text-white text-sm font-mono font-semibold">{dueDate}</div>
       </div>
-    </div>
-  )
-}
-
-function ChangeoverRow({ co }) {
-  const overdue = co.ms_until <= 0
-  const soon = !overdue && co.ms_until < 60 * 60 * 1000  // <1h
-  const color = overdue ? 'text-red-400' : soon ? 'text-amber-400' : 'text-gray-300'
-  const label = overdue ? 'OVERDUE' : formatChangeoverCountdown(co.ms_until)
-
-  return (
-    <div className="flex items-center gap-3 bg-gray-900/60 border border-gray-800 px-3 py-2 rounded">
-      <div className="text-white font-mono text-xs font-semibold w-16 shrink-0">
-        {co.machine_code}
-      </div>
-      <div className="flex-1 min-w-0 flex items-center gap-2 text-sm font-mono">
-        <span className="text-gray-300 truncate">{co.current_part}</span>
-        <span className="text-gray-600 shrink-0">→</span>
-        <span className="text-white truncate">{co.next_part}</span>
-      </div>
-      <div className={`text-xs font-mono font-semibold shrink-0 ${color}`}>
-        {label}
+      <div className="text-right shrink-0 min-w-[90px] border-l border-gray-800 pl-3">
+        <div className={`text-[10px] font-mono uppercase tracking-wider ${
+          job.next_up?.is_this_week ? 'text-amber-500' : 'text-gray-500'
+        }`}>
+          Up Next{job.next_up?.is_this_week ? ' · THIS WK' : ''}
+        </div>
+        {job.next_up ? (
+          <>
+            <div className={`text-sm font-mono ${
+              job.next_up.is_this_week ? 'text-amber-300' : 'text-gray-300'
+            }`}>
+              {job.next_up.part_number}
+            </div>
+            <div className={`text-[10px] font-mono mt-0.5 ${
+              job.next_up.is_this_week ? 'text-amber-500/80' : 'text-gray-500'
+            }`}>
+              {formatRelativeStart(job.next_up.scheduled_start)}
+            </div>
+          </>
+        ) : (
+          <div className="text-gray-600 text-sm font-mono">—</div>
+        )}
       </div>
     </div>
   )
@@ -759,32 +735,14 @@ function formatElapsed(ms) {
   return h > 0 ? `${d}d ${h}h` : `${d}d`
 }
 
-function formatChangeoverCountdown(ms) {
-  if (ms <= 0) return 'OVERDUE'
-  const minutes = Math.floor(ms / 60000)
-  if (minutes < 60) return `in ${minutes}m`
-  const h = Math.floor(minutes / 60)
-  const m = minutes % 60
-  if (h < 24) return m === 0 ? `in ${h}h` : `in ${h}h ${m}m`
-  const d = Math.floor(h / 24)
-  return `in ${d}d ${h % 24}h`
-}
-
-function QualityRow({ record, formatDate }) {
-  return (
-    <div className="bg-gray-950 border border-gray-800 rounded px-3 py-2 text-sm">
-      <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-        <span className="text-white font-mono font-medium">{record.job?.component?.part_number || '—'}</span>
-        <span className="text-gray-600">·</span>
-        <span className="text-skynet-accent font-mono text-xs">{record.job?.job_number}</span>
-        <span className="text-gray-600">·</span>
-        <span className="text-gray-400 text-xs">{formatDate(record.compliance_approved_at)}</span>
-        <span className="text-gray-600">·</span>
-        <span className="text-white text-xs">{record.compliance_bad_qty || 0} pcs</span>
-      </div>
-      {record.compliance_notes && (
-        <p className="text-gray-500 text-xs italic truncate">{record.compliance_notes}</p>
-      )}
-    </div>
-  )
+function formatRelativeStart(scheduledStart) {
+  if (!scheduledStart) return ''
+  const ms = new Date(scheduledStart).getTime() - Date.now()
+  if (ms <= 0) return 'overdue'
+  const totalMinutes = Math.floor(ms / 60000)
+  if (totalMinutes < 60) return `in ${totalMinutes}m`
+  const totalHours = Math.round(ms / 3600000)
+  if (totalHours < 24) return `in ${totalHours}h`
+  const d = Math.floor(totalHours / 24)
+  return `in ${d}d`
 }

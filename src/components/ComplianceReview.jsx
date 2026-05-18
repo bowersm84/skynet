@@ -8,6 +8,7 @@ import { evaluateJobShortfall } from '../lib/shortfall'
 import { fulfillFromRequeueJob } from '../lib/coFulfillment'
 import { promoteToPartDocument } from '../lib/documents'
 import { isReadOnlyRole } from '../lib/roles'
+import { requiresChemicals } from '../lib/materials'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
 import DeferredDocsWidget from './DeferredDocsWidget'
@@ -157,7 +158,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           work_order_assembly_id, is_standalone_finishing, source_description,
           has_open_shortfall,
           work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_open_shortfall),
-          component:parts!component_id(id, part_number, description, customer, part_type),
+          component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
           assigned_machine:machines!assigned_machine_id(name)
         ),
         sent_by_profile:profiles!sent_by(full_name),
@@ -2551,14 +2552,18 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               <p className="text-gray-500 text-xs">Material Lot #</p>
                               <p className="text-white">{send.material_lot_number || '—'}</p>
                             </div>
-                            <div>
-                              <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
-                              <p className="text-white">{send.chemical_lot_number || '—'}</p>
-                            </div>
-                            <div>
-                              <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
-                              <p className="text-white">{send.chemical_lot_number_2 || '—'}</p>
-                            </div>
+                            {requiresChemicals(send.job?.component) && (
+                              <>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
+                                  <p className="text-white">{send.chemical_lot_number || '—'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                                  <p className="text-white">{send.chemical_lot_number_2 || '—'}</p>
+                                </div>
+                              </>
+                            )}
                             <div>
                               <p className="text-gray-500 text-xs">Machine Count</p>
                               <p className="text-white">{send.quantity ?? '—'}</p>
@@ -3075,14 +3080,18 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                               <p className="text-gray-500 text-xs">Material Lot #</p>
                               <p className="text-white">{details.latestSend.material_lot_number || '—'}</p>
                             </div>
-                            <div>
-                              <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
-                              <p className="text-white">{details.latestSend.chemical_lot_number || '—'}</p>
-                            </div>
-                            <div>
-                              <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
-                              <p className="text-white">{details.latestSend.chemical_lot_number_2 || '—'}</p>
-                            </div>
+                            {requiresChemicals(job.component) && (
+                              <>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
+                                  <p className="text-white">{details.latestSend.chemical_lot_number || '—'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                                  <p className="text-white">{details.latestSend.chemical_lot_number_2 || '—'}</p>
+                                </div>
+                              </>
+                            )}
                             <div>
                               <p className="text-gray-500 text-xs">Machine Count</p>
                               <p className="text-white">{details.latestSend.quantity ?? '—'}</p>

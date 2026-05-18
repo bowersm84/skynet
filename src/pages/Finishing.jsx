@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import { requiresChemicals } from '../lib/materials'
 import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
@@ -472,7 +473,7 @@ export default function Finishing() {
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description, has_open_shortfall,
             work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
-            component:parts!component_id(id, part_number, description, customer, part_type),
+            component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
             assigned_machine:machines!assigned_machine_id(name)
           ),
           sent_by_profile:profiles!sent_by(full_name)
@@ -492,7 +493,7 @@ export default function Finishing() {
             id, job_number, quantity, production_lot_number, status, work_order_assembly_id,
             is_standalone_finishing, source_description, has_open_shortfall,
             work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, notes, has_open_shortfall),
-            component:parts!component_id(id, part_number, description, customer, part_type),
+            component:parts!component_id(id, part_number, description, customer, part_type, material_type:material_types(category, name, short_code)),
             assigned_machine:machines!assigned_machine_id(name)
           ),
           sent_by_profile:profiles!sent_by(full_name),
@@ -1095,7 +1096,7 @@ export default function Finishing() {
     }
   }
 
-  const handleConfirmStartBatch = async () => {
+  const handleConfirmStartBatch = async (needsChemicals = true) => {
     if (!startModalSend) return
     const incomingCount = parseInt(startIncomingCount) || 0
     if (incomingCount <= 0) {
@@ -1115,8 +1116,8 @@ export default function Finishing() {
           finishing_operator_id: operator.id,
           finishing_started_at: now,
           finishing_lot_number: startLotNumber || null,
-          chemical_lot_number: startChemicalLot.trim() || null,
-          chemical_lot_number_2: startChemicalLot2.trim() || null,
+          chemical_lot_number: needsChemicals ? (startChemicalLot.trim() || null) : null,
+          chemical_lot_number_2: needsChemicals ? (startChemicalLot2.trim() || null) : null,
           incoming_count: incomingCount,
           updated_at: now
         })
@@ -2646,7 +2647,9 @@ export default function Finishing() {
       )}
 
       {/* Start Batch Modal */}
-      {showStartModal && startModalSend && (
+      {showStartModal && startModalSend && (() => {
+        const needsChemicals = requiresChemicals(startModalSend.job?.component)
+        return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
             <div className="flex items-center justify-between p-4 border-b border-gray-700">
@@ -2709,49 +2712,57 @@ export default function Finishing() {
                 </div>
               </div>
 
-              {/* Chemical Lots — citric acid + alkaline mix */}
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-gray-400 text-sm mb-1">
-                    <Beaker size={14} className="inline mr-1" />
-                    Citric Acid Lot #
-                  </label>
-                  <p className="text-gray-600 text-xs mb-2">Lot from citric acid container</p>
-                  <input
-                    type="text"
-                    value={startChemicalLot}
-                    onChange={(e) => setStartChemicalLot(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
-                    placeholder="Enter citric acid lot"
-                  />
-                  {!startChemicalLot.trim() && (
-                    <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
-                  )}
-                </div>
+              {/* Chemical Lots — citric acid + alkaline mix.
+                  Hidden when this part's material category doesn't require passivation chemicals
+                  (e.g. steel, aluminum). See lib/materials.js. */}
+              {needsChemicals ? (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">
+                      <Beaker size={14} className="inline mr-1" />
+                      Citric Acid Lot #
+                    </label>
+                    <p className="text-gray-600 text-xs mb-2">Lot from citric acid container</p>
+                    <input
+                      type="text"
+                      value={startChemicalLot}
+                      onChange={(e) => setStartChemicalLot(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                      placeholder="Enter citric acid lot"
+                    />
+                    {!startChemicalLot.trim() && (
+                      <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
+                    )}
+                  </div>
 
-                <div>
-                  <label className="block text-gray-400 text-sm mb-1">
-                    <Beaker size={14} className="inline mr-1" />
-                    Alkaline Mix Lot #
-                  </label>
-                  <p className="text-gray-600 text-xs mb-2">Lot from alkaline mix container</p>
-                  <input
-                    type="text"
-                    value={startChemicalLot2}
-                    onChange={(e) => setStartChemicalLot2(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
-                    placeholder="Enter alkaline mix lot"
-                  />
-                  {!startChemicalLot2.trim() && (
-                    <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
-                  )}
-                </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">
+                      <Beaker size={14} className="inline mr-1" />
+                      Alkaline Mix Lot #
+                    </label>
+                    <p className="text-gray-600 text-xs mb-2">Lot from alkaline mix container</p>
+                    <input
+                      type="text"
+                      value={startChemicalLot2}
+                      onChange={(e) => setStartChemicalLot2(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-cyan-500 focus:outline-none"
+                      placeholder="Enter alkaline mix lot"
+                    />
+                    {!startChemicalLot2.trim() && (
+                      <p className="text-yellow-500/70 text-xs mt-1">Required for compliance records</p>
+                    )}
+                  </div>
 
-                <div className="text-xs text-gray-500 italic flex items-start gap-1.5 pt-1">
-                  <AlertTriangle size={12} className="mt-0.5 flex-shrink-0 text-cyan-400" />
-                  <span>If either chemical lot has changed since the last batch, click "New" above to generate a fresh Finishing Lot #.</span>
+                  <div className="text-xs text-gray-500 italic flex items-start gap-1.5 pt-1">
+                    <AlertTriangle size={12} className="mt-0.5 flex-shrink-0 text-cyan-400" />
+                    <span>If either chemical lot has changed since the last batch, click "New" above to generate a fresh Finishing Lot #.</span>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <p className="text-xs text-gray-500 italic">
+                  Chemical lot tracking not required for {startModalSend.job?.component?.material_type?.category?.toLowerCase() || 'this material'} parts.
+                </p>
+              )}
 
               {/* Incoming Count */}
               <div>
@@ -2782,10 +2793,17 @@ export default function Finishing() {
                 })()}
               </div>
 
-              {/* Confirm button */}
+              {/* Confirm button.
+                  Chemical-lot fields are required only when the part's material category
+                  requires passivation chemicals (stainless / pre-formed). */}
               <button
-                onClick={handleConfirmStartBatch}
-                disabled={actionLoading || !startIncomingCount || parseInt(startIncomingCount) <= 0}
+                onClick={() => handleConfirmStartBatch(needsChemicals)}
+                disabled={
+                  actionLoading ||
+                  !startIncomingCount ||
+                  parseInt(startIncomingCount) <= 0 ||
+                  (needsChemicals && (!startChemicalLot.trim() || !startChemicalLot2.trim()))
+                }
                 className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
               >
                 {actionLoading ? (
@@ -2798,7 +2816,8 @@ export default function Finishing() {
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* Start New Job (Standalone Batch) Modal */}
       {showNewJobModal && (

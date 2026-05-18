@@ -712,3 +712,25 @@ Six small changes following Matt's first walkthrough of the live Bridge.
 **Priority queue.** Expanded from top 3 to top 5 active jobs by quantity. Added the assigned machine code per row (phosphor-dim styling); shows "— UNASSIGNED" in amber for jobs not yet on a machine.
 
 **Dim text legibility.** Bumped the `--muted` CSS var from `#64748b` to `#94a3b8` to lift all the subtitle/footer dim text. Same character of dimness, just less hard to read on the cinema-dark background.
+
+---
+
+## 2026-05-18 — Conditional chemical lot fields (passivation chemicals are stainless-only)
+
+Citric Acid and Alkaline Mix lot fields in the Finishing Station Start Batch modal (and the Compliance review screen) now hide for parts whose material category doesn't require passivation chemicals. Operational truth: only stainless-based parts go through the citric/alkaline passivation. Steel and aluminum skip the chemicals entirely. Previously every batch showed and required the two lot fields, forcing operators to fake-fill them for non-stainless batches — a real data-integrity issue.
+
+**Predicate.** `src/lib/materials.js` exports `REQUIRES_CHEMICALS_CATEGORIES = ['Stainless', 'Pre-Formed']` and `requiresChemicals(part)`. Pre-Formed (blank studs) is included because the blanks are stainless underneath. Categories explicitly NOT requiring chemicals: Steel, Aluminum, Brass, Titanium. Defensive default: if the category can't be determined (NULL `material_type_id` or missing join), return `true` so the operator is prompted to verify rather than the system silently skipping required data.
+
+**Schema.** No migration. `finishing_sends.chemical_lot_number` and `chemical_lot_number_2` were already nullable. When chemicals aren't required, the form persists NULL for both — not empty strings — so the DB stays clean.
+
+**Query enrichment.** Every place that loads a job with its part for the finishing flow now joins `material_type:material_types(category, name, short_code)` so the predicate can resolve without an extra fetch. Touched queries: `Finishing.jsx` pending + active batch loaders, `ComplianceReview.jsx` pending-batches loader, and `Mainframe.jsx`'s top-level jobs loader (the source that feeds ComplianceReview the manufacturing-complete job objects).
+
+**Compliance gets the same rule.** Roger's review surface hides the chemical fields for non-stainless batches; the predicate is identical (`requiresChemicals` from the same helper). Applied in both display sites: per-batch traceability grid and per-job latest-send grid.
+
+**Optional helper text** rendered in place of the hidden fields: "Chemical lot tracking not required for [steel/aluminum/...] parts." Subtle, italic, fits existing kiosk helper-text style.
+
+**Validation.** The Start Batch button now blocks when `needsChemicals && (!citricAcidLot || !alkalineMixLot)`. Pre-fix the button was already only gated on incoming count — chemical lots were merely warned-on. Tightening this side along with the hiding so stainless batches actually require the values they're prompted for.
+
+**Future-proofing.** Adding a new category to the chemicals-required set (e.g., a custom alloy that needs the same passivation) is a one-line edit to `REQUIRES_CHEMICALS_CATEGORIES`. No code changes elsewhere.
+
+**Resolves blocked workflow:** J-000025 (SK4-6P, -6 Stud Steel) which was sitting in James's Incoming Queue unable to start because the chemical fields were required for a part that doesn't need them.

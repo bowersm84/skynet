@@ -21,38 +21,53 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
 
   const downReason = isDown ? getDownReason() : null
 
+  // Derive a single status string from machine + job state.
+  // Priority: Down > Setup > Running > Ready/Staged > Idle.
+  // Ready vs Staged depends on whether the machine is kiosk-enabled —
+  // a Staged machine has work queued but no kiosk to launch from yet
+  // (waiting on phased rollout).
+  const derivedStatus = (() => {
+    if (isDown) return 'down'
+    if (activeJob?.status === 'in_setup') return 'setup'
+    if (activeJob?.status === 'in_progress') return 'running'
+    if (queuedJobs.length > 0) {
+      return machine.kiosk_enabled ? 'ready' : 'staged'
+    }
+    return 'idle'
+  })()
+
   const getStatusColor = (status) => {
-    if (isDown) return 'text-red-500'
     switch (status) {
-      case 'available': return 'text-green-500'
-      case 'in_use': return 'text-skynet-accent'
-      case 'maintenance': return 'text-purple-500'
       case 'down': return 'text-red-500'
-      case 'offline': return 'text-red-500'
+      case 'setup': return 'text-skynet-accent'
+      case 'running': return 'text-skynet-accent'
+      case 'ready': return 'text-green-500'
+      case 'staged': return 'text-amber-400'
+      case 'idle': return 'text-gray-500'
       default: return 'text-gray-500'
     }
   }
 
   const getStatusBg = (status) => {
-    if (isDown) return 'border-red-600 bg-red-950/30'
     switch (status) {
-      case 'available': return 'border-green-800'
-      case 'in_use': return 'border-blue-800'
-      case 'maintenance': return 'border-purple-800'
       case 'down': return 'border-red-600 bg-red-950/30'
-      case 'offline': return 'border-red-800'
+      case 'setup': return 'border-blue-800'
+      case 'running': return 'border-blue-800'
+      case 'ready': return 'border-green-800'
+      case 'staged': return 'border-amber-800'
+      case 'idle': return 'border-gray-800'
       default: return 'border-gray-800'
     }
   }
 
   const getStatusDisplay = (status) => {
-    if (isDown) return 'DOWN'
     switch (status) {
-      case 'available': return 'Available'
-      case 'in_use': return 'In Use'
-      case 'maintenance': return 'Maintenance'
       case 'down': return 'DOWN'
-      case 'offline': return 'Offline'
+      case 'setup': return 'Setup'
+      case 'running': return 'Running'
+      case 'ready': return 'Ready'
+      case 'staged': return 'Staged'
+      case 'idle': return 'Idle'
       default: return status.charAt(0).toUpperCase() + status.slice(1)
     }
   }
@@ -69,7 +84,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
   const maintenanceType = activeJob?.work_order?.maintenance_type
 
   return (
-    <div className={`bg-gray-900 rounded-lg border ${getStatusBg(machine.status)} overflow-hidden ${isDown ? 'ring-2 ring-red-500/50' : ''}`}>
+    <div className={`bg-gray-900 rounded-lg border ${getStatusBg(derivedStatus)} overflow-hidden ${isDown ? 'ring-2 ring-red-500/50' : ''}`}>
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div>
           <h3 className="text-white font-semibold">{machine.name}</h3>
@@ -82,8 +97,8 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
               DOWN
             </span>
           ) : (
-            <span className={`text-sm font-medium ${getStatusColor(machine.status)}`}>
-              {getStatusDisplay(machine.status)}
+            <span className={`text-sm font-medium ${getStatusColor(derivedStatus)}`}>
+              {getStatusDisplay(derivedStatus)}
             </span>
           )}
         </div>
@@ -216,7 +231,7 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
           </div>
         )}
 
-        {jobs.length === 0 && !isDown && machine.status === 'available' && (
+        {derivedStatus === 'idle' && (
           <p className="text-gray-600 text-xs text-center mt-2">Ready for assignment</p>
         )}
 

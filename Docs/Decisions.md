@@ -607,17 +607,42 @@ Corrected backfill SQL is in `Docs/migrations/2026-05-17_sky16_doc_requirements_
 
 ---
 
-## 2026-05-18 — Production Dashboard: "Yesterday" = last business day
+## 2026-05-18 — Production Dashboard: smart default + date picker
 
-**Problem.** Production Dashboard "Yesterday's Output" section pulled literal `now - 1 day`. Viewing on Sunday May 17 looked at Saturday May 16 data, which was always zero — Skybolt is closed weekends. Operators saw zeros and assumed the dashboard was broken.
+**Problem.** "Yesterday's Output" pulled literal `now - 1 day`, so Sunday/Monday viewing landed on a closed Saturday and showed zeros. Also no way to look back at a specific date — useful for holidays, ad-hoc historical review, or just checking last Tuesday.
 
-**Fix.** Replaced the `yesterdayBounds()` and `yesterdayLabel` helpers with a single `lastBusinessDay()` function that walks backward from today until it lands on a weekday (Mon-Fri). Resulting mapping:
-- Viewed Sun → shows Friday's data
-- Viewed Mon → shows Friday's data
-- Viewed Tue → shows Monday's data
-- Viewed Wed-Fri → shows previous day
-- Viewed Sat → shows Friday's data
+**Fix.** Two changes layered together:
 
-Added a `yesterdayHeading` constant so the section title is dynamic ("Friday's Output" / "Monday's Output" / etc.) — viewers always know which day's data they're looking at without parsing the small date subtitle.
+1. **Smart default.** A new module-level `lastBusinessDay()` helper walks backward from today until it hits Mon-Fri. Sunday/Monday viewing → Friday, Tuesday → Monday, Wed-Fri → previous day, Saturday → Friday. Becomes the initial value for the new `selectedDate` state.
 
-**Not handled.** Federal holidays. If Skybolt closes for Memorial Day (Mon May 26), Tuesday will still show "Monday's Output" with zeros. Punt — Matt can add a holiday list later if it becomes a pattern.
+2. **Date picker.** Native `<input type="date">` in the section header (right side, dark-themed via `colorScheme: 'dark'`). `max` is pinned to today — no future dates. Picking a date updates `selectedDate`, which is in `loadYesterday`'s `useCallback` deps, so the data refetches automatically via the existing polling chain.
+
+Section heading is now dynamic — "Friday's Output" / "Monday's Output" / etc. — based on the selected date's weekday. Subtitle shows the full date for disambiguation.
+
+**Holidays.** This solves manual lookback (pick the day before the holiday to see real numbers). Automatic holiday-aware default is not implemented — Memorial Day Monday will still default to that Monday, so viewer picks Friday May 22 manually. Add a federal holidays list later if it becomes a pattern.
+
+**Timezone note.** All date arithmetic and `<input type="date">` ↔ `Date` conversions use local date parts (year/month/day getters and constructors), not `toISOString`, to avoid UTC midnight drift that would shift the selected day in non-UTC timezones.
+
+---
+
+## 2026-05-18 — Mainframe machine status taxonomy
+
+**Problem.** Machine cards in Mainframe showed "Available" for any machine that wasn't actively producing — uninformative. An idle machine and a machine with 4 jobs queued behind a closed kiosk both said the same thing. Status badge needs to reflect the actual operational state.
+
+**New taxonomy.** Six derived states, computed in `MachineCard.jsx` from machine + job state, priority top-down:
+
+| Status   | Color | Meaning |
+|----------|-------|---------|
+| Down     | red   | machine.status='down' OR ongoing downtime OR active unplanned maintenance |
+| Setup    | blue  | a job is in 'in_setup' on this machine |
+| Running  | blue  | a job is in 'in_progress' on this machine |
+| Ready    | green | machine is kiosk_enabled AND has queued jobs (just waiting for a machinist to log in) |
+| Staged   | amber | machine is NOT kiosk_enabled AND has queued jobs (work is positioned but no kiosk to start from — Wave 2+ rollout pending) |
+| Idle     | gray  | no jobs at all |
+
+**Implementation.** Single derived const `derivedStatus` computed once at the top of `MachineCard`. The three display helpers (`getStatusColor`, `getStatusBg`, `getStatusDisplay`) were refactored to key off the new strings. The raw `machine.status` DB column is no longer used in rendering — Down already had its own `isDown` predicate that incorporates downtime and maintenance signals, so the DB column's old 'available' / 'in_use' / 'maintenance' values are now ignored for display purposes.
+
+**Today's mapping (Wave 1 kiosk rollout):** MZ-5 is the only kiosk-enabled machine. So:
+- MZ-5 with queue, no active job → **Ready**
+- Any other machine with queue, no active job → **Staged**
+- When more kiosks come online, those machines will flip from Staged to Ready automatically — no code change needed, just the `machines.kiosk_enabled` toggle.

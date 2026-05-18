@@ -2,6 +2,39 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { AlertOctagon, Wrench, Power } from 'lucide-react'
 
+// ---- Date helpers (module-level, pure, local timezone) ----
+// Skybolt is closed Sat/Sun. "Last business day" walks backward from today
+// until it hits a weekday: Sun/Mon → Fri, Tue → Mon, Wed-Fri → previous day.
+const lastBusinessDay = () => {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  d.setDate(d.getDate() - 1)
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() - 1)
+  }
+  return d
+}
+// Build ISO bounds for any Date — local midnight to next local midnight.
+const dateBounds = (date) => {
+  const start = new Date(date)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return { start: start.toISOString(), end: end.toISOString() }
+}
+// <input type="date"> ↔ Date conversions, both using local date parts to
+// avoid UTC drift (toISOString shifts the day across midnight in many TZs).
+const dateToInputValue = (d) => {
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+const inputValueToDate = (s) => {
+  const [y, m, d] = s.split('-').map(Number)
+  return new Date(y, m - 1, d)
+}
+
 export default function ProductionDisplay() {
   const [loading, setLoading] = useState(true)
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -18,39 +51,25 @@ export default function ProductionDisplay() {
 
   const [openCOCount, setOpenCOCount] = useState(0)
 
-  // ---- Date helpers (local timezone) ----
-  // Skybolt is closed Sat/Sun. "Yesterday" means the most recent business day:
-  // viewing on Sun/Mon → Friday; Tue → Monday; Wed-Fri → previous day; Sat → Friday.
-  // Walks backward from today until it hits a weekday (1-5).
-  const lastBusinessDay = () => {
-    const d = new Date()
-    d.setHours(0, 0, 0, 0)
-    d.setDate(d.getDate() - 1)
-    while (d.getDay() === 0 || d.getDay() === 6) {
-      d.setDate(d.getDate() - 1)
-    }
-    return d
-  }
-  const yesterdayBounds = () => {
-    const start = lastBusinessDay()
-    const end = new Date(start)
-    end.setDate(end.getDate() + 1)
-    return { start: start.toISOString(), end: end.toISOString() }
-  }
+  // Date being viewed in the "Output" section. Defaults to the most recent
+  // business day; user can override via the date picker in the section header.
+  const [selectedDate, setSelectedDate] = useState(() => lastBusinessDay())
+
+  // ---- In-component date derivations ----
   const fiveDaysAgoISO = () => {
     const d = new Date()
     d.setDate(d.getDate() - 5)
     return d.toISOString()
   }
   const formatDate = (s) => s ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
-  const yesterdayLabel = lastBusinessDay().toLocaleDateString('en-US', {
+  const selectedDateLabel = selectedDate.toLocaleDateString('en-US', {
     weekday: 'long', month: 'short', day: 'numeric'
   })
-  const yesterdayHeading = `${lastBusinessDay().toLocaleDateString('en-US', { weekday: 'long' })}'s Output`
+  const selectedDateHeading = `${selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}'s Output`
 
   // ---- Loaders ----
   const loadYesterday = useCallback(async () => {
-    const { start, end } = yesterdayBounds()
+    const { start, end } = dateBounds(selectedDate)
 
     const [sentRes, passedRes] = await Promise.all([
       supabase.from('finishing_sends')
@@ -82,7 +101,7 @@ export default function ProductionDisplay() {
 
     setYesterdaySent(aggregate(sentRes.data, 'quantity'))
     setYesterdayPassed(aggregate(passedRes.data, 'verified_count'))
-  }, [])
+  }, [selectedDate])
 
   const loadMachineStatus = useCallback(async () => {
     const { data: machines, error: mErr } = await supabase
@@ -202,10 +221,25 @@ export default function ProductionDisplay() {
 
       <div className="grid grid-cols-12 gap-6 mb-6">
 
-        {/* Yesterday's Output */}
+        {/* Output for selected date — defaults to last business day */}
         <div className="col-span-3 bg-gray-900 rounded-xl border border-gray-800 p-5">
-          <h2 className="text-xl font-bold text-skynet-accent mb-1">{yesterdayHeading}</h2>
-          <p className="text-gray-500 text-xs font-mono mb-5">{yesterdayLabel}</p>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <h2 className="text-xl font-bold text-skynet-accent">{selectedDateHeading}</h2>
+            <input
+              type="date"
+              value={dateToInputValue(selectedDate)}
+              max={dateToInputValue(new Date())}
+              onChange={(e) => {
+                if (e.target.value) {
+                  setSelectedDate(inputValueToDate(e.target.value))
+                }
+              }}
+              style={{ colorScheme: 'dark' }}
+              className="bg-gray-800 border border-gray-700 rounded text-gray-300 text-xs font-mono px-2 py-1 focus:outline-none focus:border-skynet-accent"
+              title="Choose date to review"
+            />
+          </div>
+          <p className="text-gray-500 text-xs font-mono mb-5">{selectedDateLabel}</p>
 
           <div className="mb-5">
             <p className="text-gray-400 text-sm">Sent to finishing</p>

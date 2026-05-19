@@ -849,3 +849,56 @@ Pace signal for non-red states (green / amber / grey) no longer surfaces visuall
 **10-day forward filter on Active Jobs.** The loader now only emits jobs whose `scheduled_end` is in the past (past-due, BEHIND) or within the next 10 days. Anything scheduled further out is hidden — the TV-projected list stays digestible (8-12 rows typical vs. potentially 40+ if every future-scheduled job rendered). Jobs with NULL `scheduled_end` are kept defensively. Header count (`activeJobs.length`) reflects the visible filtered total, not a hidden global active count — intentional: the dashboard reflects what's visible.
 
 **Machine code elevated to part-number prominence.** Was small gray text under the part number; now bold, white, same font size, on the same line as the part number. The machine name (e.g., "Mazak 5") drops to a small gray subtitle below.
+
+## 2026-05-19 — S9 Batch A: Pre-mfg compliance gated on machine assignment
+
+**Workflow flip.** `ComplianceReview.jsx` pre-mfg filter now requires `assigned_machine_id IS NOT NULL` on `pending_compliance` jobs. Unscheduled jobs are invisible to Roger — they sit in April's Unassigned bucket until scheduled, then surface in his queue with machine context so the review is against the target machine's doc set.
+
+**Why.** Several documents (machine-specific setup sheets, CAM programs, tooling lists) only make sense once the target machine is known. Roger previously approved against the part's master doc set, then April scheduled later, sometimes onto a machine that warranted different docs. The flip puts April first in the chain.
+
+**Machine code surfaced.** Compliance card header sub-line now shows assigned machine code in skynet-accent font-mono, alongside job number / qty / customer. Data was already in the loader; just unused.
+
+**Reschedule onto a different machine reverts to pending_compliance.** `applySchedule()` in `src/lib/scheduling.js` takes a new `revertCompliance` flag. When true:
+- `jobs.status` → `pending_compliance`
+- Clear `compliance_outcome`, `compliance_notes`, `documents_deferred*` (4 cols)
+- All `job_documents.status` → `pending`, clear `approved_by` / `approved_at`
+
+`ScheduleJobModal.jsx` detects the revert case (`editMode && status='assigned' && new_machine !== old_machine`), shows an amber banner in Step 3, switches the Save label to "Reschedule & re-review", and gates on `window.confirm()`. `pending_compliance` reschedules and same-machine reschedules don't trigger.
+
+**Mainframe KPI sync.** "Pending Compliance" tile filters pre-mfg branch by `assigned_machine_id`; post-mfg branch unchanged. KPI now matches the visible section count below.
+
+**Scope edges (intentional v1).**
+- `in_setup`/`in_progress` machine swaps don't trigger revert. Operationally the right tool there is Split (Batch B); the modal doesn't block, just doesn't revert.
+- `ready` status code path in `ComplianceReview.handleApproveJob` kept as legacy fallback. Won't execute under new rules; not ripped out.
+- Document reset is wholesale (every doc to pending). No per-doc machine-specific flag exists.
+
+---
+
+## 2026-05-19 — S9 Batch B: Job Split feature (productized from May 2026 manual splits)
+
+Operational pattern from the May 2026 manual SQL splits productized into a UI feature. Scheduler clicks Split on a job row in WO Lookup, picks a quantity, confirms. Original's quantity reduces; a new job is born in `pending_compliance` — invisible to Roger until April puts it on a machine (per Batch A flip).
+
+**Atomic via Postgres RPC.** `public.split_job(p_job_id, p_new_job_quantity, p_reason)` in one locked transaction:
+- Auth: `auth.uid()` + profile role lookup. Rejects all roles except `scheduler` and `admin`.
+- Status gate: `pending_compliance`, `ready`, `assigned`, `in_setup`, `in_progress`, `manufacturing_complete`. Blocked downstream and on terminals.
+- Quantity validation: `0 < new_qty < pieces_left_to_make` where `pieces_left = quantity − COALESCE(qty_override, 0) − COALESCE(good_pieces, 0)`.
+- `FOR UPDATE` lock on original. `quantity` decremented; `qty_override` untouched (preserves prior-work provenance).
+- New job INSERT: `pending_compliance`, no machine, no schedule. Notes reference original.
+- Clones routing steps (skipping `removed`) with `status='pending'`, operational columns null. `is_added_step=false` — the new job's routing is a fresh snapshot.
+- Clones `job_documents` (preserves `file_url`, `uploaded_by`, `source`, `notes`) with `status='pending'`, `approved_*` cleared.
+- Does NOT clone `job_materials` or `job_tools` — both are kiosk-time artifacts. New job starts fresh on whatever machine the scheduler picks.
+- Audit row in `public.job_splits`.
+
+`SECURITY DEFINER`; `GRANT EXECUTE TO authenticated`. Permission check lives in-function, not via RLS.
+
+**Audit table.** `public.job_splits(id, original_job_id, new_job_id, split_at, split_by, original_qty_before, original_qty_after, new_job_qty, reason)`. Check constraint `before = after + new_qty`. Indexed on `original_job_id` and `split_at DESC`. RLS enabled; authenticated SELECT; INSERTs flow through the function only (no policy by design).
+
+**UI gate.** `src/lib/jobs.js` exports `SPLITTABLE_STATUSES`, `isSplittable(job)`, `canSplitJobs(role)`. Single source of truth shared with the RPC's `k_allowed_statuses`. Split button on WO Lookup job rows (both assembly and non-assembly paths in `Mainframe.jsx`).
+
+**Entry point.** WO Lookup only for v1. Mainframe machine card and Schedule surfaces deferred — start narrow.
+
+**Known v1 limitations.**
+- `pieces_left_to_make` slightly overcounts when batches are mid-finishing (`good_pieces` only updates at job complete). Scheduler can mentally adjust.
+- Cloned `job_documents` reference the original job's S3 folder path. Files load fine; folder structure mildly untidy.
+- Customer order allocations stay at WO level. Both halves fulfill the same WO.
+- Operator at the original machine isn't notified their target shrank — they'll see it on next kiosk refresh. UX nudge deferred.

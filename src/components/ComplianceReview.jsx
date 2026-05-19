@@ -839,11 +839,15 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   const isComplianceUser = profile?.role === 'compliance' || profile?.role === 'admin' || profile?.can_approve_compliance === true
 
   // Filter jobs by category
+  // S9 workflow flip: pre-mfg compliance is gated on machine assignment.
+  // Unscheduled pending_compliance jobs are invisible to Roger until April
+  // (scheduler) puts them on a machine — that way Roger always reviews docs
+  // against a known target machine.
   const pendingMachiningJobs = jobs.filter(job =>
-    job.status === 'pending_compliance' && job.compliance_outcome !== 'hold'
+    job.status === 'pending_compliance' && job.compliance_outcome !== 'hold' && job.assigned_machine_id
   )
   const heldMachiningJobs = jobs.filter(job =>
-    job.status === 'pending_compliance' && job.compliance_outcome === 'hold'
+    job.status === 'pending_compliance' && job.compliance_outcome === 'hold' && job.assigned_machine_id
   )
   const pendingPostMfgJobs = jobs.filter(job => job.status === 'pending_post_manufacturing')
   const approvedUnassignedJobs = jobs.filter(job => job.status === 'ready' && !job.assigned_machine_id)
@@ -1712,6 +1716,14 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                         <span className="text-skynet-accent font-mono">{job.job_number}</span>
                         <span className="mx-2">•</span>
                         <span>Qty: {job.quantity}</span>
+                        {job.assigned_machine && (
+                          <>
+                            <span className="mx-2">•</span>
+                            <span className="text-skynet-accent font-mono">
+                              {job.assigned_machine.code || job.assigned_machine.name}
+                            </span>
+                          </>
+                        )}
                         {job.work_order?.customer && (
                           <span className="mx-2">• {job.work_order.customer}</span>
                         )}

@@ -129,8 +129,25 @@ export default function ScheduleJobModal({
   const fmtDateTime = (d) =>
     d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'
 
+  // S9 workflow flip: rescheduling an already-assigned job onto a different
+  // machine sends it back to pending_compliance for re-review. Pending-
+  // compliance reschedules don't trigger this (job hasn't been approved
+  // for any machine yet — just switch machines silently).
+  const isMachineSwapRevert =
+    editMode &&
+    job?.status === 'assigned' &&
+    job?.assigned_machine_id &&
+    job.assigned_machine_id !== selectedMachineId
+
   const handleSchedule = async () => {
     if (!canSubmit) return
+    if (isMachineSwapRevert) {
+      const ok = window.confirm(
+        'Changing machines will return this job to Compliance for re-review of machine-specific documents. ' +
+        'All document approvals on this job will be reset to pending. Continue?'
+      )
+      if (!ok) return
+    }
     setSaving(true)
     setSaveError(null)
     try {
@@ -142,7 +159,8 @@ export default function ScheduleJobModal({
         targetStart: propagation.targetSlot.scheduled_start,
         targetEnd: propagation.targetSlot.scheduled_end,
         targetMinutes: totalMinutes,
-        cascadeChanges: propagation.changes
+        cascadeChanges: propagation.changes,
+        revertCompliance: isMachineSwapRevert
       })
       onSuccess()
     } catch (e) {
@@ -225,6 +243,7 @@ export default function ScheduleJobModal({
               propagation={propagation}
               fmtDateTime={fmtDateTime}
               job={job}
+              isMachineSwapRevert={isMachineSwapRevert}
             />
           )}
         </div>
@@ -290,7 +309,7 @@ export default function ScheduleJobModal({
                 className="flex items-center gap-1.5 px-4 py-2 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded transition-colors"
               >
                 {saving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-                {saving ? 'Scheduling...' : editMode ? 'Save changes' : 'Schedule'}
+                {saving ? 'Scheduling...' : isMachineSwapRevert ? 'Reschedule & re-review' : editMode ? 'Save changes' : 'Schedule'}
               </button>
             )}
           </div>
@@ -512,7 +531,7 @@ function InsertionSlot({ label, active, onClick }) {
 function Step3Duration({
   machine, queue, insertionIndex,
   durationDays, setDurationDays, durationHours, setDurationHours,
-  totalMinutes, propagation, fmtDateTime, job
+  totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert
 }) {
   const beforeJob = queue[insertionIndex - 1]
   const afterJob = queue[insertionIndex]
@@ -575,6 +594,17 @@ function Step3Duration({
         )}
       </div>
 
+      {isMachineSwapRevert && (
+        <div className="bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm flex items-start gap-2">
+          <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium">Returns to Compliance for re-review</p>
+            <p className="text-xs text-amber-300/80 mt-1">
+              Changing machines on an approved job resets compliance approval and all document approvals to pending. Roger will re-review against the new machine's doc set.
+            </p>
+          </div>
+        </div>
+      )}
       {targetSlot && totalMinutes > 0 && (
         <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5">
           <div className="flex items-center justify-between text-sm">

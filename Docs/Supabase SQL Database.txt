@@ -482,6 +482,7 @@ CREATE TABLE public.machines (
   status_updated_at timestamp with time zone,
   status_updated_by uuid,
   kiosk_enabled boolean NOT NULL DEFAULT false,
+  is_commissioned boolean NOT NULL DEFAULT true,
   CONSTRAINT machines_pkey PRIMARY KEY (id),
   CONSTRAINT machines_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id),
   CONSTRAINT machines_status_updated_by_fkey FOREIGN KEY (status_updated_by) REFERENCES public.profiles(id)
@@ -657,7 +658,7 @@ CREATE TABLE public.profiles (
   id uuid NOT NULL,
   email character varying NOT NULL,
   full_name character varying,
-  role character varying NOT NULL DEFAULT 'machinist'::character varying CHECK (role::text = ANY (ARRAY['admin'::character varying::text, 'compliance'::character varying::text, 'machinist'::character varying::text, 'assembly'::character varying::text, 'display'::character varying::text, 'scheduler'::character varying::text, 'customer_service'::character varying::text, 'finishing'::character varying::text])),
+  role character varying NOT NULL DEFAULT 'machinist'::character varying CHECK (role::text = ANY (ARRAY['admin'::character varying::text, 'compliance'::character varying::text, 'machinist'::character varying::text, 'assembly'::character varying::text, 'display'::character varying::text, 'scheduler'::character varying::text, 'customer_service'::character varying::text, 'finishing'::character varying::text, 'president'::character varying::text, 'viewer'::character varying::text])),
   home_location_id uuid,
   can_float boolean DEFAULT false,
   pin_code character varying,

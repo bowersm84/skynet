@@ -2738,8 +2738,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             <div className="col-span-1 text-center">Qty</div>
                                             <div className="col-span-2">Machine</div>
                                             <div className="col-span-2">Status</div>
-                                            <div className="col-span-1">Progress</div>
-                                            <div className="col-span-2 text-right">Actions</div>
+                                            <div className="col-span-3 text-right">Actions</div>
                                           </div>
                                         </div>
                                         {assemblyJobs.map(job => {
@@ -2816,15 +2815,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                     </span>
                                                   ))}
                                                 </div>
-                                                <div className="col-span-1 text-sm text-gray-400">
-                                                  {job.status === 'complete' && (
-                                                    <span>{getEffectiveQty(job).qty}/{job.quantity}</span>
-                                                  )}
-                                                  {['in_setup', 'in_progress'].includes(job.status) && (
-                                                    <span className="text-green-400">Active</span>
-                                                  )}
-                                                </div>
-                                                <div className="col-span-2 text-right flex items-center justify-end gap-1">
+                                                <div className="col-span-3 text-right flex items-center justify-end gap-1">
                                                   {!['pending_compliance', 'cancelled'].includes(job.status) && (
                                                     <button
                                                       onClick={() => setPrintPackageJob(job)}
@@ -3085,8 +3076,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                     <div className="col-span-1 text-center">Qty</div>
                                     <div className="col-span-2">Machine</div>
                                     <div className="col-span-2">Status</div>
-                                    <div className="col-span-1">Progress</div>
-                                    <div className="col-span-2 text-right">Actions</div>
+                                    <div className="col-span-3 text-right">Actions</div>
                                   </div>
                                 </div>
                                 {wo.jobs.map(job => {
@@ -3154,15 +3144,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             {statusBadge.label}
                                           </span>
                                         </div>
-                                        <div className="col-span-1 text-sm text-gray-400">
-                                          {job.status === 'complete' && job.good_pieces !== null && (
-                                            <span>{job.good_pieces}/{job.quantity}</span>
-                                          )}
-                                          {['in_setup', 'in_progress'].includes(job.status) && (
-                                            <span className="text-green-400">Active</span>
-                                          )}
-                                        </div>
-                                        <div className="col-span-2 text-right flex items-center justify-end gap-1">
+                                        <div className="col-span-3 text-right flex items-center justify-end gap-1">
                                           {!['pending_compliance', 'cancelled'].includes(job.status) && (
                                             <button
                                               onClick={() => setPrintPackageJob(job)}

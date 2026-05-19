@@ -8,14 +8,35 @@ export default function SplitJobModal({ isOpen, job, onClose, onSuccess }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
+  // Mirror getEffectiveQty's chain: qty_override (authoritative count) →
+  // sum of non-rejected finishing batches → machinist's good_pieces.
+  // Anything past the machine (in-flight or approved) counts as produced.
+  function computeProduced(j) {
+    if (!j) return 0
+    if (j.qty_override != null) return j.qty_override
+    const sends = j.finishing_sends || []
+    const live = sends.filter(s =>
+      s.compliance_status !== 'rejected' && s.status !== 'rejected'
+    )
+    if (live.length > 0) {
+      return live.reduce((acc, s) => {
+        if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
+        if (s.verified_count != null) return acc + s.verified_count
+        return acc + (s.quantity || 0)
+      }, 0)
+    }
+    return j.good_pieces || 0
+  }
+
+  const produced = computeProduced(job)
   const piecesLeftToMake = job
-    ? Math.max(1, (job.quantity || 0) - (job.qty_override || 0) - (job.good_pieces || 0))
+    ? Math.max(0, (job.quantity || 0) - produced)
     : 0
 
   // Re-initialize state when the modal opens or the job changes
   useEffect(() => {
     if (!isOpen || !job) return
-    const left = Math.max(1, (job.quantity || 0) - (job.qty_override || 0) - (job.good_pieces || 0))
+    const left = Math.max(1, (job.quantity || 0) - computeProduced(job))
     setNewJobQty(Math.max(1, Math.ceil(left / 2)))
     setReason('')
     setError(null)
@@ -24,8 +45,6 @@ export default function SplitJobModal({ isOpen, job, onClose, onSuccess }) {
   if (!isOpen || !job) return null
 
   const qty = job.quantity || 0
-  const qtyOverride = job.qty_override || 0
-  const goodPieces = job.good_pieces || 0
   const originalQtyAfter = qty - newJobQty
   const isValid =
     Number.isInteger(newJobQty) && newJobQty > 0 && newJobQty < piecesLeftToMake
@@ -92,15 +111,13 @@ export default function SplitJobModal({ isOpen, job, onClose, onSuccess }) {
             <span className="text-gray-400">Total quantity</span>
             <span className="text-white font-mono">{qty.toLocaleString()}</span>
           </div>
-          {qtyOverride > 0 && (
-            <div className="flex justify-between">
-              <span className="text-gray-400">Prior work (override)</span>
-              <span className="text-amber-300 font-mono">{qtyOverride.toLocaleString()}</span>
-            </div>
-          )}
           <div className="flex justify-between">
-            <span className="text-gray-400">Good pieces</span>
-            <span className="text-white font-mono">{goodPieces.toLocaleString()}</span>
+            <span className="text-gray-400">
+              Produced{job.qty_override != null && <span className="text-amber-400 text-xs ml-1">(override)</span>}
+            </span>
+            <span className={`font-mono ${job.qty_override != null ? 'text-amber-300' : 'text-white'}`}>
+              {produced.toLocaleString()}
+            </span>
           </div>
           <div className="flex justify-between border-t border-gray-800 pt-1.5">
             <span className="text-gray-300 font-medium">Pieces left to make</span>

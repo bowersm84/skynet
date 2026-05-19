@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
@@ -20,6 +20,8 @@ import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { getWOFulfillmentSummary } from '../lib/woFulfillment'
 import AddJobDocumentModal from '../components/AddJobDocumentModal'
+import SplitJobModal from '../components/SplitJobModal'
+import { isSplittable, canSplitJobs } from '../lib/jobs'
 import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
 import WOLookupShortfalls from '../components/WOLookupShortfalls'
@@ -82,6 +84,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   // WO Edit modal state
   const [editingWO, setEditingWO] = useState(null)
   
+  // Split job state (S9 Batch B — opens SplitJobModal from WO Lookup job rows)
+  const [splitJobTarget, setSplitJobTarget] = useState(null)
   // Cancel job state (two-step confirmation in WO Lookup)
   const [cancellingJobId, setCancellingJobId] = useState(null)
   const [cancelStep, setCancelStep] = useState(0) // 0=none, 1=first warning, 2=final confirmation
@@ -989,9 +993,13 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const finishingActive  = finishingSends.filter(s => s.status === 'in_finishing')
   const finishingPending = finishingSends.filter(s => s.status === 'pending_finishing')
 
-  // Job categorization
+  // Job categorization — pending_compliance pre-mfg is gated on machine
+  // assignment (S9 workflow flip), so the KPI must exclude unscheduled jobs
+  // to match ComplianceReview's filtered queue. pending_post_manufacturing
+  // has no machine dependency and counts unconditionally.
   const pendingComplianceJobs = jobs.filter(job =>
-    job.status === 'pending_compliance' || job.status === 'pending_post_manufacturing'
+    (job.status === 'pending_compliance' && job.assigned_machine_id) ||
+    job.status === 'pending_post_manufacturing'
   )
   const readyJobs = jobs.filter(job => !job.assigned_machine_id && job.status === 'ready')
   // SKY21: scheduler needs to see pending_compliance jobs alongside ready ones
@@ -2736,6 +2744,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                         </div>
                                         {assemblyJobs.map(job => {
                                           const canCancel = !['complete', 'cancelled'].includes(job.status) && canWrite
+                                          const canSplit = canSplitJobs(profile?.role) && isSplittable(job)
                                           return (
                                             <div 
                                               key={job.id} 
@@ -2823,6 +2832,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                     >
                                                       <Printer size={12} />
                                                       Print
+                                                    </button>
+                                                  )}
+                                                  {canSplit && (
+                                                    <button
+                                                      onClick={() => setSplitJobTarget(job)}
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-skynet-accent hover:text-blue-300 hover:bg-blue-900/30 border border-blue-800/50 hover:border-blue-700 rounded transition-colors"
+                                                    >
+                                                      <Split size={12} />
+                                                      Split
                                                     </button>
                                                   )}
                                                   {canCancel && (
@@ -3074,6 +3092,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                 {wo.jobs.map(job => {
                                   const statusBadge = getStatusBadge(job.status)
                                   const canCancel = !['complete', 'cancelled'].includes(job.status)
+                                  const canSplit = canSplitJobs(profile?.role) && isSplittable(job)
                                   return (
                                     <div 
                                       key={job.id} 
@@ -3151,6 +3170,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             >
                                               <Printer size={12} />
                                               Print
+                                            </button>
+                                          )}
+                                          {canSplit && (
+                                            <button
+                                              onClick={() => setSplitJobTarget(job)}
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-skynet-accent hover:text-blue-300 hover:bg-blue-900/30 border border-blue-800/50 hover:border-blue-700 rounded transition-colors"
+                                            >
+                                              <Split size={12} />
+                                              Split
                                             </button>
                                           )}
                                           {canCancel && (
@@ -3631,6 +3659,18 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             setExpandedJobDocs(prev => ({ ...prev, [jobId]: true }))
           }
           fetchWOLookup()
+        }}
+      />
+
+      {/* Split Job Modal (WO Lookup, scheduler+admin only) — S9 Batch B */}
+      <SplitJobModal
+        isOpen={!!splitJobTarget}
+        job={splitJobTarget}
+        onClose={() => setSplitJobTarget(null)}
+        onSuccess={async () => {
+          setSplitJobTarget(null)
+          await fetchWOLookup()
+          await fetchData()
         }}
       />
 

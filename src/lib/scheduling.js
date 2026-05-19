@@ -165,7 +165,8 @@ export function formatDurationDH(minutes) {
  */
 export async function applySchedule({
   supabase, profile, targetJob, targetMachineId,
-  targetStart, targetEnd, targetMinutes, cascadeChanges
+  targetStart, targetEnd, targetMinutes, cascadeChanges,
+  revertCompliance = false
 }) {
   for (const change of cascadeChanges || []) {
     const { error } = await supabase
@@ -180,25 +181,52 @@ export async function applySchedule({
     }
   }
 
-  const newStatus = targetJob.status === 'pending_compliance'
+  // S9 workflow flip: when an already-approved job (status='assigned') is
+  // rescheduled onto a different machine, send it back to pending_compliance
+  // so Roger re-reviews docs against the new machine. Caller (ScheduleJobModal)
+  // sets revertCompliance=true after warning the user.
+  const newStatus = revertCompliance
     ? 'pending_compliance'
-    : 'assigned'
+    : (targetJob.status === 'pending_compliance' ? 'pending_compliance' : 'assigned')
+
+  const jobUpdate = {
+    assigned_machine_id: targetMachineId,
+    scheduled_start: targetStart.toISOString(),
+    scheduled_end: targetEnd.toISOString(),
+    estimated_minutes: targetMinutes,
+    status: newStatus,
+    scheduled_by: profile?.id,
+    scheduled_at: new Date().toISOString()
+  }
+  if (revertCompliance) {
+    jobUpdate.compliance_outcome = null
+    jobUpdate.compliance_notes = null
+    jobUpdate.documents_deferred = false
+    jobUpdate.documents_deferred_reason = null
+    jobUpdate.documents_deferred_by = null
+    jobUpdate.documents_deferred_at = null
+  }
 
   const { error } = await supabase
     .from('jobs')
-    .update({
-      assigned_machine_id: targetMachineId,
-      scheduled_start: targetStart.toISOString(),
-      scheduled_end: targetEnd.toISOString(),
-      estimated_minutes: targetMinutes,
-      status: newStatus,
-      scheduled_by: profile?.id,
-      scheduled_at: new Date().toISOString()
-    })
+    .update(jobUpdate)
     .eq('id', targetJob.id)
 
   if (error) {
     throw new Error(`Schedule failed on ${targetJob.job_number}: ${error.message}`)
+  }
+
+  if (revertCompliance) {
+    // Reset all job_documents to pending so Roger re-approves against the
+    // new machine's doc set. Doc-level audit history is not preserved on
+    // the row — if a future audit need arises, capture via audit_logs.
+    const { error: docErr } = await supabase
+      .from('job_documents')
+      .update({ status: 'pending', approved_by: null, approved_at: null })
+      .eq('job_id', targetJob.id)
+    if (docErr) {
+      throw new Error(`Document reset failed on ${targetJob.job_number}: ${docErr.message}`)
+    }
   }
 }
 

@@ -19,3 +19,13 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.7);
   cursor: pointer;
 }
+
+/* Kiosk tablet tap reliability: kill the 300ms click delay and prevent
+   a missed tap from starting a text selection. Applied to modal action
+   buttons. */
+.tap {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}

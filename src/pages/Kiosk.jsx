@@ -217,6 +217,21 @@ export default function Kiosk() {
   const [machineReadyNotes, setMachineReadyNotes] = useState('')
   const [clearingDowntime, setClearingDowntime] = useState(false)
 
+  // Tablet fix: lock background scroll while any modal is open so touch
+  // scrolling stays inside the modal instead of bleeding to the page.
+  useEffect(() => {
+    const anyModalOpen =
+      showMaterialModal || showFinishingSendModal || showCompleteModal ||
+      showToolingModal || showMachineReadyModal || showJobHistory ||
+      lotMismatchModal != null
+    if (anyModalOpen) {
+      const prev = document.body.style.overflow
+      document.body.style.overflow = 'hidden'
+      return () => { document.body.style.overflow = prev }
+    }
+  }, [showMaterialModal, showFinishingSendModal, showCompleteModal,
+      showToolingModal, showMachineReadyModal, showJobHistory, lotMismatchModal])
+
   // ========== SECONDARY OPERATION DETECTION ==========
   // Detect if this is a secondary operation station (finishing, paint, etc.)
   const isSecondaryStation = machine?.code?.toLowerCase().startsWith('pass') ||
@@ -5216,7 +5231,7 @@ export default function Kiosk() {
                 <button
                   onClick={handleAddMaterial}
                   disabled={actionLoading || !materialForm.material_type || (!isBlanks && !materialForm.bar_size) || !materialForm.bars_loaded}
-                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  className="tap w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
                   <Plus size={20} />Add Material
                 </button>
@@ -5271,7 +5286,7 @@ export default function Kiosk() {
 
             {/* Footer - Different for setup vs production */}
             {activeJob.status === 'in_setup' ? (
-              <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
+              <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => {
@@ -5280,7 +5295,7 @@ export default function Kiosk() {
                         setShowToolingModal(true)
                       }
                     }}
-                    className="px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"
+                    className="tap px-4 py-2 text-gray-400 hover:text-white text-sm flex items-center gap-2"
                   >
                     <ArrowLeft size={16} />{activeJob.tooling_required ? 'Back' : 'Close'}
                   </button>
@@ -5288,17 +5303,17 @@ export default function Kiosk() {
                 <button
                   onClick={handleConfirmStartProduction}
                   disabled={actionLoading}
-                  className="px-6 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg flex items-center gap-2"
+                  className="tap px-6 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg flex items-center gap-2"
                 >
                   {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <Play size={20} />}
                   Confirm & Start Production
                 </button>
               </div>
             ) : (
-              <div className="px-6 py-4 border-t border-gray-800 flex justify-end">
-                <button 
-                  onClick={() => setShowMaterialModal(false)} 
-                  className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg flex items-center gap-2"
+              <div className="px-6 py-4 border-t border-gray-800 flex justify-end flex-shrink-0">
+                <button
+                  onClick={() => setShowMaterialModal(false)}
+                  className="tap px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg flex items-center gap-2"
                 >
                   <CheckCircle size={20} />
                   Done
@@ -5448,7 +5463,7 @@ export default function Kiosk() {
       {/* Send to Finishing Modal */}
       {showFinishingSendModal && activeJob && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-          <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md">
+          <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col">
             <div className="px-6 py-4 border-b border-gray-800 bg-cyan-900/20">
               <h2 className="text-xl font-semibold text-white flex items-center gap-2">
                 <SendHorizontal className="text-cyan-400" size={24} />
@@ -5457,7 +5472,7 @@ export default function Kiosk() {
               <p className="text-gray-500 text-sm mt-1">{activeJob.job_number} • {activeJob.component?.part_number}</p>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {finishingSends.length > 0 && (() => {
                 const rollup = getFinishingSendsRollup(finishingSends)
                 return (
@@ -5574,17 +5589,17 @@ export default function Kiosk() {
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
               <button
                 onClick={() => { setShowFinishingSendModal(false); setFinishingSendQty(''); setFinishingSendNotes('') }}
-                className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors font-semibold border border-gray-600"
+                className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors font-semibold border border-gray-600"
               >
                 Cancel
               </button>
               <button
                 onClick={handleFinishingSend}
                 disabled={!finishingSendQty || parseInt(finishingSendQty) <= 0 || actionLoading}
-                className="flex-1 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white rounded-lg transition-colors font-semibold flex items-center justify-center gap-2"
+                className="tap flex-1 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white rounded-lg transition-colors font-semibold flex items-center justify-center gap-2"
               >
                 {actionLoading ? <Loader2 size={18} className="animate-spin" /> : <SendHorizontal size={18} />}
                 Send {finishingSendQty ? `${finishingSendQty} pcs` : ''}
@@ -5641,7 +5656,7 @@ export default function Kiosk() {
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
           {secondaryConfig ? (
             /* Secondary Operation Completion Modal */
-            <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md">
+            <div className="bg-gray-900 border border-cyan-700 rounded-lg w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col">
               <div className="px-6 py-4 border-b border-cyan-700 bg-cyan-900/20">
                 <h2 className="text-xl font-semibold text-white flex items-center gap-2">
                   <CheckCircle className="text-green-500" size={24} />
@@ -5652,7 +5667,7 @@ export default function Kiosk() {
                 </p>
               </div>
 
-              <div className="p-6 space-y-4">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
                 {/* Info summary */}
                 <div className="bg-cyan-900/30 rounded-lg p-4">
                   <div className="flex items-center justify-between text-sm mb-2">
@@ -5726,17 +5741,17 @@ export default function Kiosk() {
                 </div>
               </div>
 
-              <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
-                <button 
-                  onClick={resetCompleteModal} 
-                  className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
+                <button
+                  onClick={resetCompleteModal}
+                  className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   onClick={handleCompleteSecondaryOperation}
-                  disabled={actionLoading || !secondaryCompletionForm.end_time} 
-                  className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  disabled={actionLoading || !secondaryCompletionForm.end_time}
+                  className="tap flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
                   {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
                   Complete
@@ -5744,8 +5759,8 @@ export default function Kiosk() {
               </div>
             </div>
           ) : (
-          <div className={`bg-gray-900 border rounded-lg w-full max-w-md ${
-            isMaintenance(activeJob) 
+          <div className={`bg-gray-900 border rounded-lg w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col ${
+            isMaintenance(activeJob)
               ? activeJob.work_order?.maintenance_type === 'unplanned'
                 ? 'border-purple-700'
                 : 'border-blue-700'
@@ -5780,7 +5795,7 @@ export default function Kiosk() {
             {/* Maintenance Completion Form */}
             {isMaintenance(activeJob) ? (
               <>
-                <div className="p-6 space-y-4">
+                <div className="flex-1 overflow-y-auto p-6 space-y-4">
                   <div>
                     <label className="block text-gray-400 text-sm mb-2">End Time *</label>
                     <div className="flex gap-2 items-center">
@@ -5843,9 +5858,9 @@ export default function Kiosk() {
                   </div>
                 </div>
 
-                <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
-                  <button onClick={resetCompleteModal} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
-                  <button 
+                <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
+                  <button onClick={resetCompleteModal} className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
+                  <button
                     onClick={async () => {
                       if (!completeForm.actual_end) {
                         alert('Please enter the end time')
@@ -5907,8 +5922,8 @@ export default function Kiosk() {
                         setActionLoading(false)
                       }
                     }}
-                    disabled={actionLoading || !completeForm.actual_end || !maintenanceCompletionNotes.trim()} 
-                    className={`flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 ${
+                    disabled={actionLoading || !completeForm.actual_end || !maintenanceCompletionNotes.trim()}
+                    className={`tap flex-1 py-3 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 ${
                       activeJob.work_order?.maintenance_type === 'unplanned'
                         ? 'bg-purple-600 hover:bg-purple-500 text-white'
                         : 'bg-blue-600 hover:bg-blue-500 text-white'
@@ -5924,7 +5939,7 @@ export default function Kiosk() {
             {/* Step 1: Entry Form */}
             {completionStep === 'form' && (
               <>
-                <div className="p-6 space-y-4">
+                <div className="flex-1 overflow-y-auto p-6 space-y-4">
                   {/* Required Pieces - Prominent Display */}
                   <div className="bg-skynet-accent/10 border border-skynet-accent/30 rounded-lg p-4 text-center">
                     <p className="text-gray-400 text-sm">Required Pieces</p>
@@ -6060,9 +6075,9 @@ export default function Kiosk() {
                   )}
                 </div>
 
-                <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
-                  <button onClick={resetCompleteModal} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
-                  <button onClick={handleCompleteJobClick} disabled={actionLoading || !completeForm.actual_end} className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
+                  <button onClick={resetCompleteModal} className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
+                  <button onClick={handleCompleteJobClick} disabled={actionLoading || !completeForm.actual_end} className="tap flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
                     {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}Complete Job
                   </button>
                 </div>
@@ -6071,7 +6086,7 @@ export default function Kiosk() {
 
             {/* Step 2: Review Ongoing Downtimes */}
             {completionStep === 'review_downtimes' && (
-              <div className="p-6 space-y-4">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
                 <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="text-yellow-500 flex-shrink-0 mt-0.5" size={24} />
@@ -6114,7 +6129,7 @@ export default function Kiosk() {
                               ...downtimeEdits, 
                               [dt.id]: {...edit, use_duration: false}
                             })}
-                            className={`flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
+                            className={`tap flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
                               !edit.use_duration ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
                             }`}
                           >
@@ -6125,7 +6140,7 @@ export default function Kiosk() {
                               ...downtimeEdits, 
                               [dt.id]: {...edit, use_duration: true}
                             })}
-                            className={`flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
+                            className={`tap flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
                               edit.use_duration ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'
                             }`}
                           >
@@ -6190,17 +6205,17 @@ export default function Kiosk() {
                   })}
                 </div>
 
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => setCompletionStep('form')} 
-                    className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+                <div className="flex gap-3 flex-shrink-0">
+                  <button
+                    onClick={() => setCompletionStep('form')}
+                    className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
                   >
                     ← Go Back
                   </button>
-                  <button 
-                    onClick={handleFixDowntimesAndContinue} 
-                    disabled={actionLoading} 
-                    className="flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  <button
+                    onClick={handleFixDowntimesAndContinue}
+                    disabled={actionLoading}
+                    className="tap flex-1 py-3 bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                   >
                     {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
                     Fix & Continue
@@ -6211,7 +6226,7 @@ export default function Kiosk() {
 
             {/* Step 3: Materials Checkout */}
             {completionStep === 'materials' && (
-              <div className="p-6 space-y-4">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
                 <div className="bg-blue-900/30 border border-blue-600/50 rounded-lg p-4">
                   <div className="flex items-start gap-3">
                     <Layers className="text-blue-400 flex-shrink-0 mt-0.5" size={24} />
@@ -6281,17 +6296,17 @@ export default function Kiosk() {
                   </p>
                 </div>
 
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => setCompletionStep('form')} 
-                    className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
+                <div className="flex gap-3 flex-shrink-0">
+                  <button
+                    onClick={() => setCompletionStep('form')}
+                    className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors"
                   >
                     ← Back
                   </button>
-                  <button 
-                    onClick={handleMaterialsAndContinue} 
-                    disabled={actionLoading} 
-                    className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  <button
+                    onClick={handleMaterialsAndContinue}
+                    disabled={actionLoading}
+                    className="tap flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                   >
                     {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
                     Continue

@@ -301,6 +301,21 @@ CREATE TABLE public.job_shortfall_resolutions (
   CONSTRAINT job_shortfall_resolutions_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES public.profiles(id),
   CONSTRAINT job_shortfall_resolutions_requeue_job_id_fkey FOREIGN KEY (requeue_job_id) REFERENCES public.jobs(id)
 );
+CREATE TABLE public.job_splits (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  original_job_id uuid NOT NULL,
+  new_job_id uuid NOT NULL UNIQUE,
+  split_at timestamp with time zone NOT NULL DEFAULT now(),
+  split_by uuid NOT NULL,
+  original_qty_before integer NOT NULL CHECK (original_qty_before > 0),
+  original_qty_after integer NOT NULL CHECK (original_qty_after > 0),
+  new_job_qty integer NOT NULL CHECK (new_job_qty > 0),
+  reason text,
+  CONSTRAINT job_splits_pkey PRIMARY KEY (id),
+  CONSTRAINT job_splits_original_job_id_fkey FOREIGN KEY (original_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT job_splits_new_job_id_fkey FOREIGN KEY (new_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT job_splits_split_by_fkey FOREIGN KEY (split_by) REFERENCES public.profiles(id)
+);
 CREATE TABLE public.job_tools (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   job_id uuid NOT NULL,

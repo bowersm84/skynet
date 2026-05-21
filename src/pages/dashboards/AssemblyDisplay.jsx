@@ -70,6 +70,7 @@ export default function AssemblyDisplay() {
           )
         `)
         .eq('status', 'in_finishing')
+        .eq('is_standalone', false) // SKY51 — exclude standalone J-FIN finishing batches
 
       if (error) throw error
 
@@ -120,6 +121,7 @@ export default function AssemblyDisplay() {
           )
         `)
         .eq('status', 'ready_for_assembly')
+        .eq('is_standalone_finishing', false) // SKY51 — exclude standalone J-FIN jobs
         .order('created_at', { ascending: true })
 
       if (error) throw error

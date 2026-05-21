@@ -15,7 +15,7 @@ import CustomerOrders from './pages/CustomerOrders'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
-import { isReadOnlyRole } from './lib/roles'
+import { isReadOnlyRole, canSeeBridge } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -184,8 +184,9 @@ function MainApp() {
   const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role)
   const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role) || profile?.is_salesperson === true
 
-  // Dashboards menu remains admin-only (distinct from Armory)
-  const canAccessDashboards = profile?.role === 'admin'
+  // SKY56 — all authenticated roles get the Dashboards menu; the Bridge entry
+  // is filtered per-role below (president + admin only).
+  const canAccessDashboards = !!profile?.role
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
   const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
@@ -318,7 +319,7 @@ function MainApp() {
               </button>
             )}
 
-            {/* Dashboards dropdown - admin only */}
+            {/* Dashboards dropdown - all roles; Bridge entry filtered per-role (SKY56) */}
             {currentPage === 'mainframe' && canAccessDashboards && (
               <div className="relative" ref={dashboardsMenuRef}>
                 <button
@@ -331,7 +332,7 @@ function MainApp() {
                 </button>
                 {showDashboardsMenu && (
                   <div className="absolute right-0 top-full mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 py-1">
-                    {DASHBOARDS.map(db => (
+                    {DASHBOARDS.filter(db => db.path !== '/bridge' || canSeeBridge(profile?.role)).map(db => (
                       <a
                         key={db.path}
                         href={db.path}

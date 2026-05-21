@@ -231,6 +231,7 @@ export async function getAllOpenCOLines(supabase) {
       due_date,
       priority,
       status,
+      created_at,
       components_needed,
       part:parts(id, part_number, description, part_type, is_active),
       customer_order:customer_orders!inner(
@@ -267,6 +268,7 @@ export async function getAllOpenCOLines(supabase) {
         quantity_allocated: allocated,
         remaining,
         due_date: line.due_date,
+        entry_date: line.created_at,
         priority: line.priority,
       }
     })

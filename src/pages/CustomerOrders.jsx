@@ -1267,6 +1267,7 @@ function DemandView({ profile, setActionStatus }) {
                           <th className="px-3 py-2 text-left">CO #</th>
                           <th className="px-3 py-2 text-left">Customer</th>
                           <th className="px-3 py-2 text-left">Line</th>
+                          <th className="px-3 py-2 text-left">Entered</th>
                           <th className="px-3 py-2 text-right">Remaining</th>
                           <th className="px-3 py-2 text-left">Due</th>
                           <th className="px-3 py-2 text-left">Priority</th>
@@ -1293,6 +1294,9 @@ function DemandView({ profile, setActionStatus }) {
                               </td>
                               <td className="px-3 py-2 text-gray-300">{line.customer_name}</td>
                               <td className="px-3 py-2 text-gray-500 text-xs">#{line.line_number}</td>
+                              <td className="px-3 py-2 text-gray-400 text-xs">
+                                {line.entry_date ? formatDate(line.entry_date) : '—'}
+                              </td>
                               <td className="px-3 py-2 text-right font-mono text-amber-300">
                                 {line.remaining.toLocaleString()}
                               </td>

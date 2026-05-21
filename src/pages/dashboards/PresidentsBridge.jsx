@@ -36,9 +36,11 @@ export default function PresidentsBridge() {
     complianceQueue: 0,
     finishingQueue: 0,
     trajectory: { preLaunch: 0, production: 0, cruise: 0, approach: 0, splashdown: 0 },
-    priorityParts: [],
+    products: [],
   })
   const [lastUpdated, setLastUpdated] = useState(null)
+  // SKY51 — which product rows are expanded to show component breakdown.
+  const [expandedProducts, setExpandedProducts] = useState({})
   const [, setTick] = useState(0) // forces re-render so MET/clock refresh
 
   // Inject Google Fonts once
@@ -126,14 +128,20 @@ export default function PresidentsBridge() {
             .from('finishing_sends')
             .select('id', { count: 'exact', head: true })
             .neq('status', 'finishing_complete'),
-          // 5. All active jobs (trajectory + priority parts)
+          // 5. All active jobs (trajectory + product rollup). Includes assembly +
+          // finishing-send data so we can compute through-finishing per component.
           supabase
             .from('jobs')
             .select(`
-              id, quantity, status,
+              id, quantity, status, component_id, work_order_assembly_id,
               work_order:work_orders(wo_number, customer, due_date),
               component:parts!component_id(part_number),
-              machine:machines!assigned_machine_id(code, name)
+              machine:machines!assigned_machine_id(code, name),
+              work_order_assembly:work_order_assemblies!work_order_assembly_id(
+                id, order_quantity, quantity,
+                assembly:parts!assembly_id(part_number, description)
+              ),
+              finishing_sends(verified_count, status)
             `)
             .not('status', 'in', '(complete,incomplete,cancelled)'),
         ])
@@ -151,18 +159,48 @@ export default function PresidentsBridge() {
           }
         })
 
-        // Priority parts: top 5 by quantity
-        const priorityParts = (jobsRes.data || [])
-          .filter(j => j.component?.part_number && (j.quantity || 0) > 0)
-          .sort((a, b) => (b.quantity || 0) - (a.quantity || 0))
-          .slice(0, 5)
-          .map(j => ({
-            part_number: j.component.part_number,
-            quantity: j.quantity || 0,
-            customer: j.work_order?.customer || '—',
-            due_date: j.work_order?.due_date || null,
+        // SKY51 — Product rollup. Group active jobs by WO assembly (the "product").
+        // Jobs with no work_order_assembly_id (e.g. J-FIN standalone finishing) are
+        // excluded. Planned = order_quantity. Actual = order_quantity × the smallest
+        // (through-finishing ÷ component job.quantity) ratio across components, so a
+        // product needing 4 of a part reads correctly and 1:1 parts collapse to a
+        // simple min. Through-finishing = SUM(verified_count) at finishing_complete.
+        const productMap = {}
+        ;(jobsRes.data || []).forEach(j => {
+          const woa = j.work_order_assembly
+          if (!woa || !woa.id) return // excludes J-FIN / non-assembly jobs
+          const throughFinishing = (j.finishing_sends || [])
+            .filter(s => s.status === 'finishing_complete')
+            .reduce((s, fs) => s + (fs.verified_count || 0), 0)
+          if (!productMap[woa.id]) {
+            productMap[woa.id] = {
+              assembly_id: woa.id,
+              product_number: woa.assembly?.part_number || '—',
+              product_description: woa.assembly?.description || '',
+              planned: woa.order_quantity || 0,
+              customer: j.work_order?.customer || '—',
+              due_date: j.work_order?.due_date || null,
+              components: [],
+            }
+          }
+          productMap[woa.id].components.push({
+            part_number: j.component?.part_number || '—',
             machine_code: j.machine?.code || null,
-          }))
+            required: j.quantity || 0,
+            through_finishing: throughFinishing,
+          })
+        })
+        const products = Object.values(productMap).map(p => {
+          // Limiting component ratio (guard divide-by-zero).
+          const ratios = p.components
+            .filter(c => (c.required || 0) > 0)
+            .map(c => c.through_finishing / c.required)
+          const minRatio = ratios.length ? Math.min(...ratios) : 0
+          const actual = Math.floor((p.planned || 0) * minRatio)
+          return { ...p, actual }
+        })
+        .sort((a, b) => (b.planned || 0) - (a.planned || 0))
+        .slice(0, 5)
 
         // Machine taxonomy: derive Down/Setup/Running/Ready/Staged/Idle per machine
         // using the shared helper so Bridge and Mainframe stay in lockstep.
@@ -190,7 +228,7 @@ export default function PresidentsBridge() {
           complianceQueue: complianceRes.count || 0,
           finishingQueue: finishingRes.count || 0,
           trajectory,
-          priorityParts,
+          products,
         })
         setLastUpdated(new Date())
       } catch (e) {
@@ -424,29 +462,46 @@ export default function PresidentsBridge() {
         <div className="section">
           <div className="section-header">
             <div className="section-title">PRIORITY MANUFACTURING QUEUE</div>
-            <div className="section-meta">TOP 3 BY VOLUME · OPEN ORDERS</div>
+            <div className="section-meta" title="Actual = limiting component through finishing; switches to assembled qty when Assembly goes live">TOP 5 BY VOLUME · PRODUCTS · ACTUAL/PLANNED ⓘ</div>
           </div>
           <div className="priority-list">
-            {data.priorityParts.length === 0 && (
-              <div className="priority-empty">NO ACTIVE JOBS · STANDING BY</div>
+            {data.products.length === 0 && (
+              <div className="priority-empty">NO ACTIVE PRODUCTS · STANDING BY</div>
             )}
-            {data.priorityParts.map((p, i) => (
-              <div key={p.part_number + '-' + i} className={'priority-row p' + (i + 1)}>
-                <div className="priority-badge">P{i + 1}</div>
-                <div className="priority-part">{p.part_number}</div>
-                <div className="priority-qty">
-                  {p.quantity.toLocaleString()}<span className="unit">PCS</span>
+            {data.products.map((p, i) => {
+              const isOpen = !!expandedProducts[p.assembly_id]
+              return (
+              <div key={p.assembly_id}>
+                <div
+                  className={'priority-row p' + (i + 1)}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setExpandedProducts(prev => ({ ...prev, [p.assembly_id]: !prev[p.assembly_id] }))}
+                >
+                  <div className="priority-badge">P{i + 1}</div>
+                  <div className="priority-part">{p.product_number}</div>
+                  <div className="priority-qty">
+                    {p.actual.toLocaleString()} / {p.planned.toLocaleString()}<span className="unit">PCS</span>
+                  </div>
+                  <div className="priority-meta">
+                    {(p.customer || '—').toUpperCase()}
+                    {' · DUE '}{formatDue(p.due_date)}
+                    {'  '}{isOpen ? '▾' : '▸'}
+                  </div>
                 </div>
-                <div className="priority-meta">
-                  {(p.customer || '—').toUpperCase()}
-                  {' · '}
-                  <span className={`priority-machine ${p.machine_code ? '' : 'unassigned'}`}>
-                    {p.machine_code || '— UNASSIGNED'}
-                  </span>
-                  {' · DUE '}{formatDue(p.due_date)}
-                </div>
+                {isOpen && (
+                  <div style={{ padding: '8px 18px 12px 76px', background: 'rgba(10, 20, 25, 0.4)', borderLeft: '2px solid rgba(255,255,255,0.08)' }}>
+                    {p.components.map((c, ci) => (
+                      <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '16px', fontSize: '11px', padding: '3px 0', color: 'var(--muted)', fontFamily: "'JetBrains Mono', monospace", letterSpacing: '1px' }}>
+                        <span>{c.part_number}</span>
+                        <span>{c.machine_code || '— UNASSIGNED'}</span>
+                        <span style={{ color: 'var(--phosphor)' }}>{c.through_finishing.toLocaleString()} / {c.required.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
 

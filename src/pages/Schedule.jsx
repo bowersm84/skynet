@@ -33,7 +33,7 @@ import {
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
-import { getMachineQueue, computeRemovalCascade, applyUnschedule } from '../lib/scheduling'
+import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH } from '../lib/scheduling'
 
 const ONGOING_STATUSES = [
   'in_setup',
@@ -130,6 +130,12 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [scheduleClickJob, setScheduleClickJob] = useState(null)
   const [scheduleClickEditMode, setScheduleClickEditMode] = useState(false)
   const [scheduleClickDefaults, setScheduleClickDefaults] = useState(null)
+
+  // SKY55 — Adjust End Date (end-only quick edit; start + machine + position locked)
+  const [endDateEditJob, setEndDateEditJob] = useState(null)
+  const [endDateEditValue, setEndDateEditValue] = useState('') // datetime-local string
+  const [endDateSaving, setEndDateSaving] = useState(false)
+  const [endDateError, setEndDateError] = useState(null)
 
   // Global schedule search state
   const [globalSearch, setGlobalSearch] = useState('')
@@ -832,6 +838,61 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     setScheduleClickDefaults(null)
     setCloseGap(true)
     setUnscheduleConfirm(job)
+  }
+
+  // SKY55 — open the Adjust End Date modal (running or editable jobs).
+  const toLocalDatetimeInput = (d) => {
+    const dt = new Date(d)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}`
+  }
+
+  const handleOpenEndDateEdit = (job) => {
+    const baseMs = job.scheduled_end
+      ? new Date(job.scheduled_end).getTime()
+      : (job.scheduled_start ? new Date(job.scheduled_start).getTime() : Date.now()) + (job.estimated_minutes || 60) * 60000
+    setEndDateEditValue(toLocalDatetimeInput(new Date(baseMs)))
+    setEndDateError(null)
+    setEndDateEditJob(job)
+    setSelectedJob(null)
+  }
+
+  const handleSaveEndDate = async () => {
+    if (!endDateEditJob) return
+    const job = endDateEditJob
+    const start = job.scheduled_start ? new Date(job.scheduled_start) : null
+    const newEnd = endDateEditValue ? new Date(endDateEditValue) : null
+
+    if (!newEnd || isNaN(newEnd.getTime())) {
+      setEndDateError('Enter a valid end date and time.')
+      return
+    }
+    if (start && newEnd <= start) {
+      setEndDateError('End must be after the job start.')
+      return
+    }
+    if (isJobRunning(job) && newEnd <= new Date()) {
+      setEndDateError('End must be in the future for a running job.')
+      return
+    }
+
+    setEndDateSaving(true)
+    setEndDateError(null)
+    try {
+      let cascadeChanges = []
+      if (job.assigned_machine_id) {
+        const queue = getMachineQueue(scheduledJobs, job.assigned_machine_id)
+        cascadeChanges = computeEndChangeCascade(queue, job.id, newEnd).changes
+      }
+      await applyEndDateChange({ supabase, job, newEnd, cascadeChanges })
+      setEndDateEditJob(null)
+      fetchData()
+      loadAllScheduledJobs()
+    } catch (e) {
+      setEndDateError(e.message || 'Failed to update end date.')
+    } finally {
+      setEndDateSaving(false)
+    }
   }
 
   const handleUnschedule = async () => {
@@ -2922,10 +2983,19 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               {/* Action buttons - disabled for in-progress or completed jobs */}
               {(selectedJob.status === 'in_progress' || selectedJob.status === 'in_setup') ? (
                 <div className="pt-4 border-t border-gray-700">
-                  <p className="text-sm text-yellow-500 flex items-center gap-2">
+                  <p className="text-sm text-yellow-500 flex items-center gap-2 mb-3">
                     <AlertTriangle size={14} />
-                    This job is currently running and cannot be edited or unscheduled.
+                    Running — machine and position are locked. You can still adjust the end date.
                   </p>
+                  {canEdit && (
+                    <button
+                      onClick={() => handleOpenEndDateEdit(selectedJob)}
+                      className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors"
+                    >
+                      <Calendar size={16} />
+                      Adjust End Date
+                    </button>
+                  )}
                 </div>
               ) : (selectedJob.status === 'complete' || selectedJob.status === 'manufacturing_complete') ? (
                 <div className="pt-4 border-t border-gray-700">
@@ -2981,7 +3051,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   </p>
                 </div>
               ) : (
-              <div className="flex items-center gap-3 pt-4 border-t border-gray-700">
+              <div className="flex items-center gap-3 pt-4 border-t border-gray-700 flex-wrap">
                 <button
                   onClick={() => {
                     setScheduleClickJob(selectedJob)
@@ -2992,6 +3062,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                 >
                   <Edit3 size={16} />
                   Edit
+                </button>
+                <button
+                  onClick={() => handleOpenEndDateEdit(selectedJob)}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded transition-colors"
+                >
+                  <Calendar size={16} />
+                  Adjust End Date
                 </button>
                 <button
                   onClick={() => setUnscheduleConfirm(selectedJob)}
@@ -3006,6 +3083,94 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           </div>
         </div>
       )}
+
+      {/* SKY55 — Adjust End Date modal (end-only; start, machine, position locked) */}
+      {endDateEditJob && (() => {
+        const job = endDateEditJob
+        const start = job.scheduled_start ? new Date(job.scheduled_start) : null
+        const newEnd = endDateEditValue ? new Date(endDateEditValue) : null
+        const validEnd = !!newEnd && !isNaN(newEnd.getTime()) && (!start || newEnd > start)
+        const queue = job.assigned_machine_id ? getMachineQueue(scheduledJobs, job.assigned_machine_id) : []
+        const cascade = validEnd ? computeEndChangeCascade(queue, job.id, newEnd) : { changes: [] }
+        const newMinutes = (validEnd && start) ? Math.max(1, Math.round((newEnd - start) / 60000)) : null
+        const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEndDateEditJob(null)}>
+            <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-skynet-accent/20 flex items-center justify-center">
+                  <Calendar size={20} className="text-skynet-accent" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Adjust End Date</h3>
+                  <p className="text-gray-400 text-sm">{job.component?.part_number || job.job_number} · {job.job_number}</p>
+                </div>
+              </div>
+
+              <p className="text-gray-400 text-xs mb-4">
+                Start, machine, and queue position stay fixed — only the end moves. Downstream jobs on this machine shift to match.
+              </p>
+
+              <div className="space-y-2 mb-4 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Start (locked)</span>
+                  <span className="text-gray-300 font-mono">{fmt(start)}</span>
+                </div>
+                <div>
+                  <label className="block text-gray-400 mb-1">New end</label>
+                  <input
+                    type="datetime-local"
+                    value={endDateEditValue}
+                    onChange={(e) => setEndDateEditValue(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
+                    style={{ colorScheme: 'dark' }}
+                  />
+                </div>
+                {newMinutes && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">New duration</span>
+                    <span className="text-gray-300 font-mono">{formatDurationDH(newMinutes)}</span>
+                  </div>
+                )}
+              </div>
+
+              {cascade.changes.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-gray-400 text-xs mb-2 flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-amber-400" />
+                    {cascade.changes.length} downstream job{cascade.changes.length === 1 ? '' : 's'} will shift
+                  </p>
+                  <div className="space-y-1 max-h-40 overflow-y-auto">
+                    {cascade.changes.map(c => (
+                      <div key={c.job.id} className="bg-gray-800/40 border border-gray-700 rounded p-2 text-xs flex items-center justify-between gap-2">
+                        <span className="text-skynet-accent font-mono">{c.job.component?.part_number || c.job.job_number}</span>
+                        <span className="text-gray-500">{fmt(c.job.scheduled_start)} → {fmt(c.newStart)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {endDateError && (
+                <p className="text-red-400 text-sm mb-3 flex items-center gap-2">
+                  <AlertTriangle size={14} /> {endDateError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-end gap-3">
+                <button onClick={() => setEndDateEditJob(null)} className="px-4 py-2 text-gray-400 hover:text-white transition-colors">Cancel</button>
+                <button
+                  onClick={handleSaveEndDate}
+                  disabled={!validEnd || endDateSaving}
+                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {endDateSaving ? (<><Loader2 size={16} className="animate-spin" /> Saving...</>) : (<><Calendar size={16} /> Save End Date</>)}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Unschedule Confirmation Modal */}
       {unscheduleConfirm && (() => {

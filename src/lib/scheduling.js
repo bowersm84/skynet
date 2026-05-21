@@ -315,3 +315,70 @@ export async function applyUnschedule({ supabase, job, cascadeChanges = [] }) {
     throw new Error(`Unschedule failed on ${job.job_number}: ${error.message}`)
   }
 }
+
+/**
+ * Compute the downstream cascade when a job's END moves but its position and
+ * start stay fixed. The target itself is NOT in `changes` (its end is written
+ * separately by applyEndDateChange). Walks forward from newEnd, propagating
+ * each subsequent job by its duration. Legacy jobs with no derivable duration
+ * keep their times; the cursor advances to their existing scheduled_end.
+ */
+export function computeEndChangeCascade(currentQueue, jobId, newEnd) {
+  const idx = currentQueue.findIndex(j => j.id === jobId)
+  if (idx < 0) return { changes: [], target: null }
+  const target = currentQueue[idx]
+
+  let cursor = new Date(newEnd)
+  const changes = []
+  for (let i = idx + 1; i < currentQueue.length; i++) {
+    const j = currentQueue[i]
+    const dur = jobDuration(j)
+    if (!dur) {
+      if (j.scheduled_end) cursor = new Date(j.scheduled_end)
+      continue
+    }
+    const newStart = new Date(cursor)
+    const newJobEnd = new Date(newStart.getTime() + dur * 60000)
+    cursor = newJobEnd
+
+    const currStart = j.scheduled_start ? new Date(j.scheduled_start).getTime() : null
+    const currEnd = j.scheduled_end ? new Date(j.scheduled_end).getTime() : null
+    if (currStart !== newStart.getTime() || currEnd !== newJobEnd.getTime()) {
+      changes.push({ job: j, newStart, newEnd: newJobEnd })
+    }
+  }
+  return { changes, target }
+}
+
+/**
+ * Persist an end-date change: cascade downstream first, then write the target's
+ * new scheduled_end and recomputed estimated_minutes. Start, machine, position,
+ * status, and compliance are all left untouched.
+ */
+export async function applyEndDateChange({ supabase, job, newEnd, cascadeChanges = [] }) {
+  for (const change of cascadeChanges) {
+    const { error } = await supabase
+      .from('jobs')
+      .update({
+        scheduled_start: change.newStart.toISOString(),
+        scheduled_end: change.newEnd.toISOString()
+      })
+      .eq('id', change.job.id)
+    if (error) {
+      throw new Error(`Cascade failed on ${change.job.job_number}: ${error.message}`)
+    }
+  }
+
+  const start = new Date(job.scheduled_start)
+  const minutes = Math.max(1, Math.round((new Date(newEnd) - start) / 60000))
+  const { error } = await supabase
+    .from('jobs')
+    .update({
+      scheduled_end: new Date(newEnd).toISOString(),
+      estimated_minutes: minutes
+    })
+    .eq('id', job.id)
+  if (error) {
+    throw new Error(`End date change failed on ${job.job_number}: ${error.message}`)
+  }
+}

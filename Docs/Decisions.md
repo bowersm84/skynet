@@ -902,3 +902,108 @@ Operational pattern from the May 2026 manual SQL splits productized into a UI fe
 - Cloned `job_documents` reference the original job's S3 folder path. Files load fine; folder structure mildly untidy.
 - Customer order allocations stay at WO level. Both halves fulfill the same WO.
 - Operator at the original machine isn't notified their target shrank — they'll see it on next kiosk refresh. UX nudge deferred.
+---
+
+## 2026-05-21 — S9 Batch C: Dashboard access, Demand entry date, Bridge product rollup (SHIPPED)
+
+Three issues shipped to prod together (SKY51, SKY54, SKY56). No schema changes. SKY52 (J-FIN
+multi-batch) was built in this batch but **reverted before push** — deferred for design (see
+`Finishing_Batches_Implementation_Plan.md`).
+
+**SKY56 — Dashboards for all roles; Bridge stays president+admin.** `canAccessDashboards`
+changed from `role === 'admin'` to `!!profile?.role` (any authenticated role). The President's
+Bridge entry is filtered per-role in the `DASHBOARDS.map` via `canSeeBridge(profile?.role)`
+(president + admin only, from `lib/roles.js`). Production + Assembly visible to everyone.
+
+**SKY54 — Entry date on the Demand screen.** `getAllOpenCOLines` now pulls
+`customer_order_lines.created_at`, exposed as `entry_date`. CustomerOrders.jsx Demand detail
+rows show an "Entered" column. `created_at` = the date the CO line was entered into SkyNet.
+
+**SKY51 part 1 — J-FIN off the dashboards.** Standalone finishing jobs were leaking into the
+Bridge priority queue (e.g. SK203C-CAGE / J-FIN-000005 ranking as P3). Fix standardizes on
+`is_standalone_finishing = false` for job lists across dashboards. Assembly's in-finishing list
+also filtered. **Finishing-throughput tallies KEEP J-FIN** (per Matt — a J-FIN job is
+legitimately finishing work); only job lists/queues exclude it. The product rollup (part 2)
+also drops J-FIN automatically since standalone jobs have no `work_order_assembly_id`.
+
+**SKY51 part 2 — Bridge PRODUCT rollup.** Priority Manufacturing Queue changed from ranking
+component *parts* to ranking *products* (WO assemblies). Per product:
+- **Planned** = `work_order_assemblies.order_quantity` (order qty only, NOT order+stock).
+- **Actual** = `order_quantity × MIN over components of (through-finishing ÷ component
+  job.quantity)`. The ratio form handles assemblies needing >1 of a component per unit (4 screws
+  per product reads correctly) and collapses to a simple min for 1:1 parts.
+- **Through-finishing** = `SUM(finishing_sends.verified_count)` where `status='finishing_complete'`
+  — i.e. pieces that passed finishing, NOT machine count. (Confirmed: every job-bearing component
+  goes through finishing — purchased BOM parts get no job — so there is no no-finishing fallback;
+  a component with nothing sent reads 0, which is correct.)
+- Rows are **click-to-expand** to show component breakdown (part #, machine, through-finishing /
+  required). Info note on the panel header explains the interim metric and that it switches to
+  assembled quantity once Assembly goes live.
+- **Layout fix (follow-up):** the first cut wrapped the four `.priority-row` grid cells in a flex
+  div, collapsing them into column 1 (text shifted left). Fix: keep the `priority-row` grid class
+  on the element that directly holds the four cells; attach onClick there; render the expand panel
+  as a sibling outside the grid row.
+
+---
+
+## 2026-05-21 — TEST-from-PROD data refresh tooling + hard-won Supabase lessons
+
+Built a repeatable PROD→TEST data refresh (`Docs/refresh-test-from-prod.ps1`) so TEST can be
+reloaded with live data on demand while preserving hand-built TEST users. Runbook:
+`SkyNet_Refresh_TEST_from_PROD_Runbook.docx`. Several non-obvious constraints were discovered the
+hard way and MUST be remembered:
+
+**Supabase blocks FK-trigger control.** You are NOT the table owner, so `ALTER TABLE ... DISABLE/
+ENABLE TRIGGER ALL` and `SET session_replication_role = replica` to suppress FK enforcement during
+a data load **do not work** (`permission denied: ... is a system trigger`). The original
+"load with checks off, then re-stamp" design is impossible on managed Supabase. **Correct approach:
+remap user IDs in the dump file itself before loading**, so every user-reference column already
+points at a valid TEST profile and no FK is ever violated.
+
+**The refresh recipe (Supabase-safe, in the script):**
+1. `pg_dump` PROD `--data-only --schema=public --exclude-table=public.profiles`.
+2. Fetch PROD user IDs live (`SELECT id FROM profiles`) and string-replace each in the dump with
+   the TEST admin ID (`004b6b6e-...`, Matt). Imported "who did this" columns then all read as the
+   TEST admin — cosmetic; roles are tested by logging in, not by historical attribution.
+3. Back up TEST profiles (`pg_dump --table=public.profiles`).
+4. Wipe TEST data tables. **`TRUNCATE ... CASCADE` reaches `public.profiles` through FKs even when
+   profiles is excluded from the loop** — it cascades across the public schema and wiped the TEST
+   users. Mitigation: back up profiles first, then restore if the post-wipe count is 0. (`auth.users`
+   is in a different schema and is NOT reached by the cascade — the 10 login accounts survived, which
+   is how profiles were rebuildable.)
+5. Load the remapped dump in one transaction (empty tables → no duplicate-key collisions; remapped
+   IDs → no FK violations).
+
+**Connection requirement:** use the **Session pooler (port 5432)**. Transaction pooler (6543) and
+the IPv6 direct host do NOT work with pg_dump.
+
+**VS Code stale-environment gotcha:** the integrated terminal captures its environment at app
+launch; "new" terminals inherit that stale snapshot, so permanent PATH/credential env vars set
+afterward aren't visible. The script self-loads PATH + creds from the Windows user store on each run
+to sidestep this. For ad-hoc `psql`, load manually or fully restart VS Code.
+
+**Tools:** EnterpriseDB binaries at `C:\pgsql\bin` (winget community source was unregistered →
+"No package found"). Credentials stored as permanent Windows user env vars (PROD_DB_URL / TEST_DB_URL),
+never in the committed script.
+
+---
+
+## 2026-05-21 — PROD data cleanups (one-time, manual SQL)
+
+**Old-process jobs → TCO.** J-000023 and J-000011 completed entirely via the pre-SkyNet (old)
+process and were sitting in the finishing Incoming Queue. Moved to `pending_tco` with an appended
+`jobs.notes` annotation ("Moved to TCO - completed via the pre-SkyNet (old) process; finishing not
+tracked in SkyNet."), and their `finishing_sends` set to `finishing_complete` (NOT deleted — keeps
+the record, drops them out of the queue). Job status otherwise unchanged.
+
+**Phantom finishing batch removed.** J-000017 had a bogus 1-pc Batch B: the machinist sent 641 to
+finishing, then completing the job with the already-delivered qty spawned a 1-pc send that James
+pushed through finishing though no real part existed. Deleted the qty-1 `finishing_send`
+(`bf61d4a5-...`) and decremented `good_pieces` 642 → 641. Verified no `outbound_sends` child existed
+(`finishing_send_id` is the only FK referencing finishing_sends). Batch A (641, FLN-100034) untouched.
+
+**Gotcha logged — relative UPDATE double-apply.** The cleanup command used
+`good_pieces = good_pieces - 1` (relative). It was run twice; the DELETE was idempotent (`DELETE 0`
+the second time) but the relative UPDATE decremented again (641 → 640), corrected with `+ 1`.
+**Lesson: for one-shot data corrections, set values absolutely (`SET good_pieces = 641`), not
+relatively**, so an accidental re-run is harmless.

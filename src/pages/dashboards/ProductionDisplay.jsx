@@ -43,7 +43,9 @@ export default function ProductionDisplay() {
   const [outputData, setOutputData] = useState({
     passedTotal: 0, passedBatches: 0,
     acceptedTotal: 0, acceptedBatches: 0,
-    partsAccepted: []
+    partsAccepted: [],
+    rejectedTotal: 0, reworkedTotal: 0,
+    rejectedParts: [], reworkedParts: []
   })
 
   const [machineGroups, setMachineGroups] = useState({
@@ -73,7 +75,7 @@ export default function ProductionDisplay() {
   const loadYesterday = useCallback(async () => {
     const { start, end } = dateBounds(selectedDate)
 
-    const [passedRes, acceptedRes] = await Promise.all([
+    const [passedRes, acceptedRes, qualityRes] = await Promise.all([
       supabase.from('finishing_sends')
         .select('verified_count, job:jobs(component:parts!component_id(part_number))')
         .eq('status', 'finishing_complete')
@@ -82,10 +84,15 @@ export default function ProductionDisplay() {
         .select('compliance_good_qty, job:jobs(component:parts!component_id(part_number))')
         .eq('compliance_outcome', 'accepted')
         .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
+      supabase.from('finishing_sends')
+        .select('compliance_outcome, compliance_bad_qty, verified_count, job:jobs(component:parts!component_id(part_number)), machine:machines!machine_id(code)')
+        .in('compliance_outcome', ['rejected', 'rework'])
+        .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
     ])
 
     if (passedRes.error) console.error('Error loading passed-finishing:', passedRes.error)
     if (acceptedRes.error) console.error('Error loading accepted:', acceptedRes.error)
+    if (qualityRes.error) console.error('Error loading quality (rejected/rework):', qualityRes.error)
 
     const passedRows = passedRes.data || []
     const acceptedRows = acceptedRes.data || []
@@ -103,9 +110,38 @@ export default function ProductionDisplay() {
     const partsAccepted = Object.entries(acceptedByPart)
       .map(([part_number, qty]) => ({ part_number, qty }))
       .sort((a, b) => b.qty - a.qty)
-      .slice(0, 6)
 
-    setOutputData({ passedTotal, passedBatches, acceptedTotal, acceptedBatches, partsAccepted })
+    // Quality: rejected + reworked for the same selected day, off the same compliance gate.
+    // Reworked qty = compliance_bad_qty (the flagged portion). Rejected qty = bad_qty when
+    // present, else the whole verified batch (option B — forward-compatible with partial reject).
+    // Each list aggregates by part number + producing machine (machine null on standalone J-FIN -> "—").
+    const qualityRows = qualityRes.data || []
+    const aggregateQuality = (rows, qtyOf) => {
+      const byKey = {}
+      for (const r of rows) {
+        const pn = r.job?.component?.part_number || '—'
+        const mc = r.machine?.code || '—'
+        const key = `${pn}|||${mc}`
+        if (!byKey[key]) byKey[key] = { part_number: pn, machine: mc, qty: 0 }
+        byKey[key].qty += qtyOf(r)
+      }
+      return Object.values(byKey).sort((a, b) => b.qty - a.qty)
+    }
+    const rejectedParts = aggregateQuality(
+      qualityRows.filter(r => r.compliance_outcome === 'rejected'),
+      r => r.compliance_bad_qty ?? r.verified_count ?? 0
+    )
+    const reworkedParts = aggregateQuality(
+      qualityRows.filter(r => r.compliance_outcome === 'rework'),
+      r => r.compliance_bad_qty ?? 0
+    )
+    const rejectedTotal = rejectedParts.reduce((s, p) => s + p.qty, 0)
+    const reworkedTotal = reworkedParts.reduce((s, p) => s + p.qty, 0)
+
+    setOutputData({
+      passedTotal, passedBatches, acceptedTotal, acceptedBatches, partsAccepted,
+      rejectedTotal, reworkedTotal, rejectedParts, reworkedParts
+    })
   }, [selectedDate])
 
   // Uses the shared deriveMachineStatus helper (src/lib/machineStatus.js) so
@@ -540,6 +576,58 @@ export default function ProductionDisplay() {
                 ))}
               </div>
             )}
+          </div>
+
+          <div className="border-t border-gray-800 pt-4 mt-4">
+            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">Quality</p>
+
+            <div className="mb-4">
+              <div className="flex items-baseline justify-between mb-1.5">
+                <span className="text-red-400 text-sm font-semibold">Rejected</span>
+                <span className="text-red-400 font-bold">
+                  {outputData.rejectedTotal.toLocaleString()}{' '}
+                  <span className="text-gray-500 text-xs font-normal">parts</span>
+                </span>
+              </div>
+              {outputData.rejectedParts.length === 0 ? (
+                <p className="text-gray-600 text-xs italic">None</p>
+              ) : (
+                <div className="space-y-1">
+                  {outputData.rejectedParts.map((p, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-gray-300 font-mono">
+                        {p.part_number} <span className="text-gray-600">· {p.machine}</span>
+                      </span>
+                      <span className="text-white">{p.qty.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="flex items-baseline justify-between mb-1.5">
+                <span className="text-amber-400 text-sm font-semibold">Reworked</span>
+                <span className="text-amber-400 font-bold">
+                  {outputData.reworkedTotal.toLocaleString()}{' '}
+                  <span className="text-gray-500 text-xs font-normal">parts</span>
+                </span>
+              </div>
+              {outputData.reworkedParts.length === 0 ? (
+                <p className="text-gray-600 text-xs italic">None</p>
+              ) : (
+                <div className="space-y-1">
+                  {outputData.reworkedParts.map((p, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-gray-300 font-mono">
+                        {p.part_number} <span className="text-gray-600">· {p.machine}</span>
+                      </span>
+                      <span className="text-white">{p.qty.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

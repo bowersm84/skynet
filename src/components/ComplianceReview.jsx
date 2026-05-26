@@ -458,6 +458,11 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         setApprovingBatch(null)
         return
       }
+      if (outcome === 'rework' && (badNum == null || badNum < 1)) {
+        alert('Enter the Bad Quantity (the number of parts being reworked) before sending to rework.')
+        setApprovingBatch(null)
+        return
+      }
       if (goodNum != null && (Number.isNaN(goodNum) || goodNum < 0)) {
         alert('Good Quantity must be a non-negative number.')
         setApprovingBatch(null)
@@ -2634,6 +2639,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                                 />
                               </div>
                             </div>
+                            <p className="text-[11px] text-gray-500 leading-snug mb-2">
+                              Bad Quantity = the parts actually rejected or reworked — not the whole batch
+                              unless all of them are affected. This count feeds the Production dashboard quality metrics.
+                            </p>
                             <div>
                               <label className="block text-gray-400 text-xs mb-1">
                                 {batchReviewData[send.id]?.outcome === 'rework'

@@ -54,6 +54,7 @@ export default function ProductionDisplay() {
 
   const [activeJobs, setActiveJobs] = useState([])
   const [downMachineETAs, setDownMachineETAs] = useState([])
+  const [requestedJobIds, setRequestedJobIds] = useState(() => new Set())
 
   // Date being viewed in the "Output" section. Defaults to the most recent
   // business day; user can override via the date picker in the section header.
@@ -465,22 +466,56 @@ export default function ProductionDisplay() {
     setActiveJobs(filtered)
   }, [])
 
+  // Open schedule-change requests — just the job_ids, for the "requested" marker on Due.
+  const loadOpenRequests = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('schedule_change_requests')
+      .select('job_id')
+      .eq('status', 'open')
+    if (error) { console.error('Error loading open change requests:', error); return }
+    setRequestedJobIds(new Set((data || []).map(r => r.job_id)))
+  }, [])
+
   const loadAll = useCallback(async () => {
     await Promise.all([
       loadYesterday(),
       loadMachineStatus(),
       loadActiveJobs(),
       loadDownMachineETAs(),
+      loadOpenRequests(),
     ])
     setLastUpdated(new Date())
     setLoading(false)
-  }, [loadYesterday, loadMachineStatus, loadActiveJobs, loadDownMachineETAs])
+  }, [loadYesterday, loadMachineStatus, loadActiveJobs, loadDownMachineETAs, loadOpenRequests])
 
   useEffect(() => {
     loadAll()
     const interval = setInterval(loadAll, 60000)
     return () => clearInterval(interval)
   }, [loadAll])
+
+  // Production-meeting change request. Advisory only — nothing on the schedule moves
+  // until the scheduler applies it from the review queue. Returns { ok, message? }.
+  const submitDueRequest = useCallback(async (job, inputDateValue) => {
+    if (!inputDateValue) return { ok: false }
+    const [y, m, d] = inputDateValue.split('-').map(Number)
+    const base = job.scheduled_end ? new Date(job.scheduled_end) : null
+    const hh = base ? base.getHours() : 17
+    const mm = base ? base.getMinutes() : 0
+    const requestedEnd = new Date(y, m - 1, d, hh, mm, 0)
+    const { error } = await supabase.rpc('submit_change_request', {
+      p_job_id: job.id,
+      p_requested_end: requestedEnd.toISOString(),
+      p_note: null,
+      p_source: 'production_meeting',
+    })
+    if (error) {
+      console.error('submit_change_request failed:', error)
+      return { ok: false, message: error.message }
+    }
+    setRequestedJobIds(prev => new Set(prev).add(job.id))
+    return { ok: true }
+  }, [])
 
   if (loading) {
     return (
@@ -645,7 +680,12 @@ export default function ProductionDisplay() {
             ) : (
               <div className="space-y-2">
                 {activeJobs.map(j => (
-                  <ActiveJobRow key={j.id} job={j} />
+                  <ActiveJobRow
+                    key={j.id}
+                    job={j}
+                    hasOpenRequest={requestedJobIds.has(j.id)}
+                    onRequestDue={submitDueRequest}
+                  />
                 ))}
               </div>
             )}
@@ -753,7 +793,11 @@ function StatusTile({ color, label, count, machines }) {
   )
 }
 
-function ActiveJobRow({ job }) {
+function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerValue, setPickerValue] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [justRequested, setJustRequested] = useState(false)
   // Row-level highlight states (replaces the old colored left-border traffic light).
   // Behind wins over this-week for background/border when both apply — it's more
   // urgent. UP NEXT cell still gets its own amber treatment internally either way.
@@ -815,9 +859,65 @@ function ActiveJobRow({ job }) {
         <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider">Elapsed</div>
         <div className="text-gray-300 text-sm font-mono">{formatElapsed(job.elapsedMs)}</div>
       </div>
-      <div className="text-right shrink-0 min-w-[90px] border-l border-gray-800 pl-3">
-        <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider">Due</div>
-        <div className="text-white text-sm font-mono font-semibold">{dueDate}</div>
+      <div className="text-right shrink-0 min-w-[110px] border-l border-gray-800 pl-3 relative">
+        <div className="text-gray-500 text-[10px] font-mono uppercase tracking-wider flex items-center justify-end gap-1">
+          Due
+          {hasOpenRequest && (
+            <span title="Change requested" className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block" />
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setPickerValue(job.scheduled_end ? dateToInputValue(new Date(job.scheduled_end)) : dateToInputValue(new Date()))
+            setPickerOpen(o => !o)
+          }}
+          className="text-white text-sm font-mono font-semibold hover:text-blue-300 underline decoration-dotted decoration-gray-600 underline-offset-4"
+          title="Request a new due date"
+        >
+          {justRequested ? 'Requested ✓' : dueDate}
+        </button>
+        {pickerOpen && (
+          <div className="absolute right-0 mt-1 z-10 bg-gray-900 border border-gray-700 rounded-lg p-3 shadow-xl w-56 text-left">
+            <p className="text-gray-400 text-[10px] uppercase tracking-wider mb-1">Request new due date</p>
+            <input
+              type="date"
+              value={pickerValue}
+              min={dateToInputValue(new Date())}
+              onChange={(e) => setPickerValue(e.target.value)}
+              style={{ colorScheme: 'dark' }}
+              className="w-full bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs font-mono px-2 py-1 mb-2 focus:outline-none focus:border-blue-500"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPickerOpen(false)}
+                className="text-gray-400 hover:text-gray-200 text-xs px-2 py-1"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={submitting || !pickerValue}
+                onClick={async () => {
+                  setSubmitting(true)
+                  const res = await onRequestDue(job, pickerValue)
+                  setSubmitting(false)
+                  if (res?.ok) {
+                    setPickerOpen(false)
+                    setJustRequested(true)
+                    setTimeout(() => setJustRequested(false), 4000)
+                  } else {
+                    alert(res?.message || 'Could not submit the request.')
+                  }
+                }}
+                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded"
+              >
+                {submitting ? 'Sending…' : 'Request'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       <div className="text-right shrink-0 min-w-[90px] border-l border-gray-800 pl-3">
         <div className={`text-[10px] font-mono uppercase tracking-wider ${

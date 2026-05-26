@@ -29,7 +29,8 @@ import {
   Plus,
   Settings,
   LayoutGrid,
-  List
+  List,
+  CalendarClock
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
@@ -137,6 +138,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [endDateSaving, setEndDateSaving] = useState(false)
   const [endDateError, setEndDateError] = useState(null)
 
+  // SKY57 — schedule change requests review queue
+  const [changeRequests, setChangeRequests] = useState([])
+  const [showChangeRequests, setShowChangeRequests] = useState(false)
+  const [applyingRequestId, setApplyingRequestId] = useState(null)
+
   // Global schedule search state
   const [globalSearch, setGlobalSearch] = useState('')
   const [globalSearchResults, setGlobalSearchResults] = useState([])
@@ -181,11 +187,19 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
   useEffect(() => {
     fetchData()
-    
+    loadChangeRequests()
+
     const jobsSubscription = supabase
       .channel('schedule-jobs-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, 
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' },
         () => fetchData()
+      )
+      .subscribe()
+
+    const changeRequestsSubscription = supabase
+      .channel('schedule-change-requests')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_change_requests' },
+        () => loadChangeRequests()
       )
       .subscribe()
 
@@ -209,6 +223,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       supabase.removeChannel(jobsSubscription)
       supabase.removeChannel(machinesSubscription)
       supabase.removeChannel(downtimeSubscription)
+      supabase.removeChannel(changeRequestsSubscription)
     }
   }, [weekOffset])
 
@@ -892,6 +907,81 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       setEndDateError(e.message || 'Failed to update end date.')
     } finally {
       setEndDateSaving(false)
+    }
+  }
+
+  // SKY57 — load open schedule change requests for the review queue.
+  const loadChangeRequests = async () => {
+    const { data, error } = await supabase
+      .from('schedule_change_requests')
+      .select(`
+        id, job_id, current_end, requested_end, note, source, status, requested_by, created_at,
+        job:jobs(id, job_number, scheduled_start, scheduled_end, assigned_machine_id, status,
+                 component:parts!component_id(part_number),
+                 assigned_machine:machines(code, name)),
+        requester:profiles!requested_by(full_name)
+      `)
+      .eq('status', 'open')
+      .order('created_at', { ascending: true })
+    if (error) { console.error('Error loading change requests:', error); return }
+    setChangeRequests(data || [])
+  }
+
+  // Apply: reuse the SKY55 end-date cascade engine, then mark this request applied and
+  // auto-dismiss any other open requests on the same job (decision 2).
+  const handleApplyChangeRequest = async (req) => {
+    setApplyingRequestId(req.id)
+    try {
+      const { data: job, error: jErr } = await supabase
+        .from('jobs')
+        .select('id, job_number, scheduled_start, scheduled_end, assigned_machine_id, status')
+        .eq('id', req.job_id)
+        .single()
+      if (jErr || !job) throw new Error(jErr?.message || 'Job not found')
+      if (!job.scheduled_start) throw new Error('Job has no scheduled start; cannot move its end.')
+
+      const newEnd = new Date(req.requested_end)
+      let cascadeChanges = []
+      if (job.assigned_machine_id) {
+        const queue = getMachineQueue(scheduledJobs, job.assigned_machine_id)
+        cascadeChanges = computeEndChangeCascade(queue, job.id, newEnd).changes
+      }
+      await applyEndDateChange({ supabase, job, newEnd, cascadeChanges })
+
+      const now = new Date().toISOString()
+      await supabase
+        .from('schedule_change_requests')
+        .update({ status: 'applied', actioned_by: profile?.id, actioned_at: now })
+        .eq('id', req.id)
+      await supabase
+        .from('schedule_change_requests')
+        .update({ status: 'dismissed', actioned_by: profile?.id, actioned_at: now })
+        .eq('job_id', req.job_id)
+        .eq('status', 'open')
+
+      await loadChangeRequests()
+      fetchData()
+      loadAllScheduledJobs()
+    } catch (e) {
+      alert(`Could not apply the change request: ${e.message}`)
+    } finally {
+      setApplyingRequestId(null)
+    }
+  }
+
+  const handleDismissChangeRequest = async (req) => {
+    setApplyingRequestId(req.id)
+    try {
+      const { error } = await supabase
+        .from('schedule_change_requests')
+        .update({ status: 'dismissed', actioned_by: profile?.id, actioned_at: new Date().toISOString() })
+        .eq('id', req.id)
+      if (error) throw error
+      await loadChangeRequests()
+    } catch (e) {
+      alert(`Could not dismiss the request: ${e.message}`)
+    } finally {
+      setApplyingRequestId(null)
     }
   }
 
@@ -1873,6 +1963,97 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         </div>
 
         <div className="flex items-center gap-2">
+          {/* SKY57 — Change Requests review queue (admin/scheduler) */}
+          {canEdit && (
+            <div className="relative mr-2">
+              <button
+                onClick={() => setShowChangeRequests(s => !s)}
+                className="relative flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium rounded-lg transition-colors"
+                title="Schedule change requests"
+              >
+                <CalendarClock size={16} />
+                <span className="hidden sm:inline">Requests</span>
+                {changeRequests.length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-blue-600 text-white text-[10px] font-bold rounded-full">
+                    {changeRequests.length}
+                  </span>
+                )}
+              </button>
+              {showChangeRequests && (
+                <div className="absolute right-0 top-full mt-2 w-[420px] max-h-[70vh] overflow-y-auto bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-white font-semibold text-sm flex items-center gap-2">
+                      <CalendarClock size={16} className="text-blue-400" />
+                      Change Requests
+                    </h3>
+                    <button onClick={() => setShowChangeRequests(false)} className="text-gray-500 hover:text-gray-200">
+                      <X size={16} />
+                    </button>
+                  </div>
+                  {changeRequests.length === 0 ? (
+                    <p className="text-gray-500 text-sm italic py-4 text-center">No open requests</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {changeRequests.map(req => {
+                        const j = req.job
+                        const curEnd = (req.current_end || j?.scheduled_end)
+                          ? new Date(req.current_end || j.scheduled_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          : '—'
+                        const reqEnd = req.requested_end
+                          ? new Date(req.requested_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          : '—'
+                        const sourceLabel = req.source === 'kiosk'
+                          ? `Kiosk${req.requester?.full_name ? ' · ' + req.requester.full_name : ''}`
+                          : 'Production Meeting'
+                        const busy = applyingRequestId === req.id
+                        return (
+                          <div key={req.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-white font-mono text-sm font-semibold">{j?.job_number || '—'}</span>
+                                {j?.component?.part_number && (
+                                  <span className="text-skynet-accent text-xs font-mono truncate">{j.component.part_number}</span>
+                                )}
+                              </div>
+                              <span className="text-gray-500 text-[10px] uppercase tracking-wider shrink-0">{sourceLabel}</span>
+                            </div>
+                            <div className="flex items-center gap-2 mt-1 text-xs">
+                              <span className="text-gray-400">{curEnd}</span>
+                              <span className="text-gray-600">→</span>
+                              <span className="text-blue-300 font-semibold">{reqEnd}</span>
+                              {j?.assigned_machine?.code && (
+                                <span className="text-gray-500 ml-auto">{j.assigned_machine.code}</span>
+                              )}
+                            </div>
+                            {req.note && (
+                              <p className="text-gray-400 text-xs mt-1 italic">"{req.note}"</p>
+                            )}
+                            <div className="flex items-center justify-end gap-2 mt-2">
+                              <button
+                                disabled={busy}
+                                onClick={() => handleDismissChangeRequest(req)}
+                                className="text-gray-400 hover:text-gray-200 text-xs px-2 py-1 disabled:opacity-50"
+                              >
+                                Dismiss
+                              </button>
+                              <button
+                                disabled={busy}
+                                onClick={() => handleApplyChangeRequest(req)}
+                                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded"
+                              >
+                                {busy ? 'Applying…' : 'Apply'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Schedule Maintenance Button — admin/scheduler only */}
           {canEdit && (
             <button

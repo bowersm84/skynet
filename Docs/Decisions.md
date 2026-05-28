@@ -1095,3 +1095,25 @@ feature. Spec bumped to v3.5.
   `Partial_Reject_Implementation_Plan.md`) and **kiosk change requests + requester notification**
   (`Kiosk_Change_Requests_Implementation_Plan.md`). The require-Bad-Qty-on-Reject rule lands with
   partial reject, where it's finally meaningful.
+
+## 2026-05-28 — Retire `qty_override` → Manual Batch entries (missed / pre-system production)
+
+  **Origin.** Surfaced diagnosing a Production Dashboard count bug. The per-job `qty_override` scalar was being used to record carried-over / pre-system production. As built it (a) **froze** the produced count — `getEffectiveQty`'s first branch returned the override and stopped looking at outsourcing returns, approved batches, or the machinist count; and (b) on the dashboard was read as the **denominator** (`target = qty_override ?? quantity`), pinning the goal to the override instead of the real order.
+
+  **Diagnosis gated the migration (per-job classification).** Audited all seven PROD overrides against what SkyNet actually logged (approved finishing batches + lots, outbound returns, `good_pieces`). Finding: only **2 of 7** were genuinely pre-system; the other **5** sit on jobs already tracked in SkyNet finishing, so re-adding them as entries would have **double-counted ~10,400 parts**. The "lot in the override reason matches a finishing lot" signal is *not* sufficient to mark a job already-tracked — production often continued under the same production lot across the go-live cutover (J-000027), so the genuinely-pre-system quantity is a human call, not a data rule.
+  - Convert → Manual Batch: **J-000023** (96,625, zero SkyNet production); **J-000022** (79,725, pending Roger confirming its finishing is fresh balance).
+  - Retire, no entry (already tracked in finishing): **J-000021, J-000024, J-000025, J-000027, J-000029**.
+
+  **Decision — entry, not a scalar.** New table `missed_production_entries` (`id, job_id, quantity, reason*, production_lot, passivation_lot, created_by, created_at`). RLS: authenticated SELECT; INSERT/UPDATE/DELETE restricted to admin + compliance via the `EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = ANY(...))` house pattern. Produced count = normal `getEffectiveQty` chain **+ SUM(missed entries)**; the override-wins-frozen branch is removed. Additive by construction (a true pre-system part never appears in SkyNet's logs) so it can't double-count — *provided* an entry is only ever used for parts SkyNet will never otherwise track.
+
+  **Single source of truth.** Extracted the duplicated `getEffectiveQty` (Mainframe + Assembly) into `src/lib/effectiveQty.js` so the surfaces can't drift; both import it. `SplitJobModal.computeProduced` keeps its own logic (intentionally counts in-flight non-rejected batches for split safety) but drops the `qty_override` line and adds the missed-entry sum.
+
+  **Dashboard.** Numerator `pieces_passed_finishing + SUM(missed entries)` — kept this over routing the whole numerator through the helper, to preserve the end-to-end finishing-yield semantics; denominator reverts `qty_override ?? quantity` → `jobs.quantity` (the real order).
+
+  **UI — "Manual Batch".** The Order Lookup override modal/button is replaced by an admin/compliance **+ Manual Batch** action in the job's batch area (above routing). Entry renders as a "Manual Batch · N pcs · lot …" line alongside the finishing batches; the qty cell shows a small "+" flag when the total includes one. Internal names stay `missed_production_entries` / `handleMissedEntry*` — only user-facing labels say "Manual Batch."
+
+  **Migration (per-job, manual — NOT auto-convert).** Cleared all seven overrides (`UPDATE jobs SET qty_override = null …`; jobs untouched) and deleted the J-000023 placeholder `finishing_send` (96,625, no lot / no compliance / never verified — a future double-count risk if ever approved). Compliance re-enters the genuinely pre-system batches by hand per the classification above.
+
+  **Ordering bite (caught live).** Code embedding the new table shipped to TEST/localhost before the table existed on that Supabase project → the WO Lookup query 400'd (`PGRST200`, "Could not find a relationship between 'jobs' and 'missed_production_entries'") and Order Lookup showed zero work orders, which read as "data wiped" until the table was created. **Rule:** the table migration lands on a project *before* the code that queries it (TEST table → test-branch deploy → validate → PROD table → merge main).
+
+  **Deferred.** (1) Drop the `qty_override` column — keep one release past migration. (2) Remove the now-inert `COALESCE(qty_override)` term in the `split_job` RPC (functionally 0 once overrides cleared, but a dead reference). (3) Genuine *replacement-correction* overrides ("recount confirmed 615 not 620" — a subtractive correction the additive entry model doesn't express) — none in the data today; separate decision if ever needed.

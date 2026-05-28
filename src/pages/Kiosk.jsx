@@ -315,7 +315,7 @@ export default function Kiosk() {
   // Determine user capabilities based on role
   const isViewOnly = operator?.role === 'display'
   const isAdmin = operator?.role === 'admin'
-  const canOperate = operator?.role === 'machinist' || operator?.role === 'admin'
+  const canOperate = operator?.role === 'machinist' || operator?.role === 'admin' || operator?.role === 'finishing'
 
   // Clear any expired Supabase session left in localStorage. We
   // disabled autoRefreshToken (re-PIN is the renewal mechanism), so

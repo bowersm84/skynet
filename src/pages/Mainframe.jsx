@@ -26,6 +26,7 @@ import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
 import WOLookupShortfalls from '../components/WOLookupShortfalls'
 import { isReadOnlyRole } from '../lib/roles'
+import { getEffectiveQty } from '../lib/effectiveQty'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
   const canWrite = !isReadOnlyRole(profile?.role)
@@ -68,10 +69,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   
   // Work Order Lookup state
   const [showWOLookup, setShowWOLookup] = useState(false)
-  const [overrideJob, setOverrideJob] = useState(null)
-  const [overrideValue, setOverrideValue] = useState('')
-  const [overrideReason, setOverrideReason] = useState('')
-  const [overrideSaving, setOverrideSaving] = useState(false)
+  const [missedEntryJob, setMissedEntryJob] = useState(null)
+  const [missedEntryForm, setMissedEntryForm] = useState({ quantity: '', reason: '', production_lot: '', passivation_lot: '' })
+  const [missedEntrySaving, setMissedEntrySaving] = useState(false)
   const [orderLookupTab, setOrderLookupTab] = useState('work_orders') // 'work_orders' | 'shortfalls' | 'customer_orders'
   const [woLookupData, setWOLookupData] = useState([])
   const [woFulfillmentCache, setWOFulfillmentCache] = useState({}) // woId -> rows or 'loading'
@@ -503,14 +503,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             component_id,
             compliance_outcome,
             compliance_notes,
-            qty_override,
-            qty_override_reason,
-            qty_override_at,
+            missed_production_entries (id, quantity, production_lot, passivation_lot, reason, created_at),
             documents_deferred,
             documents_deferred_reason,
             documents_deferred_at,
             has_open_shortfall,
-            qty_override_by_profile:profiles!qty_override_by(full_name),
             component:parts!component_id(part_number, description),
             machine:assigned_machine_id(name),
             finishing_sends (
@@ -821,69 +818,6 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     return target < today
-  }
-
-  const getEffectiveQty = (job) => {
-    // 0. Manual admin override — wins over everything.
-    if (job.qty_override != null) {
-      return { qty: job.qty_override, verified: true, overridden: true }
-    }
-
-    // 1. Outsourcing returns — group by routing step, pick the latest step, sum its returns.
-    //    Single step + multi-batch case → sum all batches.
-    //    Sequential ops case → only the latest op's batches matter (prior op's output
-    //    was the input to the next op).
-    if (job.outbound_sends?.length) {
-      const completedReturns = job.outbound_sends.filter(s =>
-        s.returned_at && s.quantity_returned != null
-      )
-      if (completedReturns.length > 0) {
-        // Group by step. Try the polymorphic routing_step_id first (S6+), fall back to
-        // the legacy job_routing_step_id field (pre-S6 finishing-side rows).
-        const byStep = {}
-        for (const s of completedReturns) {
-          const stepId = s.routing_step_id || s.job_routing_step_id || '_unknown_'
-          if (!byStep[stepId]) byStep[stepId] = []
-          byStep[stepId].push(s)
-        }
-        // Pick the step whose most-recent return is the latest overall (that's the most
-        // recent operation in the sequence).
-        const groups = Object.keys(byStep).map(id => {
-          const sends = byStep[id]
-          const latestMs = Math.max(...sends.map(s => new Date(s.returned_at).getTime()))
-          return { stepId: id, sends, latestMs }
-        })
-        groups.sort((a, b) => b.latestMs - a.latestMs)
-        const latestStepSends = groups[0].sends
-        const sum = latestStepSends.reduce((acc, s) => acc + (s.quantity_returned || 0), 0)
-        return { qty: sum, verified: true, overridden: false }
-      }
-    }
-
-    // 2. Compliance-approved batches
-    if (job.finishing_sends?.length) {
-      const approvedBatches = job.finishing_sends.filter(s => s.compliance_status === 'approved')
-      if (approvedBatches.length > 0) {
-        const sum = approvedBatches.reduce((acc, s) => {
-          if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
-          if (s.compliance_bad_qty != null) {
-            const base = s.verified_count ?? s.quantity
-            return acc + Math.max(0, base - s.compliance_bad_qty)
-          }
-          if (s.verified_count != null) return acc + s.verified_count
-          return acc + s.quantity
-        }, 0)
-        return { qty: sum, verified: true, overridden: false }
-      }
-    }
-
-    // 3. Machinist's count
-    if (job.good_pieces != null && job.good_pieces > 0) {
-      return { qty: job.good_pieces, verified: true, overridden: false }
-    }
-
-    // 4. Original order
-    return { qty: job.quantity, verified: false, overridden: false }
   }
 
   // How many units have completed ALL routing steps and are ready to ship?
@@ -1263,83 +1197,36 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     }
   }
 
-  const handleOverrideStart = (job) => {
-    const eq = getEffectiveQty(job)
-    setOverrideJob(job)
-    setOverrideValue(String(eq.qty))
-    setOverrideReason('')
+  const handleMissedEntryStart = (job) => {
+    setMissedEntryJob(job)
+    setMissedEntryForm({ quantity: '', reason: '', production_lot: '', passivation_lot: '' })
   }
-
-  const handleOverrideCancel = () => {
-    setOverrideJob(null)
-    setOverrideValue('')
-    setOverrideReason('')
-    setOverrideSaving(false)
+  const handleMissedEntryCancel = () => {
+    setMissedEntryJob(null)
+    setMissedEntryForm({ quantity: '', reason: '', production_lot: '', passivation_lot: '' })
+    setMissedEntrySaving(false)
   }
-
-  const handleOverrideSubmit = async () => {
-    if (!overrideJob) return
-    const trimmedReason = overrideReason.trim()
-    const parsedValue = parseInt(overrideValue, 10)
-
-    if (Number.isNaN(parsedValue) || parsedValue < 0) {
-      alert('Override quantity must be a non-negative number.')
-      return
-    }
-    if (!trimmedReason) {
-      alert('A reason is required for any qty override.')
-      return
-    }
-
-    setOverrideSaving(true)
+  const handleMissedEntrySubmit = async () => {
+    if (!missedEntryJob) return
+    const qty = parseInt(missedEntryForm.quantity, 10)
+    const reason = missedEntryForm.reason.trim()
+    if (Number.isNaN(qty) || qty <= 0) { alert('Quantity must be a positive number.'); return }
+    if (!reason) { alert('A reason is required.'); return }
+    setMissedEntrySaving(true)
     try {
-      const now = new Date().toISOString()
-      const { error } = await supabase
-        .from('jobs')
-        .update({
-          qty_override: parsedValue,
-          qty_override_reason: trimmedReason,
-          qty_override_by: profile.id,
-          qty_override_at: now,
-          updated_at: now,
-        })
-        .eq('id', overrideJob.id)
+      const { error } = await supabase.from('missed_production_entries').insert({
+        job_id: missedEntryJob.id, quantity: qty, reason,
+        production_lot: missedEntryForm.production_lot.trim() || null,
+        passivation_lot: missedEntryForm.passivation_lot.trim() || null,
+        created_by: profile.id,
+      })
       if (error) throw error
-
-      handleOverrideCancel()
+      handleMissedEntryCancel()
       fetchWOLookup()
     } catch (err) {
-      console.error('Override save failed:', err)
-      alert('Failed to save override: ' + err.message)
-      setOverrideSaving(false)
-    }
-  }
-
-  const handleOverrideClear = async () => {
-    if (!overrideJob) return
-    if (!window.confirm('Clear the qty override for this job? The displayed qty will revert to the calculated value.')) return
-
-    setOverrideSaving(true)
-    try {
-      const now = new Date().toISOString()
-      const { error } = await supabase
-        .from('jobs')
-        .update({
-          qty_override: null,
-          qty_override_reason: null,
-          qty_override_by: null,
-          qty_override_at: null,
-          updated_at: now,
-        })
-        .eq('id', overrideJob.id)
-      if (error) throw error
-
-      handleOverrideCancel()
-      fetchWOLookup()
-    } catch (err) {
-      console.error('Override clear failed:', err)
-      alert('Failed to clear override: ' + err.message)
-      setOverrideSaving(false)
+      console.error('Missed production entry failed:', err)
+      alert('Failed to save entry: ' + err.message)
+      setMissedEntrySaving(false)
     }
   }
 
@@ -2774,30 +2661,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                 <div className="col-span-1 text-center">
                                                   {(() => {
                                                     const eq = getEffectiveQty(job)
-                                                    const canOverrideQty = ['admin', 'compliance'].includes(profile?.role)
                                                     return (
                                                       <div className="flex flex-col items-center gap-0.5">
-                                                        {eq.overridden ? (
-                                                          <span className="text-sm" title={`Override by ${job.qty_override_by_profile?.full_name || 'admin'}: ${job.qty_override_reason}`}>
-                                                            <span className="text-amber-300 font-medium">{eq.qty}</span>
-                                                            <span className="text-gray-500">/{job.quantity}</span>
-                                                            <span className="text-amber-400 ml-1">*</span>
-                                                          </span>
-                                                        ) : eq.verified && eq.qty !== job.quantity ? (
+                                                        {eq.verified && eq.qty !== job.quantity ? (
                                                           <span className="text-sm">
                                                             <span className="text-white font-medium">{eq.qty}</span>
                                                             <span className="text-gray-500">/{job.quantity}</span>
+                                                            {eq.hasMissed && <span className="text-sky-400 ml-1" title="Includes a manual batch">+</span>}
                                                           </span>
                                                         ) : (
                                                           <span className="text-white text-sm">{job.quantity}</span>
-                                                        )}
-                                                        {canOverrideQty && (
-                                                          <button
-                                                            onClick={() => handleOverrideStart(job)}
-                                                            className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"
-                                                          >
-                                                            override
-                                                          </button>
                                                         )}
                                                       </div>
                                                     )
@@ -2903,6 +2776,27 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                     })
                                                   }
                                                 </div>
+                                              )}
+                                              {job.missed_production_entries?.length > 0 && (
+                                                <div className="mt-2 space-y-1">
+                                                  {job.missed_production_entries.map((m) => (
+                                                    <div key={m.id} className="flex items-center gap-2 text-xs pl-2 border-l border-sky-800">
+                                                      <span className="text-sky-400 font-mono">Manual Batch</span>
+                                                      <span className="text-gray-600">&middot;</span>
+                                                      <span className="text-gray-400">{m.quantity} pcs</span>
+                                                      {m.production_lot && (<><span className="text-gray-600">&middot;</span><span className="text-gray-500">lot {m.production_lot}</span></>)}
+                                                      {m.reason && <span className="text-gray-600 italic truncate">&mdash; {m.reason}</span>}
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              )}
+                                              {['admin', 'compliance'].includes(profile?.role) && (
+                                                <button
+                                                  onClick={() => handleMissedEntryStart(job)}
+                                                  className="mt-2 inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300"
+                                                >
+                                                  <Plus size={12} /> Manual Batch
+                                                </button>
                                               )}
 
                                               {/* Routing steps */}
@@ -3104,30 +2998,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                         <div className="col-span-1 text-center">
                                           {(() => {
                                             const eq = getEffectiveQty(job)
-                                            const canOverrideQty = ['admin', 'compliance'].includes(profile?.role)
                                             return (
                                               <div className="flex flex-col items-center gap-0.5">
-                                                {eq.overridden ? (
-                                                  <span className="text-sm" title={`Override by ${job.qty_override_by_profile?.full_name || 'admin'}: ${job.qty_override_reason}`}>
-                                                    <span className="text-amber-300 font-medium">{eq.qty}</span>
-                                                    <span className="text-gray-500">/{job.quantity}</span>
-                                                    <span className="text-amber-400 ml-1">*</span>
-                                                  </span>
-                                                ) : eq.verified && eq.qty !== job.quantity ? (
+                                                {eq.verified && eq.qty !== job.quantity ? (
                                                   <span className="text-sm">
                                                     <span className="text-white font-medium">{eq.qty}</span>
                                                     <span className="text-gray-500">/{job.quantity}</span>
+                                                    {eq.hasMissed && <span className="text-sky-400 ml-1" title="Includes a manual batch">+</span>}
                                                   </span>
                                                 ) : (
                                                   <span className="text-white text-sm">{job.quantity}</span>
-                                                )}
-                                                {canOverrideQty && (
-                                                  <button
-                                                    onClick={() => handleOverrideStart(job)}
-                                                    className="text-[10px] text-gray-500 hover:text-amber-400 underline decoration-dotted"
-                                                  >
-                                                    override
-                                                  </button>
                                                 )}
                                               </div>
                                             )
@@ -3221,6 +3101,27 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             })
                                           }
                                         </div>
+                                      )}
+                                      {job.missed_production_entries?.length > 0 && (
+                                        <div className="mt-2 space-y-1">
+                                          {job.missed_production_entries.map((m) => (
+                                            <div key={m.id} className="flex items-center gap-2 text-xs pl-2 border-l border-sky-800">
+                                              <span className="text-sky-400 font-mono">Manual Batch</span>
+                                              <span className="text-gray-600">&middot;</span>
+                                              <span className="text-gray-400">{m.quantity} pcs</span>
+                                              {m.production_lot && (<><span className="text-gray-600">&middot;</span><span className="text-gray-500">lot {m.production_lot}</span></>)}
+                                              {m.reason && <span className="text-gray-600 italic truncate">&mdash; {m.reason}</span>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {['admin', 'compliance'].includes(profile?.role) && (
+                                        <button
+                                          onClick={() => handleMissedEntryStart(job)}
+                                          className="mt-2 inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300"
+                                        >
+                                          <Plus size={12} /> Manual Batch
+                                        </button>
                                       )}
 
                                       {/* Routing steps */}
@@ -3411,102 +3312,66 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         </div>
       )}
 
-      {/* Qty Override Modal */}
-      {overrideJob && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]"
-          onClick={() => !overrideSaving && handleOverrideCancel()}
-        >
-          <div
-            className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* Add Pre-System / Missed Production Modal */}
+      {missedEntryJob && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]"
+             onClick={() => !missedEntrySaving && handleMissedEntryCancel()}>
+          <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
+               onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between mb-4">
               <div>
-                <h3 className="text-xl font-bold text-white">Override Quantity</h3>
-                <p className="text-sm text-gray-400 mt-1">
-                  {overrideJob.job_number} · {overrideJob.component?.part_number}
-                </p>
+                <h3 className="text-xl font-bold text-white">Add Manual Batch</h3>
+                <p className="text-sm text-gray-400 mt-1">{missedEntryJob.job_number} &middot; {missedEntryJob.component?.part_number}</p>
               </div>
-              <button
-                onClick={handleOverrideCancel}
-                disabled={overrideSaving}
-                className="text-gray-500 hover:text-white disabled:opacity-50"
-              >
-                <X size={20} />
-              </button>
+              <button onClick={handleMissedEntryCancel} disabled={missedEntrySaving} className="text-gray-500 hover:text-white disabled:opacity-50"><X size={20} /></button>
             </div>
-
-            <div className="mb-4 p-3 bg-gray-800 rounded border border-gray-700 text-sm">
-              <div className="text-gray-400">Order qty: <span className="text-white">{overrideJob.quantity}</span></div>
-              <div className="text-gray-400">Calculated effective qty: <span className="text-white">{(() => {
-                const stripped = { ...overrideJob, qty_override: null }
-                return getEffectiveQty(stripped).qty
-              })()}</span></div>
-              {overrideJob.qty_override != null && (
-                <div className="text-amber-400 mt-1">
-                  Currently overridden to {overrideJob.qty_override}
-                  {overrideJob.qty_override_reason && (
-                    <div className="text-xs text-gray-500 italic mt-1">"{overrideJob.qty_override_reason}"</div>
-                  )}
-                </div>
-              )}
+            <div className="mb-4 p-3 bg-gray-800 rounded border border-gray-700 text-sm text-gray-400">
+              Records a batch SkyNet didn't otherwise track &mdash; e.g. parts made before go-live
+              or carried over from a prior WO &mdash; so they count toward this job. Added to the
+              live produced total, which keeps climbing as real parts flow through finishing. Only
+              use for parts SkyNet will never otherwise log, so the count can't double.
             </div>
-
             <div className="space-y-3 mb-4">
               <div>
-                <label className="block text-gray-400 text-sm mb-1">New Quantity</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={overrideValue}
-                  onChange={(e) => setOverrideValue(e.target.value)}
-                  disabled={overrideSaving}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white focus:border-amber-500 focus:outline-none"
-                />
+                <label className="block text-gray-400 text-sm mb-1">Quantity <span className="text-red-400">*</span></label>
+                <input type="number" min="1" value={missedEntryForm.quantity}
+                  onChange={(e) => setMissedEntryForm(f => ({ ...f, quantity: e.target.value }))}
+                  disabled={missedEntrySaving}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white focus:border-sky-500 focus:outline-none" />
               </div>
               <div>
-                <label className="block text-gray-400 text-sm mb-1">
-                  Reason <span className="text-red-400">*</span>
-                </label>
-                <textarea
-                  value={overrideReason}
-                  onChange={(e) => setOverrideReason(e.target.value)}
-                  disabled={overrideSaving}
-                  placeholder="Explain why this override is necessary (e.g., '5 pieces lost in transit', 'recount confirmed 615 not 620')..."
-                  rows={3}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-amber-500 focus:outline-none"
-                />
+                <label className="block text-gray-400 text-sm mb-1">Reason <span className="text-red-400">*</span></label>
+                <textarea value={missedEntryForm.reason}
+                  onChange={(e) => setMissedEntryForm(f => ({ ...f, reason: e.target.value }))}
+                  disabled={missedEntrySaving} rows={2}
+                  placeholder="e.g. Carry-over from WO 12033 — produced before go-live"
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white placeholder-gray-500 text-sm focus:border-sky-500 focus:outline-none" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">Production lot</label>
+                  <input type="text" value={missedEntryForm.production_lot}
+                    onChange={(e) => setMissedEntryForm(f => ({ ...f, production_lot: e.target.value }))}
+                    disabled={missedEntrySaving}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-sky-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-gray-400 text-sm mb-1">Passivation lot</label>
+                  <input type="text" value={missedEntryForm.passivation_lot}
+                    onChange={(e) => setMissedEntryForm(f => ({ ...f, passivation_lot: e.target.value }))}
+                    disabled={missedEntrySaving}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-sky-500 focus:outline-none" />
+                </div>
               </div>
             </div>
-
-            <div className="flex justify-between items-center gap-2">
-              {overrideJob.qty_override != null ? (
-                <button
-                  onClick={handleOverrideClear}
-                  disabled={overrideSaving}
-                  className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
-                >
-                  Clear override
-                </button>
-              ) : <div />}
-              <div className="flex gap-2">
-                <button
-                  onClick={handleOverrideCancel}
-                  disabled={overrideSaving}
-                  className="px-4 py-2 text-gray-400 hover:text-white disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleOverrideSubmit}
-                  disabled={overrideSaving || !overrideValue || !overrideReason.trim()}
-                  className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {overrideSaving ? <Loader2 size={16} className="animate-spin" /> : null}
-                  {overrideSaving ? 'Saving...' : 'Save Override'}
-                </button>
-              </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={handleMissedEntryCancel} disabled={missedEntrySaving} className="px-4 py-2 text-gray-400 hover:text-white disabled:opacity-50">Cancel</button>
+              <button onClick={handleMissedEntrySubmit}
+                disabled={missedEntrySaving || !missedEntryForm.quantity || !missedEntryForm.reason.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed">
+                {missedEntrySaving ? <Loader2 size={16} className="animate-spin" /> : null}
+                {missedEntrySaving ? 'Saving...' : 'Add Entry'}
+              </button>
             </div>
           </div>
         </div>

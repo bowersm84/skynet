@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { getEffectiveQty } from '../lib/effectiveQty'
 import {
   Package,
   CheckCircle,
@@ -61,63 +62,6 @@ export default function Assembly({ profile, onUpdate }) {
   const [sendBatchForm, setSendBatchForm] = useState({ quantity: 0 })
   const [sendBatchAlreadySent, setSendBatchAlreadySent] = useState(0)
   
-  // Effective qty precedence — copied from Mainframe.jsx so all surfaces agree.
-  // 0. Manual admin override → wins over everything.
-  // 1. Outsourcing returns → most recent returned send wins.
-  // 2. Compliance-approved batches → sum of good_qty (or derived from verified - bad).
-  // 3. Machinist's good_pieces.
-  // 4. Original job.quantity.
-  const getEffectiveQty = (job) => {
-    if (job.qty_override != null) {
-      return { qty: job.qty_override, verified: true, overridden: true }
-    }
-    // 1. Outsourcing returns — group by routing step, pick the latest step, sum its returns.
-    //    Single step + multi-batch case → sum all batches.
-    //    Sequential ops case → only the latest op's batches matter (prior op's output
-    //    was the input to the next op).
-    if (job.outbound_sends?.length) {
-      const completedReturns = job.outbound_sends.filter(s =>
-        s.returned_at && s.quantity_returned != null
-      )
-      if (completedReturns.length > 0) {
-        const byStep = {}
-        for (const s of completedReturns) {
-          const stepId = s.routing_step_id || s.job_routing_step_id || '_unknown_'
-          if (!byStep[stepId]) byStep[stepId] = []
-          byStep[stepId].push(s)
-        }
-        const groups = Object.keys(byStep).map(id => {
-          const sends = byStep[id]
-          const latestMs = Math.max(...sends.map(s => new Date(s.returned_at).getTime()))
-          return { stepId: id, sends, latestMs }
-        })
-        groups.sort((a, b) => b.latestMs - a.latestMs)
-        const latestStepSends = groups[0].sends
-        const sum = latestStepSends.reduce((acc, s) => acc + (s.quantity_returned || 0), 0)
-        return { qty: sum, verified: true, overridden: false }
-      }
-    }
-    if (job.finishing_sends?.length) {
-      const approvedBatches = job.finishing_sends.filter(s => s.compliance_status === 'approved')
-      if (approvedBatches.length > 0) {
-        const sum = approvedBatches.reduce((acc, s) => {
-          if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
-          if (s.compliance_bad_qty != null) {
-            const base = s.verified_count ?? s.quantity
-            return acc + Math.max(0, base - s.compliance_bad_qty)
-          }
-          if (s.verified_count != null) return acc + s.verified_count
-          return acc + s.quantity
-        }, 0)
-        return { qty: sum, verified: true, overridden: false }
-      }
-    }
-    if (job.good_pieces != null && job.good_pieces > 0) {
-      return { qty: job.good_pieces, verified: true, overridden: false }
-    }
-    return { qty: job.quantity, verified: false, overridden: false }
-  }
-
   // Compute the assembly-level supply qty from linked component jobs.
   // Each component job's effective qty is normalized to "possible assemblies"
   // using the BOM ratio implied by (job.quantity / woa.quantity), then we take
@@ -197,8 +141,8 @@ export default function Assembly({ profile, onUpdate }) {
             status,
             work_order_assembly_id,
             quantity,
-            qty_override,
             good_pieces,
+            missed_production_entries (quantity),
             is_maintenance,
             finishing_sends (
               id, quantity, verified_count,

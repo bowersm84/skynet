@@ -274,7 +274,8 @@ export default function ProductionDisplay() {
   // Active jobs row data.
   //   Displayed metric  = pieces passed finishing  /  target qty
   //     pieces_passed_finishing := SUM(verified_count) from finishing_sends w/ status='finishing_complete'
-  //     target_qty := qty_override ?? quantity   (qty_override is a REPLACEMENT for the job's total)
+  //                                + SUM(missed_production_entries.quantity) for pre-system / off-system parts
+  //     target_qty := quantity   (the real order qty — qty_override is retired, see Missed Production Entries plan)
   //   Pacing input      = machinist's good_pieces / target_qty
   //     We keep the machinist count for the traffic light because finishing yield
   //     lags by hours — the displayed total changed, but urgency keeps the
@@ -301,9 +302,10 @@ export default function ProductionDisplay() {
     const jobsRes = await supabase
       .from('jobs')
       .select(`
-        id, job_number, status, quantity, qty_override, good_pieces, bad_pieces,
+        id, job_number, status, quantity, good_pieces, bad_pieces,
         estimated_minutes, setup_start, production_start, scheduled_start, scheduled_end,
         assigned_machine_id,
+        missed_production_entries (quantity),
         component:parts!component_id(part_number, description),
         machine:machines!assigned_machine_id(code, name)
       `)
@@ -378,8 +380,9 @@ export default function ProductionDisplay() {
     const todayStartMs = todayStart.getTime()
 
     const enriched = list.map(j => {
-      const finished = finishingByJob[j.id] || 0
-      const targetQty = j.qty_override ?? j.quantity ?? 0
+      const missed = (j.missed_production_entries || []).reduce((a, e) => a + (e.quantity || 0), 0)
+      const finished = (finishingByJob[j.id] || 0) + missed
+      const targetQty = j.quantity ?? 0
       let elapsedMs = 0
 
       if (j.status === 'in_setup' && j.setup_start) {

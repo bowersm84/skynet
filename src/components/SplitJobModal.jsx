@@ -13,19 +13,17 @@ export default function SplitJobModal({ isOpen, job, onClose, onSuccess }) {
   // Anything past the machine (in-flight or approved) counts as produced.
   function computeProduced(j) {
     if (!j) return 0
-    if (j.qty_override != null) return j.qty_override
+    const missed = (j.missed_production_entries || []).reduce((a, e) => a + (e.quantity || 0), 0)
     const sends = j.finishing_sends || []
-    const live = sends.filter(s =>
-      s.compliance_status !== 'rejected' && s.status !== 'rejected'
-    )
+    const live = sends.filter(s => s.compliance_status !== 'rejected' && s.status !== 'rejected')
     if (live.length > 0) {
-      return live.reduce((acc, s) => {
+      return missed + live.reduce((acc, s) => {
         if (s.compliance_good_qty != null) return acc + s.compliance_good_qty
         if (s.verified_count != null) return acc + s.verified_count
         return acc + (s.quantity || 0)
       }, 0)
     }
-    return j.good_pieces || 0
+    return missed + (j.good_pieces || 0)
   }
 
   const produced = computeProduced(job)
@@ -113,9 +111,9 @@ export default function SplitJobModal({ isOpen, job, onClose, onSuccess }) {
           </div>
           <div className="flex justify-between">
             <span className="text-gray-400">
-              Produced{job.qty_override != null && <span className="text-amber-400 text-xs ml-1">(override)</span>}
+              Produced
             </span>
-            <span className={`font-mono ${job.qty_override != null ? 'text-amber-300' : 'text-white'}`}>
+            <span className="font-mono text-white">
               {produced.toLocaleString()}
             </span>
           </div>

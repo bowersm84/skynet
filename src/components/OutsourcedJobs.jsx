@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { FEATURES } from '../config'
-import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus, Combine } from 'lucide-react'
+import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus, Combine, Pencil, X } from 'lucide-react'
 import CombineLikeProductsModal from './CombineLikeProductsModal'
 
 const OPERATION_LABELS = {
@@ -88,6 +88,8 @@ export default function OutsourcedJobs({ profile }) {
   const [combineModalOpen, setCombineModalOpen] = useState(false)
   const [groupReturnOpen, setGroupReturnOpen] = useState(null)
   const [groupReturnForm, setGroupReturnForm] = useState({})
+  const [editingExpectedId, setEditingExpectedId] = useState(null)
+  const [editingExpectedValue, setEditingExpectedValue] = useState('')
 
   const canEdit = profile?.can_approve_compliance === true || profile?.role === 'admin'
 
@@ -850,6 +852,34 @@ export default function OutsourcedJobs({ profile }) {
     }
   }
 
+  // Update expected_return_at for one send, or for an entire consolidation group.
+  // Date column on outbound_sends is stored as date (YYYY-MM-DD), no timezone conversion needed.
+  const handleUpdateExpectedReturn = async (send, newDate) => {
+    setSaving(true)
+    try {
+      const update = {
+        expected_return_at: newDate || null,
+        updated_at: new Date().toISOString(),
+      }
+      let query = supabase.from('outbound_sends').update(update)
+      if (send.consolidation_group_id) {
+        query = query.eq('consolidation_group_id', send.consolidation_group_id)
+      } else {
+        query = query.eq('id', send.id)
+      }
+      const { error } = await query
+      if (error) throw error
+      setEditingExpectedId(null)
+      setEditingExpectedValue('')
+      await fetchAll()
+    } catch (err) {
+      console.error('Error updating expected return:', err)
+      alert('Failed to update expected return: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleAttachCert = async (sendId, file) => {
     if (!file) return
     setUploadingCertId(sendId)
@@ -1260,11 +1290,57 @@ export default function OutsourcedJobs({ profile }) {
                         <span className="text-gray-600"> by {send.sent_by_profile.full_name}</span>
                       )}
                     </span>
-                    {send.expected_return_at && (
-                      <span className={`flex items-center gap-1 ${overdue ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
-                        {overdue && <AlertCircle size={12} />}
-                        Expected: <span className={overdue ? '' : 'text-gray-300'}>{formatDateOnly(send.expected_return_at)}</span>
-                      </span>
+                    {(send.expected_return_at || canEdit) && (
+                      editingExpectedId === send.id ? (
+                        <span className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-gray-400 text-xs">Expected:</span>
+                          <input
+                            type="date"
+                            value={editingExpectedValue}
+                            onChange={e => setEditingExpectedValue(e.target.value)}
+                            className="px-1.5 py-0.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => handleUpdateExpectedReturn(send, editingExpectedValue || null)}
+                            disabled={saving}
+                            className="text-skynet-accent hover:text-blue-400 disabled:opacity-50"
+                            title="Save"
+                          >
+                            <Check size={13} />
+                          </button>
+                          <button
+                            onClick={() => { setEditingExpectedId(null); setEditingExpectedValue('') }}
+                            className="text-gray-500 hover:text-white"
+                            title="Cancel"
+                          >
+                            <X size={13} />
+                          </button>
+                          {send.consolidation_group_id && (
+                            <span className="text-[10px] text-gray-500 italic">applies to whole group</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className={`flex items-center gap-1 ${overdue ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
+                          {overdue && <AlertCircle size={12} />}
+                          Expected:{' '}
+                          <span className={overdue ? '' : 'text-gray-300'}>
+                            {send.expected_return_at ? formatDateOnly(send.expected_return_at) : '—'}
+                          </span>
+                          {canEdit && (
+                            <button
+                              onClick={() => {
+                                setEditingExpectedId(send.id)
+                                setEditingExpectedValue(send.expected_return_at || '')
+                              }}
+                              className="ml-1 text-gray-500 hover:text-skynet-accent transition-colors"
+                              title="Edit expected return date"
+                            >
+                              <Pencil size={11} />
+                            </button>
+                          )}
+                        </span>
+                      )
                     )}
                   </div>
 

@@ -802,11 +802,20 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
   // Behind wins over this-week for background/border when both apply — it's more
   // urgent. UP NEXT cell still gets its own amber treatment internally either way.
   const isBehind = job.trafficLight === 'red'
-  const isThisWeek = job.next_up?.is_this_week === true
+  // Due today = this job's own scheduled_end falls on today's calendar date.
+  // (Independent of the UP NEXT "THIS WK" flag, which is about the next queued job.)
+  const isDueToday = (() => {
+    if (!job.scheduled_end) return false
+    const end = new Date(job.scheduled_end)
+    const now = new Date()
+    return end.getFullYear() === now.getFullYear()
+      && end.getMonth() === now.getMonth()
+      && end.getDate() === now.getDate()
+  })()
 
   const containerClasses = isBehind
     ? 'border-2 border-red-500/60 bg-red-950/30'
-    : isThisWeek
+    : isDueToday
       ? 'border-2 border-amber-500/50 bg-amber-950/20'
       : 'border border-gray-800 bg-gray-900/60'
 

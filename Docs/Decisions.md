@@ -1007,3 +1007,91 @@ pushed through finishing though no real part existed. Deleted the qty-1 `finishi
 the second time) but the relative UPDATE decremented again (641 → 640), corrected with `+ 1`.
 **Lesson: for one-shot data corrections, set values absolutely (`SET good_pieces = 641`), not
 relatively**, so an accidental re-run is harmless.
+
+---
+
+## 2026-05-26 — SKY57 Schedule Change Requests + Dashboard Quality Metrics
+
+Shipped as one coordinated release (single branch, TEST→PROD). Three threads landed together:
+the Production Dashboard bug fixes + compliance note (Release A), then the SKY57 change-request
+feature. Spec bumped to v3.5.
+
+### D-S57-01 — Write path: SECURITY DEFINER RPC, not an Edge Function
+
+- **Decision:** Anon/no-auth writes from the Production Dashboard go through a `SECURITY DEFINER`
+  Postgres function, `submit_change_request(p_job_id, p_requested_end, p_note, p_source)`, granted
+  to `anon` + `authenticated`. NOT a Supabase Edge Function (the original SKY57 plan's Option B).
+- **Why:** The Production Dashboard is an unauthenticated TV route (`/dashboards/production`,
+  mounted outside `MainApp` — "TV dashboard, no login required"), and the anon client can't cleanly
+  write the table. An Edge Function would solve that but drags in an entire net-new surface the repo
+  has never had — Deno, CORS config, a service-role secret, `supabase/functions/`, and a
+  `supabase functions deploy` step — which is exactly what got SKY57 deferred in the first place.
+  A `SECURITY DEFINER` RPC gives the identical controlled, validated, anon-callable write (inserts
+  under the function owner, bypassing RLS) using infrastructure we already live in. The kiosk path
+  later calls the same RPC, authenticated, so `requested_by` carries the machinist.
+- **Validation in the function:** job exists and is not complete/cancelled; `requested_end` present
+  and not before today; `requested_by = auth.uid()` only when `source='kiosk'` (NULL for the
+  dashboard/meeting path); de-dupe an identical OPEN request for the same job + date (returns the
+  existing id, no new row).
+- **Lesson:** When the only argument for an Edge Function is "anon can't write this table," reach for
+  a `SECURITY DEFINER` RPC first. Same security posture, zero new infra, squarely in the existing
+  Postgres/RLS toolset. (The v3.4 spec listed "Edge Functions" in the stack as if assumed — SKY57 is
+  the case where the RPC was the right call instead.)
+
+### D-S57-02 — Apply reuses the SKY55 cascade engine; applying auto-dismisses siblings
+
+- **Decision:** The review-queue "Apply" runs the exact SKY55 path —
+  `getMachineQueue(scheduledJobs, …)` → `computeEndChangeCascade` → `applyEndDateChange` — identical
+  to `handleSaveEndDate` (Adjust End Date). A change request only records "this job should end on
+  date X"; nothing moves until the scheduler applies. On Apply, the request is marked `applied` and
+  **any other open requests on the same job are auto-dismissed**, so a stale sibling can't be
+  double-applied after the schedule already moved (plan open-question 2, resolved).
+- **Why:** End-date moves already have a single, tested engine. A request is advisory data, not a
+  second scheduling mechanism. Auto-dismissing siblings keeps the queue honest after one is actioned.
+- **End-date only.** Start, machine, and queue position stay pinned (consistent with SKY55). No
+  compliance revert (that's machine-swap only).
+- **Known limitation (accepted):** Apply pulls the downstream queue from `scheduledJobs` (the visible
+  week), matching SKY55. A request on a job scheduled outside the current week view moves that job's
+  end but cascades neighbors only when the scheduler is on that week. Meeting requests target
+  currently-running (in-week) jobs, so acceptable.
+
+### D-S57-03 — RLS mirrors the `customer_orders` convention
+
+- **Decision:** `schedule_change_requests` RLS follows the established `customer_orders` pattern:
+  authenticated SELECT (`true`); a second anon SELECT limited to `status='open'` (all the dashboard's
+  "already requested" marker needs); UPDATE (Apply/Dismiss) restricted to admin / scheduler /
+  customer_service via the `EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = ANY(...))`
+  check. No INSERT policy (all inserts via the RPC). No DELETE policy (dismissal is a status update,
+  never a hard delete).
+- **Why:** Match the house style so future audits read consistently. April is scheduler/CS, so she's
+  covered by the same role array used across the customer-order tables.
+- **Marker + dedup (plan open-question 3, resolved):** the dashboard shows a small marker on a job's
+  DUE date when an open request exists, and the RPC no-ops an identical open request — together these
+  stop one meeting from filing the same change three times.
+
+### Release A — Production Dashboard quality metrics + the data-entry fix behind them
+
+- **Parts Accepted uncapped.** Removed the `.slice(0, 6)` in `ProductionDisplay.jsx`; the left column
+  now lists every distinct accepted part for the day, sorted by qty. (Heavy-day TV overflow flagged to
+  Matt; left uncapped per request.)
+- **Rejected / Reworked Quality block.** Added under Accepted, off the SAME post-mfg compliance gate
+  (`finishing_sends`, same date bounds) so the three numbers always reconcile. Each list aggregates by
+  part number + producing machine (`finishing_sends.machine_id`; "—" for standalone J-FIN). **Reworked
+  qty = SUM(`compliance_bad_qty`)**. **Rejected qty = `compliance_bad_qty ?? verified_count`** (option
+  B).
+- **Why option B for Rejected (and the gotcha that forced it):** diagnosis of the post-mfg submit flow
+  showed the Reject path requires only a Rejection Reason — it never captures a Bad Quantity, so on a
+  plain reject `compliance_bad_qty` saves as NULL. Summing `compliance_bad_qty` alone would have made
+  the Rejected count read ~0 even on days batches were rejected. Option B falls back to the whole
+  `verified_count` when bad qty is absent, and automatically reads the partial bad qty once partial
+  reject ships — no dashboard rework needed then.
+- **Require Bad Quantity on Rework + guidance note.** Post-mfg review now blocks a Rework submit
+  without a Bad Quantity (≥1), so `compliance_bad_qty` is always populated for the metric. A note on
+  the Quantity Check block tells the reviewer Bad Quantity = the parts actually rejected/reworked (not
+  the whole batch unless all are affected) and that it feeds the dashboard. The note targets the
+  post-mfg review card only — that's where Roger inspects and enters qty, not James in Finishing.
+- **Deferred, with plans written:** **partial reject** (today Reject rejects the whole send; making it
+  quantity-aware is a flow change touching job advancement + shortfall accounting —
+  `Partial_Reject_Implementation_Plan.md`) and **kiosk change requests + requester notification**
+  (`Kiosk_Change_Requests_Implementation_Plan.md`). The require-Bad-Qty-on-Reject rule lands with
+  partial reject, where it's finally meaningful.

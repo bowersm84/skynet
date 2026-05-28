@@ -560,6 +560,19 @@ CREATE TABLE public.materials (
   CONSTRAINT materials_pkey PRIMARY KEY (id),
   CONSTRAINT materials_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
 );
+CREATE TABLE public.missed_production_entries (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL,
+  quantity integer NOT NULL CHECK (quantity > 0),
+  reason text NOT NULL,
+  production_lot text,
+  passivation_lot text,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT missed_production_entries_pkey PRIMARY KEY (id),
+  CONSTRAINT missed_production_entries_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT missed_production_entries_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
+);
 CREATE TABLE public.outbound_sends (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   job_id uuid,

@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { FEATURES } from '../config'
-import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus } from 'lucide-react'
+import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus, Combine } from 'lucide-react'
+import CombineLikeProductsModal from './CombineLikeProductsModal'
 
 const OPERATION_LABELS = {
   heat_treat: { label: 'Heat Treatment', color: 'bg-orange-900/30 text-orange-400 border-orange-800' },
@@ -84,8 +85,25 @@ export default function OutsourcedJobs({ profile }) {
   const [returnForm, setReturnForm] = useState({})
   const [saving, setSaving] = useState(false)
   const [uploadingCertId, setUploadingCertId] = useState(null)
+  const [combineModalOpen, setCombineModalOpen] = useState(false)
+  const [groupReturnOpen, setGroupReturnOpen] = useState(null)
+  const [groupReturnForm, setGroupReturnForm] = useState({})
 
   const canEdit = profile?.can_approve_compliance === true || profile?.role === 'admin'
+
+  // Map: consolidation_group_id → count of rows in that group (across at-vendor + returned).
+  // Used to render the "Consolidated (N)" pill on group members.
+  const groupSizeMap = (() => {
+    const m = {}
+    for (const list of [atVendor, returned]) {
+      for (const s of list) {
+        const gid = s.consolidation_group_id
+        if (!gid) continue
+        m[gid] = (m[gid] || 0) + 1
+      }
+    }
+    return m
+  })()
 
   const computeBatchLetters = async (jobIds) => {
     if (!jobIds.length) return {}
@@ -235,7 +253,7 @@ export default function OutsourcedJobs({ profile }) {
       .from('finishing_sends')
       .select(`
         id, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
-        finishing_lot_number, compliance_approved_at, finishing_completed_at,
+        finishing_lot_number, material_lot_number, compliance_approved_at, finishing_completed_at,
         job:jobs!inner(
           id, job_number, quantity, status,
           part:parts!component_id(part_number, description, part_type),
@@ -726,6 +744,112 @@ export default function OutsourcedJobs({ profile }) {
     }
   }
 
+  const handleReturnGroup = async (groupId) => {
+    const form = groupReturnForm[groupId] || {}
+    if (!form.vendor_lot_number?.trim()) {
+      alert('Vendor lot/cert number is required')
+      return
+    }
+    const groupRows = atVendor.filter(s => s.consolidation_group_id === groupId)
+    if (!groupRows.length) return
+
+    setSaving(true)
+    try {
+      const returnDate = form.return_date ? localDateToISO(form.return_date) : new Date().toISOString()
+      const vendorLot = form.vendor_lot_number.trim()
+
+      // 1. Bulk-update all rows in the group (same vendor_lot, return_date; per-row qty defaults to its quantity)
+      const { error: bulkErr } = await supabase
+        .from('outbound_sends')
+        .update({
+          returned_at: returnDate,
+          returned_by: profile.id,
+          vendor_lot_number: vendorLot,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('consolidation_group_id', groupId)
+      if (bulkErr) throw bulkErr
+
+      // Per-row quantity_returned (defaults to row.quantity)
+      for (const r of groupRows) {
+        const qty = parseInt(form[`qty_${r.id}`] ?? r.quantity)
+        await supabase
+          .from('outbound_sends')
+          .update({ quantity_returned: qty })
+          .eq('id', r.id)
+      }
+
+      // 2. Per (job, job_routing_step) cascade. Each row keeps its own job/step linkage
+      //    under Option B, so the existing per-step rollup applies row-by-row.
+      const uniqueStepRows = []
+      const seen = new Set()
+      for (const r of groupRows) {
+        const key = `${r.job_id}|${r.job_routing_step_id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        uniqueStepRows.push(r)
+      }
+
+      for (const r of uniqueStepRows) {
+        if (!r.job_routing_step_id) continue
+
+        const { data: stepSends } = await supabase
+          .from('outbound_sends')
+          .select('id, returned_at')
+          .eq('job_routing_step_id', r.job_routing_step_id)
+        const allStepReturned = stepSends && stepSends.length > 0
+          && stepSends.every(s => s.returned_at != null)
+        if (!allStepReturned) continue
+
+        const jobId = r.job?.id || r.job_id
+        const { data: jobRow } = await supabase
+          .from('jobs')
+          .select('id, actual_end')
+          .eq('id', jobId)
+          .single()
+        const machiningDone = jobRow?.actual_end != null
+        if (!machiningDone) continue
+
+        await supabase
+          .from('job_routing_steps')
+          .update({
+            status: 'complete',
+            completed_at: new Date().toISOString(),
+            completed_by: profile.id,
+            lot_number: vendorLot,
+          })
+          .eq('id', r.job_routing_step_id)
+
+        const { data: allSteps } = await supabase
+          .from('job_routing_steps')
+          .select('id, step_type, status')
+          .eq('job_id', jobId)
+          .eq('step_type', 'external')
+        const allExternalComplete = allSteps && allSteps.length > 0
+          && allSteps.every(s => s.status === 'complete')
+        if (!allExternalComplete) continue
+
+        const partType = r.job?.part?.part_type
+        const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
+          ? 'pending_tco'
+          : 'ready_for_assembly'
+        await supabase
+          .from('jobs')
+          .update({ status: nextStatus, updated_at: new Date().toISOString() })
+          .eq('id', jobId)
+      }
+
+      setGroupReturnOpen(null)
+      setGroupReturnForm({})
+      await fetchAll()
+    } catch (err) {
+      console.error('Error logging group return:', err)
+      alert('Failed to log group return: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleAttachCert = async (sendId, file) => {
     if (!file) return
     setUploadingCertId(sendId)
@@ -795,6 +919,15 @@ export default function OutsourcedJobs({ profile }) {
           <Plus size={14} className="text-amber-400" />
           <span className="text-white font-medium text-sm">Ready to Send</span>
           <span className="text-gray-500 text-xs">({readySteps.length})</span>
+          {canEdit && readySteps.filter(r => r.sourceKind === 'finishing').length >= 2 && (
+            <button
+              onClick={() => setCombineModalOpen(true)}
+              className="ml-auto flex items-center gap-1.5 px-2.5 py-1 bg-skynet-accent hover:bg-blue-600 text-white text-xs font-medium rounded-lg transition-colors"
+            >
+              <Combine size={12} />
+              Combine Like Products
+            </button>
+          )}
         </div>
 
         {readySteps.length === 0 ? (
@@ -986,6 +1119,79 @@ export default function OutsourcedJobs({ profile }) {
           <span className="text-gray-500 text-xs">({atVendor.length})</span>
         </div>
 
+        {groupReturnOpen && (() => {
+          const gid = groupReturnOpen
+          const groupRows = atVendor.filter(s => s.consolidation_group_id === gid)
+          const form = groupReturnForm[gid] || {}
+          if (!groupRows.length) return null
+          return (
+            <div className="mb-4 bg-gray-900 border-2 border-skynet-accent/60 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-medium text-white flex items-center gap-2">
+                  <Combine size={14} className="text-skynet-accent" />
+                  Return Whole Group ({groupRows.length} items)
+                </h4>
+                <button
+                  onClick={() => setGroupReturnOpen(null)}
+                  className="text-gray-400 hover:text-white text-xs"
+                >Cancel</button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-gray-500 text-[10px] mb-1">Vendor Lot/Cert # *</label>
+                  <input
+                    type="text"
+                    value={form.vendor_lot_number || ''}
+                    onChange={e => setGroupReturnForm(prev => ({ ...prev, [gid]: { ...form, vendor_lot_number: e.target.value } }))}
+                    placeholder="Lot or cert #"
+                    className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-gray-500 text-[10px] mb-1">Return Date</label>
+                  <input
+                    type="date"
+                    value={form.return_date || ''}
+                    onChange={e => setGroupReturnForm(prev => ({ ...prev, [gid]: { ...form, return_date: e.target.value } }))}
+                    className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-gray-500 text-[10px]">Quantity returned per item</label>
+                {groupRows.map(r => {
+                  const meta = getSendDisplayMeta(r)
+                  return (
+                    <div key={r.id} className="flex items-center gap-3 px-3 py-1.5 rounded bg-gray-800/60 border border-gray-700">
+                      <span className="text-xs text-white font-mono flex-1">
+                        {meta.jobNumber} · Batch {r.batchLetter} · FLN {meta.lotValue}
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={form[`qty_${r.id}`] ?? ''}
+                        onChange={e => setGroupReturnForm(prev => ({ ...prev, [gid]: { ...form, [`qty_${r.id}`]: e.target.value } }))}
+                        className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-white text-xs text-center focus:border-skynet-accent focus:outline-none"
+                      />
+                      <span className="text-xs text-gray-500">/ {r.quantity}</span>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => handleReturnGroup(gid)}
+                  disabled={saving || !form.vendor_lot_number?.trim()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                >
+                  {saving ? <Clock size={13} className="animate-spin" /> : <Check size={13} />}
+                  Confirm Group Return
+                </button>
+              </div>
+            </div>
+          )
+        })()}
+
         {atVendor.length === 0 ? (
           <p className="text-gray-600 text-sm italic text-center py-6">No parts currently at vendors</p>
         ) : (
@@ -1009,6 +1215,12 @@ export default function OutsourcedJobs({ profile }) {
                       )}
                       {send.vendor_name && (
                         <span className="text-sm text-white font-medium">{send.vendor_name}</span>
+                      )}
+                      {send.consolidation_group_id && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-skynet-accent/10 text-skynet-accent border-skynet-accent/40 flex items-center gap-1">
+                          <Combine size={10} />
+                          Consolidated ({groupSizeMap[send.consolidation_group_id] || 1})
+                        </span>
                       )}
                     </div>
                     <span className="text-xs px-2 py-0.5 rounded bg-blue-900/30 text-blue-300 flex-shrink-0">
@@ -1089,6 +1301,27 @@ export default function OutsourcedJobs({ profile }) {
                             <RotateCcw size={13} />
                             Log Return
                           </button>
+                          {send.consolidation_group_id && (groupSizeMap[send.consolidation_group_id] || 0) > 1 && (
+                            <button
+                              onClick={() => {
+                                const gid = send.consolidation_group_id
+                                setGroupReturnOpen(gid)
+                                const groupRows = atVendor.filter(s => s.consolidation_group_id === gid)
+                                const initial = {
+                                  vendor_lot_number: '',
+                                  return_date: new Date().toISOString().split('T')[0],
+                                }
+                                for (const r of groupRows) {
+                                  initial[`qty_${r.id}`] = String(r.quantity || '')
+                                }
+                                setGroupReturnForm(prev => ({ ...prev, [gid]: initial }))
+                              }}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-skynet-accent hover:bg-blue-600 text-white text-xs font-medium rounded-lg transition-colors"
+                            >
+                              <Combine size={13} />
+                              Return Whole Group
+                            </button>
+                          )}
                           <label className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
                             isUploading ? 'bg-gray-700 text-gray-400' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
                           }`}>
@@ -1195,6 +1428,12 @@ export default function OutsourcedJobs({ profile }) {
                       {send.vendor_name && (
                         <span className="text-sm text-white font-medium">{send.vendor_name}</span>
                       )}
+                      {send.consolidation_group_id && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-skynet-accent/10 text-skynet-accent border-skynet-accent/40 flex items-center gap-1">
+                          <Combine size={10} />
+                          Consolidated ({groupSizeMap[send.consolidation_group_id] || 1})
+                        </span>
+                      )}
                     </div>
                     <span className="text-xs px-2 py-0.5 rounded bg-green-900/30 text-green-400 flex-shrink-0">
                       Returned
@@ -1254,6 +1493,18 @@ export default function OutsourcedJobs({ profile }) {
           )
         )}
       </div>
+
+      {combineModalOpen && (
+        <CombineLikeProductsModal
+          readySteps={readySteps}
+          profile={profile}
+          onClose={() => setCombineModalOpen(false)}
+          onSuccess={async () => {
+            await fetchAll()
+            setCombineModalOpen(false)
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -193,7 +193,6 @@ export default function Armory({ profile }) {
           )
         `)
         .order('part_number')
-        .range(0, 9999)
 
       if (partsError) throw partsError
       setParts(partsData || [])

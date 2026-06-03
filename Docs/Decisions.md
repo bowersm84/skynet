@@ -1118,3 +1118,11 @@ feature. Spec bumped to v3.5.
   **Ordering bite (caught live).** Code embedding the new table shipped to TEST/localhost before the table existed on that Supabase project → the WO Lookup query 400'd (`PGRST200`, "Could not find a relationship between 'jobs' and 'missed_production_entries'") and Order Lookup showed zero work orders, which read as "data wiped" until the table was created. **Rule:** the table migration lands on a project *before* the code that queries it (TEST table → test-branch deploy → validate → PROD table → merge main).
 
   **Deferred.** (1) Drop the `qty_override` column — keep one release past migration. (2) Remove the now-inert `COALESCE(qty_override)` term in the `split_job` RPC (functionally 0 once overrides cleared, but a dead reference). (3) Genuine *replacement-correction* overrides ("recount confirmed 615 not 620" — a subtractive correction the additive entry model doesn't express) — none in the data today; separate decision if ever needed.
+
+---
+
+## 2026-06-03 — Mandate material entry + material lot in PLN (kiosk Start Production)
+
+**Decision.** Material entry is mandatory at kiosk Start Production — the "Skip Material Setup" override is removed; a non-empty material lot is required to start. PLN format is now `PLN-<lot>-YYMMDD-NNNN`, minted at Start Production. One raw material lot per job (already enforced by the `handleAddMaterial` B1 guard — untouched here). Kiosk-only; non-kiosk machines retain the legacy manual PLN entry at Finishing pickup until they receive a kiosk. Forward-only — existing PLNs and in-progress jobs are untouched.
+
+**Implementation (`src/pages/Kiosk.jsx`, frontend-only — no SQL/migration).** `handleConfirmStartProduction` now blocks with an alert when no material is loaded or the first material's lot is blank, instead of opening the override modal. `generateProductionLotNumber(materialLot)` folds the trimmed lot into the minted number; `handleConfirmMaterials` passes `jobMaterials[0].lot_number`. `handleConfirmMaterialOverride` and the `showMaterialOverrideModal` JSX are left in place but are now unreachable (nothing sets the flag true), so the `material_override` audit event simply stops being produced for new jobs — to be deleted in a later cleanup.

@@ -2287,10 +2287,11 @@ export default function Kiosk() {
   }
 
   // ========== LOT NUMBER GENERATION ==========
-  const generateProductionLotNumber = async () => {
+  const generateProductionLotNumber = async (materialLot) => {
     const now = new Date()
     const datePart = now.toISOString().slice(2, 10).replace(/-/g, '') // YYMMDD
     const prefix = 'PLN'
+    const lotPart = (materialLot || '').trim()
 
     try {
       const { data, error } = await supabase.rpc('next_lot_number', {
@@ -2300,10 +2301,10 @@ export default function Kiosk() {
 
       if (error) throw error
       const seq = String(data).padStart(4, '0')
-      return `${prefix}-${datePart}-${seq}`
+      return `${prefix}-${lotPart}-${datePart}-${seq}`
     } catch (err) {
       // Fallback: timestamp-based number if RPC fails
-      const fallback = `${prefix}-${datePart}-${now.getTime().toString().slice(-4)}`
+      const fallback = `${prefix}-${lotPart}-${datePart}-${now.getTime().toString().slice(-4)}`
       console.warn('Lot number RPC failed, using fallback:', fallback, err)
       return fallback
     }
@@ -2514,20 +2515,27 @@ export default function Kiosk() {
   }
 
   const handleConfirmStartProduction = () => {
+    // Material entry is mandatory — the "Skip Material Setup" override is no longer permitted.
     if (jobMaterials.length === 0) {
-      setShowMaterialOverrideModal(true)
-    } else {
-      handleConfirmMaterials()
+      alert('Material must be loaded before you can start production.')
+      return
     }
+    const lot = jobMaterials[0]?.lot_number?.trim()
+    if (!lot) {
+      alert('A material lot number is required before you can start production.')
+      return
+    }
+    handleConfirmMaterials()
   }
 
   const handleConfirmMaterials = async () => {
     setActionLoading(true)
     try {
-      // Generate PLN on production start if not already set
+      // Generate PLN on production start if not already set (PLN-<lot>-YYMMDD-NNNN)
       let productionLotNumber = activeJob.production_lot_number
       if (!productionLotNumber) {
-        productionLotNumber = await generateProductionLotNumber()
+        const materialLot = jobMaterials[0]?.lot_number || ''
+        productionLotNumber = await generateProductionLotNumber(materialLot)
       }
 
       const now = new Date().toISOString()

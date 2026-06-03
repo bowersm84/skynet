@@ -78,15 +78,15 @@ export default function ProductionDisplay() {
 
     const [passedRes, acceptedRes, qualityRes] = await Promise.all([
       supabase.from('finishing_sends')
-        .select('verified_count, job:jobs(component:parts!component_id(part_number))')
+        .select('verified_count, job:jobs(is_standalone_finishing, component:parts!component_id(part_number))')
         .eq('status', 'finishing_complete')
         .gte('finishing_completed_at', start).lt('finishing_completed_at', end),
       supabase.from('finishing_sends')
-        .select('compliance_good_qty, job:jobs(component:parts!component_id(part_number))')
+        .select('compliance_good_qty, job:jobs(is_standalone_finishing, component:parts!component_id(part_number))')
         .eq('compliance_outcome', 'accepted')
         .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
       supabase.from('finishing_sends')
-        .select('compliance_outcome, compliance_bad_qty, verified_count, job:jobs(component:parts!component_id(part_number)), machine:machines!machine_id(code)')
+        .select('compliance_outcome, compliance_bad_qty, verified_count, job:jobs(is_standalone_finishing, component:parts!component_id(part_number)), machine:machines!machine_id(code)')
         .in('compliance_outcome', ['rejected', 'rework'])
         .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
     ])
@@ -95,8 +95,11 @@ export default function ProductionDisplay() {
     if (acceptedRes.error) console.error('Error loading accepted:', acceptedRes.error)
     if (qualityRes.error) console.error('Error loading quality (rejected/rework):', qualityRes.error)
 
-    const passedRows = passedRes.data || []
-    const acceptedRows = acceptedRes.data || []
+    // Production Dashboard reflects in-house production only — exclude standalone
+    // J-FIN finishing jobs (received parts) from every output rollup (SKY51 scope).
+    const isProduction = (r) => !r.job?.is_standalone_finishing
+    const passedRows = (passedRes.data || []).filter(isProduction)
+    const acceptedRows = (acceptedRes.data || []).filter(isProduction)
 
     const passedTotal = passedRows.reduce((s, r) => s + (r.verified_count || 0), 0)
     const passedBatches = passedRows.length
@@ -116,7 +119,7 @@ export default function ProductionDisplay() {
     // Reworked qty = compliance_bad_qty (the flagged portion). Rejected qty = bad_qty when
     // present, else the whole verified batch (option B — forward-compatible with partial reject).
     // Each list aggregates by part number + producing machine (machine null on standalone J-FIN -> "—").
-    const qualityRows = qualityRes.data || []
+    const qualityRows = (qualityRes.data || []).filter(isProduction)
     const aggregateQuality = (rows, qtyOf) => {
       const byKey = {}
       for (const r of rows) {

@@ -15,7 +15,8 @@ import CustomerOrders from './pages/CustomerOrders'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
-import { isReadOnlyRole, canSeeBridge } from './lib/roles'
+import SalesDashboard from './pages/dashboards/SalesDashboard'
+import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -23,6 +24,7 @@ import ForceChangePassword from './components/ForceChangePassword'
 
 const DASHBOARDS = [
   { label: 'Production Dashboard', path: '/dashboards/production' },
+  { label: 'Sales Dashboard', path: '/dashboards/sales' },
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
   { label: "President's Bridge", path: '/bridge' },
 ]
@@ -332,7 +334,11 @@ function MainApp() {
                 </button>
                 {showDashboardsMenu && (
                   <div className="absolute right-0 top-full mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 py-1">
-                    {DASHBOARDS.filter(db => db.path !== '/bridge' || canSeeBridge(profile?.role)).map(db => (
+                    {DASHBOARDS.filter(db => {
+                      if (db.path === '/bridge') return canSeeBridge(profile?.role)
+                      if (db.path === '/dashboards/sales') return canViewSalesDashboard(profile)
+                      return true
+                    }).map(db => (
                       <a
                         key={db.path}
                         href={db.path}
@@ -465,6 +471,7 @@ function App() {
         {/* Assembly display - TV dashboard, no login required */}
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
         <Route path="/dashboards/production" element={<ProductionDisplay />} />
+        <Route path="/dashboards/sales" element={<SalesDashboard />} />
 
         {/* President's Bridge - auth + role gated (president + admin) */}
         <Route path="/bridge" element={<PresidentsBridge />} />

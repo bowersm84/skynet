@@ -287,6 +287,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         `)
         .eq('is_active', true)
         .eq('is_commissioned', true)
+        .neq('machine_type', 'finishing')
         .order('display_order')
 
       if (machinesError) {

@@ -23,6 +23,7 @@ export function getMachineQueue(allJobs, machineId, { excludeJobId } = {}) {
     .filter(j =>
       j.assigned_machine_id === machineId &&
       j.status !== 'complete' &&
+      j.status !== 'manufacturing_complete' &&
       j.status !== 'cancelled' &&
       j.scheduled_start &&
       j.id !== excludeJobId

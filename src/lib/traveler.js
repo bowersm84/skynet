@@ -130,13 +130,21 @@ export function buildTravelerHTML(travelerData) {
     return map
   })()
 
+  // Identify the machining step. "Machine Process" is the canonical CNC step that carries
+  // the production lot; every internal step after it is finishing and carries the FLN.
+  // If there is no machining step (e.g. standalone J-FIN jobs), machineStepOrder = -Infinity
+  // so every internal step is treated as finishing and the FLN flows onto all of them.
+  const machineStep = steps.find(
+    s => s.step_type !== 'external' && (s.step_name || '').toLowerCase() === 'machine process'
+  ) || null
+  const machineStepOrder = machineStep ? machineStep.step_order : -Infinity
+
   const stepsHTML = steps.flatMap(step => {
-    const stepName = (step.step_name || '').toLowerCase()
-    const isWash = stepName === 'wash'
-    const isTreatment = stepName === 'treatment' || stepName === 'passivation'
-    const isDry = stepName === 'dry'
-    const isMachineStep = !isWash && !isTreatment && !isDry && step.step_type !== 'external'
     const isExternalStep = step.step_type === 'external'
+    const isMachineStep = !isExternalStep && machineStep != null && step.id === machineStep.id
+    // Any internal step after the machining step is a finishing step (carries the FLN),
+    // regardless of its specific name (Wash, Passivation, Mineral Spirit Wash, …).
+    const isFinishingStep = !isExternalStep && !isMachineStep && step.step_order > machineStepOrder
 
     // For external steps, find ALL outbound_sends for this step (not just the first)
     const stepSends = isExternalStep
@@ -155,25 +163,25 @@ export function buildTravelerHTML(travelerData) {
       } else {
         rowLot = step.lot_number || ''
       }
-      if (!rowLot && (isWash || isTreatment || isDry) && fb?.finishing_lot_number) rowLot = fb.finishing_lot_number
+      if (!rowLot && isFinishingStep && fb?.finishing_lot_number) rowLot = fb.finishing_lot_number
       if (!rowLot && isMachineStep && job.production_lot_number) rowLot = job.production_lot_number
       // Final fallback for external steps where the send exists but vendor_lot_number is null
       // (e.g., still at vendor) — use step.lot_number if it has a value, else blank
       if (!rowLot && isExternalStep && step.lot_number) rowLot = step.lot_number
 
       let rowQty = step.quantity != null ? String(step.quantity) : ''
-      if (!rowQty && (isWash || isTreatment || isDry) && finishingQty !== '') rowQty = String(finishingQty)
+      if (!rowQty && isFinishingStep && finishingQty !== '') rowQty = String(finishingQty)
       if (!rowQty && isMachineStep && job.good_pieces != null && job.good_pieces > 0) rowQty = String(job.good_pieces)
       if (!rowQty && isMachineStep && machineOutputQty > 0) rowQty = String(machineOutputQty)
       if (!rowQty && isExternalStep && linkedSend?.quantity_returned != null) rowQty = String(linkedSend.quantity_returned)
 
       let rowDate = shortDate(step.completed_at)
-      if (!rowDate && (isWash || isTreatment || isDry)) rowDate = finishingDate
+      if (!rowDate && isFinishingStep) rowDate = finishingDate
       if (!rowDate && isMachineStep && job.actual_end) rowDate = shortDate(job.actual_end)
       if (!rowDate && isExternalStep && linkedSend?.returned_at) rowDate = shortDate(linkedSend.returned_at)
 
       let rowOp = step.operator_initials || initials(step.completed_by_profile?.full_name) || ''
-      if (!rowOp && (isWash || isTreatment || isDry)) rowOp = finishingOp
+      if (!rowOp && isFinishingStep) rowOp = finishingOp
       if (!rowOp && isMachineStep && job.assigned_user?.full_name) rowOp = initials(job.assigned_user.full_name)
 
       const station = _esc(step.station)
@@ -187,7 +195,7 @@ export function buildTravelerHTML(travelerData) {
       <td style="${routingCellCSS}">${_esc(step.step_name)}${step.is_added_step ? ' *' : ''}${batchSuffix ? ' ' + batchSuffix : ''}</td>
       <td style="${routingCellCSS} width:90px;">${station}</td>
       <td style="${routingCellCSS} text-align:center; width:45px;">${step.step_type === 'external' ? 'EXT' : 'INT'}</td>
-      <td style="${routingCellCSS} width:90px;">${_esc(rowLot)}</td>
+      <td style="${routingCellCSS} width:240px;">${_esc(rowLot)}</td>
       <td style="${routingCellCSS} width:55px; text-align:center;">${_esc(rowQty)}</td>
       <td style="${routingCellCSS} width:80px;">${_esc(rowDate)}</td>
       <td style="${routingCellCSS} width:90px; text-align:center;">${_esc(rowOp)}</td>
@@ -243,7 +251,7 @@ export function buildTravelerHTML(travelerData) {
         ? 'Stock build &mdash; no customer orders.'
         : 'No active customer order allocations.'
       return `
-    <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
+    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
       </thead>
@@ -266,7 +274,7 @@ export function buildTravelerHTML(travelerData) {
         </tr>`
     }).join('')
     return `
-    <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
+    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
         <tr>
@@ -307,9 +315,9 @@ export function buildTravelerHTML(travelerData) {
   </div>
   <div class="print-page">
     <div style="text-align:center; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:16px;">
-      <h1 style="margin:0; font-size:22px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
+      <h1 style="margin:0; font-size:28px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
     </div>
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:13px;">
+    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:17px;">
       <tbody>
         <tr><td style="${headerLabelCSS}">Part Number</td><td style="${headerValueCSS}">${_esc(comp?.part_number) || '&mdash;'}</td>
             <td style="${headerLabelCSS}">Job Number</td><td style="${headerValueCSS}">${_esc(job.job_number)}</td></tr>
@@ -324,7 +332,11 @@ export function buildTravelerHTML(travelerData) {
       </tbody>
     </table>
     ${coSectionHTML}
-    <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
+    <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+      <colgroup>
+        <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%) -->
+        <col style="width:4%" /><col style="width:25%" /><col style="width:19%" /><col style="width:5%" /><col style="width:23%" /><col style="width:6%" /><col style="width:9%" /><col style="width:9%" />
+      </colgroup>
       <thead>
         <tr><th style="${routingHeaderCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>
             <th style="${routingHeaderCSS}">Type</th><th style="${routingHeaderCSS}">Lot #</th><th style="${routingHeaderCSS}">Qty</th>
@@ -332,8 +344,8 @@ export function buildTravelerHTML(travelerData) {
       </thead>
       <tbody>${stepsHTML}${blankRows}</tbody>
     </table>
-    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:12px;"><strong>Notes:</strong></div>
-    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:10px; color:#666;">
+    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:16px;"><strong>Notes:</strong></div>
+    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:13px; color:#666;">
       <span>Generated from SkyNet MES &mdash; ${printTime}</span><span>Skybolt Aeromotive Corp</span>
     </div>
   </div>

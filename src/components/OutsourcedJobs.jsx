@@ -312,6 +312,12 @@ export default function OutsourcedJobs({ profile }) {
       for (const step of externalSteps) {
         const key = `${batch.id}|${step.id}`
         if (sentSet.has(key)) continue
+        // Don't offer this external step until every earlier external step has returned —
+        // a later step (e.g. Plating) must wait for an earlier one (e.g. Heat Treat) to come back.
+        const earlierExternalPending = externalSteps.some(
+          s => s.step_order < step.step_order && !['complete', 'skipped', 'removed'].includes(s.status)
+        )
+        if (earlierExternalPending) continue
         rows.push({
           rowKey: key,
           sourceKind: 'finishing',

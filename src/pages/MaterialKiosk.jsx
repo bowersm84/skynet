@@ -193,7 +193,9 @@ export default function MaterialKiosk() {
       const { data, error } = await supabase
         .from('machines')
         .select('id, name, code, machine_type, kiosk_enabled, display_order, location_id, locations:location_id(name)')
-        .eq('is_active', true).eq('is_commissioned', true).order('display_order')
+        .eq('is_active', true).eq('is_commissioned', true)
+        .neq('machine_type', 'finishing')   // finishing tanks don't receive raw material
+        .order('display_order')
       if (error) throw error
       setMachines((data || []).filter(m => !m.name?.startsWith('Bolt Master')))
     } catch (err) { console.error('Error loading machines:', err) }

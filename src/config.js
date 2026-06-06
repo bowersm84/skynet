@@ -28,4 +28,13 @@ export const FEATURES = {
    * For go-live: false. Flip to true when Jody is trained and ready.
    */
   ASSEMBLY_MODULE: false,
+
+  /**
+   * Raw Material Checkout Kiosk — rack staging device + material finalize on
+   * completion paths. When false: the MaterialKiosk route is hidden and no
+   * new material-kiosk UI renders. The existing in-kiosk material step and the
+   * June-3 start-lot gate are UNAFFECTED by this flag.
+   * Pilot: flip true for the one material area only.
+   */
+  MATERIAL_KIOSK: true,
 }

@@ -2,8 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { 
-  Lock, 
-  Unlock,
+  Lock,
   ArrowLeft,
   AlertCircle, 
   Loader2, 
@@ -32,6 +31,7 @@ import {
   Beaker,
   ExternalLink
 } from 'lucide-react'
+import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
@@ -166,6 +166,7 @@ export default function Kiosk() {
   
   // Material tracking state
   const [showMaterialModal, setShowMaterialModal] = useState(false)
+  const [showAddForm, setShowAddForm] = useState(true) // Add-material form visibility; collapses when material is already staged
   const [showMaterialOverrideModal, setShowMaterialOverrideModal] = useState(false)
   const [overrideReason, setOverrideReason] = useState('')
   const [showToolingOverrideModal, setShowToolingOverrideModal] = useState(false)
@@ -180,8 +181,10 @@ export default function Kiosk() {
   const [materialTypes, setMaterialTypes] = useState([])
   const [barSizes, setBarSizes] = useState([])
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
+  const [jobLoads, setJobLoads] = useState([]) // Per-load history (append-only display log) for current job
   const [lotMismatchModal, setLotMismatchModal] = useState(null) // { existingLot, newLot }
   const [inventoryStock, setInventoryStock] = useState([]) // Available stock rows for dropdown grouping
+  const [materialsMaster, setMaterialsMaster] = useState([]) // materials master (type+size) for material_master_id resolution
 
   // Finishing send state
   const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
@@ -1053,6 +1056,20 @@ export default function Kiosk() {
     }
   }
 
+  // Load the materials master (type + size combos) for material_master_id resolution
+  const loadMaterialsMaster = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('materials')
+        .select('id, material_type_id, bar_size_inches')
+        .eq('is_active', true)
+      if (error) throw error
+      setMaterialsMaster(data || [])
+    } catch (err) {
+      console.error('Error loading materials master:', err)
+    }
+  }
+
   // Load materials for current job
   const loadJobMaterials = async (jobId) => {
     if (!jobId) return
@@ -1067,6 +1084,28 @@ export default function Kiosk() {
       setJobMaterials(data || [])
     } catch (err) {
       console.error('Error loading job materials:', err)
+    }
+    // Per-load history (append-only DISPLAY log), oldest first. Refreshed alongside
+    // the per-job aggregate everywhere loadJobMaterials runs. Loader name resolved via
+    // a follow-up profiles lookup keyed by staged_by.
+    try {
+      const { data: loads } = await supabase
+        .from('material_loads')
+        .select('id, bars, staged_at, material_type, bar_size, lot_number, staged_by')
+        .eq('job_id', jobId)
+        .order('staged_at', { ascending: true })
+      const loaderIds = [...new Set((loads || []).map(l => l.staged_by).filter(Boolean))]
+      let nameById = {}
+      if (loaderIds.length > 0) {
+        const { data: profs } = await supabase
+          .from('profiles')
+          .select('id, full_name')
+          .in('id', loaderIds)
+        for (const p of profs || []) nameById[p.id] = p.full_name
+      }
+      setJobLoads((loads || []).map(l => ({ ...l, _loaderName: nameById[l.staged_by] || '' })))
+    } catch (err) {
+      console.error('Error loading material loads:', err)
     }
   }
 
@@ -1463,7 +1502,7 @@ export default function Kiosk() {
 
   // ========== PIN AUTH ==========
   const handlePinInput = (digit) => {
-    if (pin.length < 6) {
+    if (pin.length < 4) {
       setPin(prev => prev + digit)
       setAuthError(null)
     }
@@ -2316,14 +2355,23 @@ export default function Kiosk() {
     setShowMaterialModal(true)
     await loadMaterialTypes()
     await loadBarSizes()
+    await loadMaterialsMaster()
     await loadInventoryStock()
     await loadJobMaterials(activeJob.id)
-    // Reset form
+    // Reload auto-fill (D-JUN03-04): if material is already staged for this job, prefill
+    // type/size/lot/length so the operator only enters the added count. (The accumulate
+    // path preserves the originals; the B1 guard blocks any lot change.)
+    const { data: existingMat } = await supabase
+      .from('job_materials').select('*').eq('job_id', activeJob.id).limit(1)
+    const matRow = existingMat?.[0] || null
+    // If material is already staged (e.g. at the Raw Material Kiosk), default to the
+    // confirm-from-staged view and keep the add form collapsed; otherwise show the form.
+    setShowAddForm(!(matRow && (matRow.bars_loaded || 0) > 0 && matRow.lot_number?.trim()))
     setMaterialForm({
-      material_type: '',
-      bar_size: '',
-      bar_length: '',
-      lot_number: '',
+      material_type: matRow?.material_type || '',
+      bar_size: (matRow?.bar_size && matRow.bar_size !== 'N/A') ? matRow.bar_size : '',
+      bar_length: matRow?.bar_length != null ? String(matRow.bar_length) : '',
+      lot_number: matRow?.lot_number || '',
       bars_loaded: 0
     })
   }
@@ -2383,20 +2431,69 @@ export default function Kiosk() {
 
     setActionLoading(true)
     try {
-      const { error } = await supabase
+      // ONE row per job (job_materials UNIQUE(job_id)). "Add More" accumulates into
+      // the existing row's bars_loaded rather than inserting a second row. Fetch fresh
+      // to avoid a stale-state double-insert race. Lot/length/type/size are set once and
+      // preserved on reload (the B1 guard above already blocks a lot change).
+      const addBars = parseInt(materialForm.bars_loaded)
+      // Resolve the Material Master row (best-effort) from the chosen type + size,
+      // so the machine kiosk stores material_master_id like the rack kiosk does.
+      const _typeRow = materialTypes.find(t => t.name === materialForm.material_type)
+      const _sizeRow = barSizes.find(b => b.size === materialForm.bar_size)
+      const materialMasterId = (_typeRow && !isBlanks && _sizeRow?.size_decimal != null)
+        ? (materialsMaster.find(mm => mm.material_type_id === _typeRow.id && Number(mm.bar_size_inches) === Number(_sizeRow.size_decimal))?.id || null)
+        : null
+      const { data: existingRows, error: existingErr } = await supabase
         .from('job_materials')
-        .insert({
-          job_id: activeJob.id,
-          material_type: materialForm.material_type,
-          bar_size: isBlanks ? 'N/A' : materialForm.bar_size,
-          bar_length: !isBlanks && materialForm.bar_length ? parseFloat(materialForm.bar_length) : null,
-          lot_number: materialForm.lot_number || null,
-          bars_loaded: parseInt(materialForm.bars_loaded),
-          loaded_by: operator.id,
-          loaded_at: new Date().toISOString()
-        })
+        .select('*')
+        .eq('job_id', activeJob.id)
+        .limit(1)
+      if (existingErr) throw existingErr
+      const existing = existingRows?.[0] || null
 
-      if (error) throw error
+      if (existing) {
+        const { error } = await supabase
+          .from('job_materials')
+          .update({
+            bars_loaded: (existing.bars_loaded || 0) + addBars,
+            material_type: existing.material_type || materialForm.material_type,
+            bar_size: existing.bar_size || (isBlanks ? 'N/A' : materialForm.bar_size),
+            bar_length: existing.bar_length ?? ((!isBlanks && materialForm.bar_length) ? parseFloat(materialForm.bar_length) : null),
+            lot_number: existing.lot_number || (materialForm.lot_number || null),
+            material_master_id: existing.material_master_id || materialMasterId,
+            loaded_by: operator.id,
+            loaded_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', existing.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('job_materials')
+          .insert({
+            job_id: activeJob.id,
+            material_type: materialForm.material_type,
+            bar_size: isBlanks ? 'N/A' : materialForm.bar_size,
+            bar_length: !isBlanks && materialForm.bar_length ? parseFloat(materialForm.bar_length) : null,
+            lot_number: materialForm.lot_number || null,
+            bars_loaded: addBars,
+            material_master_id: materialMasterId,
+            loaded_by: operator.id,
+            loaded_at: new Date().toISOString()
+          })
+        if (error) throw error
+      }
+
+      // Per-load history (append-only DISPLAY log) — fire-and-forget, never blocks staging.
+      supabase.from('material_loads').insert({
+        job_id: activeJob.id,
+        material_type: materialForm.material_type,
+        bar_size: isBlanks ? 'N/A' : materialForm.bar_size,
+        lot_number: materialForm.lot_number || null,
+        bars: addBars,
+        source: 'machine_kiosk',
+        staged_by: operator.id,
+      }).then(() => {}, (err) => console.warn('material_loads write failed (non-fatal):', err))
 
       // Capture form values before reset for inventory deduction
       const savedMaterialType = materialForm.material_type
@@ -3566,40 +3663,20 @@ export default function Kiosk() {
         </header>
 
         <div className="flex-1 flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 w-full max-w-sm">
-            <div className="text-center mb-6">
-              <Lock className="w-12 h-12 text-skynet-accent mx-auto mb-3" />
-              <h2 className="text-xl font-semibold text-white">Operator Login</h2>
-              <p className="text-gray-500 text-sm mt-1">Enter your PIN to continue</p>
-            </div>
-
-            <div className="flex justify-center gap-2 mb-6">
-              {[...Array(6)].map((_, i) => (
-                <div key={i} className={`w-10 h-12 rounded-lg border-2 flex items-center justify-center text-2xl font-bold transition-colors ${i < pin.length ? 'border-skynet-accent bg-skynet-accent/20 text-white' : 'border-gray-700 bg-gray-800 text-gray-600'}`}>
-                  {i < pin.length ? '•' : ''}
-                </div>
-              ))}
-            </div>
-
-            {authError && (
-              <div className="flex items-center gap-2 text-red-400 text-sm mb-4 justify-center">
-                <AlertCircle size={16} />{authError}
-              </div>
-            )}
-
-            <div className="grid grid-cols-3 gap-2 mb-4">
-              {[1,2,3,4,5,6,7,8,9].map((digit) => (
-                <button key={digit} onClick={() => handlePinInput(digit.toString())} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">{digit}</button>
-              ))}
-              <button onClick={handlePinClear} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">Clear</button>
-              <button onClick={() => handlePinInput('0')} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">0</button>
-              <button onClick={handlePinBackspace} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">←</button>
-            </div>
-
-            <button onClick={handlePinSubmit} disabled={pin.length < 4 || authenticating} className="w-full h-12 bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-              {authenticating ? <><Loader2 className="w-5 h-5 animate-spin" />Verifying...</> : <><Unlock size={20} />Login</>}
-            </button>
-          </div>
+          <PinPad
+            icon={<Lock className="w-10 h-10 text-skynet-accent mx-auto mb-3" />}
+            title="Operator Login"
+            subtitle="Enter your PIN to continue"
+            pin={pin}
+            error={authError}
+            busy={authenticating}
+            maxLength={4}
+            buttonLabel="Login"
+            onDigit={handlePinInput}
+            onClear={handlePinClear}
+            onBackspace={handlePinBackspace}
+            onSubmit={handlePinSubmit}
+          />
         </div>
 
         <footer className="bg-gray-900 border-t border-gray-800 px-6 py-3">
@@ -4291,6 +4368,17 @@ export default function Kiosk() {
                             </div>
                           </div>
                         ))}
+                        {jobLoads.length > 0 && (
+                          <div className="pl-3 border-l-2 border-gray-700 ml-1 space-y-1.5 pt-1">
+                            <p className="text-gray-500 text-xs uppercase tracking-wide">Loads</p>
+                            {jobLoads.map(load => (
+                              <div key={load.id} className="flex items-baseline gap-2 text-sm">
+                                <span className="text-white font-semibold">{load.bars} {load.material_type?.toLowerCase().includes('blank') ? 'pieces' : 'bars'}</span>
+                                <span className="text-gray-400">— {[load._loaderName, formatTime(load.staged_at)].filter(Boolean).join(' · ')}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <p className="text-gray-500 text-sm italic">No materials loaded</p>
@@ -4334,7 +4422,7 @@ export default function Kiosk() {
                               ) : (
                                 <div className="flex-1 flex flex-col gap-1">
                                   <button onClick={handleOpenMaterials} disabled={actionLoading} className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                                    <Package size={20} />Load Materials
+                                    <Package size={20} />Load Materials + Start Job
                                   </button>
                                   <button onClick={handleOpenTooling} className="text-xs text-gray-500 hover:text-gray-400 transition-colors flex items-center justify-center gap-1">
                                     <Wrench size={12} />Add Tooling (optional)
@@ -5008,6 +5096,45 @@ export default function Kiosk() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Staged-material banner — confirm-from-staged is the default path; the footer button starts the job */}
+              {jobMaterials.length > 0 && jobMaterials[0]?.lot_number?.trim() && (
+                <div className="bg-green-900/20 border border-green-800/50 rounded-lg p-4">
+                  <div className="flex items-start gap-2">
+                    <Package size={20} className="text-green-400 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <h3 className="text-green-300 font-medium">Material staged from the Raw Material Kiosk</h3>
+                      {(() => {
+                        const m = jobMaterials[0]
+                        const sizePart = m.bar_size && m.bar_size !== 'N/A' ? ` · ${m.bar_size}` : ''
+                        const unit = m.material_type?.toLowerCase().includes('blank') ? 'blanks' : 'bars'
+                        return (
+                          <p className="text-gray-300 text-sm mt-1">{m.material_type}{sizePart} · {m.bars_loaded} {unit} · lot {m.lot_number}</p>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                  {!showAddForm && (
+                    <button onClick={() => setShowAddForm(true)} className="mt-3 text-sm text-skynet-accent hover:text-blue-400 transition-colors flex items-center gap-1">
+                      <Plus size={14} />Add or change material
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {showAddForm && (
+                <>
+              {/* Accumulation warning — adds stack on top of any prior staging, incl. the Raw Material Kiosk */}
+              <div className="flex items-start gap-2 bg-amber-900/30 border border-amber-700/50 text-amber-300 rounded-lg p-3 text-sm">
+                <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
+                <p>
+                  Adding here accumulates on top of any material already staged for this job — including bars staged at the Raw Material Kiosk. Enter only the bars you're loading now, not the running total.
+                  {(() => {
+                    const alreadyStaged = jobMaterials.reduce((sum, m) => sum + (m.bars_loaded || 0), 0)
+                    return alreadyStaged > 0 ? ` (${alreadyStaged} bars already staged)` : ''
+                  })()}
+                </p>
+              </div>
+
               {/* Add Material Form */}
               <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
                 <h3 className="text-white font-medium flex items-center gap-2">
@@ -5244,6 +5371,8 @@ export default function Kiosk() {
                   <Plus size={20} />Add Material
                 </button>
               </div>
+                </>
+              )}
 
               {/* Current Materials Loaded */}
               <div>

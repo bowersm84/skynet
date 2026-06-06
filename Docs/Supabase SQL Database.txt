@@ -170,6 +170,7 @@ CREATE TABLE public.jobs (
   documents_deferred_by uuid,
   documents_deferred_at timestamp with time zone,
   has_open_shortfall boolean NOT NULL DEFAULT false,
+  co_fulfillment_applied_at timestamp with time zone,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),

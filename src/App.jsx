@@ -9,6 +9,7 @@ import ConfirmInvite from './pages/ConfirmInvite'
 import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
+import MaterialKiosk from './pages/MaterialKiosk'
 import Finishing from './pages/Finishing'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
@@ -464,6 +465,9 @@ function App() {
 
         {/* Kiosk route - PIN-based auth, no Supabase login required */}
         <Route path="/kiosk/:machineCode" element={<Kiosk />} />
+
+        {/* Raw Material Checkout Kiosk — machine-agnostic rack staging device. PIN auth; self-gated by FEATURES.MATERIAL_KIOSK inside the page. */}
+        <Route path="/material-kiosk" element={<MaterialKiosk />} />
 
         {/* Finishing station route */}
         <Route path="/finishing" element={<Finishing />} />

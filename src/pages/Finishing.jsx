@@ -7,13 +7,11 @@ import { batchRequiresChemicals } from '../lib/routing'
 import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
-  Unlock,
   Loader2,
   LogOut,
   Play,
   CheckCircle,
   Clock,
-  AlertCircle,
   AlertTriangle,
   Package,
   Beaker,
@@ -39,6 +37,7 @@ import {
   Eye,
   ExternalLink
 } from 'lucide-react'
+import PinPad from '../components/PinPad'
 
 // Stage definitions
 const STAGES = [
@@ -783,7 +782,7 @@ export default function Finishing() {
 
   // PIN Authentication — numpad handlers (matches Kiosk pattern)
   const handlePinInput = (digit) => {
-    if (pin.length < 6) {
+    if (pin.length < 4) {
       setPin(prev => prev + digit)
       setAuthError(null)
     }
@@ -817,7 +816,7 @@ export default function Finishing() {
         .single()
 
       if (error) {
-        if (error.code === 'PGRST116') setAuthError('Invalid PIN')
+        if (error.code === 'PGRST116') { setAuthError('Invalid PIN'); setPin('') }
         else throw error
         return
       }
@@ -1527,40 +1526,20 @@ export default function Finishing() {
         </header>
 
         <div className="flex-1 flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 w-full max-w-sm">
-            <div className="text-center mb-6">
-              <Lock className="w-12 h-12 text-cyan-400 mx-auto mb-3" />
-              <h2 className="text-xl font-semibold text-white">Operator Login</h2>
-              <p className="text-gray-500 text-sm mt-1">Enter your PIN to continue</p>
-            </div>
-
-            <div className="flex justify-center gap-2 mb-6">
-              {[...Array(6)].map((_, i) => (
-                <div key={i} className={`w-10 h-12 rounded-lg border-2 flex items-center justify-center text-2xl font-bold transition-colors ${i < pin.length ? 'border-cyan-500 bg-cyan-500/20 text-white' : 'border-gray-700 bg-gray-800 text-gray-600'}`}>
-                  {i < pin.length ? '•' : ''}
-                </div>
-              ))}
-            </div>
-
-            {authError && (
-              <div className="flex items-center gap-2 text-red-400 text-sm mb-4 justify-center">
-                <AlertCircle size={16} />{authError}
-              </div>
-            )}
-
-            <div className="grid grid-cols-3 gap-2 mb-4">
-              {[1,2,3,4,5,6,7,8,9].map((digit) => (
-                <button key={digit} onClick={() => handlePinInput(digit.toString())} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">{digit}</button>
-              ))}
-              <button onClick={handlePinClear} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">Clear</button>
-              <button onClick={() => handlePinInput('0')} className="h-14 bg-gray-800 hover:bg-gray-700 text-white text-xl font-semibold rounded-lg transition-colors active:scale-95">0</button>
-              <button onClick={handlePinBackspace} className="h-14 bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm font-medium rounded-lg transition-colors">←</button>
-            </div>
-
-            <button onClick={handlePinSubmit} disabled={pin.length < 4 || authenticating} className="w-full h-12 bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-              {authenticating ? <><Loader2 className="w-5 h-5 animate-spin" />Verifying...</> : <><Unlock size={20} />Login</>}
-            </button>
-          </div>
+          <PinPad
+            icon={<Lock className="w-10 h-10 text-skynet-accent mx-auto mb-3" />}
+            title="Operator Login"
+            subtitle="Enter your PIN to continue"
+            pin={pin}
+            error={authError}
+            busy={authenticating}
+            maxLength={4}
+            buttonLabel="Login"
+            onDigit={handlePinInput}
+            onClear={handlePinClear}
+            onBackspace={handlePinBackspace}
+            onSubmit={handlePinSubmit}
+          />
         </div>
 
         <footer className="bg-gray-900 border-t border-gray-800 px-6 py-3">

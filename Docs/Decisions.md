@@ -1165,3 +1165,10 @@ SKY58 (Production Dashboard, `loadDownMachineETAs`) — (a) when no active DTU's
 
 ### D-S75-01 — ScheduleJobModal receives the full cross-week schedule
 SKY75 — `ScheduleJobModal` now receives `allScheduledJobs` (full cross-week schedule) instead of the visible-week `scheduledJobs`. The modal uses the prop only as `getMachineQueue` input (machine-picker stats, Step 2 position picker, insertion cascade). The week slice made the queue incomplete, so placing a job in a week where the machine had no jobs reported 'No jobs queued' and the cascade ignored downstream jobs in other weeks. Full schedule fixes both. Modal prop name left unchanged.
+
+---
+
+## 2026-06-07 — SKY74 Kiosk Complete derives good count from finishing sends
+
+### D-S74-01 — Remove machinist final-qty entry; good_pieces = finishing-sends total
+SKY74 — kiosk PRODUCTION Complete (`handleCompleteJob` + `completeForm` + the non-maintenance Complete modal branch) no longer takes an operator good/bad count. The auto-finishing-send (`good_pieces − already_sent`) is removed — it produced phantom batches (e.g. J-000042 / J-000029). The operator must explicitly choose 'Send a final batch' (entering the batch quantity — never prefilled; the existing prefilled box is the pencil-whip problem) or 'Complete without sending'. `jobs.good_pieces` is set to the SUM of the job's `finishing_sends` (every job finishes internally); `bad_pieces` fixed at 0 (scrap not tracked at the kiosk); `time_per_unit` uses the finishing total. The final batch insert is blocking (a failed send must not under-count the job). Shortfall is unaffected by design: `evaluateJobShortfall` already prefers compliance's `post_mfg_good_qty` and falls back to `good_pieces` (now the finishing total), so no trigger re-pointing was needed. Maintenance/DTU completion is a separate inline handler and is untouched.

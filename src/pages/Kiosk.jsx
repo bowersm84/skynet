@@ -114,8 +114,8 @@ export default function Kiosk() {
   const [showCompleteModal, setShowCompleteModal] = useState(false)
   const [completeForm, setCompleteForm] = useState({
     actual_end: '',
-    good_pieces: 0,
-    bad_pieces: 0
+    send_choice: null,   // SKY74: 'send' | 'none' — no default; operator must choose
+    final_batch_qty: ''  // SKY74: never prefilled; operator types the batch count
   })
   const [completionStep, setCompletionStep] = useState('form') // 'form', 'review_downtimes', 'materials'
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
@@ -2884,8 +2884,8 @@ export default function Kiosk() {
     const now = new Date()
     setCompleteForm({
       actual_end: formatDateTimeLocal(now),
-      good_pieces: activeJob?.quantity || 0,
-      bad_pieces: 0
+      send_choice: null,
+      final_batch_qty: ''
     })
     setCompletionStep('form')
     setOngoingDowntimes([])
@@ -2907,11 +2907,14 @@ export default function Kiosk() {
       alert('Please enter the actual end time')
       return
     }
-    const goodPieces = parseInt(completeForm.good_pieces) || 0
-    const badPieces = parseInt(completeForm.bad_pieces) || 0
-
-    if (goodPieces + badPieces === 0) {
-      alert('Please enter at least one good or bad piece')
+    // SKY74 — operator must explicitly choose to send a final batch or complete without
+    // sending; nothing is prefilled. If sending, a positive batch quantity is required.
+    if (completeForm.send_choice !== 'send' && completeForm.send_choice !== 'none') {
+      alert('Choose whether to send a final batch to finishing or complete without sending')
+      return
+    }
+    if (completeForm.send_choice === 'send' && (parseInt(completeForm.final_batch_qty) || 0) <= 0) {
+      alert('Enter the quantity for the final batch being sent to finishing')
       return
     }
 
@@ -3095,7 +3098,7 @@ export default function Kiosk() {
   const resetCompleteModal = () => {
     setShowCompleteModal(false)
     setCompletionStep('form')
-    setCompleteForm({ actual_end: '', good_pieces: 0, bad_pieces: 0 })
+    setCompleteForm({ actual_end: '', send_choice: null, final_batch_qty: '' })
     setOngoingDowntimes([])
     setDowntimeEdits({})
     setValidationErrors([])
@@ -3107,26 +3110,8 @@ export default function Kiosk() {
       alert('Please enter the actual end time')
       return
     }
-    const goodPieces = parseInt(completeForm.good_pieces) || 0
-    const badPieces = parseInt(completeForm.bad_pieces) || 0
-
-    if (goodPieces + badPieces === 0) {
-      alert('Please enter at least one good or bad piece')
-      return
-    }
-
     setActionLoading(true)
     try {
-      let time_per_unit = null
-      if (activeJob.production_start) {
-        const prodStart = new Date(activeJob.production_start)
-        const actualEnd = new Date(completeForm.actual_end)
-        const totalMinutes = (actualEnd - prodStart) / (1000 * 60)
-        const totalPieces = goodPieces + badPieces
-        if (totalPieces > 0 && totalMinutes > 0) {
-          time_per_unit = parseFloat((totalMinutes / totalPieces).toFixed(2))
-        }
-      }
 
       // Save material remaining values
       if (jobMaterials.length > 0) {
@@ -3150,17 +3135,11 @@ export default function Kiosk() {
       // Jobs go to manufacturing_complete; finishing is handled via finishing_sends
       const nextStatus = 'manufacturing_complete'
 
-      // Auto-create finishing send for any remaining quantity not already sent
-      try {
-        const { data: existingSends } = await supabase
-          .from('finishing_sends')
-          .select('quantity')
-          .eq('job_id', activeJob.id)
-
-        const alreadySent = (existingSends || []).reduce((sum, s) => sum + s.quantity, 0)
-        const remaining = goodPieces - alreadySent
-
-        if (remaining > 0) {
+      // SKY74 — no auto-send. If the operator chose to send a final batch, insert exactly
+      // that operator-entered quantity (never prefilled). Otherwise nothing new is sent.
+      if (completeForm.send_choice === 'send') {
+        const finalBatchQty = parseInt(completeForm.final_batch_qty) || 0
+        if (finalBatchQty > 0) {
           // Fetch material lot number fresh from DB (activeJob does not include materials)
           const { data: jobMaterialsData } = await supabase
             .from('job_materials')
@@ -3169,21 +3148,45 @@ export default function Kiosk() {
             .not('lot_number', 'is', null)
             .limit(1)
 
-          const autoSendMaterialLot = jobMaterialsData?.[0]?.lot_number || null
+          const finalBatchMaterialLot = jobMaterialsData?.[0]?.lot_number || null
 
-          await supabase.from('finishing_sends').insert({
+          const { error: finalSendErr } = await supabase.from('finishing_sends').insert({
             job_id: activeJob.id,
             machine_id: activeJob.assigned_machine_id,
             sent_by: operator.id,
-            quantity: remaining,
+            quantity: finalBatchQty,
             production_lot_number: activeJob.production_lot_number || null,
-            material_lot_number: autoSendMaterialLot,
+            material_lot_number: finalBatchMaterialLot,
             status: 'pending_finishing',
-            notes: 'Auto-sent on job completion'
+            notes: 'Final batch on job completion'
           })
+          // Blocking: the finishing total is the job's good count, so a failed send must
+          // not silently under-count the job.
+          if (finalSendErr) {
+            console.error('Final finishing send failed:', finalSendErr)
+            alert('Failed to send the final batch to finishing: ' + finalSendErr.message)
+            setActionLoading(false)
+            return
+          }
         }
-      } catch (sendErr) {
-        console.error('Auto finishing send failed (non-blocking):', sendErr)
+      }
+
+      // SKY74 — good_pieces is derived from the actual finishing-sends total (every job
+      // finishes internally), not an operator-entered count. Re-read after any final batch.
+      const { data: allSends } = await supabase
+        .from('finishing_sends')
+        .select('quantity')
+        .eq('job_id', activeJob.id)
+      const finishingTotal = (allSends || []).reduce((sum, s) => sum + (s.quantity || 0), 0)
+
+      let time_per_unit = null
+      if (activeJob.production_start && finishingTotal > 0) {
+        const prodStart = new Date(activeJob.production_start)
+        const actualEnd = new Date(completeForm.actual_end)
+        const totalMinutes = (actualEnd - prodStart) / (1000 * 60)
+        if (totalMinutes > 0) {
+          time_per_unit = parseFloat((totalMinutes / finishingTotal).toFixed(2))
+        }
       }
 
       const { error } = await supabase
@@ -3191,8 +3194,8 @@ export default function Kiosk() {
         .update({
           status: nextStatus,
           actual_end: new Date(completeForm.actual_end).toISOString(),
-          good_pieces: goodPieces,
-          bad_pieces: badPieces,
+          good_pieces: finishingTotal,
+          bad_pieces: 0,
           time_per_unit: time_per_unit,
           checked_out_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -6168,7 +6171,7 @@ export default function Kiosk() {
                           )}
                         </div>
                         <p className="text-gray-500 text-xs pl-5 pt-1">
-                          Enter your total good/bad count for the entire job — including pieces already sent.
+                          The job's good count is the sum of these finishing batches — you no longer enter it by hand.
                         </p>
                       </div>
                     )
@@ -6182,39 +6185,75 @@ export default function Kiosk() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-gray-400 text-sm mb-2">Good Pieces</label>
-                      <input type="number" min="0" value={completeForm.good_pieces} onChange={(e) => setCompleteForm({...completeForm, good_pieces: e.target.value})} className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-green-500 focus:outline-none" />
-                    </div>
-                    <div>
-                      <label className="block text-gray-400 text-sm mb-2">Bad Pieces</label>
-                      <input type="number" min="0" value={completeForm.bad_pieces} onChange={(e) => setCompleteForm({...completeForm, bad_pieces: e.target.value})} className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-red-500 focus:outline-none" />
-                    </div>
-                  </div>
+                  {/* SKY74 — operator does not enter a good count; it is the finishing-sends total.
+                      They must explicitly choose to send a final batch (entering the quantity, never
+                      prefilled) or complete without sending. */}
+                  {(() => {
+                    const alreadySent = finishingSends.reduce((sum, s) => sum + (s.quantity || 0), 0)
+                    const enteredQty = parseInt(completeForm.final_batch_qty) || 0
+                    const projected = alreadySent + (completeForm.send_choice === 'send' ? enteredQty : 0)
+                    return (
+                      <div className="space-y-3">
+                        <label className="block text-gray-400 text-sm">Final batch to finishing *</label>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setCompleteForm({ ...completeForm, send_choice: 'send' })}
+                            className={`tap py-3 px-3 rounded-lg border text-sm font-medium transition-colors ${completeForm.send_choice === 'send' ? 'bg-green-600 border-green-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}
+                          >
+                            Send a final batch
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCompleteForm({ ...completeForm, send_choice: 'none', final_batch_qty: '' })}
+                            className={`tap py-3 px-3 rounded-lg border text-sm font-medium transition-colors ${completeForm.send_choice === 'none' ? 'bg-green-600 border-green-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}
+                          >
+                            Complete without sending
+                          </button>
+                        </div>
 
-                  <div className="bg-gray-800 rounded-lg p-3 text-center">
-                    <p className="text-gray-500 text-sm">
-                      Total Entered: <span className={`font-medium ${(parseInt(completeForm.good_pieces) || 0) >= activeJob.quantity ? 'text-green-400' : 'text-yellow-400'}`}>{(parseInt(completeForm.good_pieces) || 0) + (parseInt(completeForm.bad_pieces) || 0)}</span>
-                      {(parseInt(completeForm.good_pieces) || 0) < activeJob.quantity && (
-                        <span className="text-yellow-400 ml-2">({activeJob.quantity - (parseInt(completeForm.good_pieces) || 0)} remaining)</span>
-                      )}
-                    </p>
-                  </div>
+                        {completeForm.send_choice === 'send' && (
+                          <div>
+                            <label className="block text-gray-400 text-sm mb-2">Final batch quantity *</label>
+                            <input
+                              type="number"
+                              min="1"
+                              inputMode="numeric"
+                              placeholder="Enter quantity being sent"
+                              value={completeForm.final_batch_qty}
+                              onChange={(e) => setCompleteForm({ ...completeForm, final_batch_qty: e.target.value })}
+                              className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-green-500 focus:outline-none"
+                            />
+                          </div>
+                        )}
 
-                  {(parseInt(completeForm.good_pieces) || 0) < activeJob.quantity && (
-                    <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 text-sm text-amber-200 flex items-start gap-2">
-                      <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
-                      <span>
-                        Good pieces ({parseInt(completeForm.good_pieces) || 0}) below target ({activeJob.quantity}). This will be flagged to the scheduler for shortfall review.
-                      </span>
-                    </div>
-                  )}
+                        <div className="bg-gray-800 rounded-lg p-3 text-sm text-gray-400 space-y-1">
+                          <div className="flex justify-between">
+                            <span>Already sent to finishing</span>
+                            <span className="text-cyan-300">{alreadySent} pcs</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Job good total after completion</span>
+                            <span className={projected >= activeJob.quantity ? 'text-green-400' : 'text-amber-300'}>{projected} / {activeJob.quantity}</span>
+                          </div>
+                        </div>
+
+                        {completeForm.send_choice && projected < activeJob.quantity && (
+                          <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 text-sm text-amber-200 flex items-start gap-2">
+                            <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                            <span>
+                              Job good total ({projected}) is below target ({activeJob.quantity}). This will be flagged to the scheduler for shortfall review.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
 
                 <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
                   <button onClick={resetCompleteModal} className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
-                  <button onClick={handleCompleteJobClick} disabled={actionLoading || !completeForm.actual_end} className="tap flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                  <button onClick={handleCompleteJobClick} disabled={actionLoading || !completeForm.actual_end || !completeForm.send_choice || (completeForm.send_choice === 'send' && (parseInt(completeForm.final_batch_qty) || 0) <= 0)} className="tap flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
                     {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}Complete Job
                   </button>
                 </div>

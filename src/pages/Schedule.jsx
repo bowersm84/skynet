@@ -2622,6 +2622,38 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                     </div>
                                   )
                                 })}
+                                {/* SKY58 — ongoing kiosk-logged downtime as a timeline block (parity with the
+                                    maintenance block). Only for a machine DOWN with no DTU/maintenance job, which
+                                    already draws its own block. Positioned via the job positioner by treating the
+                                    open-ended downtime as an ongoing, no-end span (extends to end of view). */}
+                                {(() => {
+                                  if (getActiveMaintenanceForMachine(machine.id)) return null
+                                  const dt = getOngoingDowntimeForMachine(machine.id)
+                                  if (!dt) return null
+                                  const dtStyle = getJobBlockStyle(
+                                    { scheduled_start: dt.start_time, scheduled_end: null, status: 'in_progress', estimated_minutes: 60 },
+                                    date
+                                  )
+                                  if (!dtStyle) return null
+                                  const dtDetail = dt.notes ? `${dt.reason} — ${dt.notes}` : dt.reason
+                                  return (
+                                    <div
+                                      key={`downtime-${dt.id}`}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className={`absolute top-1 bottom-1 bg-red-900/80 border border-red-600 rounded cursor-default flex items-center overflow-hidden px-1.5 z-[2] ${dtStyle.continuesFromPrevious ? 'rounded-l-none border-l-0' : ''} ${dtStyle.continuesToNext ? 'rounded-r-none' : ''}`}
+                                      style={{ left: dtStyle.left, width: dtStyle.width }}
+                                      title={`DOWN — ${dtDetail} (since ${formatTime(dt.start_time)})`}
+                                    >
+                                      <div className="flex flex-col justify-center min-w-0 w-full leading-tight py-0.5">
+                                        <div className="flex items-center gap-0.5 min-w-0">
+                                          <AlertTriangle size={10} className="text-white flex-shrink-0" />
+                                          <span className="text-white text-xs font-bold truncate">DOWN</span>
+                                        </div>
+                                        <div className="truncate text-white/80 text-[10px]">{dtDetail}</div>
+                                      </div>
+                                    </div>
+                                  )
+                                })()}
                               </div>
                             </div>
                           )

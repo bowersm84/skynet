@@ -1158,3 +1158,10 @@ SKY58 — kiosk-logged downtime (`machine_downtime_logs`, `end_time` NULL) now r
 
 ### D-S58-02 — Production Dashboard down-machine descriptions persist (DTU + kiosk fallbacks)
 SKY58 (Production Dashboard, `loadDownMachineETAs`) — (a) when no active DTU's window contains now, fall back to the most-recent active DTU so a down machine's description + ETA persist after the `scheduled_end` passes (scheduler should extend; until then the info stays, showing the stale end date as the ETA). (b) For machines down with no DTU job (kiosk-entered downtime), fall back to the open `machine_downtime_logs` reason/notes as the description. Render unchanged — `{d.description || '—'}` already shows regardless of `dtu_number`; null `estimated_return` shows TBD. Note: the earlier D-S58-01 Command-view block is a separate surface.
+
+---
+
+## 2026-06-07 — SKY75 Reschedule position picker reads full schedule
+
+### D-S75-01 — ScheduleJobModal receives the full cross-week schedule
+SKY75 — `ScheduleJobModal` now receives `allScheduledJobs` (full cross-week schedule) instead of the visible-week `scheduledJobs`. The modal uses the prop only as `getMachineQueue` input (machine-picker stats, Step 2 position picker, insertion cascade). The week slice made the queue incomplete, so placing a job in a week where the machine had no jobs reported 'No jobs queued' and the cascade ignored downstream jobs in other weeks. Full schedule fixes both. Modal prop name left unchanged.

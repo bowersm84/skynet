@@ -378,11 +378,15 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
         if (jDocsError) throw jDocsError
         setJobDocuments(jDocs || [])
 
+        // Consolidated list: the job's own documents are the as-run snapshot (pulled
+        // forward from the part at WO creation, plus per-job uploads like the material
+        // cert). Fall back to the live part master only when a job has no documents of
+        // its own (legacy jobs predating pull-forward).
+        const docs = (jDocs && jDocs.length > 0) ? jDocs : pDocs
+
         // Initialize selection: traveler + all docs checked by default
-        // Prefix job doc keys with "job-" to avoid UUID collisions with part docs
         const initial = { traveler: true }
-        pDocs.forEach(doc => { initial[`part-${doc.id}`] = true })
-        ;(jDocs || []).forEach(doc => { initial[`job-${doc.id}`] = true })
+        docs.forEach(doc => { initial[`doc-${doc.id}`] = true })
         setSelectedDocs(initial)
       } catch (err) {
         console.error('Error fetching print package data:', err)
@@ -406,10 +410,9 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
 
     setPrinting(true)
     try {
-      // Gather selected file documents from both sources (only those with a file_url)
-      const selectedParts = partDocuments.filter(doc => selectedDocs[`part-${doc.id}`] && doc.file_url)
-      const selectedJobs = jobDocuments.filter(doc => selectedDocs[`job-${doc.id}`] && doc.file_url)
-      const allSelectedDocs = [...selectedParts, ...selectedJobs]
+      // Gather selected file documents (only those with a file_url)
+      const docs = jobDocuments.length > 0 ? jobDocuments : partDocuments
+      const allSelectedDocs = docs.filter(doc => selectedDocs[`doc-${doc.id}`] && doc.file_url)
 
       // Generate signed URLs for all selected documents
       const docsWithUrls = await Promise.all(
@@ -444,6 +447,9 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
 
   const selectedCount = Object.values(selectedDocs).filter(Boolean).length
   const hasSelection = selectedCount > 0
+  // Consolidated list — job docs are the as-run snapshot; part docs are a
+  // fallback only for legacy jobs that have no job documents of their own.
+  const documents = jobDocuments.length > 0 ? jobDocuments : partDocuments
 
   return (
     <div
@@ -495,62 +501,28 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
                 </div>
               </label>
 
-              {/* Part documents (master docs for this component) */}
-              {partDocuments.length > 0 && (
+              {/* Consolidated documents — job docs are the as-run snapshot pulled
+                  forward at WO creation plus per-job uploads; part docs appear only
+                  as a fallback for legacy jobs with no documents of their own. */}
+              {documents.length > 0 && (
                 <>
                   <div className="text-xs text-gray-500 uppercase tracking-wide mt-4 mb-1">
-                    Part Documents
+                    Documents
                   </div>
-                  {partDocuments.map(doc => {
+                  {documents.map(doc => {
                     const isPDF = doc.mime_type === 'application/pdf'
                     const isImage = doc.mime_type?.startsWith('image/')
                     const typeLabel = isPDF ? 'PDF' : isImage ? 'IMG' : 'FILE'
 
                     return (
                       <label
-                        key={`part-${doc.id}`}
+                        key={`doc-${doc.id}`}
                         className="flex items-center gap-3 p-3 bg-gray-800 rounded border border-gray-700 cursor-pointer hover:border-gray-500 transition-colors"
                       >
                         <input
                           type="checkbox"
-                          checked={!!selectedDocs[`part-${doc.id}`]}
-                          onChange={(e) => setSelectedDocs(prev => ({ ...prev, [`part-${doc.id}`]: e.target.checked }))}
-                          className="w-4 h-4 rounded"
-                        />
-                        <FileText size={16} className="text-gray-400" />
-                        <div className="flex-1 min-w-0">
-                          <span className="text-white text-sm font-medium">
-                            {doc.document_type?.name || 'Document'}
-                          </span>
-                          <p className="text-gray-500 text-xs truncate">{doc.file_name}</p>
-                        </div>
-                        <span className="text-gray-600 text-xs font-mono">{typeLabel}</span>
-                      </label>
-                    )
-                  })}
-                </>
-              )}
-
-              {/* Job documents (per-job compliance uploads) */}
-              {jobDocuments.length > 0 && (
-                <>
-                  <div className="text-xs text-gray-500 uppercase tracking-wide mt-4 mb-1">
-                    Job Documents
-                  </div>
-                  {jobDocuments.map(doc => {
-                    const isPDF = doc.mime_type === 'application/pdf'
-                    const isImage = doc.mime_type?.startsWith('image/')
-                    const typeLabel = isPDF ? 'PDF' : isImage ? 'IMG' : 'FILE'
-
-                    return (
-                      <label
-                        key={`job-${doc.id}`}
-                        className="flex items-center gap-3 p-3 bg-gray-800 rounded border border-gray-700 cursor-pointer hover:border-gray-500 transition-colors"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={!!selectedDocs[`job-${doc.id}`]}
-                          onChange={(e) => setSelectedDocs(prev => ({ ...prev, [`job-${doc.id}`]: e.target.checked }))}
+                          checked={!!selectedDocs[`doc-${doc.id}`]}
+                          onChange={(e) => setSelectedDocs(prev => ({ ...prev, [`doc-${doc.id}`]: e.target.checked }))}
                           className="w-4 h-4 rounded"
                         />
                         <FileText size={16} className="text-green-400" />
@@ -567,14 +539,14 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
                 </>
               )}
 
-              {partDocuments.length === 0 && jobDocuments.length === 0 && (
+              {documents.length === 0 && (
                 <p className="text-gray-500 text-sm text-center py-2">
                   No documents found.
                 </p>
               )}
 
               {/* Info message about how documents open */}
-              {(partDocuments.length > 0 || jobDocuments.length > 0) && (
+              {documents.length > 0 && (
                 <p className="text-gray-500 text-xs mt-4 leading-relaxed">
                   Documents will open in separate tabs for printing to preserve their original formatting and orientation.
                 </p>

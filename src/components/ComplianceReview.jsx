@@ -109,6 +109,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   const [recentlyApprovedBatches, setRecentlyApprovedBatches] = useState([])
   const [showRecentBatches, setShowRecentBatches] = useState(false)
   const [allJobSendsMap, setAllJobSendsMap] = useState({})
+
+  // Lot-change paperwork worklist (informational, compliance-side)
+  const [lotChangePaperwork, setLotChangePaperwork] = useState([])
+  const [acknowledgingPaperworkId, setAcknowledgingPaperworkId] = useState(null)
   // Shape: { [jobId]: [sends sorted by sent_at] }
 
   const fetchBatchDetails = async (send) => {
@@ -213,6 +217,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   useEffect(() => {
     fetchPendingBatches()
     fetchRecentlyApprovedBatches()
+    fetchLotChangePaperwork()
 
     const sub = supabase
       .channel('compliance-finishing-sends')
@@ -223,10 +228,79 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       }, () => { fetchPendingBatches(); fetchRecentlyApprovedBatches() })
       .subscribe()
 
+    const splitsSub = supabase
+      .channel('compliance-lot-splits')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'job_splits'
+      }, () => fetchLotChangePaperwork())
+      .subscribe()
+
     return () => {
       supabase.removeChannel(sub)
+      supabase.removeChannel(splitsSub)
     }
   }, [])
+
+  // Open lot-change paperwork items (reason='material lot change', not yet gathered).
+  // Heads-up only — the real cert backstop is Job B's normal post-mfg review.
+  const fetchLotChangePaperwork = async () => {
+    const { data, error } = await supabase
+      .from('job_splits')
+      .select(`
+        id, original_job_id, new_job_id, new_job_qty, split_at, compliance_ack_at,
+        old_lot_number, new_lot_number,
+        original_job:jobs!original_job_id(job_number),
+        new_job:jobs!new_job_id(job_number, work_order_id,
+                 component:parts!component_id(part_number),
+                 assigned_machine:machines(code, name))
+      `)
+      .eq('reason', 'material lot change')
+      .is('compliance_ack_at', null)
+      .order('split_at', { ascending: true })
+    if (error) { console.error('Error loading lot-change paperwork:', error); return }
+    setLotChangePaperwork(data || [])
+  }
+
+  // Produce Job B's paperwork (traveler + production log + pulled docs) for the
+  // machinist via the existing Print Hub.
+  const openLotChangePackage = async (jobId) => {
+    if (!jobId) return
+    const { data, error } = await supabase
+      .from('jobs')
+      .select(`
+        id, job_number, quantity, status,
+        work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+        component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) )
+      `)
+      .eq('id', jobId)
+      .single()
+    if (error || !data) { alert('Could not load the job for printing: ' + (error?.message || 'not found')); return }
+    setPrintPackageJob(data)
+  }
+
+  const handlePaperworkGathered = async (item) => {
+    setAcknowledgingPaperworkId(item.id)
+    try {
+      const { error } = await supabase
+        .from('job_splits')
+        .update({ compliance_ack_at: new Date().toISOString(), compliance_ack_by: profile?.id })
+        .eq('id', item.id)
+      if (error) throw error
+      await supabase.from('audit_logs').insert({
+        event_type: 'lot_split_paperwork_gathered',
+        job_id: item.new_job_id,
+        operator_id: profile?.id || null,
+        details: { original_job_id: item.original_job_id, new_job_id: item.new_job_id, remainder: item.new_job_qty, by: 'compliance' }
+      })
+      await fetchLotChangePaperwork()
+    } catch (e) {
+      alert(`Could not mark paperwork gathered: ${e.message}`)
+    } finally {
+      setAcknowledgingPaperworkId(null)
+    }
+  }
 
   const getBatchLabel = (send) => {
     const jobSends = allJobSendsMap[send.job_id] || []
@@ -2428,6 +2502,78 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     <div className="space-y-4">
       {/* Deferred-documents widget — self-hides when count = 0 */}
       <DeferredDocsWidget refreshKey={jobs} onNavigateToWO={onNavigateToWO} />
+
+      {/* Lot-Change Paperwork — non-blocking heads-up worklist. The hard cert check
+          stays at Job B's normal post-mfg review; this just lets compliance get ahead
+          of gathering the new lot's material cert. Self-hides when empty. */}
+      {lotChangePaperwork.length > 0 && (
+        <div className="border border-amber-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 bg-amber-900/20 border-b border-amber-800 flex items-center gap-2">
+            <ClipboardCheck size={16} className="text-amber-400" />
+            <h3 className="text-white font-semibold text-sm">Lot-Change Paperwork ({lotChangePaperwork.length})</h3>
+            <span className="text-amber-300/70 text-xs ml-auto">Informational — not a gate</span>
+          </div>
+          <div className="p-3 space-y-2">
+            {lotChangePaperwork.map(item => {
+              const nj = item.new_job
+              const busy = acknowledgingPaperworkId === item.id
+              const oldLot = item.old_lot_number || null
+              const newLot = item.new_lot_number || null
+              return (
+                <div key={item.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      <span className="text-gray-400 font-mono text-xs">{item.original_job?.job_number || '—'}</span>
+                      <span className="text-gray-600">→</span>
+                      {nj?.work_order_id ? (
+                        <button onClick={() => onNavigateToWO?.(nj.work_order_id)} className="text-white font-mono text-sm font-semibold hover:text-skynet-accent transition-colors inline-flex items-center gap-1">
+                          {nj?.job_number || '—'}<ExternalLink size={12} />
+                        </button>
+                      ) : (
+                        <span className="text-white font-mono text-sm font-semibold">{nj?.job_number || '—'}</span>
+                      )}
+                      {nj?.component?.part_number && (
+                        <span className="text-skynet-accent text-xs font-mono truncate">{nj.component.part_number}</span>
+                      )}
+                    </div>
+                    <span className="text-amber-400 text-[10px] uppercase tracking-wider shrink-0">New lot cert</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1 text-xs">
+                    <span className="text-gray-400">{item.new_job_qty} pcs on a new material lot</span>
+                    {nj?.assigned_machine?.code && (
+                      <span className="text-gray-500 ml-auto">{nj.assigned_machine.code}</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <span className="text-gray-500 text-[10px] uppercase tracking-wider">Material lot</span>
+                    <span className="font-mono text-sm text-gray-300">{oldLot || '—'}</span>
+                    <span className="text-gray-600">→</span>
+                    <span className="font-mono text-sm text-amber-300 font-semibold">{newLot || 'pending'}</span>
+                  </div>
+                  <p className="text-gray-500 text-xs mt-1">Gather the new lot's material cert. Job B's post-mfg review still requires it.</p>
+                  <div className="flex items-center justify-end gap-2 mt-2">
+                    <button
+                      onClick={() => openLotChangePackage(item.new_job_id)}
+                      className="bg-gray-700 hover:bg-gray-600 text-gray-100 text-xs font-semibold px-3 py-1 rounded inline-flex items-center gap-1"
+                    >
+                      <Printer size={12} />Print Package
+                    </button>
+                    {canWrite && (
+                      <button
+                        disabled={busy}
+                        onClick={() => handlePaperworkGathered(item)}
+                        className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded inline-flex items-center gap-1"
+                      >
+                        {busy ? 'Saving…' : <><CheckCircle size={12} />Acknowledge</>}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Pending Review - Machining */}
       {renderPendingSection(

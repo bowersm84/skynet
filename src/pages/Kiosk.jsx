@@ -29,7 +29,8 @@ import {
   Edit3,
   Timer,
   Beaker,
-  ExternalLink
+  ExternalLink,
+  Repeat
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
@@ -192,6 +193,14 @@ export default function Kiosk() {
   const [finishingSendNotes, setFinishingSendNotes] = useState('')
   const [finishingSends, setFinishingSends] = useState([])
 
+  // Lot-change split (machinist switches material lot mid-run)
+  const [showLotChangeModal, setShowLotChangeModal] = useState(false)
+  const [lotChangeForm, setLotChangeForm] = useState({ send_choice: null, final_batch_qty: '' })
+  const [lotChangeNewLot, setLotChangeNewLot] = useState('')
+  const autoMaterialsJobIdRef = useRef(null)
+  const lotChangePrefillRef = useRef(null)        // carries Job A's material + new lot to Job B's Add Material form
+  const suppressLotAutofillRef = useRef(false)    // keep the carried lot through the inventory-match effect
+
   // Admin state
   const [showJobHistory, setShowJobHistory] = useState(false)
   const [jobHistory, setJobHistory] = useState([])
@@ -226,14 +235,24 @@ export default function Kiosk() {
     const anyModalOpen =
       showMaterialModal || showFinishingSendModal || showCompleteModal ||
       showToolingModal || showMachineReadyModal || showJobHistory ||
-      lotMismatchModal != null
+      showLotChangeModal || lotMismatchModal != null
     if (anyModalOpen) {
       const prev = document.body.style.overflow
       document.body.style.overflow = 'hidden'
       return () => { document.body.style.overflow = prev }
     }
   }, [showMaterialModal, showFinishingSendModal, showCompleteModal,
-      showToolingModal, showMachineReadyModal, showJobHistory, lotMismatchModal])
+      showToolingModal, showMachineReadyModal, showJobHistory,
+      showLotChangeModal, lotMismatchModal])
+
+  // Lot-change auto-jump: once Job B becomes the active in-setup job (set by
+  // handleConfirmLotChange), open its Add Material screen automatically.
+  useEffect(() => {
+    if (autoMaterialsJobIdRef.current && activeJob?.id === autoMaterialsJobIdRef.current) {
+      autoMaterialsJobIdRef.current = null
+      handleOpenMaterials()
+    }
+  }, [activeJob?.id])
 
   // ========== SECONDARY OPERATION DETECTION ==========
   // Detect if this is a secondary operation station (finishing, paint, etc.)
@@ -2325,6 +2344,76 @@ export default function Kiosk() {
     }
   }
 
+  // ========== LOT-CHANGE SPLIT ==========
+  // Machinist declares the current material lot finished mid-run. The RPC finalizes
+  // Job A at the entered good count (+ auto-sends the not-yet-sent remainder to
+  // finishing), then spawns Job B (remainder) on the same machine, startable,
+  // inheriting Job A's end. Job B's PLN mints when the machinist starts it and
+  // enters Lot 2. good_pieces is NOT live post-SKY74, so the count is entered here.
+  const handleOpenLotChange = () => {
+    setLotChangeForm({ send_choice: null, final_batch_qty: '' })
+    setShowLotChangeModal(true)
+  }
+
+  const handleConfirmLotChange = async () => {
+    if (!activeJob) return
+    const alreadySent = finishingSends.reduce((sum, s) => sum + (s.quantity || 0), 0)
+    const finalBatch = lotChangeForm.send_choice === 'send' ? (parseInt(lotChangeForm.final_batch_qty) || 0) : 0
+    const made = alreadySent + finalBatch
+    if (!lotChangeForm.send_choice) { alert('Choose whether to send a final batch or complete without sending.'); return }
+    if (lotChangeForm.send_choice === 'send' && finalBatch <= 0) { alert('Enter the final batch quantity being sent to finishing.'); return }
+    if (made <= 0) { alert('Nothing made on this lot — nothing to finalize.'); return }
+    if (made >= (activeJob.quantity || 0)) { alert('That leaves no remainder — use Complete Job instead.'); return }
+    if (!lotChangeNewLot.trim()) { alert('Enter the new material lot number.'); return }
+
+    setActionLoading(true)
+    try {
+      const { data, error } = await supabase.rpc('split_job_lot_change', {
+        p_job_id: activeJob.id,
+        p_operator_id: operator.id,
+        p_good_pieces: made,
+        p_reason: 'material lot change',
+        p_new_lot_number: lotChangeNewLot.trim()
+      })
+      if (error) throw error
+      // Move Job B into setup so it becomes the active job on this machine, then jump
+      // straight to its Add Material screen (the machinist enters Lot 2 there → mints Job B's PLN).
+      const newJobId = data?.new_job_id
+      const nowIso = new Date().toISOString()
+      if (newJobId) {
+        // Carry Job A's material identity + the entered new lot to Job B's Add Material
+        // form, so the machinist only logs bars and starts (which mints Job B's PLN).
+        const { data: aMat } = await supabase
+          .from('job_materials')
+          .select('material_type, bar_size, bar_length')
+          .eq('job_id', activeJob.id)
+          .limit(1)
+        const a0 = aMat?.[0] || {}
+        lotChangePrefillRef.current = {
+          material_type: a0.material_type || '',
+          bar_size: a0.bar_size || '',
+          bar_length: a0.bar_length != null ? String(a0.bar_length) : '',
+          lot_number: lotChangeNewLot.trim()
+        }
+        await supabase.from('jobs').update({
+          status: 'in_setup', setup_start: nowIso, assigned_user_id: operator.id, updated_at: nowIso
+        }).eq('id', newJobId)
+        autoMaterialsJobIdRef.current = newJobId
+      }
+      setShowLotChangeModal(false)
+      setLotChangeForm({ send_choice: null, final_batch_qty: '' })
+      setLotChangeNewLot('')
+      setSelectedJob(null)
+      await loadJobs()
+      setToastMessage(`Lot change saved — log bars for ${data?.new_job_number || 'the new job'} (${data?.remainder ?? ''} pcs) and start.`)
+    } catch (err) {
+      console.error('Lot change split error:', err)
+      alert('Failed to switch lot: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   // ========== LOT NUMBER GENERATION ==========
   const generateProductionLotNumber = async (materialLot) => {
     const now = new Date()
@@ -2374,11 +2463,28 @@ export default function Kiosk() {
       lot_number: matRow?.lot_number || '',
       bars_loaded: 0
     })
+    // Lot-change continuation: pre-fill carried material + new lot so the machinist
+    // only logs bars and starts. Suppress the inventory lot-autofill so it isn't overwritten.
+    if (lotChangePrefillRef.current) {
+      const pf = lotChangePrefillRef.current
+      lotChangePrefillRef.current = null
+      suppressLotAutofillRef.current = true
+      setShowAddForm(true)
+      setMaterialForm({
+        material_type: pf.material_type,
+        bar_size: pf.bar_size,
+        bar_length: pf.bar_length,
+        lot_number: pf.lot_number,
+        bars_loaded: 0
+      })
+    }
   }
 
   // Pre-fill lot number when a single inventory match exists
   useEffect(() => {
     if (!materialForm.material_type || !materialForm.bar_size) return
+    // Keep a carried lot (lot-change continuation) through one pass of this effect.
+    if (suppressLotAutofillRef.current) { suppressLotAutofillRef.current = false; return }
     const matches = inventoryStock.filter(r =>
       r.material_type === materialForm.material_type &&
       r.bar_size === materialForm.bar_size
@@ -4458,6 +4564,16 @@ export default function Kiosk() {
                     </div>
                   )}
 
+                  {/* Lot-Change Split — machinist switches material lot mid-run */}
+                  {canOperate && activeJob && activeJob.status === 'in_progress' && !activeJob.is_maintenance &&
+                   !activeJob.job_number?.startsWith('DTU-') && !activeJob.job_number?.startsWith('DTP-') && (
+                    <div className="mt-3">
+                      <button onClick={handleOpenLotChange} disabled={actionLoading} className="w-full py-3 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-amber-600/50">
+                        <Repeat size={18} />Material Lot Finished — Switch Lot
+                      </button>
+                    </div>
+                  )}
+
                   {/* Job Documents */}
                   {activeJob && (
                     <div className="mt-6 pt-6 border-t border-gray-700">
@@ -5790,6 +5906,183 @@ export default function Kiosk() {
           </div>
         </div>
       )}
+
+      {/* Lot-Change Split Modal — machinist switches material lot mid-run */}
+      {showLotChangeModal && activeJob && (() => {
+        const target = activeJob.quantity || 0
+        const alreadySent = finishingSends.reduce((sum, s) => sum + (s.quantity || 0), 0)
+        const finalBatch = lotChangeForm.send_choice === 'send' ? (parseInt(lotChangeForm.final_batch_qty) || 0) : 0
+        const made = alreadySent + finalBatch
+        const remaining = target - made
+        const lot1 = activeJob.production_lot_number || null
+        const due = activeJob.scheduled_end ? new Date(activeJob.scheduled_end).toLocaleString() : '—'
+        const newLot = lotChangeNewLot.trim()
+        const valid =
+          !!lotChangeForm.send_choice &&
+          (lotChangeForm.send_choice !== 'send' || finalBatch > 0) &&
+          made > 0 && remaining > 0 && newLot.length > 0
+        return (
+          <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+            <div className="bg-gray-900 border border-amber-700 rounded-lg w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col">
+              <div className="px-6 py-4 border-b border-gray-800 bg-amber-900/20">
+                <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                  <Repeat className="text-amber-400" size={24} />
+                  Material Lot Finished — Switch Lot
+                </h2>
+                <p className="text-gray-500 text-sm mt-1">{activeJob.job_number} • {activeJob.component?.part_number}</p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                <p className="text-gray-300 text-sm">
+                  Finalize this job at what was made on{lot1 ? <> lot <span className="font-mono text-amber-300">{lot1}</span></> : ' the current lot'}. The remainder moves to a new job on the same machine, due by <span className="text-white">{due}</span>. Enter the new lot below — the continuation job opens ready for you to log bars and start.
+                </p>
+
+                {/* Required pieces */}
+                <div className="bg-skynet-accent/10 border border-skynet-accent/30 rounded-lg p-4 text-center">
+                  <p className="text-gray-400 text-sm">Required Pieces</p>
+                  <p className="text-3xl font-bold text-white">{target}</p>
+                </div>
+
+                {/* Sent to finishing during production (same view as Complete) */}
+                {finishingSends.length > 0 && (() => {
+                  const rollup = getFinishingSendsRollup(finishingSends)
+                  return (
+                    <div className="bg-cyan-900/20 border border-cyan-800 rounded-lg p-3 space-y-2">
+                      <div className="flex items-center gap-2 text-cyan-400 text-sm font-medium">
+                        <SendHorizontal size={14} />
+                        Sent to Finishing During Production
+                      </div>
+                      {finishingSends.map((send, idx) => {
+                        const s = getFinishingSendSummary(send)
+                        return (
+                          <div key={send.id} className="pl-5 text-sm border-b border-cyan-900/50 pb-2 last:border-0 last:pb-0">
+                            <div className="flex justify-between text-gray-300">
+                              <span>
+                                {finishingSends.length > 1 && (
+                                  <span className="text-cyan-400 font-mono mr-1">Batch {String.fromCharCode(65 + idx)}</span>
+                                )}
+                                {finishingSends.length > 1 ? '— ' : ''}
+                                <span className="text-cyan-400">{s.sent} sent</span>
+                              </span>
+                              <span className="text-gray-500 text-xs">{new Date(send.sent_at).toLocaleTimeString()}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-wrap text-xs mt-1">
+                              {s.received != null ? (
+                                <span className="text-blue-400">{s.received} received</span>
+                              ) : (
+                                <span className="text-gray-500 italic">Pending receipt at finishing</span>
+                              )}
+                              {s.verified != null && (<><span className="text-gray-700">·</span><span className="text-emerald-400">{s.verified} verified</span></>)}
+                              {s.accepted != null && (<><span className="text-gray-700">·</span><span className="text-emerald-300">{s.accepted} accepted</span>{s.rejected > 0 && (<span className="text-red-400 ml-1">({s.rejected} rejected)</span>)}</>)}
+                            </div>
+                          </div>
+                        )
+                      })}
+                      <div className="border-t border-cyan-800 pt-1 mt-1 pl-5">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-cyan-300 font-medium">Total already sent:</span>
+                          <span className="text-cyan-400 font-medium">{rollup.totalSent} pcs</span>
+                        </div>
+                      </div>
+                      <p className="text-gray-500 text-xs pl-5 pt-1">
+                        The good count is the sum of these finishing batches — you don't enter it by hand.
+                      </p>
+                    </div>
+                  )
+                })()}
+
+                {/* Final batch to finishing (same pattern as Complete) */}
+                <div className="space-y-3">
+                  <label className="block text-gray-400 text-sm">Final batch to finishing *</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setLotChangeForm({ ...lotChangeForm, send_choice: 'send' })}
+                      className={`tap py-3 px-3 rounded-lg border text-sm font-medium transition-colors ${lotChangeForm.send_choice === 'send' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}
+                    >
+                      Send a final batch
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLotChangeForm({ ...lotChangeForm, send_choice: 'none', final_batch_qty: '' })}
+                      className={`tap py-3 px-3 rounded-lg border text-sm font-medium transition-colors ${lotChangeForm.send_choice === 'none' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}
+                    >
+                      Complete without sending
+                    </button>
+                  </div>
+
+                  {lotChangeForm.send_choice === 'send' && (
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-2">Final batch quantity *</label>
+                      <input
+                        type="number"
+                        min="1"
+                        inputMode="numeric"
+                        placeholder="Enter quantity being sent"
+                        value={lotChangeForm.final_batch_qty}
+                        onChange={(e) => setLotChangeForm({ ...lotChangeForm, final_batch_qty: e.target.value })}
+                        className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center text-xl focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                  )}
+
+                  <div className="bg-gray-800 rounded-lg p-3 text-sm text-gray-400 space-y-1">
+                    <div className="flex justify-between">
+                      <span>Already sent to finishing</span>
+                      <span className="text-cyan-300">{alreadySent} pcs</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Made on this lot (good total)</span>
+                      <span className="text-amber-300 font-medium">{lotChangeForm.send_choice ? `${made} pcs` : '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Continuation job (new lot)</span>
+                      <span className={remaining > 0 ? 'text-white font-medium' : 'text-gray-600'}>{lotChangeForm.send_choice ? `${remaining} pcs` : '—'}</span>
+                    </div>
+                  </div>
+
+                  {lotChangeForm.send_choice && made > 0 && remaining <= 0 && (
+                    <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 text-sm text-amber-200 flex items-start gap-2">
+                      <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                      <span>That leaves no remainder — use Complete Job instead of a lot split.</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* New material lot */}
+                <div>
+                  <label className="block text-gray-400 text-sm mb-2">New material lot *</label>
+                  <input
+                    type="text"
+                    value={lotChangeNewLot}
+                    onChange={(e) => setLotChangeNewLot(e.target.value)}
+                    placeholder="Lot number for the continuation run"
+                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-lg focus:border-amber-500 focus:outline-none"
+                  />
+                  <p className="text-gray-500 text-xs mt-1">Carries onto {activeJob.component?.part_number || 'the new job'} and mints its PLN when you start.</p>
+                </div>
+              </div>
+
+              <div className="px-6 py-4 border-t border-gray-800 flex gap-3 flex-shrink-0">
+                <button
+                  onClick={() => { setShowLotChangeModal(false); setLotChangeForm({ send_choice: null, final_batch_qty: '' }); setLotChangeNewLot('') }}
+                  className="tap flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors font-semibold border border-gray-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmLotChange}
+                  disabled={!valid || actionLoading}
+                  className="tap flex-1 py-3 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 text-white rounded-lg transition-colors font-semibold flex items-center justify-center gap-2"
+                >
+                  {actionLoading ? <Loader2 size={18} className="animate-spin" /> : <Repeat size={18} />}
+                  Confirm & Split
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Complete Job Modal */}
       {showCompleteModal && activeJob && (

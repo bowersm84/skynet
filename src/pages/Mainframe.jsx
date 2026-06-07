@@ -51,6 +51,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   // Finishing queue count
   const [finishingSends, setFinishingSends] = useState([])
   const [pendingBatchComplianceCount, setPendingBatchComplianceCount] = useState(0)
+  const [lotChangePaperworkCount, setLotChangePaperworkCount] = useState(0)
   const [outsourcedCount, setOutsourcedCount] = useState(0)
   
   // Auto-refresh state
@@ -198,6 +199,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         .select('id', { count: 'exact', head: true })
         .eq('compliance_status', 'pending_compliance')
       setPendingBatchComplianceCount(batchComplianceCount || 0)
+
+      // Open lot-change paperwork (informational compliance worklist) — surfaced in
+      // the Pending Compliance KPI alongside jobs + batches.
+      const { count: lotChangeCount } = await supabase
+        .from('job_splits')
+        .select('id', { count: 'exact', head: true })
+        .eq('reason', 'material lot change')
+        .is('compliance_ack_at', null)
+      setLotChangePaperworkCount(lotChangeCount || 0)
 
       // Fetch for assembly-ready work orders
       // An assembly is ready when ALL its linked jobs have status ready_for_assembly
@@ -376,7 +386,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     // NEW: Subscribe to downtime log changes
     const downtimeSubscription = supabase
       .channel('downtime-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_downtime_logs' }, 
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_downtime_logs' },
+        () => fetchData()
+      )
+      .subscribe()
+
+    const lotSplitsSubscription = supabase
+      .channel('mainframe-lot-splits')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_splits' },
         () => fetchData()
       )
       .subscribe()
@@ -385,6 +402,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       supabase.removeChannel(jobsSubscription)
       supabase.removeChannel(machinesSubscription)
       supabase.removeChannel(downtimeSubscription)
+      supabase.removeChannel(lotSplitsSubscription)
     }
   }, [fetchData])
 
@@ -1414,9 +1432,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         <StatCard
           id="compliance"
           label="Pending Compliance"
-          value={pendingComplianceJobs.length + pendingBatchComplianceCount}
+          value={pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount}
           colorClass="text-purple-400"
-          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
+          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
         <StatCard

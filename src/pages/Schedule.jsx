@@ -143,6 +143,10 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [showChangeRequests, setShowChangeRequests] = useState(false)
   const [applyingRequestId, setApplyingRequestId] = useState(null)
 
+  // Lot-change split acknowledgements (informational, scheduler-side)
+  const [lotSplitAcks, setLotSplitAcks] = useState([])
+  const [acknowledgingSplitId, setAcknowledgingSplitId] = useState(null)
+
   // Global schedule search state
   const [globalSearch, setGlobalSearch] = useState('')
   const [globalSearchResults, setGlobalSearchResults] = useState([])
@@ -188,6 +192,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   useEffect(() => {
     fetchData()
     loadChangeRequests()
+    loadLotSplitAcks()
 
     const jobsSubscription = supabase
       .channel('schedule-jobs-changes')
@@ -200,6 +205,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       .channel('schedule-change-requests')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_change_requests' },
         () => loadChangeRequests()
+      )
+      .subscribe()
+
+    const lotSplitsSubscription = supabase
+      .channel('schedule-lot-splits')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_splits' },
+        () => loadLotSplitAcks()
       )
       .subscribe()
 
@@ -224,6 +236,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       supabase.removeChannel(machinesSubscription)
       supabase.removeChannel(downtimeSubscription)
       supabase.removeChannel(changeRequestsSubscription)
+      supabase.removeChannel(lotSplitsSubscription)
     }
   }, [weekOffset])
 
@@ -926,6 +939,48 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       .order('created_at', { ascending: true })
     if (error) { console.error('Error loading change requests:', error); return }
     setChangeRequests(data || [])
+  }
+
+  // Open lot-change split acknowledgements for the scheduler (reason='material lot
+  // change', not yet acknowledged). Informational only — never blocks.
+  const loadLotSplitAcks = async () => {
+    const { data, error } = await supabase
+      .from('job_splits')
+      .select(`
+        id, original_job_id, new_job_id, new_job_qty, split_at, scheduler_ack_at,
+        original_job:jobs!original_job_id(job_number),
+        new_job:jobs!new_job_id(job_number, quantity, scheduled_start, scheduled_end,
+                 component:parts!component_id(part_number),
+                 assigned_machine:machines(code, name))
+      `)
+      .eq('reason', 'material lot change')
+      .is('scheduler_ack_at', null)
+      .order('split_at', { ascending: true })
+    if (error) { console.error('Error loading lot-split acknowledgements:', error); return }
+    setLotSplitAcks(data || [])
+  }
+
+  // Acknowledge a lot-change split — stamp scheduler_ack_at/by + audit. Non-blocking.
+  const handleAcknowledgeLotSplit = async (ack) => {
+    setAcknowledgingSplitId(ack.id)
+    try {
+      const { error } = await supabase
+        .from('job_splits')
+        .update({ scheduler_ack_at: new Date().toISOString(), scheduler_ack_by: profile?.id })
+        .eq('id', ack.id)
+      if (error) throw error
+      await supabase.from('audit_logs').insert({
+        event_type: 'lot_split_acknowledged',
+        job_id: ack.new_job_id,
+        operator_id: profile?.id || null,
+        details: { original_job_id: ack.original_job_id, new_job_id: ack.new_job_id, remainder: ack.new_job_qty, by: 'scheduler' }
+      })
+      await loadLotSplitAcks()
+    } catch (e) {
+      alert(`Could not acknowledge: ${e.message}`)
+    } finally {
+      setAcknowledgingSplitId(null)
+    }
   }
 
   // Apply: reuse the SKY55 end-date cascade engine, then mark this request applied and
@@ -1970,13 +2025,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               <button
                 onClick={() => setShowChangeRequests(s => !s)}
                 className="relative flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium rounded-lg transition-colors"
-                title="Schedule change requests"
+                title="Messages — change requests & acknowledgements"
               >
                 <CalendarClock size={16} />
-                <span className="hidden sm:inline">Requests</span>
-                {changeRequests.length > 0 && (
+                <span className="hidden sm:inline">Messages</span>
+                {(changeRequests.length + lotSplitAcks.length) > 0 && (
                   <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-blue-600 text-white text-[10px] font-bold rounded-full">
-                    {changeRequests.length}
+                    {changeRequests.length + lotSplitAcks.length}
                   </span>
                 )}
               </button>
@@ -1985,12 +2040,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-white font-semibold text-sm flex items-center gap-2">
                       <CalendarClock size={16} className="text-blue-400" />
-                      Change Requests
+                      Messages
                     </h3>
                     <button onClick={() => setShowChangeRequests(false)} className="text-gray-500 hover:text-gray-200">
                       <X size={16} />
                     </button>
                   </div>
+                  <p className="text-gray-400 text-[11px] uppercase tracking-wider mb-1.5">Change Requests</p>
                   {changeRequests.length === 0 ? (
                     <p className="text-gray-500 text-sm italic py-4 text-center">No open requests</p>
                   ) : (
@@ -2043,6 +2099,59 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                 className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded"
                               >
                                 {busy ? 'Applying…' : 'Apply'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {/* Acknowledgements — lot-change splits surfaced to the scheduler (informational) */}
+                  <p className="text-gray-400 text-[11px] uppercase tracking-wider mb-1.5 mt-3">Acknowledgements</p>
+                  {lotSplitAcks.length === 0 ? (
+                    <p className="text-gray-500 text-sm italic py-3 text-center">No new acknowledgements</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {lotSplitAcks.map(ack => {
+                        const nj = ack.new_job
+                        const inhEnd = nj?.scheduled_end
+                          ? new Date(nj.scheduled_end).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+                          : '—'
+                        const tight = nj?.scheduled_end ? new Date(nj.scheduled_end) <= new Date() : false
+                        const busy = acknowledgingSplitId === ack.id
+                        return (
+                          <div key={ack.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-gray-400 font-mono text-xs">{ack.original_job?.job_number || '—'}</span>
+                                <span className="text-gray-600">→</span>
+                                <span className="text-white font-mono text-sm font-semibold">{nj?.job_number || '—'}</span>
+                                {nj?.component?.part_number && (
+                                  <span className="text-skynet-accent text-xs font-mono truncate">{nj.component.part_number}</span>
+                                )}
+                              </div>
+                              <span className="text-amber-400 text-[10px] uppercase tracking-wider shrink-0">Lot change</span>
+                            </div>
+                            <div className="flex items-center gap-2 mt-1 text-xs">
+                              <span className="text-gray-400">{ack.new_job_qty} pcs remainder</span>
+                              <span className="text-gray-600">·</span>
+                              <span className="text-gray-400">due {inhEnd}</span>
+                              {nj?.assigned_machine?.code && (
+                                <span className="text-gray-500 ml-auto">{nj.assigned_machine.code}</span>
+                              )}
+                            </div>
+                            {tight && (
+                              <p className="text-amber-400 text-xs mt-1 flex items-center gap-1">
+                                <AlertTriangle size={12} /> Inherited end has passed — remainder won't fit; review schedule.
+                              </p>
+                            )}
+                            <div className="flex items-center justify-end gap-2 mt-2">
+                              <button
+                                disabled={busy}
+                                onClick={() => handleAcknowledgeLotSplit(ack)}
+                                className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded"
+                              >
+                                {busy ? 'Saving…' : 'Acknowledge'}
                               </button>
                             </div>
                           </div>

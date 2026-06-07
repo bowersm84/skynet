@@ -385,9 +385,9 @@ CREATE TABLE public.machine_downtime_logs (
 );
 CREATE TABLE public.job_materials (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
-  job_id uuid NOT NULL,
-  material_type text NOT NULL,
-  bar_size text NOT NULL,
+  job_id uuid NOT NULL UNIQUE,
+  material_type text,
+  bar_size text,
   lot_number text,
   bars_loaded integer NOT NULL DEFAULT 0,
   bars_remaining integer,
@@ -398,10 +398,15 @@ CREATE TABLE public.job_materials (
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
   bar_length numeric,
+  material_master_id uuid,
+  reconciled_by uuid,
+  reconciled_at timestamp with time zone,
   CONSTRAINT job_materials_pkey PRIMARY KEY (id),
   CONSTRAINT job_materials_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT job_materials_loaded_by_fkey FOREIGN KEY (loaded_by) REFERENCES public.profiles(id),
-  CONSTRAINT job_materials_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id)
+  CONSTRAINT job_materials_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.profiles(id),
+  CONSTRAINT job_materials_material_master_id_fkey FOREIGN KEY (material_master_id) REFERENCES public.materials(id),
+  CONSTRAINT job_materials_reconciled_by_fkey FOREIGN KEY (reconciled_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.material_types (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -857,4 +862,18 @@ CREATE TABLE public.missed_production_entries (
   CONSTRAINT missed_production_entries_pkey PRIMARY KEY (id),
   CONSTRAINT missed_production_entries_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT missed_production_entries_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.material_loads (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL,
+  material_type text,
+  bar_size text,
+  lot_number text,
+  bars integer NOT NULL,
+  source text,
+  staged_by uuid,
+  staged_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT material_loads_pkey PRIMARY KEY (id),
+  CONSTRAINT material_loads_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT material_loads_staged_by_fkey FOREIGN KEY (staged_by) REFERENCES public.profiles(id)
 );

@@ -242,26 +242,48 @@ export default function ProductionDisplay() {
       return
     }
 
+    // Open kiosk/maintenance downtime logs for these machines — description fallback
+    // when a machine is down with no DTU job (machinist-entered downtime).
+    const { data: downtimeLogs } = await supabase
+      .from('machine_downtime_logs')
+      .select('machine_id, reason, notes, start_time')
+      .is('end_time', null)
+      .in('machine_id', ids)
+    const downtimeLogByMachine = {}
+    for (const dl of (downtimeLogs || [])) {
+      const prev = downtimeLogByMachine[dl.machine_id]
+      if (!prev || new Date(dl.start_time) > new Date(prev.start_time)) {
+        downtimeLogByMachine[dl.machine_id] = dl
+      }
+    }
+
     const now = Date.now()
     const candidatesByMachine = {}
     for (const d of (dtus || [])) {
       if (!d.scheduled_start || !d.scheduled_end) continue
-      const startMs = new Date(d.scheduled_start).getTime()
-      const endMs = new Date(d.scheduled_end).getTime()
-      if (now < startMs || now > endMs) continue
       if (!candidatesByMachine[d.assigned_machine_id]) candidatesByMachine[d.assigned_machine_id] = []
       candidatesByMachine[d.assigned_machine_id].push(d)
     }
 
     const result = downMachines.map(m => {
       const candidates = candidatesByMachine[m.id] || []
-      candidates.sort((a, b) => new Date(a.scheduled_end) - new Date(b.scheduled_end))
-      const primary = candidates[0]
+      // Prefer a DTU whose scheduled window contains now; otherwise fall back to the most
+      // recent one (latest end) so the description/ETA persists even after the scheduled
+      // end has passed and the scheduler hasn't extended it (SKY58).
+      const current = candidates.find(d =>
+        now >= new Date(d.scheduled_start).getTime() && now <= new Date(d.scheduled_end).getTime()
+      )
+      const primary = current || candidates.slice().sort(
+        (a, b) => new Date(b.scheduled_end) - new Date(a.scheduled_end)
+      )[0]
+      // No DTU job → use the open downtime log's reason/notes (kiosk-entered downtime).
+      const dl = downtimeLogByMachine[m.id]
+      const downtimeDescription = dl ? (dl.notes ? `${dl.reason} — ${dl.notes}` : dl.reason) : null
       return {
         machine_code: m.code,
         machine_name: m.name,
         dtu_number: primary?.job_number || null,
-        description: primary?.work_order?.notes || null,
+        description: primary?.work_order?.notes || downtimeDescription,
         maintenance_type: primary?.work_order?.maintenance_type || null,
         estimated_return: primary?.scheduled_end || null,
       }

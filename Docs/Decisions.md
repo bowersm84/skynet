@@ -1155,3 +1155,6 @@ feature. Spec bumped to v3.5.
 
 ### D-S58-01 — Kiosk-logged downtime renders as a Command week timeline block
 SKY58 — kiosk-logged downtime (`machine_downtime_logs`, `end_time` NULL) now renders as a red block on the Command week timeline, positioned via `getJobBlockStyle` as an ongoing no-end span. Gated to machines with no active DTU/maintenance job (which already draw their own block) so there's never a duplicate. The machine-column truncated label is retained as a quick indicator. Zoomed-day view not covered (week view only).
+
+### D-S58-02 — Production Dashboard down-machine descriptions persist (DTU + kiosk fallbacks)
+SKY58 (Production Dashboard, `loadDownMachineETAs`) — (a) when no active DTU's window contains now, fall back to the most-recent active DTU so a down machine's description + ETA persist after the `scheduled_end` passes (scheduler should extend; until then the info stays, showing the stale end date as the ETA). (b) For machines down with no DTU job (kiosk-entered downtime), fall back to the open `machine_downtime_logs` reason/notes as the description. Render unchanged — `{d.description || '—'}` already shows regardless of `dtu_number`; null `estimated_return` shows TBD. Note: the earlier D-S58-01 Command-view block is a separate surface.

@@ -169,65 +169,34 @@ export async function applySchedule({
   targetStart, targetEnd, targetMinutes, cascadeChanges,
   revertCompliance = false
 }) {
-  for (const change of cascadeChanges || []) {
-    const { error } = await supabase
-      .from('jobs')
-      .update({
-        scheduled_start: change.newStart.toISOString(),
-        scheduled_end: change.newEnd.toISOString()
-      })
-      .eq('id', change.job.id)
-    if (error) {
-      throw new Error(`Cascade failed on ${change.job.job_number}: ${error.message}`)
-    }
-  }
-
-  // S9 workflow flip: when an already-approved job (status='assigned') is
-  // rescheduled onto a different machine, send it back to pending_compliance
-  // so Roger re-reviews docs against the new machine. Caller (ScheduleJobModal)
-  // sets revertCompliance=true after warning the user.
+  // SKY63 Packet 3 — apply the placement + downstream cascade in ONE server-side
+  // transaction (reschedule_with_cascade) so the deferrable overlap constraint is
+  // validated only on the final arrangement, not the intermediate shuffle. Writing
+  // the moves one-by-one tripped the constraint on a transient overlap.
   const newStatus = revertCompliance
     ? 'pending_compliance'
     : (targetJob.status === 'pending_compliance' ? 'pending_compliance' : 'assigned')
 
-  const jobUpdate = {
-    assigned_machine_id: targetMachineId,
-    scheduled_start: targetStart.toISOString(),
-    scheduled_end: targetEnd.toISOString(),
-    estimated_minutes: targetMinutes,
-    status: newStatus,
-    scheduled_by: profile?.id,
-    scheduled_at: new Date().toISOString()
-  }
-  if (revertCompliance) {
-    jobUpdate.compliance_outcome = null
-    jobUpdate.compliance_notes = null
-    jobUpdate.documents_deferred = false
-    jobUpdate.documents_deferred_reason = null
-    jobUpdate.documents_deferred_by = null
-    jobUpdate.documents_deferred_at = null
-  }
+  const cascade = (cascadeChanges || []).map(change => ({
+    job_id: change.job.id,
+    new_start: change.newStart.toISOString(),
+    new_end: change.newEnd.toISOString()
+  }))
 
-  const { error } = await supabase
-    .from('jobs')
-    .update(jobUpdate)
-    .eq('id', targetJob.id)
+  const { error } = await supabase.rpc('reschedule_with_cascade', {
+    p_target_id: targetJob.id,
+    p_target_machine_id: targetMachineId,
+    p_target_start: targetStart.toISOString(),
+    p_target_end: targetEnd.toISOString(),
+    p_target_minutes: targetMinutes,
+    p_new_status: newStatus,
+    p_scheduled_by: profile?.id ?? null,
+    p_cascade: cascade,
+    p_revert_compliance: revertCompliance
+  })
 
   if (error) {
-    throw new Error(`Schedule failed on ${targetJob.job_number}: ${error.message}`)
-  }
-
-  if (revertCompliance) {
-    // Reset all job_documents to pending so Roger re-approves against the
-    // new machine's doc set. Doc-level audit history is not preserved on
-    // the row — if a future audit need arises, capture via audit_logs.
-    const { error: docErr } = await supabase
-      .from('job_documents')
-      .update({ status: 'pending', approved_by: null, approved_at: null })
-      .eq('job_id', targetJob.id)
-    if (docErr) {
-      throw new Error(`Document reset failed on ${targetJob.job_number}: ${docErr.message}`)
-    }
+    throw new Error(error.message)
   }
 }
 
@@ -287,34 +256,18 @@ export function computeRemovalCascade(currentQueue, removedJobId) {
  * Pass empty cascadeChanges to skip the gap-closing step.
  */
 export async function applyUnschedule({ supabase, job, cascadeChanges = [] }) {
-  for (const change of cascadeChanges) {
-    const { error } = await supabase
-      .from('jobs')
-      .update({
-        scheduled_start: change.newStart.toISOString(),
-        scheduled_end: change.newEnd.toISOString()
-      })
-      .eq('id', change.job.id)
-    if (error) {
-      throw new Error(`Cascade failed on ${change.job.job_number}: ${error.message}`)
-    }
-  }
-
   const newStatus = job.status === 'pending_compliance' ? 'pending_compliance' : 'ready'
-  const { error } = await supabase
-    .from('jobs')
-    .update({
-      assigned_machine_id: null,
-      scheduled_start: null,
-      scheduled_end: null,
-      status: newStatus,
-      scheduled_by: null,
-      scheduled_at: null
-    })
-    .eq('id', job.id)
-  if (error) {
-    throw new Error(`Unschedule failed on ${job.job_number}: ${error.message}`)
-  }
+  const cascade = (cascadeChanges || []).map(c => ({
+    job_id: c.job.id,
+    new_start: c.newStart.toISOString(),
+    new_end: c.newEnd.toISOString()
+  }))
+  const { error } = await supabase.rpc('unschedule_with_cascade', {
+    p_job_id: job.id,
+    p_new_status: newStatus,
+    p_cascade: cascade
+  })
+  if (error) throw new Error(error.message)
 }
 
 /**
@@ -357,29 +310,18 @@ export function computeEndChangeCascade(currentQueue, jobId, newEnd) {
  * status, and compliance are all left untouched.
  */
 export async function applyEndDateChange({ supabase, job, newEnd, cascadeChanges = [] }) {
-  for (const change of cascadeChanges) {
-    const { error } = await supabase
-      .from('jobs')
-      .update({
-        scheduled_start: change.newStart.toISOString(),
-        scheduled_end: change.newEnd.toISOString()
-      })
-      .eq('id', change.job.id)
-    if (error) {
-      throw new Error(`Cascade failed on ${change.job.job_number}: ${error.message}`)
-    }
-  }
-
   const start = new Date(job.scheduled_start)
   const minutes = Math.max(1, Math.round((new Date(newEnd) - start) / 60000))
-  const { error } = await supabase
-    .from('jobs')
-    .update({
-      scheduled_end: new Date(newEnd).toISOString(),
-      estimated_minutes: minutes
-    })
-    .eq('id', job.id)
-  if (error) {
-    throw new Error(`End date change failed on ${job.job_number}: ${error.message}`)
-  }
+  const cascade = (cascadeChanges || []).map(c => ({
+    job_id: c.job.id,
+    new_start: c.newStart.toISOString(),
+    new_end: c.newEnd.toISOString()
+  }))
+  const { error } = await supabase.rpc('change_end_with_cascade', {
+    p_job_id: job.id,
+    p_new_end: new Date(newEnd).toISOString(),
+    p_new_minutes: minutes,
+    p_cascade: cascade
+  })
+  if (error) throw new Error(error.message)
 }

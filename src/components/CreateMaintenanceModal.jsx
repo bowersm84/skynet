@@ -143,91 +143,70 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
     const startDateTime = new Date(`${maintenanceDate}T${maintenanceStartTime}:00`)
     const endDateTime = calculateMaintenanceEnd()
 
-    if (maintenanceType === 'unplanned') {
-      const { data: overlappingJobs, error: fetchError } = await supabase
-        .from('jobs')
-        .select(`
-          *,
-          work_order:work_orders(wo_number, customer, priority),
-          component:parts!component_id(part_number, description)
-        `)
-        .eq('assigned_machine_id', selectedMachine)
-        .in('status', ['assigned', 'in_setup', 'in_progress'])
+    // Check for production overlapping the maintenance window for BOTH planned and
+    // unplanned. If any, defer to the resolve modal (requeue vs. shift around it).
+    const { data: overlappingJobs, error: fetchError } = await supabase
+      .from('jobs')
+      .select(`
+        *,
+        work_order:work_orders(wo_number, customer, priority),
+        component:parts!component_id(part_number, description)
+      `)
+      .eq('assigned_machine_id', selectedMachine)
+      .in('status', ['assigned', 'in_setup', 'in_progress'])
 
-      if (fetchError) {
-        console.error('Error checking for overlapping jobs:', fetchError)
-      }
-
-      const actualOverlaps = (overlappingJobs || []).filter(job => {
-        if (!job.scheduled_start || !job.scheduled_end) return false
-        const jobStart = new Date(job.scheduled_start)
-        const jobEnd = new Date(job.scheduled_end)
-        return jobStart < endDateTime && jobEnd > startDateTime
-      })
-
-      if (actualOverlaps.length > 0) {
-        setAffectedJobs(actualOverlaps)
-        setShowCrashModal(true)
-        return
-      }
+    if (fetchError) {
+      console.error('Error checking for overlapping jobs:', fetchError)
     }
 
-    await createMaintenanceOrder(startDateTime, endDateTime)
+    const actualOverlaps = (overlappingJobs || []).filter(job => {
+      if (!job.scheduled_start || !job.scheduled_end) return false
+      const jobStart = new Date(job.scheduled_start)
+      const jobEnd = new Date(job.scheduled_end)
+      return jobStart < endDateTime && jobEnd > startDateTime
+    })
+
+    if (actualOverlaps.length > 0) {
+      setAffectedJobs(actualOverlaps)
+      setShowCrashModal(true)
+      return
+    }
+
+    await createMaintenanceOrder(startDateTime, endDateTime, [])
   }
 
-  const createMaintenanceOrder = async (startDateTime, endDateTime) => {
-    const { data: workOrder, error: woError } = await supabase
-      .from('work_orders')
-      .insert({
-        wo_number: moNumber,
-        order_type: 'maintenance',
-        maintenance_type: maintenanceType,
-        machine_id: selectedMachine,
-        priority: 'normal',
-        notes: maintenanceDescription,
-        status: 'in_progress'
-      })
-      .select()
-      .single()
-
-    if (woError) throw woError
-
-    // Generate job number with DTP (Planned) or DTU (Unplanned) prefix
+  const createMaintenanceOrder = async (startDateTime, endDateTime, requeueIds = []) => {
+    // Job number with DTP (Planned) or DTU (Unplanned) prefix
     const jobPrefix = maintenanceType === 'planned' ? 'DTP-' : 'DTU-'
-    
-    // Get the last job number with this prefix
     const { data: lastJob } = await supabase
       .from('jobs')
       .select('job_number')
       .like('job_number', `${jobPrefix}%`)
       .order('job_number', { ascending: false })
       .limit(1)
-    
+
     let nextJobNum = 1
     if (lastJob && lastJob.length > 0) {
       const lastNum = parseInt(lastJob[0].job_number.replace(jobPrefix, '')) || 0
       nextJobNum = lastNum + 1
     }
-
     const jobNumber = `${jobPrefix}${String(nextJobNum).padStart(6, '0')}`
 
-    const { error: jobError } = await supabase
-      .from('jobs')
-      .insert({
-        job_number: jobNumber,
-        work_order_id: workOrder.id,
-        component_id: null,
-        quantity: 1,
-        status: 'assigned',
-        is_maintenance: true,
-        maintenance_description: maintenanceDescription,
-        assigned_machine_id: selectedMachine,
-        scheduled_start: startDateTime.toISOString(),
-        scheduled_end: endDateTime.toISOString(),
-        estimated_minutes: maintenanceDuration * 60
-      })
-
-    if (jobError) throw jobError
+    // Atomic: create the maintenance WO + block and shove movable production around
+    // it in one transaction, so the deferred overlap constraint only sees the final,
+    // conflict-free schedule. requeueIds: jobs to pull off the machine entirely.
+    const { error: rpcError } = await supabase.rpc('create_maintenance_atomic', {
+      p_machine_id: selectedMachine,
+      p_mo_number: moNumber,
+      p_job_number: jobNumber,
+      p_description: maintenanceDescription,
+      p_maintenance_type: maintenanceType,
+      p_start: startDateTime.toISOString(),
+      p_end: endDateTime.toISOString(),
+      p_minutes: maintenanceDuration * 60,
+      p_requeue_ids: requeueIds
+    })
+    if (rpcError) throw new Error(rpcError.message)
 
     if (maintenanceType === 'unplanned') {
       await supabase
@@ -250,48 +229,14 @@ export default function CreateMaintenanceModal({ isOpen, onClose, onSuccess, mac
       const startDateTime = new Date(`${maintenanceDate}T${maintenanceStartTime}:00`)
       const endDateTime = calculateMaintenanceEnd()
 
-      if (crashAction === 'return_to_queue') {
-        for (const job of affectedJobs) {
-          await supabase
-            .from('jobs')
-            .update({
-              status: 'ready',
-              assigned_machine_id: null,
-              scheduled_start: null,
-              scheduled_end: null,
-              scheduled_by: null,
-              scheduled_at: null,
-              notes: `${job.notes || ''} [Unscheduled due to unplanned maintenance: ${maintenanceDescription}]`.trim(),
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', job.id)
-        }
-      } else if (crashAction === 'move_next') {
-        let nextAvailableStart = new Date(endDateTime)
-        
-        for (const job of affectedJobs) {
-          const jobDurationMs = job.scheduled_end && job.scheduled_start 
-            ? new Date(job.scheduled_end) - new Date(job.scheduled_start)
-            : (job.estimated_minutes || 60) * 60 * 1000
+      // return_to_queue: pull the overlapping jobs off the machine.
+      // move_next: leave them assigned — the atomic repack shifts all movable
+      // production around the maintenance block (and cascades downstream).
+      const requeueIds = crashAction === 'return_to_queue'
+        ? affectedJobs.map(j => j.id)
+        : []
 
-          const newStart = new Date(nextAvailableStart)
-          const newEnd = new Date(newStart.getTime() + jobDurationMs)
-
-          await supabase
-            .from('jobs')
-            .update({
-              scheduled_start: newStart.toISOString(),
-              scheduled_end: newEnd.toISOString(),
-              notes: `${job.notes || ''} [Rescheduled due to unplanned maintenance]`.trim(),
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', job.id)
-
-          nextAvailableStart = newEnd
-        }
-      }
-
-      await createMaintenanceOrder(startDateTime, endDateTime)
+      await createMaintenanceOrder(startDateTime, endDateTime, requeueIds)
       
       setShowCrashModal(false)
       setAffectedJobs([])

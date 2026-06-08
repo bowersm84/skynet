@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { FEATURES } from '../config'
 import { lotAllowed, deriveConsumed } from '../lib/materialIssues'
@@ -7,6 +7,24 @@ import {
   Loader2, LogOut, Package, ArrowLeft, Plus, CheckCircle,
   AlertTriangle, Search, X, Layers, RotateCcw, ClipboardCheck
 } from 'lucide-react'
+
+const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
+
+function getKioskDeviceId() {
+  try {
+    let id = localStorage.getItem(KIOSK_DEVICE_ID_KEY)
+    if (!id) {
+      id = (crypto?.randomUUID?.() || `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      localStorage.setItem(KIOSK_DEVICE_ID_KEY, id)
+    }
+    return id
+  } catch {
+    // Storage blocked (private mode etc.). Fall back to a per-tab id —
+    // the user will have to PIN in every refresh, which is the SAFE
+    // failure mode.
+    return `ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+}
 
 // Running vs queued for the per-machine lineup. Mirrors Kiosk.jsx loadJobs.
 const RUNNING_STATUSES = ['in_setup', 'in_progress']
@@ -24,7 +42,13 @@ const STATUS_LABEL = {
 }
 
 export default function MaterialKiosk() {
-  // --- Auth (mirrors Finishing.jsx: plaintext pin_code lookup, runs as anon) ---
+  // Per-device id — stable across reloads via localStorage. Mirrors Kiosk.jsx;
+  // passed to kiosk-authenticate so the rack runs as `authenticated`.
+  const deviceIdRef = useRef(getKioskDeviceId())
+
+  // --- Auth (authenticates via kiosk-authenticate edge function so every
+  // read/write runs as `authenticated`; jobs/job_materials/catalogs are
+  // authenticated-only on PROD) ---
   const [pin, setPin] = useState('')
   const [operator, setOperator] = useState(null)
   const [authError, setAuthError] = useState(null)
@@ -110,20 +134,40 @@ export default function MaterialKiosk() {
     setAuthenticating(true)
     setAuthError(null)
     try {
-      // .single() fails closed on duplicate PINs (AS9100) — generic message covers both.
-      const { data, error } = await supabase
-        .from('profiles').select('*').eq('pin_code', pin).eq('is_active', true).single()
-      if (error) {
-        if (error.code === 'PGRST116') { setAuthError('Invalid PIN'); setPin('') }
-        else throw error
-        return
+      // The rack must run as `authenticated` (jobs/job_materials/catalogs are
+      // authenticated-only on PROD). Authenticate via the same edge function the
+      // machine kiosk uses. It needs an active machine to mint the JWT but binds
+      // no session to it, so any active machine works as an anchor. machines
+      // allows anon reads of active machines, so this fetch works pre-login.
+      const { data: anchor } = await supabase
+        .from('machines').select('id').eq('is_active', true)
+        .order('display_order').limit(1)
+      const anchorId = anchor?.[0]?.id
+      if (!anchorId) { setAuthError('No active machine available'); setPin(''); return }
+
+      const { data, error } = await supabase.functions.invoke('kiosk-authenticate', {
+        body: { pin, machine_id: anchorId, device_id: deviceIdRef.current },
+      })
+      if (error || !data?.success) { setAuthError('Invalid PIN'); setPin(''); return }
+
+      const { error: sessionErr } = await supabase.auth.setSession({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+      })
+      if (sessionErr) {
+        console.error('setSession failed:', sessionErr)
+        setAuthError('Authentication failed'); setPin(''); return
       }
-      setOperator(data)
+      // Opaque/unused refresh_token — re-PIN at expiry. Stop auto-refresh so the
+      // client never tries to use it.
+      supabase.auth.stopAutoRefresh()
+
+      setOperator(data.operator)
       setMode('home')
       setPin('')
     } catch (err) {
       console.error('Auth error:', err)
-      setAuthError('Authentication failed')
+      setAuthError('Authentication failed'); setPin('')
     } finally {
       setAuthenticating(false)
     }
@@ -148,9 +192,9 @@ export default function MaterialKiosk() {
     return () => { document.title = 'SkyNet MES' }
   }, [])
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await supabase.auth.signOut({ scope: 'local' })
     setOperator(null); setMode('home'); setSelectedMachine(null)
-    setJobs([]); setStageJob(null); setFinSel(null); setPin('')
   }
 
   // ---------- Catalog loads ----------

@@ -196,6 +196,20 @@ export default function Armory({ profile }) {
   const [resolvingFlag, setResolvingFlag] = useState(null) // flag row being resolved
   const [resolutionNotes, setResolutionNotes] = useState('')
   const [resolvingSaving, setResolvingSaving] = useState(false)
+  // Late-receipt linking: receipts + orphaned staging rows for an unknown_lot flag.
+  const [resolveError, setResolveError] = useState('')
+  const [resolveReceipts, setResolveReceipts] = useState([])
+  const [resolveOrphans, setResolveOrphans] = useState([])
+  const [resolveSelectedReceiptId, setResolveSelectedReceiptId] = useState('')
+  const [resolveLoading, setResolveLoading] = useState(false)
+  // Non-blocking warning banner when a link raises a negative_inventory flag.
+  const [negFlagToast, setNegFlagToast] = useState('')
+  // Receiving-save nudge to link already-staged material to the new receipt.
+  const [receivingNudge, setReceivingNudge] = useState(null) // { flagId, receivingId, lotNumber, totalBars, events, sampleJob }
+  const [nudgeSaving, setNudgeSaving] = useState(false)
+  const [nudgeError, setNudgeError] = useState('')
+  // Link actions are restricted to admin/compliance (RPC enforces it too).
+  const canLink = ['admin', 'compliance'].includes(profile?.role)
   // Receiving form only offers active materials; inactive ones are admin-only.
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor && m.is_active).map(m => m.vendor)
@@ -417,8 +431,24 @@ export default function Armory({ profile }) {
         .select('*, jobs:job_id(job_number), resolver:resolved_by(full_name)')
         .order('raised_at', { ascending: false })
       if (error) throw error
-      setReconFlags(data || [])
-      setOpenFlagCount((data || []).filter(f => f.status === 'open').length)
+      const flags = data || []
+      // Attach the linked receipt's PO (audit trail on resolved rows) without
+      // depending on a PostgREST FK embed — one batched lookup by receiving id.
+      const recvIds = [...new Set(flags.map(f => f.material_receiving_id).filter(Boolean))]
+      const poById = {}
+      if (recvIds.length > 0) {
+        const { data: recs } = await supabase
+          .from('material_receiving')
+          .select('id, po_number')
+          .in('id', recvIds)
+        for (const r of (recs || [])) poById[r.id] = r.po_number
+      }
+      const withPo = flags.map(f => ({
+        ...f,
+        _linked_po: f.material_receiving_id ? (poById[f.material_receiving_id] || null) : null,
+      }))
+      setReconFlags(withPo)
+      setOpenFlagCount(withPo.filter(f => f.status === 'open').length)
     } catch (err) {
       console.error('Error loading reconciliation flags:', err)
     }
@@ -437,9 +467,73 @@ export default function Armory({ profile }) {
     }
   }, [])
 
+  const closeResolveModal = () => {
+    setResolvingFlag(null)
+    setResolutionNotes('')
+    setResolveError('')
+    setResolveReceipts([])
+    setResolveOrphans([])
+    setResolveSelectedReceiptId('')
+  }
+
+  // Shared link path (Reconciliation Resolve modal AND the receiving-save nudge).
+  // Calls the SECURITY DEFINER RPC, refreshes flags + inventory, and raises the
+  // non-blocking warning banner when the link over-consumes the receipt.
+  const linkUnknownLotUsage = async ({ flagId, receivingId, notes, lotNumber }) => {
+    const { data, error } = await supabase.rpc('link_unknown_lot_usage', {
+      p_flag_id: flagId,
+      p_receiving_id: receivingId,
+      p_notes: notes || null,
+    })
+    if (error) throw error
+    await loadReconciliation()
+    await loadInventory()
+    if (data?.negative_flag_raised) {
+      setNegFlagToast(`Linked consumption exceeds receipt — negative inventory flag raised for lot ${lotNumber || ''}.`)
+    }
+    return data
+  }
+
+  // Open the Resolve modal. For an unknown_lot flag (admin/compliance only),
+  // preload the matching receipts and the orphaned staging rows for linking.
+  const openResolve = async (flag) => {
+    setResolvingFlag(flag)
+    setResolutionNotes('')
+    setResolveError('')
+    setResolveReceipts([])
+    setResolveOrphans([])
+    setResolveSelectedReceiptId('')
+    if (canLink && flag.flag_type === 'unknown_lot' && flag.lot_number) {
+      setResolveLoading(true)
+      try {
+        const [{ data: receipts }, { data: orphans }] = await Promise.all([
+          supabase
+            .from('material_receiving')
+            .select('id, po_number, quantity, received_at, material_type, bar_size, vendor')
+            .eq('lot_number', flag.lot_number)
+            .order('received_at', { ascending: false }),
+          supabase
+            .from('material_usage')
+            .select('id, used_at, quantity_used, job_id, jobs:job_id(job_number)')
+            .eq('lot_number', flag.lot_number)
+            .is('material_receiving_id', null)
+            .order('used_at'),
+        ])
+        setResolveReceipts(receipts || [])
+        setResolveOrphans(orphans || [])
+        if ((receipts || []).length === 1) setResolveSelectedReceiptId(receipts[0].id)
+      } catch (err) {
+        setResolveError('Failed to load linkable receipts: ' + err.message)
+      } finally {
+        setResolveLoading(false)
+      }
+    }
+  }
+
   const handleResolveFlag = async (status) => {
     if (!resolvingFlag || !resolutionNotes.trim()) return
     setResolvingSaving(true)
+    setResolveError('')
     try {
       const { error } = await supabase
         .from('material_reconciliation_flags')
@@ -451,13 +545,57 @@ export default function Armory({ profile }) {
         })
         .eq('id', resolvingFlag.id)
       if (error) throw error
-      setResolvingFlag(null)
-      setResolutionNotes('')
+      closeResolveModal()
       await loadReconciliation()
     } catch (err) {
-      alert('Failed to update flag: ' + err.message)
+      setResolveError('Failed to update flag: ' + err.message)
     } finally {
       setResolvingSaving(false)
+    }
+  }
+
+  const handleLinkAndResolve = async () => {
+    if (!resolvingFlag || !resolveSelectedReceiptId) return
+    setResolvingSaving(true)
+    setResolveError('')
+    try {
+      await linkUnknownLotUsage({
+        flagId: resolvingFlag.id,
+        receivingId: resolveSelectedReceiptId,
+        notes: resolutionNotes.trim() || null,
+        lotNumber: resolvingFlag.lot_number,
+      })
+      closeResolveModal()
+    } catch (err) {
+      setResolveError('Link failed: ' + err.message)
+    } finally {
+      setResolvingSaving(false)
+    }
+  }
+
+  // Receiving-save nudge: close out / link the staged material to the new receipt.
+  const closeNudge = () => {
+    setReceivingNudge(null)
+    setNudgeError('')
+    setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
+  }
+
+  const handleNudgeLink = async () => {
+    if (!receivingNudge) return
+    setNudgeSaving(true)
+    setNudgeError('')
+    try {
+      await linkUnknownLotUsage({
+        flagId: receivingNudge.flagId,
+        receivingId: receivingNudge.receivingId,
+        notes: null,
+        lotNumber: receivingNudge.lotNumber,
+      })
+      closeNudge()
+    } catch (err) {
+      setNudgeError('Link failed: ' + err.message)
+    } finally {
+      setNudgeSaving(false)
     }
   }
 
@@ -1387,8 +1525,49 @@ export default function Armory({ profile }) {
         setReceivingCertFiles([])
         setReceivingError('Receipt saved, but cert upload failed — retry from the Inventory tab')
       } else {
-        closeReceivingModal()
-        setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
+        // Link nudge: if this lot already has staged material under an open
+        // unknown_lot flag, offer to link it to the receipt we just created.
+        const savedLot = receivingForm.lot_number
+        let nudged = false
+        if (canLink && savedLot) {
+          const { data: openFlags } = await supabase
+            .from('material_reconciliation_flags')
+            .select('id, lot_number')
+            .eq('lot_number', savedLot)
+            .eq('flag_type', 'unknown_lot')
+            .eq('status', 'open')
+            .limit(1)
+          const flag = (openFlags || [])[0]
+          if (flag) {
+            const { data: orphans } = await supabase
+              .from('material_usage')
+              .select('quantity_used, job_id, jobs:job_id(job_number)')
+              .eq('lot_number', savedLot)
+              .is('material_receiving_id', null)
+              .order('used_at')
+            const totalBars = (orphans || []).reduce((sum, o) => sum + (o.quantity_used || 0), 0)
+            setReceivingNudge({
+              flagId: flag.id,
+              receivingId: newRow.id,
+              lotNumber: savedLot,
+              totalBars,
+              events: (orphans || []).length,
+              sampleJob: (orphans || [])[0]?.jobs?.job_number || null,
+            })
+            // Hide the form modal; the nudge modal takes over (form not yet reset).
+            setShowReceivingModal(false)
+            setReceivingError('')
+            setReceivingCertFiles([])
+            setReceivingTypeId('')
+            setReceivingSize('')
+            setSavedReceiptId(null)
+            nudged = true
+          }
+        }
+        if (!nudged) {
+          closeReceivingModal()
+          setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
+        }
       }
     } catch (err) {
       alert('Error saving receiving entry: ' + err.message)
@@ -1469,6 +1648,16 @@ export default function Armory({ profile }) {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
+      {/* Non-blocking warning banner (e.g. link raised a negative inventory flag) */}
+      {negFlagToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] max-w-lg px-4 py-3 bg-red-900/90 border border-red-600 rounded-lg text-sm text-red-100 shadow-lg flex items-center gap-3">
+          <AlertTriangle size={16} className="flex-shrink-0" />
+          <span>{negFlagToast}</span>
+          <button onClick={() => setNegFlagToast('')} className="text-red-200 hover:text-white flex-shrink-0">
+            <X size={16} />
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="border-b border-gray-800 bg-gray-900">
         <div className="max-w-7xl mx-auto px-6 py-4">
@@ -2330,15 +2519,18 @@ export default function Armory({ profile }) {
                           <td className="px-4 py-3 text-center">
                             {flag.status === 'open' ? (
                               <button
-                                onClick={() => { setResolvingFlag(flag); setResolutionNotes('') }}
+                                onClick={() => openResolve(flag)}
                                 className="text-xs px-3 py-1 bg-skynet-accent hover:bg-skynet-accent/80 text-white rounded transition-colors"
                               >
                                 Resolve
                               </button>
                             ) : (
-                              <span className="text-xs text-gray-500" title={flag.resolution_notes || ''}>
+                              <div className="text-xs text-gray-500" title={flag.resolution_notes || ''}>
                                 {flag.resolver?.full_name || '—'}
-                              </span>
+                                {flag._linked_po && (
+                                  <span className="ml-1 px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded whitespace-nowrap">PO {flag._linked_po}</span>
+                                )}
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -3716,12 +3908,19 @@ export default function Armory({ profile }) {
       )}
 
       {/* Reconciliation Resolve Modal */}
-      {resolvingFlag && (
+      {resolvingFlag && (() => {
+        const isUnknownLot = resolvingFlag.flag_type === 'unknown_lot'
+        const hasReceipts = resolveReceipts.length > 0
+        const linkMode = canLink && isUnknownLot && hasReceipts
+        const totalBars = resolveOrphans.reduce((s, o) => s + (o.quantity_used || 0), 0)
+        const selectedReceipt = resolveReceipts.find(r => r.id === resolveSelectedReceiptId)
+        const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
+        return (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold text-white">Resolve Flag</h2>
-              <button onClick={() => { setResolvingFlag(null); setResolutionNotes('') }} className="text-gray-400 hover:text-white">
+              <button onClick={closeResolveModal} className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
@@ -3730,33 +3929,166 @@ export default function Armory({ profile }) {
               {' · '}{resolvingFlag.material_type || '—'}
               {' · '}{resolvingFlag.flag_type === 'negative_inventory' ? 'Negative Inventory' : 'Unknown Lot'}
             </div>
-            <div>
-              <label className="text-xs text-gray-400 uppercase tracking-wide">Resolution Notes *</label>
-              <textarea
-                value={resolutionNotes}
-                onChange={e => setResolutionNotes(e.target.value)}
-                rows={3}
-                placeholder="Describe how this discrepancy was resolved…"
-                className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
-              />
+
+            {resolveLoading ? (
+              <div className="py-6 text-center text-gray-500 text-sm">
+                <Loader2 size={20} className="animate-spin inline" />
+              </div>
+            ) : (
+              <>
+                {linkMode && (
+                  <>
+                    {/* Orphaned staging events */}
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">
+                        Staged (unlinked) — {totalBars} bars across {resolveOrphans.length} event{resolveOrphans.length !== 1 ? 's' : ''}
+                      </label>
+                      <ul className="mt-1 space-y-1 max-h-40 overflow-y-auto">
+                        {resolveOrphans.map(o => (
+                          <li key={o.id} className="flex items-center justify-between text-xs bg-gray-800 rounded px-2 py-1">
+                            <span className="text-gray-400">{fmtDate(o.used_at)}</span>
+                            <span className="text-gray-300">{o.quantity_used} bars</span>
+                            <span className="font-mono text-skynet-accent">{o.jobs?.job_number || '—'}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    {/* Matching receipt(s) */}
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">
+                        Matching receipt{resolveReceipts.length > 1 ? 's' : ''}
+                      </label>
+                      {resolveReceipts.length === 1 ? (
+                        <div className="mt-1 bg-gray-800 rounded-lg px-3 py-2 border border-skynet-accent/40">
+                          <div className="text-sm text-gray-200">PO {resolveReceipts[0].po_number || '—'} · {resolveReceipts[0].vendor || '—'}</div>
+                          <div className="text-xs text-gray-500">{resolveReceipts[0].quantity} bars · received {fmtDate(resolveReceipts[0].received_at)}</div>
+                        </div>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          {resolveReceipts.map(r => (
+                            <label
+                              key={r.id}
+                              className={`flex items-start gap-2 rounded-lg px-3 py-2 cursor-pointer border ${
+                                resolveSelectedReceiptId === r.id ? 'bg-gray-800 border-skynet-accent/60' : 'bg-gray-800/50 border-gray-700 hover:border-gray-600'
+                              }`}
+                            >
+                              <input
+                                type="radio"
+                                name="resolveReceipt"
+                                checked={resolveSelectedReceiptId === r.id}
+                                onChange={() => setResolveSelectedReceiptId(r.id)}
+                                className="mt-1"
+                              />
+                              <div>
+                                <div className="text-sm text-gray-200">PO {r.po_number || '—'} · {r.vendor || '—'}</div>
+                                <div className="text-xs text-gray-500">{r.quantity} bars · received {fmtDate(r.received_at)}</div>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {canLink && isUnknownLot && !hasReceipts && (
+                  <div className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-400">
+                    No receipt found for lot {resolvingFlag.lot_number}. Log it in the Receiving tab first to link staged material.
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">
+                    {linkMode ? 'Notes (optional)' : 'Resolution Notes *'}
+                  </label>
+                  <textarea
+                    value={resolutionNotes}
+                    onChange={e => setResolutionNotes(e.target.value)}
+                    rows={3}
+                    placeholder={linkMode ? 'Optional — the link adds an audit note automatically…' : 'Describe how this discrepancy was resolved…'}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
+                  />
+                </div>
+
+                {resolveError && (
+                  <div className="px-3 py-2 bg-red-900/40 border border-red-700 rounded-lg text-sm text-red-300">
+                    {resolveError}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap justify-end gap-3 pt-2">
+                  <button
+                    onClick={() => handleResolveFlag('ignored')}
+                    disabled={resolvingSaving || !resolutionNotes.trim()}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium rounded-lg transition-colors flex items-center gap-2"
+                    title="Ignored lots are never re-flagged by the DB trigger"
+                  >
+                    {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
+                    Ignore Lot
+                  </button>
+                  <button
+                    onClick={() => handleResolveFlag('resolved')}
+                    disabled={resolvingSaving || !resolutionNotes.trim()}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium rounded-lg transition-colors flex items-center gap-2"
+                  >
+                    {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
+                    {linkMode ? 'Mark Resolved (no link)' : 'Mark Resolved'}
+                  </button>
+                  {linkMode && (
+                    <button
+                      onClick={handleLinkAndResolve}
+                      disabled={resolvingSaving || !resolveSelectedReceiptId}
+                      className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
+                      Link {totalBars} bars to PO {selectedReceipt?.po_number || '—'} &amp; Resolve
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        )
+      })()}
+
+      {/* Receiving-save link nudge */}
+      {receivingNudge && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Link staged material?</h2>
+              <button onClick={closeNudge} disabled={nudgeSaving} className="text-gray-400 hover:text-white disabled:opacity-50">
+                <X size={20} />
+              </button>
             </div>
+            <p className="text-sm text-gray-300">
+              Lot <span className="font-mono text-skynet-accent">{receivingNudge.lotNumber}</span> has{' '}
+              <span className="font-semibold text-white">{receivingNudge.totalBars} bars</span> already staged
+              {' '}({receivingNudge.events} staging event{receivingNudge.events !== 1 ? 's' : ''}
+              {receivingNudge.sampleJob ? `, e.g. ${receivingNudge.sampleJob}` : ''}). Link them to this receipt and resolve the flag?
+            </p>
+            {nudgeError && (
+              <div className="px-3 py-2 bg-red-900/40 border border-red-700 rounded-lg text-sm text-red-300">
+                {nudgeError}
+              </div>
+            )}
             <div className="flex justify-end gap-3 pt-2">
               <button
-                onClick={() => handleResolveFlag('ignored')}
-                disabled={resolvingSaving || !resolutionNotes.trim()}
-                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium rounded-lg transition-colors flex items-center gap-2"
-                title="Ignored lots are never re-flagged by the DB trigger"
+                onClick={closeNudge}
+                disabled={nudgeSaving}
+                className="px-4 py-2 text-gray-400 hover:text-white disabled:opacity-50"
               >
-                {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
-                Ignore Lot
+                Skip
               </button>
               <button
-                onClick={() => handleResolveFlag('resolved')}
-                disabled={resolvingSaving || !resolutionNotes.trim()}
+                onClick={handleNudgeLink}
+                disabled={nudgeSaving}
                 className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
               >
-                {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
-                Mark Resolved
+                {nudgeSaving && <Loader2 size={16} className="animate-spin" />}
+                Link &amp; Resolve
               </button>
             </div>
           </div>

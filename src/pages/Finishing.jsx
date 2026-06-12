@@ -4,6 +4,7 @@ import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { batchRequiresChemicals } from '../lib/routing'
+import { evaluateJobShortfall } from '../lib/shortfall'
 import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
@@ -149,6 +150,7 @@ export default function Finishing() {
   const [pickupMaterialLot, setPickupMaterialLot] = useState('')
   const [pickupNotes, setPickupNotes] = useState('')
   const [pickupSubmitting, setPickupSubmitting] = useState(false)
+  const [pickupCompleting, setPickupCompleting] = useState(null) // job id being completed
 
   // Queue search
   const [queueSearch, setQueueSearch] = useState('')
@@ -590,7 +592,6 @@ export default function Finishing() {
             const remaining = Math.max(0, (j.quantity || 0) - sentQty)
             return { ...j, _sentQty: sentQty, _remainingQty: remaining }
           })
-          .filter(j => j._remainingQty > 0)
 
         // Hydrate active CO allocations per WO so the customer/due display can derive from them.
         const woIds = Array.from(new Set(filtered.map(j => j.work_order?.id).filter(Boolean)))
@@ -1388,23 +1389,17 @@ export default function Finishing() {
       }
 
       // Promote job status as appropriate.
-      const newSent = pickupModalJob._sentQty + qty
-      const totalQty = pickupModalJob.quantity || 0
       const updates = { updated_at: now }
       // Persist PLN onto the job so subsequent batches auto-populate.
       // Only write if it changed (avoids a no-op DB write on Batch B+ when nothing changed).
       if (trimmedPLN !== (pickupModalJob.production_lot_number || '')) {
         updates.production_lot_number = trimmedPLN
       }
+      // No auto-complete on reaching target qty — orders frequently overrun target.
+      // James completes jobs manually via the Complete button in the pickup queue.
       if (['ready', 'assigned'].includes(pickupModalJob.status)) {
-        updates.status = newSent >= totalQty ? 'manufacturing_complete' : 'in_progress'
+        updates.status = 'in_progress'
         if (!pickupModalJob.actual_start) updates.actual_start = now
-        if (newSent >= totalQty) updates.actual_end = now
-      } else if (pickupModalJob.status === 'in_setup' || pickupModalJob.status === 'in_progress') {
-        if (newSent >= totalQty) {
-          updates.status = 'manufacturing_complete'
-          updates.actual_end = now
-        }
       }
       if (Object.keys(updates).length > 1) {
         const { error: jobError } = await supabase
@@ -1426,6 +1421,52 @@ export default function Finishing() {
       alert('Failed to send batch: ' + err.message)
     } finally {
       setPickupSubmitting(false)
+    }
+  }
+
+  // Manual completion: James explicitly closes a pickup-queue job once all pieces
+  // are sent. Mirrors kiosk completion (good_pieces from finishing-sends total,
+  // shortfall eval) but excludes compliance-rejected sends from the good count.
+  const handlePickupComplete = async (job) => {
+    const msg = job._remainingQty > 0
+      ? `${job.job_number} has sent ${job._sentQty} of ${job.quantity} (target) — ${job._remainingQty} short. Complete anyway?`
+      : `Complete ${job.job_number}? Sent ${job._sentQty} against target ${job.quantity}.`
+    if (!confirm(msg)) return
+    setPickupCompleting(job.id)
+    try {
+      const now = new Date().toISOString()
+      const { data: allSends } = await supabase
+        .from('finishing_sends')
+        .select('quantity, compliance_status')
+        .eq('job_id', job.id)
+      const finishingTotal = (allSends || [])
+        .filter(s => s.compliance_status !== 'rejected')
+        .reduce((sum, s) => sum + (s.quantity || 0), 0)
+
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: 'manufacturing_complete',
+          actual_end: now,
+          good_pieces: finishingTotal,
+          bad_pieces: 0,
+          checked_out_at: now,
+          updated_at: now
+        })
+        .eq('id', job.id)
+      if (error) throw error
+
+      // Fire-and-forget shortfall evaluation — idempotent, no-op when produced >= target.
+      evaluateJobShortfall(job.id).catch(err => {
+        console.error('evaluateJobShortfall failed (non-blocking):', err)
+      })
+
+      await loadData()
+    } catch (err) {
+      console.error('Pickup complete error:', err)
+      alert('Failed to complete job: ' + err.message)
+    } finally {
+      setPickupCompleting(null)
     }
   }
 
@@ -2320,6 +2361,15 @@ export default function Finishing() {
                           >
                             <ArrowRight size={14} />
                             Send Batch
+                          </button>
+                          <button
+                            onClick={() => handlePickupComplete(j)}
+                            disabled={pickupCompleting === j.id}
+                            className="px-3 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-sm font-medium rounded flex items-center gap-2 whitespace-nowrap"
+                            title="Mark job manufacturing complete"
+                          >
+                            {pickupCompleting === j.id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                            Complete
                           </button>
                         </div>
                         )

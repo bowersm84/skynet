@@ -223,7 +223,9 @@ export default function MaterialKiosk() {
       const available = (receiving || [])
         .map(r => ({
           material_type: r.material_type, bar_size: r.bar_size, lot_number: r.lot_number,
-          available_bars: Math.max(0, (r.quantity || 0) - (usedByReceiving[r.id] || 0)),
+          // Signed (unclamped): empty/negative lots stay selectable; the DB trigger
+          // flags the discrepancy rather than blocking staging.
+          available_bars: (r.quantity || 0) - (usedByReceiving[r.id] || 0),
         }))
         .filter(r => r.lot_number)
       setInventoryStock(available)
@@ -368,11 +370,14 @@ export default function MaterialKiosk() {
 
   const lotSuggestions = (() => {
     if (!stageForm.material_type) return []
-    return [...new Set(
-      inventoryStock
-        .filter(r => r.material_type === stageForm.material_type && (isBlanks || r.bar_size === stageForm.bar_size))
-        .map(r => r.lot_number).filter(Boolean)
-    )]
+    const rows = inventoryStock
+      .filter(r => r.material_type === stageForm.material_type && (isBlanks || r.bar_size === stageForm.bar_size) && r.lot_number)
+    // Sum available bars per lot so a lot at/below zero can be labeled but still selectable.
+    const byLot = new Map()
+    for (const r of rows) {
+      byLot.set(r.lot_number, (byLot.get(r.lot_number) || 0) + (r.available_bars || 0))
+    }
+    return [...byLot.entries()].map(([lot, available_bars]) => ({ lot, available_bars }))
   })()
 
   const handleStage = async () => {
@@ -919,7 +924,7 @@ export default function MaterialKiosk() {
                   onChange={e => setStageForm({ ...stageForm, lot_number: e.target.value })}
                   placeholder="Scan or type the lot from the tag"
                   className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none disabled:opacity-60" />
-                <datalist id="rack-lot-list">{lotSuggestions.map(l => <option key={l} value={l} />)}</datalist>
+                <datalist id="rack-lot-list">{lotSuggestions.map(l => <option key={l.lot} value={l.lot} label={l.available_bars <= 0 ? `${l.lot} (empty — will be flagged)` : l.lot} />)}</datalist>
               </div>
               {!isBlanks && (
                 <div>

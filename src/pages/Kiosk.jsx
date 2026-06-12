@@ -1039,8 +1039,10 @@ export default function Kiosk() {
         .map(r => {
           const used = usageMap[r.id] || { bars: 0, inches: 0 }
           const receivedInches = (r.quantity || 0) * (r.bar_length_inches || 0)
-          const availableInches = Math.max(0, receivedInches - used.inches)
-          const availableBars = Math.max(0, (r.quantity || 0) - used.bars)
+          // Signed (unclamped): empty/negative lots stay selectable so staging
+          // from them is allowed — the DB trigger flags the discrepancy, we don't block.
+          const availableInches = receivedInches - used.inches
+          const availableBars = (r.quantity || 0) - used.bars
           return {
             material_type: r.material_type,
             bar_size: r.bar_size,
@@ -1050,7 +1052,6 @@ export default function Kiosk() {
             available_inches: availableInches,
           }
         })
-        .filter(r => r.available_bars > 0 || r.available_inches > 0)
 
       setInventoryStock(available)
     } catch (err) {
@@ -5357,7 +5358,11 @@ export default function Kiosk() {
                         r.lot_number
                       )
                       .map(r => (
-                        <option key={r.lot_number} value={r.lot_number} />
+                        <option
+                          key={r.lot_number}
+                          value={r.lot_number}
+                          label={r.available_bars <= 0 ? `${r.lot_number} (empty — will be flagged)` : r.lot_number}
+                        />
                       ))
                     }
                   </datalist>
@@ -5419,7 +5424,10 @@ export default function Kiosk() {
                     displaySub = `Enter bar length above to see cut count`
                   }
 
-                  const isZero = displayCount === 0
+                  const isZero = displayCount <= 0
+                  if (isZero) {
+                    displaySub = 'Lot is empty — staging is allowed and the discrepancy will be flagged'
+                  }
                   return (
                     <div className={`flex items-start gap-2 px-3 py-2 rounded-lg border ${
                       isZero

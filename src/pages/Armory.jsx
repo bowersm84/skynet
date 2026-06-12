@@ -39,14 +39,14 @@ export default function Armory({ profile }) {
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'receiving'],
-    finishing:        ['inventory', 'receiving'],
-    machinist:        ['inventory'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'customers', 'users'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving'],
+    finishing:        ['inventory', 'reconciliation', 'receiving'],
+    machinist:        ['inventory', 'reconciliation'],
     scheduler:        ['customers'],
     customer_service: ['customers'],
-    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'customers'],
-    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'customers'],
+    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'customers'],
+    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'customers'],
   }
   const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -146,17 +146,30 @@ export default function Armory({ profile }) {
   const [receivingForm, setReceivingForm] = useState({
     material_id: '',
     vendor: '',
+    po_number: '',
     lot_number: '',
     quantity: '',
     bar_length_inches: '',
+    weight_lbs: '',
+    price_per_lb: '',
+    price_per_bar: '',
     rack: '',
     notes: ''
   })
+  // Inline validation error for the receiving modal (no alert()).
+  const [receivingError, setReceivingError] = useState('')
   const [inventoryRows, setInventoryRows] = useState([])
   const [invFilterMaterial, setInvFilterMaterial] = useState('')
   const [invFilterRack, setInvFilterRack] = useState('')
   const [invFilterVendor, setInvFilterVendor] = useState('')
   const [assigningRack, setAssigningRack] = useState(null)
+  // Reconciliation flags (inventory discrepancies raised by the DB trigger)
+  const [reconFlags, setReconFlags] = useState([])
+  const [reconFilter, setReconFilter] = useState('open') // 'all' | 'open' | 'resolved' | 'ignored'
+  const [openFlagCount, setOpenFlagCount] = useState(0)
+  const [resolvingFlag, setResolvingFlag] = useState(null) // flag row being resolved
+  const [resolutionNotes, setResolutionNotes] = useState('')
+  const [resolvingSaving, setResolvingSaving] = useState(false)
   // Receiving form only offers active materials; inactive ones are admin-only.
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor && m.is_active).map(m => m.vendor)
@@ -300,7 +313,7 @@ export default function Armory({ profile }) {
     try {
       const { data: receiving } = await supabase
         .from('material_receiving')
-        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity, vendor, rack, received_at')
+        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity, vendor, rack, received_at, po_number, price_per_bar')
         .order('received_at', { ascending: false })
 
       const { data: usage } = await supabase
@@ -336,7 +349,10 @@ export default function Armory({ profile }) {
           used_bars: used.bars,
           used_inches: used.inches,
           available_inches: Math.max(0, availableInches),
-          available_bars: Math.max(0, availableBars),
+          // Signed (unclamped) so negative availability surfaces for chase-down.
+          available_bars: availableBars,
+          po_number: r.po_number || null,
+          price_per_bar: r.price_per_bar != null ? Number(r.price_per_bar) : null,
         }
       })
       setInventoryRows(rows)
@@ -345,6 +361,58 @@ export default function Armory({ profile }) {
     }
   }, [])
 
+  // Reconciliation flags raised by the DB trigger (unknown lot / negative inventory).
+  const loadReconciliation = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('material_reconciliation_flags')
+        .select('*, jobs:job_id(job_number), resolver:resolved_by(full_name)')
+        .order('raised_at', { ascending: false })
+      if (error) throw error
+      setReconFlags(data || [])
+      setOpenFlagCount((data || []).filter(f => f.status === 'open').length)
+    } catch (err) {
+      console.error('Error loading reconciliation flags:', err)
+    }
+  }, [])
+
+  // Lightweight open-count for the tab badge, loaded on mount without visiting the tab.
+  const loadOpenFlagCount = useCallback(async () => {
+    try {
+      const { count } = await supabase
+        .from('material_reconciliation_flags')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'open')
+      setOpenFlagCount(count || 0)
+    } catch (err) {
+      console.error('Error loading open flag count:', err)
+    }
+  }, [])
+
+  const handleResolveFlag = async (status) => {
+    if (!resolvingFlag || !resolutionNotes.trim()) return
+    setResolvingSaving(true)
+    try {
+      const { error } = await supabase
+        .from('material_reconciliation_flags')
+        .update({
+          status,
+          resolution_notes: resolutionNotes.trim(),
+          resolved_by: profile.id,
+          resolved_at: new Date().toISOString(),
+        })
+        .eq('id', resolvingFlag.id)
+      if (error) throw error
+      setResolvingFlag(null)
+      setResolutionNotes('')
+      await loadReconciliation()
+    } catch (err) {
+      alert('Failed to update flag: ' + err.message)
+    } finally {
+      setResolvingSaving(false)
+    }
+  }
+
   useEffect(() => {
     fetchData()
   }, [fetchData])
@@ -352,6 +420,14 @@ export default function Armory({ profile }) {
   useEffect(() => {
     if (activeTab === 'inventory') loadInventory()
   }, [activeTab, loadInventory])
+
+  useEffect(() => {
+    if (activeTab === 'reconciliation') loadReconciliation()
+  }, [activeTab, loadReconciliation])
+
+  useEffect(() => {
+    loadOpenFlagCount()
+  }, [loadOpenFlagCount])
 
   // Filter parts based on search, tab, and active state
   const filteredParts = parts.filter(p => {
@@ -1095,20 +1171,42 @@ export default function Armory({ profile }) {
   }
 
   const handleSaveReceiving = async () => {
+    // Vendor + PO are mandatory for every receipt (pricing/traceability).
+    if (!receivingForm.vendor.trim() || !receivingForm.po_number.trim()) {
+      setReceivingError('Vendor and PO number are required for all receipts.')
+      return
+    }
+    setReceivingError('')
     setSaving(true)
     try {
       const selectedMaterial = materials.find(m => m.id === receivingForm.material_id)
+
+      // BUG FIX: both kiosks match material_usage against material_receiving.bar_size
+      // using the bar_sizes.size format (e.g. "0.375 dia"), so writing `0.375"` here
+      // orphaned Armory receipts from kiosk checkouts. Resolve the catalog `size`
+      // string by decimal match; fall back to a "<decimal> dia" string if unmatched.
+      let barSizeStr = null
+      if (selectedMaterial) {
+        const match = barSizes.find(
+          bs => Number(bs.size_decimal) === Number(selectedMaterial.bar_size_inches)
+        )
+        barSizeStr = match ? match.size : `${selectedMaterial.bar_size_inches} dia`
+      }
 
       const { error } = await supabase
         .from('material_receiving')
         .insert({
           material_id: receivingForm.material_id,
           material_type: selectedMaterial?.material_type?.name || '',
-          bar_size: selectedMaterial ? `${selectedMaterial.bar_size_inches}"` : null,
+          bar_size: barSizeStr,
           bar_length_inches: parseFloat(receivingForm.bar_length_inches),
           lot_number: receivingForm.lot_number,
           quantity: parseInt(receivingForm.quantity),
           vendor: receivingForm.vendor,
+          po_number: receivingForm.po_number.trim(),
+          weight_lbs: receivingForm.weight_lbs ? parseFloat(receivingForm.weight_lbs) : null,
+          price_per_lb: receivingForm.price_per_lb ? parseFloat(receivingForm.price_per_lb) : null,
+          price_per_bar: receivingForm.price_per_bar ? parseFloat(receivingForm.price_per_bar) : null,
           rack: receivingForm.rack || null,
           notes: receivingForm.notes?.trim() || null,
           received_by: profile.id,
@@ -1116,7 +1214,7 @@ export default function Armory({ profile }) {
         })
       if (error) throw error
       setShowReceivingModal(false)
-      setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', bar_length_inches: '', rack: '', notes: '' })
+      setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
       await fetchData()
     } catch (err) {
       alert('Error saving receiving entry: ' + err.message)
@@ -1191,6 +1289,7 @@ export default function Armory({ profile }) {
               { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
               { id: 'material_master', label: 'Raw Material', icon: Layers, count: null },
               { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
+              { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
               { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
               { id: 'customers', label: 'Customers', icon: Users, count: null },
               { id: 'users', label: 'Users', icon: Users, count: null }
@@ -1703,6 +1802,12 @@ export default function Armory({ profile }) {
               const stagingCount = filteredInventoryRows.filter(r => r.rack === null).length
               const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars < 2).length
               const outCount = filteredInventoryRows.filter(r => r.available_bars === 0).length
+              const negCount = filteredInventoryRows.filter(r => r.available_bars < 0).length
+              const totalValue = filteredInventoryRows.reduce((sum, r) => (
+                r.price_per_bar != null && r.available_bars > 0
+                  ? sum + r.available_bars * r.price_per_bar
+                  : sum
+              ), 0)
               return (
                 <div className="flex items-center gap-3 text-xs text-gray-500">
                   <span>{totalLots} Lots</span>
@@ -1712,6 +1817,10 @@ export default function Armory({ profile }) {
                   <span className={lowCount > 0 ? 'text-amber-400' : ''}>{lowCount} Low</span>
                   <span className="text-gray-700">·</span>
                   <span className={outCount > 0 ? 'text-red-400' : ''}>{outCount} Out of Stock</span>
+                  <span className="text-gray-700">·</span>
+                  <span className={negCount > 0 ? 'text-red-400' : ''}>{negCount} Negative</span>
+                  <span className="text-gray-700">·</span>
+                  <span>Est. Value ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
               )
             })()}
@@ -1737,6 +1846,7 @@ export default function Armory({ profile }) {
                       <th className="px-4 py-3 text-right">Used</th>
                       <th className="px-4 py-3 text-right">Avail (bars)</th>
                       <th className="px-4 py-3 text-right">Avail (in)</th>
+                      <th className="px-4 py-3 text-right">Est. Value</th>
                       <th className="px-4 py-3 text-center">Assign</th>
                     </tr>
                   </thead>
@@ -1744,6 +1854,7 @@ export default function Armory({ profile }) {
                     {filteredInventoryRows.map(row => {
                       const isOut = row.available_bars === 0
                       const isLow = row.available_bars > 0 && row.available_bars < 2
+                      const isNeg = row.available_bars < 0
                       const isStaging = row.rack === null
                       const hasBarLength = row.bar_length_inches > 0
                       return (
@@ -1766,11 +1877,16 @@ export default function Armory({ profile }) {
                           <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
                           <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.received_bars}</td>
                           <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.used_bars}</td>
-                          <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
+                          <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
                             {hasBarLength ? row.available_bars.toFixed(1) : '—'}
                           </td>
                           <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
                             {hasBarLength ? `${Math.round(row.available_inches).toLocaleString()}"` : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-gray-300">
+                            {row.price_per_bar != null && row.available_bars > 0
+                              ? `$${(row.available_bars * row.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              : '—'}
                           </td>
                           <td className="px-4 py-3 text-center">
                             {assigningRack === row.id ? (
@@ -1813,13 +1929,118 @@ export default function Armory({ profile }) {
           </div>
         )}
 
+        {/* Reconciliation Tab */}
+        {activeTab === 'reconciliation' && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-white">Inventory Reconciliation</h2>
+
+            {/* Filter pills */}
+            <div className="flex items-center gap-2">
+              {['open', 'resolved', 'ignored', 'all'].map(f => {
+                const labelMap = { open: 'Open', resolved: 'Resolved', ignored: 'Ignored', all: 'All' }
+                const isActive = reconFilter === f
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setReconFilter(f)}
+                    className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                      isActive
+                        ? 'border-skynet-accent text-skynet-accent bg-skynet-accent/10'
+                        : 'border-gray-700 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    {labelMap[f]}
+                  </button>
+                )
+              })}
+            </div>
+
+            {(() => {
+              const filteredFlags = reconFlags.filter(f => reconFilter === 'all' ? true : f.status === reconFilter)
+              if (filteredFlags.length === 0) {
+                return (
+                  <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                    <AlertTriangle size={48} className="mx-auto text-gray-600 mb-3" />
+                    <p className="text-gray-400">No {reconFilter === 'all' ? '' : reconFilter} reconciliation flags.</p>
+                  </div>
+                )
+              }
+              return (
+                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Raised</th>
+                        <th className="px-4 py-3 text-left">Type</th>
+                        <th className="px-4 py-3 text-left">Lot #</th>
+                        <th className="px-4 py-3 text-left">Material</th>
+                        <th className="px-4 py-3 text-left">Bar Size</th>
+                        <th className="px-4 py-3 text-right">Qty Δ</th>
+                        <th className="px-4 py-3 text-right">Occurrences</th>
+                        <th className="px-4 py-3 text-left">Job</th>
+                        <th className="px-4 py-3 text-left">Status</th>
+                        <th className="px-4 py-3 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700">
+                      {filteredFlags.map(flag => (
+                        <tr key={flag.id} className="bg-gray-900 hover:bg-gray-800 transition-colors">
+                          <td className="px-4 py-3 text-gray-300 whitespace-nowrap">
+                            {new Date(flag.raised_at).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td className="px-4 py-3">
+                            {flag.flag_type === 'negative_inventory' ? (
+                              <span className="text-xs px-2 py-0.5 bg-red-900/50 text-red-300 rounded whitespace-nowrap">Negative Inventory</span>
+                            ) : (
+                              <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded whitespace-nowrap">Unknown Lot</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{flag.lot_number || '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{flag.material_type || '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{flag.bar_size || '—'}</td>
+                          <td className="px-4 py-3 text-right font-mono text-gray-300">{flag.quantity_delta != null ? flag.quantity_delta : '—'}</td>
+                          <td className="px-4 py-3 text-right text-gray-300">{flag.occurrence_count ?? 1}</td>
+                          <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{flag.jobs?.job_number || '—'}</td>
+                          <td className="px-4 py-3">
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              flag.status === 'open' ? 'bg-blue-900/50 text-blue-300'
+                                : flag.status === 'resolved' ? 'bg-green-900/50 text-green-300'
+                                : 'bg-gray-700 text-gray-400'
+                            }`}>
+                              {flag.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            {flag.status === 'open' ? (
+                              <button
+                                onClick={() => { setResolvingFlag(flag); setResolutionNotes('') }}
+                                className="text-xs px-3 py-1 bg-skynet-accent hover:bg-skynet-accent/80 text-white rounded transition-colors"
+                              >
+                                Resolve
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-500" title={flag.resolution_notes || ''}>
+                                {flag.resolver?.full_name || '—'}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            })()}
+          </div>
+        )}
+
         {/* Receiving Tab */}
         {activeTab === 'receiving' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
               <button
-                onClick={() => { setReceivingForm({ material_id: '', vendor: '', lot_number: '', quantity: '', bar_length_inches: '', rack: '', notes: '' }); setShowReceivingModal(true) }}
+                onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setShowReceivingModal(true) }}
                 className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
               >
                 <Plus size={18} /> Log Receipt
@@ -1841,7 +2062,9 @@ export default function Armory({ profile }) {
                       <th className="px-4 py-3 text-left">Material Type</th>
                       <th className="px-4 py-3 text-left">Bar Size</th>
                       <th className="px-4 py-3 text-left">Lot #</th>
+                      <th className="px-4 py-3 text-left">PO</th>
                       <th className="px-4 py-3 text-right">Qty</th>
+                      <th className="px-4 py-3 text-right">$/bar</th>
                       <th className="px-4 py-3 text-right">Bar Length</th>
                       <th className="px-4 py-3 text-left">Rack</th>
                       <th className="px-4 py-3 text-left">Vendor</th>
@@ -1858,7 +2081,11 @@ export default function Armory({ profile }) {
                         <td className="px-4 py-3 text-white font-medium">{r.material_type}</td>
                         <td className="px-4 py-3 text-gray-300">{r.bar_size || '—'}</td>
                         <td className="px-4 py-3 font-mono text-skynet-accent text-xs">{r.lot_number}</td>
+                        <td className="px-4 py-3 text-gray-300 text-xs">{r.po_number || '—'}</td>
                         <td className="px-4 py-3 text-white font-semibold text-right">{r.quantity}</td>
+                        <td className="px-4 py-3 text-gray-300 text-right font-mono">
+                          {r.price_per_bar != null ? `$${Number(r.price_per_bar).toFixed(2)}` : '—'}
+                        </td>
                         <td className="px-4 py-3 text-gray-300 text-right font-mono">
                           {r.bar_length_inches ? `${r.bar_length_inches}"` : '—'}
                         </td>
@@ -2886,7 +3113,7 @@ export default function Armory({ profile }) {
           <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold text-white">Log Material Receipt</h2>
-              <button onClick={() => setShowReceivingModal(false)} className="text-gray-400 hover:text-white">
+              <button onClick={() => { setShowReceivingModal(false); setReceivingError('') }} className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
@@ -2947,6 +3174,71 @@ export default function Armory({ profile }) {
                 />
               </div>
 
+              {/* PO Number */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">PO Number *</label>
+                <input
+                  type="text"
+                  value={receivingForm.po_number}
+                  onChange={e => setReceivingForm(f => ({ ...f, po_number: e.target.value }))}
+                  placeholder="e.g. PO-12345"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Total Weight */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Total Weight (lbs)</label>
+                <input
+                  type="number" min="0" step="any"
+                  value={receivingForm.weight_lbs}
+                  onChange={e => setReceivingForm(f => ({ ...f, weight_lbs: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Price / lb */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Price / lb ($)</label>
+                <input
+                  type="number" min="0" step="0.01"
+                  value={receivingForm.price_per_lb}
+                  onChange={e => setReceivingForm(f => ({ ...f, price_per_lb: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Price / bar */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Price / bar ($)</label>
+                <input
+                  type="number" min="0" step="0.01"
+                  value={receivingForm.price_per_bar}
+                  onChange={e => setReceivingForm(f => ({ ...f, price_per_bar: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+                {/* Suggest $/bar from weight × $/lb ÷ qty when price/bar is still blank */}
+                {receivingForm.weight_lbs && receivingForm.price_per_lb && receivingForm.quantity && !receivingForm.price_per_bar && (() => {
+                  const qty = parseFloat(receivingForm.quantity)
+                  const suggested = qty > 0
+                    ? (parseFloat(receivingForm.weight_lbs) * parseFloat(receivingForm.price_per_lb)) / qty
+                    : null
+                  if (suggested == null || !isFinite(suggested)) return null
+                  return (
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className="text-xs text-gray-500">≈ ${suggested.toFixed(2)}/bar</span>
+                      <button
+                        type="button"
+                        onClick={() => setReceivingForm(f => ({ ...f, price_per_bar: suggested.toFixed(2) }))}
+                        className="text-xs px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded"
+                      >
+                        Use
+                      </button>
+                    </div>
+                  )
+                })()}
+              </div>
+
               {/* Quantity */}
               <div>
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Quantity (bars) *</label>
@@ -2999,8 +3291,14 @@ export default function Armory({ profile }) {
               </div>
             </div>
 
+            {receivingError && (
+              <div className="px-3 py-2 bg-red-900/40 border border-red-700 rounded-lg text-sm text-red-300">
+                {receivingError}
+              </div>
+            )}
+
             <div className="flex justify-end gap-3 pt-2">
-              <button onClick={() => setShowReceivingModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">
+              <button onClick={() => { setShowReceivingModal(false); setReceivingError('') }} className="px-4 py-2 text-gray-400 hover:text-white">
                 Cancel
               </button>
               <button
@@ -3010,6 +3308,54 @@ export default function Armory({ profile }) {
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}
                 Log Receipt
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reconciliation Resolve Modal */}
+      {resolvingFlag && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Resolve Flag</h2>
+              <button onClick={() => { setResolvingFlag(null); setResolutionNotes('') }} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="text-sm text-gray-400">
+              <span className="font-mono text-skynet-accent">{resolvingFlag.lot_number || '—'}</span>
+              {' · '}{resolvingFlag.material_type || '—'}
+              {' · '}{resolvingFlag.flag_type === 'negative_inventory' ? 'Negative Inventory' : 'Unknown Lot'}
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 uppercase tracking-wide">Resolution Notes *</label>
+              <textarea
+                value={resolutionNotes}
+                onChange={e => setResolutionNotes(e.target.value)}
+                rows={3}
+                placeholder="Describe how this discrepancy was resolved…"
+                className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => handleResolveFlag('ignored')}
+                disabled={resolvingSaving || !resolutionNotes.trim()}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 font-medium rounded-lg transition-colors flex items-center gap-2"
+                title="Ignored lots are never re-flagged by the DB trigger"
+              >
+                {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
+                Ignore Lot
+              </button>
+              <button
+                onClick={() => handleResolveFlag('resolved')}
+                disabled={resolvingSaving || !resolutionNotes.trim()}
+                className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
+                Mark Resolved
               </button>
             </div>
           </div>

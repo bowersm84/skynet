@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { uploadDocument, getDocumentUrl, deleteDocument } from '../lib/s3'
 import {
   Package,
   Wrench,
@@ -24,7 +25,9 @@ import {
   GripVertical,
   Users,
   Power,
-  PowerOff
+  PowerOff,
+  Paperclip,
+  ExternalLink
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
@@ -158,11 +161,34 @@ export default function Armory({ profile }) {
   })
   // Inline validation error for the receiving modal (no alert()).
   const [receivingError, setReceivingError] = useState('')
+  // Split material selectors (vendor → type → size) resolve receivingForm.material_id.
+  const [receivingTypeId, setReceivingTypeId] = useState('')
+  const [receivingSize, setReceivingSize] = useState('')
+  // Cert files staged in the modal before save; uploaded after the receipt insert.
+  const [receivingCertFiles, setReceivingCertFiles] = useState([])
+  // Set when the receipt saved but a cert upload failed — guards against duplicate saves.
+  const [savedReceiptId, setSavedReceiptId] = useState(null)
   const [inventoryRows, setInventoryRows] = useState([])
   const [invFilterMaterial, setInvFilterMaterial] = useState('')
   const [invFilterRack, setInvFilterRack] = useState('')
   const [invFilterVendor, setInvFilterVendor] = useState('')
+  const [invFilterSize, setInvFilterSize] = useState('')
+  const [invSearchLot, setInvSearchLot] = useState('')
+  const [invSortKey, setInvSortKey] = useState('material_type') // material_type | bar_size | lot_number | available_bars
+  const [invSortDir, setInvSortDir] = useState('asc')
   const [assigningRack, setAssigningRack] = useState(null)
+  // material_receiving_id → cert document count (single batched query)
+  const [materialDocCounts, setMaterialDocCounts] = useState({})
+  // Lot Documents modal (after-the-fact uploads from the Inventory tab)
+  const [docsModalRow, setDocsModalRow] = useState(null)
+  const [lotDocs, setLotDocs] = useState([])
+  const [lotDocsLoading, setLotDocsLoading] = useState(false)
+  const [docUploading, setDocUploading] = useState(false)
+  const [docModalError, setDocModalError] = useState('')
+  // Materials (Raw Material master) tab filters
+  const [matFilterType, setMatFilterType] = useState('')
+  const [matFilterVendor, setMatFilterVendor] = useState('')
+  const [matFilterSize, setMatFilterSize] = useState('')
   // Reconciliation flags (inventory discrepancies raised by the DB trigger)
   const [reconFlags, setReconFlags] = useState([])
   const [reconFilter, setReconFilter] = useState('open') // 'all' | 'open' | 'resolved' | 'ignored'
@@ -174,8 +200,20 @@ export default function Armory({ profile }) {
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor && m.is_active).map(m => m.vendor)
   )].sort()
-  const vendorMaterials = receivingForm.vendor
-    ? materials.filter(m => m.vendor === receivingForm.vendor && m.is_active)
+  // Split selectors: distinct types for the vendor, then sizes for vendor + type.
+  const receivingTypes = receivingForm.vendor
+    ? [...new Map(
+        materials
+          .filter(m => m.vendor === receivingForm.vendor && m.is_active && m.material_type)
+          .map(m => [m.material_type.id, m.material_type])
+      ).values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    : []
+  const receivingSizes = (receivingForm.vendor && receivingTypeId)
+    ? [...new Set(
+        materials
+          .filter(m => m.vendor === receivingForm.vendor && m.is_active && String(m.material_type?.id) === String(receivingTypeId))
+          .map(m => m.bar_size_inches)
+      )].sort((a, b) => Number(a) - Number(b))
     : []
 
   // Loading states
@@ -274,6 +312,16 @@ export default function Armory({ profile }) {
         .select('*, received_by_profile:profiles!received_by(full_name)')
         .order('received_at', { ascending: false })
       setReceivingLog(receivingData || [])
+
+      // Cert document counts per receiving row (single batched query).
+      const { data: docRows } = await supabase
+        .from('material_documents')
+        .select('material_receiving_id')
+      const docCounts = {}
+      for (const d of (docRows || [])) {
+        if (d.material_receiving_id) docCounts[d.material_receiving_id] = (docCounts[d.material_receiving_id] || 0) + 1
+      }
+      setMaterialDocCounts(docCounts)
 
       // Fetch machines
       const { data: machinesData, error: machinesError } = await supabase
@@ -1170,6 +1218,100 @@ export default function Armory({ profile }) {
     }
   }
 
+  // Refresh the per-row cert counts after an upload/delete (single batched query).
+  const refreshDocCounts = async () => {
+    try {
+      const { data } = await supabase.from('material_documents').select('material_receiving_id')
+      const counts = {}
+      for (const d of (data || [])) {
+        if (d.material_receiving_id) counts[d.material_receiving_id] = (counts[d.material_receiving_id] || 0) + 1
+      }
+      setMaterialDocCounts(counts)
+    } catch (err) {
+      console.error('Failed to refresh doc counts:', err)
+    }
+  }
+
+  // Open the Lot Documents modal for an inventory/receiving row and load its docs.
+  const openLotDocs = async (receivingRow) => {
+    setDocsModalRow(receivingRow)
+    setDocModalError('')
+    setLotDocs([])
+    setLotDocsLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('material_documents')
+        .select('*, uploader:uploaded_by(full_name)')
+        .eq('material_receiving_id', receivingRow.id)
+        .order('uploaded_at', { ascending: false })
+      if (error) throw error
+      setLotDocs(data || [])
+    } catch (err) {
+      setDocModalError('Failed to load documents: ' + err.message)
+    } finally {
+      setLotDocsLoading(false)
+    }
+  }
+
+  const handleLotDocUpload = async (files) => {
+    if (!docsModalRow || !files || files.length === 0) return
+    setDocUploading(true)
+    setDocModalError('')
+    try {
+      for (const file of files) {
+        const up = await uploadDocument(file, `material-certs/${docsModalRow.id}`)
+        const { error } = await supabase.from('material_documents').insert({
+          material_receiving_id: docsModalRow.id,
+          document_type: 'material_cert',
+          file_name: up.fileName,
+          file_path: up.filePath,
+          file_size: up.fileSize,
+          mime_type: up.mimeType,
+          uploaded_by: profile.id,
+        })
+        if (error) throw error
+      }
+      await openLotDocs(docsModalRow)
+      await refreshDocCounts()
+    } catch (err) {
+      setDocModalError('Upload failed: ' + err.message)
+    } finally {
+      setDocUploading(false)
+    }
+  }
+
+  const handleDeleteLotDoc = async (doc) => {
+    if (!confirm(`Delete ${doc.file_name}?`)) return
+    try {
+      await deleteDocument(doc.file_path)
+      const { error } = await supabase.from('material_documents').delete().eq('id', doc.id)
+      if (error) throw error
+      setLotDocs(prev => prev.filter(d => d.id !== doc.id))
+      await refreshDocCounts()
+    } catch (err) {
+      setDocModalError('Delete failed: ' + err.message)
+    }
+  }
+
+  const handleViewDoc = async (filePath) => {
+    try {
+      const url = await getDocumentUrl(filePath)
+      if (url) window.open(url, '_blank')
+    } catch (err) {
+      alert('Failed to open document: ' + err.message)
+    }
+  }
+
+  // Full reset + close for the receiving modal (shared by X / Cancel / Close).
+  const closeReceivingModal = () => {
+    setShowReceivingModal(false)
+    setReceivingError('')
+    setReceivingCertFiles([])
+    setReceivingTypeId('')
+    setReceivingSize('')
+    setSavedReceiptId(null)
+  }
+
   const handleSaveReceiving = async () => {
     // Vendor + PO are mandatory for every receipt (pricing/traceability).
     if (!receivingForm.vendor.trim() || !receivingForm.po_number.trim()) {
@@ -1193,7 +1335,7 @@ export default function Armory({ profile }) {
         barSizeStr = match ? match.size : `${selectedMaterial.bar_size_inches} dia`
       }
 
-      const { error } = await supabase
+      const { data: newRow, error } = await supabase
         .from('material_receiving')
         .insert({
           material_id: receivingForm.material_id,
@@ -1212,10 +1354,42 @@ export default function Armory({ profile }) {
           received_by: profile.id,
           received_at: new Date().toISOString()
         })
+        .select()
+        .single()
       if (error) throw error
-      setShowReceivingModal(false)
-      setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
+
+      // Upload any attached material certs. A failed cert must NOT lose the receipt —
+      // catch per-file, then surface a retry hint while keeping the receipt saved.
+      let certFailed = false
+      for (const file of receivingCertFiles) {
+        try {
+          const up = await uploadDocument(file, `material-certs/${newRow.id}`)
+          const { error: docErr } = await supabase.from('material_documents').insert({
+            material_receiving_id: newRow.id,
+            document_type: 'material_cert',
+            file_name: up.fileName,
+            file_path: up.filePath,
+            file_size: up.fileSize,
+            mime_type: up.mimeType,
+            uploaded_by: profile.id,
+          })
+          if (docErr) throw docErr
+        } catch (uploadErr) {
+          console.error('Cert upload failed (receipt already saved):', uploadErr)
+          certFailed = true
+        }
+      }
+
       await fetchData()
+      if (certFailed) {
+        // Keep modal open; guard re-save by switching the footer to a Close action.
+        setSavedReceiptId(newRow.id)
+        setReceivingCertFiles([])
+        setReceivingError('Receipt saved, but cert upload failed — retry from the Inventory tab')
+      } else {
+        closeReceivingModal()
+        setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' })
+      }
     } catch (err) {
       alert('Error saving receiving entry: ' + err.message)
     } finally {
@@ -1236,20 +1410,53 @@ export default function Armory({ profile }) {
     }
   }
 
+  const cmpSize = (x, y) => {
+    const xn = parseFloat(x), yn = parseFloat(y)
+    if (!isNaN(xn) && !isNaN(yn)) return xn - yn
+    return (x || '').toString().localeCompare((y || '').toString())
+  }
+  const toggleInvSort = (key) => {
+    if (invSortKey === key) setInvSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
+    else { setInvSortKey(key); setInvSortDir('asc') }
+  }
+
   const filteredInventoryRows = inventoryRows
     .filter(r => {
       if (invFilterMaterial && r.material_type !== invFilterMaterial) return false
       if (invFilterRack === 'Staging' && r.rack !== null) return false
       if (invFilterRack && invFilterRack !== 'Staging' && r.rack !== invFilterRack) return false
       if (invFilterVendor && r.vendor !== invFilterVendor) return false
+      if (invFilterSize && r.bar_size !== invFilterSize) return false
+      if (invSearchLot && !(r.lot_number || '').toLowerCase().includes(invSearchLot.toLowerCase())) return false
       return true
     })
     .sort((a, b) => {
-      const rackA = a.rack || 'Staging'
-      const rackB = b.rack || 'Staging'
-      if (rackA !== rackB) return rackA.localeCompare(rackB)
-      if (a.material_type !== b.material_type) return a.material_type.localeCompare(b.material_type)
-      return (a.lot_number || '').localeCompare(b.lot_number || '')
+      const dir = invSortDir === 'desc' ? -1 : 1
+      let primary = 0
+      if (invSortKey === 'available_bars') primary = (a.available_bars ?? 0) - (b.available_bars ?? 0)
+      else if (invSortKey === 'bar_size') primary = cmpSize(a.bar_size, b.bar_size)
+      else if (invSortKey === 'lot_number') primary = (a.lot_number || '').localeCompare(b.lot_number || '')
+      else primary = (a.material_type || '').localeCompare(b.material_type || '')
+      if (primary !== 0) return primary * dir
+      // Stable secondary ordering (not reversed): type, then size, then lot.
+      return (a.material_type || '').localeCompare(b.material_type || '')
+        || cmpSize(a.bar_size, b.bar_size)
+        || (a.lot_number || '').localeCompare(b.lot_number || '')
+    })
+
+  // Materials (Raw Material master) tab — filtered + default-sorted (type, then size).
+  const matFilterActive = !!(matFilterType || matFilterVendor || matFilterSize)
+  const filteredMaterials = materials
+    .filter(m => {
+      if (matFilterType && (m.material_type?.name || '') !== matFilterType) return false
+      if (matFilterVendor && (m.vendor || '') !== matFilterVendor) return false
+      if (matFilterSize && String(m.bar_size_inches) !== matFilterSize) return false
+      return true
+    })
+    .sort((a, b) => {
+      const t = (a.material_type?.name || '').localeCompare(b.material_type?.name || '')
+      if (t !== 0) return t
+      return Number(a.bar_size_inches) - Number(b.bar_size_inches)
     })
 
   if (loading) {
@@ -1665,6 +1872,50 @@ export default function Armory({ profile }) {
               {materials.length === 0 ? (
                 <p className="text-gray-400 text-sm">No material definitions yet.</p>
               ) : (
+                <>
+                {/* Filters */}
+                <div className="flex items-center gap-3 flex-wrap mb-3">
+                  <select
+                    value={matFilterType}
+                    onChange={e => setMatFilterType(e.target.value)}
+                    className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">All Types</option>
+                    {[...new Set(materials.map(m => m.material_type?.name).filter(Boolean))].sort().map(t => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={matFilterVendor}
+                    onChange={e => setMatFilterVendor(e.target.value)}
+                    className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">All Vendors</option>
+                    {[...new Set(materials.map(m => m.vendor).filter(Boolean))].sort().map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={matFilterSize}
+                    onChange={e => setMatFilterSize(e.target.value)}
+                    className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">All Sizes</option>
+                    {[...new Set(materials.map(m => m.bar_size_inches).filter(s => s != null))]
+                      .sort((a, b) => Number(a) - Number(b))
+                      .map(s => (<option key={s} value={String(s)}>{s}"</option>))}
+                  </select>
+                  <span className="text-xs text-gray-500">{filteredMaterials.length} of {materials.length}</span>
+                  {matFilterActive && (
+                    <button
+                      onClick={() => { setMatFilterType(''); setMatFilterVendor(''); setMatFilterSize('') }}
+                      className="text-xs text-skynet-accent hover:underline"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
                 <div className="overflow-x-auto rounded-lg border border-gray-700">
                   <table className="w-full text-sm">
                     <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
@@ -1678,7 +1929,13 @@ export default function Armory({ profile }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-700">
-                      {materials.map(m => {
+                      {filteredMaterials.length === 0 ? (
+                        <tr>
+                          <td colSpan={canSeeTab('material_master') ? 6 : 5} className="px-4 py-6 text-center text-gray-500 text-sm">
+                            No materials match the current filters.
+                          </td>
+                        </tr>
+                      ) : filteredMaterials.map(m => {
                         const refCount = materialRefCounts[m.id] || 0
                         const canDelete = refCount === 0
                         return (
@@ -1751,6 +2008,7 @@ export default function Armory({ profile }) {
                     </tbody>
                   </table>
                 </div>
+                </>
               )}
             </div>
 
@@ -1794,6 +2052,34 @@ export default function Armory({ profile }) {
                   <option key={v} value={v}>{v}</option>
                 ))}
               </select>
+              <select
+                value={invFilterSize}
+                onChange={e => setInvFilterSize(e.target.value)}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+              >
+                <option value="">All Sizes</option>
+                {[...new Set(inventoryRows.map(r => r.bar_size).filter(Boolean))]
+                  .sort((a, b) => cmpSize(a, b))
+                  .map(s => (<option key={s} value={s}>{s}</option>))}
+              </select>
+              <div className="relative">
+                <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                <input
+                  type="text"
+                  value={invSearchLot}
+                  onChange={e => setInvSearchLot(e.target.value)}
+                  placeholder="Search lot #…"
+                  className="pl-8 pr-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+              {(invFilterMaterial || invFilterRack || invFilterVendor || invFilterSize || invSearchLot) && (
+                <button
+                  onClick={() => { setInvFilterMaterial(''); setInvFilterRack(''); setInvFilterVendor(''); setInvFilterSize(''); setInvSearchLot('') }}
+                  className="text-xs text-skynet-accent hover:underline"
+                >
+                  Clear
+                </button>
+              )}
             </div>
 
             {/* Summary strip */}
@@ -1838,15 +2124,36 @@ export default function Armory({ profile }) {
                   <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
                     <tr>
                       <th className="px-4 py-3 text-left">Rack</th>
-                      <th className="px-4 py-3 text-left">Material Type</th>
-                      <th className="px-4 py-3 text-left">Bar Size</th>
-                      <th className="px-4 py-3 text-left">Lot #</th>
+                      <th className="px-4 py-3 text-left">
+                        <button onClick={() => toggleInvSort('material_type')} className="inline-flex items-center gap-1 uppercase hover:text-white">
+                          Material Type
+                          {invSortKey === 'material_type' && (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-left">
+                        <button onClick={() => toggleInvSort('bar_size')} className="inline-flex items-center gap-1 uppercase hover:text-white">
+                          Bar Size
+                          {invSortKey === 'bar_size' && (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+                        </button>
+                      </th>
+                      <th className="px-4 py-3 text-left">
+                        <button onClick={() => toggleInvSort('lot_number')} className="inline-flex items-center gap-1 uppercase hover:text-white">
+                          Lot #
+                          {invSortKey === 'lot_number' && (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+                        </button>
+                      </th>
                       <th className="px-4 py-3 text-left">Vendor</th>
                       <th className="px-4 py-3 text-right">Rec'd</th>
                       <th className="px-4 py-3 text-right">Used</th>
-                      <th className="px-4 py-3 text-right">Avail (bars)</th>
+                      <th className="px-4 py-3 text-right">
+                        <button onClick={() => toggleInvSort('available_bars')} className="inline-flex items-center gap-1 uppercase hover:text-white">
+                          Avail (bars)
+                          {invSortKey === 'available_bars' && (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+                        </button>
+                      </th>
                       <th className="px-4 py-3 text-right">Avail (in)</th>
                       <th className="px-4 py-3 text-right">Est. Value</th>
+                      <th className="px-4 py-3 text-center">Docs</th>
                       <th className="px-4 py-3 text-center">Assign</th>
                     </tr>
                   </thead>
@@ -1887,6 +2194,16 @@ export default function Armory({ profile }) {
                             {row.price_per_bar != null && row.available_bars > 0
                               ? `$${(row.available_bars * row.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                               : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <button
+                              onClick={() => openLotDocs(row)}
+                              className={`inline-flex items-center gap-1 hover:text-skynet-accent ${materialDocCounts[row.id] > 0 ? 'text-skynet-accent' : 'text-gray-600'}`}
+                              title="Lot documents"
+                            >
+                              <Paperclip size={14} />
+                              <span className="text-xs">{materialDocCounts[row.id] || 0}</span>
+                            </button>
                           </td>
                           <td className="px-4 py-3 text-center">
                             {assigningRack === row.id ? (
@@ -2040,7 +2357,7 @@ export default function Armory({ profile }) {
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
               <button
-                onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setShowReceivingModal(true) }}
+                onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setReceivingTypeId(''); setReceivingSize(''); setReceivingCertFiles([]); setSavedReceiptId(null); setShowReceivingModal(true) }}
                 className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
               >
                 <Plus size={18} /> Log Receipt
@@ -2070,6 +2387,7 @@ export default function Armory({ profile }) {
                       <th className="px-4 py-3 text-left">Vendor</th>
                       <th className="px-4 py-3 text-left">Received By</th>
                       <th className="px-4 py-3 text-left">Notes</th>
+                      <th className="px-4 py-3 text-center">Cert</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-700">
@@ -2099,6 +2417,20 @@ export default function Armory({ profile }) {
                         <td className="px-4 py-3 text-gray-300">{r.vendor || '—'}</td>
                         <td className="px-4 py-3 text-gray-300">{r.received_by_profile?.full_name || '—'}</td>
                         <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{r.notes || '—'}</td>
+                        <td className="px-4 py-3 text-center">
+                          {materialDocCounts[r.id] > 0 ? (
+                            <button
+                              onClick={() => openLotDocs(r)}
+                              className="inline-flex items-center gap-1 text-skynet-accent hover:text-skynet-accent/80"
+                              title="View material certs"
+                            >
+                              <Paperclip size={14} />
+                              <span className="text-xs">{materialDocCounts[r.id]}</span>
+                            </button>
+                          ) : (
+                            <span className="text-gray-600 text-xs">—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -3110,26 +3442,26 @@ export default function Armory({ profile }) {
       {/* Receiving Log Modal */}
       {showReceivingModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold text-white">Log Material Receipt</h2>
-              <button onClick={() => { setShowReceivingModal(false); setReceivingError('') }} className="text-gray-400 hover:text-white">
+              <button onClick={closeReceivingModal} className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
 
-            <div className="space-y-3">
-              {/* Step 1: Vendor */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Vendor */}
               <div>
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Vendor *</label>
                 {materialVendors.length > 0 ? (
                   <select
                     value={receivingForm.vendor}
-                    onChange={e => setReceivingForm(f => ({
-                      ...f,
-                      vendor: e.target.value,
-                      material_id: ''
-                    }))}
+                    onChange={e => {
+                      setReceivingForm(f => ({ ...f, vendor: e.target.value, material_id: '' }))
+                      setReceivingTypeId('')
+                      setReceivingSize('')
+                    }}
                     className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
                   >
                     <option value="">— Select vendor —</option>
@@ -3144,25 +3476,53 @@ export default function Armory({ profile }) {
                 )}
               </div>
 
-              {/* Step 2: Material (filtered by vendor) */}
+              {/* Material Type */}
               <div>
-                <label className="text-xs text-gray-400 uppercase tracking-wide">Material *</label>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Material Type *</label>
                 <select
-                  value={receivingForm.material_id}
-                  onChange={e => setReceivingForm(f => ({ ...f, material_id: e.target.value }))}
-                  disabled={!receivingForm.vendor || vendorMaterials.length === 0}
+                  value={receivingTypeId}
+                  onChange={e => {
+                    setReceivingTypeId(e.target.value)
+                    setReceivingSize('')
+                    setReceivingForm(f => ({ ...f, material_id: '' }))
+                  }}
+                  disabled={!receivingForm.vendor || receivingTypes.length === 0}
                   className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent disabled:opacity-50"
                 >
-                  <option value="">— Select material —</option>
-                  {vendorMaterials.map(m => (
-                    <option key={m.id} value={m.id}>
-                      {m.material_type?.name} — {m.bar_size_inches}"
-                    </option>
+                  <option value="">— Select type —</option>
+                  {receivingTypes.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
                 </select>
               </div>
 
-              {/* Step 3: Lot # */}
+              {/* Bar Size */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Size *</label>
+                <select
+                  value={receivingSize}
+                  onChange={e => {
+                    const size = e.target.value
+                    setReceivingSize(size)
+                    const resolved = materials.find(m =>
+                      m.vendor === receivingForm.vendor &&
+                      String(m.material_type?.id) === String(receivingTypeId) &&
+                      Number(m.bar_size_inches) === Number(size) &&
+                      m.is_active
+                    )
+                    setReceivingForm(f => ({ ...f, material_id: resolved?.id || '' }))
+                  }}
+                  disabled={!receivingTypeId || receivingSizes.length === 0}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent disabled:opacity-50"
+                >
+                  <option value="">— Select size —</option>
+                  {receivingSizes.map(s => (
+                    <option key={s} value={s}>{s}"</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Lot # */}
               <div>
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Lot # *</label>
                 <input
@@ -3170,6 +3530,29 @@ export default function Armory({ profile }) {
                   value={receivingForm.lot_number}
                   onChange={e => setReceivingForm(f => ({ ...f, lot_number: e.target.value }))}
                   placeholder="e.g. 2026-001"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Quantity */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Quantity (bars) *</label>
+                <input
+                  type="number" min="1"
+                  value={receivingForm.quantity}
+                  onChange={e => setReceivingForm(f => ({ ...f, quantity: e.target.value }))}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+
+              {/* Bar Length */}
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Length (inches) *</label>
+                <input
+                  type="number" min="1" step="any"
+                  value={receivingForm.bar_length_inches}
+                  onChange={e => setReceivingForm(f => ({ ...f, bar_length_inches: e.target.value }))}
+                  placeholder="e.g. 144"
                   className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
                 />
               </div>
@@ -3239,31 +3622,8 @@ export default function Armory({ profile }) {
                 })()}
               </div>
 
-              {/* Quantity */}
-              <div>
-                <label className="text-xs text-gray-400 uppercase tracking-wide">Quantity (bars) *</label>
-                <input
-                  type="number" min="1"
-                  value={receivingForm.quantity}
-                  onChange={e => setReceivingForm(f => ({ ...f, quantity: e.target.value }))}
-                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
-                />
-              </div>
-
-              {/* Bar Length */}
-              <div>
-                <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Length (inches) *</label>
-                <input
-                  type="number" min="1" step="any"
-                  value={receivingForm.bar_length_inches}
-                  onChange={e => setReceivingForm(f => ({ ...f, bar_length_inches: e.target.value }))}
-                  placeholder="e.g. 144"
-                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
-                />
-              </div>
-
-              {/* Rack */}
-              <div>
+              {/* Rack (full width) */}
+              <div className="sm:col-span-2">
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Rack</label>
                 <select
                   value={receivingForm.rack}
@@ -3279,8 +3639,8 @@ export default function Armory({ profile }) {
                 <p className="text-xs text-gray-600 mt-1">Leave as Staging if rack location is not yet known.</p>
               </div>
 
-              {/* Notes */}
-              <div>
+              {/* Notes (full width) */}
+              <div className="sm:col-span-2">
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
                 <textarea
                   value={receivingForm.notes}
@@ -3288,6 +3648,39 @@ export default function Armory({ profile }) {
                   rows={2}
                   className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
                 />
+              </div>
+
+              {/* Material Cert upload (full width) */}
+              <div className="sm:col-span-2">
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Material Cert</label>
+                <input
+                  type="file"
+                  accept=".pdf,image/*"
+                  multiple
+                  onChange={e => {
+                    const files = Array.from(e.target.files || [])
+                    if (files.length) setReceivingCertFiles(prev => [...prev, ...files])
+                    e.target.value = ''
+                  }}
+                  className="block w-full mt-1 text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600"
+                />
+                {receivingCertFiles.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {receivingCertFiles.map((f, i) => (
+                      <li key={i} className="flex items-center justify-between text-xs bg-gray-800 rounded px-2 py-1">
+                        <span className="text-gray-300 truncate">{f.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setReceivingCertFiles(prev => prev.filter((_, idx) => idx !== i))}
+                          className="text-gray-500 hover:text-red-400 flex-shrink-0 ml-2"
+                          title="Remove"
+                        >
+                          <X size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
 
@@ -3298,17 +3691,25 @@ export default function Armory({ profile }) {
             )}
 
             <div className="flex justify-end gap-3 pt-2">
-              <button onClick={() => { setShowReceivingModal(false); setReceivingError('') }} className="px-4 py-2 text-gray-400 hover:text-white">
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveReceiving}
-                disabled={saving || !receivingForm.vendor || !receivingForm.material_id || !receivingForm.lot_number || !receivingForm.quantity || !receivingForm.bar_length_inches}
-                className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
-              >
-                {saving && <Loader2 size={16} className="animate-spin" />}
-                Log Receipt
-              </button>
+              {savedReceiptId ? (
+                <button onClick={closeReceivingModal} className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors">
+                  Close
+                </button>
+              ) : (
+                <>
+                  <button onClick={closeReceivingModal} className="px-4 py-2 text-gray-400 hover:text-white">
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveReceiving}
+                    disabled={saving || !receivingForm.vendor || !receivingForm.material_id || !receivingForm.lot_number || !receivingForm.quantity || !receivingForm.bar_length_inches}
+                    className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                  >
+                    {saving && <Loader2 size={16} className="animate-spin" />}
+                    Log Receipt
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -3357,6 +3758,99 @@ export default function Armory({ profile }) {
                 {resolvingSaving && <Loader2 size={16} className="animate-spin" />}
                 Mark Resolved
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lot Documents Modal (after-the-fact material cert uploads) */}
+      {docsModalRow && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-white">Lot Documents</h2>
+                <p className="text-xs text-gray-500 mt-0.5 font-mono">
+                  {docsModalRow.material_type || '—'} · {docsModalRow.bar_size || '—'} · lot {docsModalRow.lot_number || '—'}
+                </p>
+              </div>
+              <button onClick={() => { setDocsModalRow(null); setLotDocs([]); setDocModalError('') }} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            {docModalError && (
+              <div className="px-3 py-2 bg-red-900/40 border border-red-700 rounded-lg text-sm text-red-300">
+                {docModalError}
+              </div>
+            )}
+
+            {/* Existing documents */}
+            {lotDocsLoading ? (
+              <div className="py-6 text-center text-gray-500 text-sm">
+                <Loader2 size={20} className="animate-spin inline" />
+              </div>
+            ) : lotDocs.length === 0 ? (
+              <p className="text-gray-500 text-sm py-2">No documents uploaded for this lot yet.</p>
+            ) : (
+              <ul className="space-y-2">
+                {lotDocs.map(doc => (
+                  <li key={doc.id} className="flex items-center justify-between gap-3 bg-gray-800 rounded-lg px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-gray-200 truncate">{doc.file_name}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400 whitespace-nowrap">
+                          {doc.document_type === 'material_cert' ? 'Material Cert' : doc.document_type === 'packing_slip' ? 'Packing Slip' : 'Other'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-0.5">
+                        {doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
+                        {doc.uploader?.full_name ? ` · ${doc.uploader.full_name}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <button
+                        onClick={() => handleViewDoc(doc.file_path)}
+                        className="p-1.5 text-gray-400 hover:text-skynet-accent rounded transition-colors"
+                        title="View"
+                      >
+                        <ExternalLink size={15} />
+                      </button>
+                      {profile?.role === 'admin' && (
+                        <button
+                          onClick={() => handleDeleteLotDoc(doc)}
+                          className="p-1.5 text-gray-400 hover:text-red-400 rounded transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {/* Upload more */}
+            <div className="border-t border-gray-800 pt-3">
+              <label className="text-xs text-gray-400 uppercase tracking-wide">Upload Documents</label>
+              <input
+                type="file"
+                accept=".pdf,image/*"
+                multiple
+                disabled={docUploading}
+                onChange={e => {
+                  const files = Array.from(e.target.files || [])
+                  e.target.value = ''
+                  if (files.length) handleLotDocUpload(files)
+                }}
+                className="block w-full mt-1 text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600 disabled:opacity-50"
+              />
+              {docUploading && (
+                <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
+                  <Loader2 size={12} className="animate-spin" /> Uploading…
+                </p>
+              )}
             </div>
           </div>
         </div>

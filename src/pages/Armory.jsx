@@ -16,6 +16,7 @@ import {
   Check,
   AlertTriangle,
   Beaker,
+  Bell,
   Layers,
   Database,
   Upload,
@@ -42,14 +43,14 @@ export default function Armory({ profile }) {
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment'],
     finishing:        ['inventory', 'reconciliation', 'receiving'],
     machinist:        ['inventory', 'reconciliation'],
     scheduler:        ['customers'],
     customer_service: ['customers'],
-    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'customers'],
-    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'customers'],
+    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
+    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
   }
   const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -176,6 +177,13 @@ export default function Armory({ profile }) {
   const [invSearchLot, setInvSearchLot] = useState('')
   const [invSortKey, setInvSortKey] = useState('material_type') // material_type | bar_size | lot_number | available_bars
   const [invViewMode, setInvViewMode] = useState('lot') // 'lot' | 'size' (roll-up by material + size)
+  // Replenishment rules (min on-hand thresholds per material type + bar size)
+  const [replenishmentRules, setReplenishmentRules] = useState([])
+  const [showRuleModal, setShowRuleModal] = useState(false)
+  const [editingRule, setEditingRule] = useState(null)
+  const [ruleForm, setRuleForm] = useState({ material_type_id: '', bar_size_id: '', min_bars: '', notes: '' })
+  const [ruleModalError, setRuleModalError] = useState('')
+  const [ruleSaving, setRuleSaving] = useState(false)
   const [invSortDir, setInvSortDir] = useState('asc')
   const [assigningRack, setAssigningRack] = useState(null)
   const [rawMenuOpen, setRawMenuOpen] = useState(false) // Raw Materials tab-group dropdown
@@ -469,6 +477,98 @@ export default function Armory({ profile }) {
     }
   }, [])
 
+  const loadReplenishment = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('material_replenishment_rules')
+        .select('*')
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      setReplenishmentRules(data || [])
+    } catch (err) {
+      console.error('Error loading replenishment rules:', err)
+    }
+  }, [])
+
+  const openRuleModal = (rule) => {
+    if (rule) {
+      setEditingRule(rule)
+      setRuleForm({
+        material_type_id: rule.material_type_id,
+        bar_size_id: rule.bar_size_id,
+        min_bars: String(rule.min_bars ?? ''),
+        notes: rule.notes || '',
+      })
+    } else {
+      setEditingRule(null)
+      setRuleForm({ material_type_id: '', bar_size_id: '', min_bars: '', notes: '' })
+    }
+    setRuleModalError('')
+    setShowRuleModal(true)
+  }
+
+  const handleSaveRule = async () => {
+    setRuleSaving(true)
+    setRuleModalError('')
+    try {
+      if (!ruleForm.material_type_id || !ruleForm.bar_size_id) {
+        setRuleModalError('Material type and bar size are required.')
+        return
+      }
+      const minVal = parseFloat(ruleForm.min_bars)
+      if (isNaN(minVal) || minVal < 0) {
+        setRuleModalError('Enter a minimum of 0 or more bars.')
+        return
+      }
+      const payload = {
+        material_type_id: ruleForm.material_type_id,
+        bar_size_id: ruleForm.bar_size_id,
+        min_bars: minVal,
+        notes: ruleForm.notes?.trim() || null,
+        updated_at: new Date().toISOString(),
+      }
+      if (editingRule) {
+        const { error } = await supabase.from('material_replenishment_rules').update(payload).eq('id', editingRule.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase.from('material_replenishment_rules').insert({ ...payload, created_by: profile?.id })
+        if (error) {
+          if (error.code === '23505') { setRuleModalError('A rule for this material type and bar size already exists.'); return }
+          throw error
+        }
+      }
+      setShowRuleModal(false)
+      setEditingRule(null)
+      await loadReplenishment()
+    } catch (err) {
+      console.error('Failed to save replenishment rule:', err)
+      setRuleModalError('Could not save the rule. Please try again.')
+    } finally {
+      setRuleSaving(false)
+    }
+  }
+
+  const handleDeleteRule = async (rule) => {
+    if (!window.confirm('Delete this replenishment rule?')) return
+    try {
+      await supabase.from('material_replenishment_rules').delete().eq('id', rule.id)
+      await loadReplenishment()
+    } catch (err) {
+      console.error('Failed to delete replenishment rule:', err)
+    }
+  }
+
+  const handleToggleRuleActive = async (rule) => {
+    try {
+      await supabase.from('material_replenishment_rules')
+        .update({ is_active: !rule.is_active, updated_at: new Date().toISOString() })
+        .eq('id', rule.id)
+      await loadReplenishment()
+    } catch (err) {
+      console.error('Failed to toggle replenishment rule:', err)
+    }
+  }
+
   const closeResolveModal = () => {
     setResolvingFlag(null)
     setResolutionNotes('')
@@ -616,6 +716,13 @@ export default function Armory({ profile }) {
   useEffect(() => {
     loadOpenFlagCount()
   }, [loadOpenFlagCount])
+
+  // Load rules + inventory on mount so the Replenishment Rules badge is accurate
+  // from any tab (below-min count needs full inventory totals).
+  useEffect(() => {
+    loadReplenishment()
+    loadInventory()
+  }, [loadReplenishment, loadInventory])
 
   // Filter parts based on search, tab, and active state
   const filteredParts = parts.filter(p => {
@@ -1625,6 +1732,26 @@ export default function Armory({ profile }) {
         || (a.lot_number || '').localeCompare(b.lot_number || '')
     })
 
+  // Replenishment: total available bars per material+size across ALL lots
+  // (thresholds are vendor-agnostic), the active min per group, and below-min count.
+  const rmGroupKey = (typeName, sizeStr) => `${typeName}|||${sizeStr}`
+  const fullTotalsByGroup = inventoryRows.reduce((m, r) => {
+    const k = rmGroupKey(r.material_type, r.bar_size)
+    m[k] = (m[k] || 0) + (r.available_bars || 0)
+    return m
+  }, {})
+  const typeNameById = Object.fromEntries(materialTypes.map(t => [t.id, t.name]))
+  const sizeStrById = Object.fromEntries(barSizes.map(s => [s.id, s.size]))
+  const ruleMinByGroup = replenishmentRules.reduce((m, rule) => {
+    if (rule.is_active === false) return m
+    const tn = typeNameById[rule.material_type_id]
+    const ss = sizeStrById[rule.bar_size_id]
+    if (tn != null && ss != null) m[rmGroupKey(tn, ss)] = Number(rule.min_bars)
+    return m
+  }, {})
+  const belowMinCount = Object.keys(ruleMinByGroup).filter(k => (fullTotalsByGroup[k] || 0) < ruleMinByGroup[k]).length
+  const canEditRules = ['admin', 'compliance'].includes(profile?.role)
+
   // Materials (Raw Material master) tab — filtered + default-sorted (type, then size).
   const matFilterActive = !!(matFilterType || matFilterVendor || matFilterSize)
   const filteredMaterials = materials
@@ -1681,7 +1808,7 @@ export default function Armory({ profile }) {
           <div className="flex gap-1">
             {(() => {
               // Round B will add 'replenishment' to this group — single-line change.
-              const RAW_MATERIALS_TAB_IDS = ['barsizes', 'material_master', 'inventory', 'reconciliation', 'receiving']
+              const RAW_MATERIALS_TAB_IDS = ['barsizes', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment']
               const allTabs = [
                 { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
                 { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
@@ -1692,6 +1819,7 @@ export default function Armory({ profile }) {
                 { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
                 { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
                 { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
+                { id: 'replenishment', label: 'Replenishment Rules', icon: Bell, count: belowMinCount || null },
                 { id: 'customers', label: 'Customers', icon: Users, count: null },
                 { id: 'users', label: 'Users', icon: Users, count: null },
               ]
@@ -2524,6 +2652,7 @@ export default function Armory({ profile }) {
                         <th className="px-4 py-3 text-left">Material Type</th>
                         <th className="px-4 py-3 text-left">Bar Size</th>
                         <th className="px-4 py-3 text-right">Total Avail (bars)</th>
+                        <th className="px-4 py-3 text-right">Min</th>
                         <th className="px-4 py-3 text-right">Lots</th>
                         <th className="px-4 py-3 text-left">Vendors</th>
                         <th className="px-4 py-3 text-right">Est. Value</th>
@@ -2531,12 +2660,24 @@ export default function Armory({ profile }) {
                     </thead>
                     <tbody className="divide-y divide-gray-700">
                       {rows.map(g => {
+                        const gk = `${g.material_type}|||${g.bar_size}`
+                        const minVal = ruleMinByGroup[gk]
+                        const fullTotal = fullTotalsByGroup[gk] ?? 0
+                        const isBelow = minVal != null && fullTotal < minVal
                         const isNeg = g.totalBars < 0
                         return (
                           <tr key={`${g.material_type}|${g.bar_size}`} className="bg-gray-900 hover:bg-gray-800 transition-colors">
                             <td className="px-4 py-3 text-gray-300">{g.material_type}</td>
                             <td className="px-4 py-3 text-gray-300">{g.bar_size}</td>
-                            <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : 'text-white'}`}>{g.totalBars.toFixed(1)}</td>
+                            <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isBelow ? 'text-amber-300 font-semibold' : 'text-white'}`}>{g.totalBars.toFixed(1)}</td>
+                            <td className="px-4 py-3 text-right font-mono">
+                              {minVal != null ? (
+                                <span className="inline-flex items-center gap-1.5 justify-end">
+                                  <span className="text-gray-400">{minVal}</span>
+                                  {isBelow && <span className="text-xs px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded whitespace-nowrap">Below min</span>}
+                                </span>
+                              ) : <span className="text-gray-600">—</span>}
+                            </td>
                             <td className="px-4 py-3 text-right text-gray-400">{g.lotCount}</td>
                             <td className="px-4 py-3 text-gray-400 text-xs">{[...g.vendors].sort().join(', ') || '—'}</td>
                             <td className="px-4 py-3 text-right font-mono text-gray-300">
@@ -2550,6 +2691,7 @@ export default function Armory({ profile }) {
                       <tr>
                         <td className="px-4 py-3 font-semibold" colSpan={2}>Total ({rows.length} size groups)</td>
                         <td className="px-4 py-3 text-right font-mono font-semibold">{grandBars.toFixed(1)}</td>
+                        <td className="px-4 py-3"></td>
                         <td className="px-4 py-3"></td>
                         <td className="px-4 py-3"></td>
                         <td className="px-4 py-3 text-right font-mono font-semibold">
@@ -2814,6 +2956,178 @@ export default function Armory({ profile }) {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Replenishment Rules Tab */}
+        {activeTab === 'replenishment' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Replenishment Rules</h2>
+                <p className="text-sm text-gray-500">Minimum on-hand bars per material type and size. Below-min combinations are flagged here and in the Inventory By-Size view.</p>
+              </div>
+              {canEditRules && (
+                <button
+                  onClick={() => openRuleModal(null)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white text-sm rounded-lg transition-colors"
+                >
+                  <Plus size={16} /> Add Rule
+                </button>
+              )}
+            </div>
+
+            {belowMinCount > 0 && (
+              <div className="flex items-center gap-2 text-sm bg-amber-900/10 border border-amber-800/40 rounded-lg px-3 py-2">
+                <Bell size={15} className="text-amber-400" />
+                <span className="text-amber-200">{belowMinCount} material/size combination{belowMinCount === 1 ? '' : 's'} below minimum</span>
+              </div>
+            )}
+
+            {replenishmentRules.length === 0 ? (
+              <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                <Bell size={48} className="mx-auto text-gray-600 mb-3" />
+                <p className="text-gray-400">No replenishment rules yet.</p>
+                {canEditRules && <p className="text-gray-600 text-sm mt-1">Add a rule to get low-stock alerts for a material and size.</p>}
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-gray-700">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Material Type</th>
+                      <th className="px-4 py-3 text-left">Bar Size</th>
+                      <th className="px-4 py-3 text-right">Min Bars</th>
+                      <th className="px-4 py-3 text-right">Current Avail</th>
+                      <th className="px-4 py-3 text-left">Status</th>
+                      <th className="px-4 py-3 text-center">Active</th>
+                      {canEditRules && <th className="px-4 py-3 text-center">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {[...replenishmentRules]
+                      .map(rule => ({
+                        rule,
+                        typeName: typeNameById[rule.material_type_id] || '—',
+                        sizeStr: sizeStrById[rule.bar_size_id] || '—',
+                      }))
+                      .sort((a, b) => a.typeName.localeCompare(b.typeName) || cmpSize(a.sizeStr, b.sizeStr))
+                      .map(({ rule, typeName, sizeStr }) => {
+                        const current = fullTotalsByGroup[`${typeName}|||${sizeStr}`] ?? 0
+                        const isBelow = rule.is_active !== false && current < Number(rule.min_bars)
+                        return (
+                          <tr key={rule.id} className={`bg-gray-900 hover:bg-gray-800 transition-colors ${rule.is_active === false ? 'opacity-50' : ''}`}>
+                            <td className="px-4 py-3 text-gray-300">{typeName}</td>
+                            <td className="px-4 py-3 text-gray-300">{sizeStr}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">{Number(rule.min_bars)}</td>
+                            <td className={`px-4 py-3 text-right font-mono ${isBelow ? 'text-amber-300 font-semibold' : 'text-white'}`}>{current.toFixed(1)}</td>
+                            <td className="px-4 py-3">
+                              {rule.is_active === false ? (
+                                <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-400 rounded">Inactive</span>
+                              ) : isBelow ? (
+                                <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Below min</span>
+                              ) : (
+                                <span className="text-xs px-2 py-0.5 bg-green-900/50 text-green-300 rounded">OK</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {canEditRules ? (
+                                <button onClick={() => handleToggleRuleActive(rule)} title={rule.is_active === false ? 'Activate' : 'Deactivate'} className="text-gray-400 hover:text-white">
+                                  {rule.is_active === false ? <PowerOff size={16} /> : <Power size={16} className="text-green-400" />}
+                                </button>
+                              ) : (
+                                rule.is_active === false ? <PowerOff size={16} className="mx-auto text-gray-600" /> : <Power size={16} className="mx-auto text-green-400" />
+                              )}
+                            </td>
+                            {canEditRules && (
+                              <td className="px-4 py-3">
+                                <div className="flex items-center justify-center gap-2">
+                                  <button onClick={() => openRuleModal(rule)} className="text-gray-400 hover:text-white" title="Edit"><Edit2 size={14} /></button>
+                                  <button onClick={() => handleDeleteRule(rule)} className="text-gray-400 hover:text-red-400" title="Delete"><Trash2 size={14} /></button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        )
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Add / Edit Rule Modal */}
+            {showRuleModal && (
+              <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+                <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-bold text-white">{editingRule ? 'Edit' : 'Add'} Replenishment Rule</h2>
+                    <button onClick={() => setShowRuleModal(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">Material Type *</label>
+                      <select
+                        value={ruleForm.material_type_id}
+                        onChange={e => setRuleForm(f => ({ ...f, material_type_id: e.target.value }))}
+                        disabled={!!editingRule}
+                        className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent disabled:opacity-60"
+                      >
+                        <option value="">— Select type —</option>
+                        {[...materialTypes].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(t => (
+                          <option key={t.id} value={t.id}>{t.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">Bar Size *</label>
+                      <select
+                        value={ruleForm.bar_size_id}
+                        onChange={e => setRuleForm(f => ({ ...f, bar_size_id: e.target.value }))}
+                        disabled={!!editingRule}
+                        className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent disabled:opacity-60"
+                      >
+                        <option value="">— Select size —</option>
+                        {[...barSizes].sort((a, b) => (Number(a.size_decimal) || 0) - (Number(b.size_decimal) || 0)).map(s => (
+                          <option key={s.id} value={s.id}>{s.size}</option>
+                        ))}
+                      </select>
+                      {editingRule && <p className="mt-1 text-xs text-gray-500">Type and size are fixed on an existing rule. Delete and re-add to change them.</p>}
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">Minimum Bars *</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={ruleForm.min_bars}
+                        onChange={e => setRuleForm(f => ({ ...f, min_bars: e.target.value }))}
+                        className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
+                      <textarea
+                        value={ruleForm.notes}
+                        onChange={e => setRuleForm(f => ({ ...f, notes: e.target.value }))}
+                        rows={2}
+                        className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                      />
+                    </div>
+                    {ruleModalError && <p className="text-sm text-red-400">{ruleModalError}</p>}
+                  </div>
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button onClick={() => setShowRuleModal(false)} className="px-4 py-2 text-gray-400 hover:text-white text-sm">Cancel</button>
+                    <button
+                      onClick={handleSaveRule}
+                      disabled={ruleSaving}
+                      className="px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white text-sm rounded-lg transition-colors disabled:opacity-60"
+                    >
+                      {ruleSaving ? 'Saving…' : (editingRule ? 'Save Changes' : 'Add Rule')}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>

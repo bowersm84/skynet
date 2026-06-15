@@ -1017,43 +1017,21 @@ export default function Kiosk() {
   // Load available inventory stock for dropdown grouping
   const loadInventoryStock = async () => {
     try {
-      const { data: receiving } = await supabase
-        .from('material_receiving')
-        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity')
-
-      const { data: usage } = await supabase
-        .from('material_usage')
-        .select('material_receiving_id, quantity_used, quantity_used_inches')
-
-      const usageMap = {}
-      for (const u of (usage || [])) {
-        if (!u.material_receiving_id) continue
-        if (!usageMap[u.material_receiving_id]) {
-          usageMap[u.material_receiving_id] = { bars: 0, inches: 0 }
-        }
-        usageMap[u.material_receiving_id].bars += (u.quantity_used || 0)
-        usageMap[u.material_receiving_id].inches += (u.quantity_used_inches || 0)
-      }
-
-      const available = (receiving || [])
-        .map(r => {
-          const used = usageMap[r.id] || { bars: 0, inches: 0 }
-          const receivedInches = (r.quantity || 0) * (r.bar_length_inches || 0)
-          // Signed (unclamped): empty/negative lots stay selectable so staging
-          // from them is allowed — the DB trigger flags the discrepancy, we don't block.
-          const availableInches = receivedInches - used.inches
-          const availableBars = (r.quantity || 0) - used.bars
-          return {
-            material_type: r.material_type,
-            bar_size: r.bar_size,
-            lot_number: r.lot_number,
-            bar_length_inches: r.bar_length_inches || 0,
-            available_bars: availableBars,
-            available_inches: availableInches,
-          }
-        })
-
-      setInventoryStock(available)
+      // Availability from the material_availability view (received − used + approved
+      // adjustments). Signed/unclamped: empty/negative lots stay selectable so staging
+      // is allowed — the DB trigger flags the discrepancy, we don't block.
+      const { data, error } = await supabase
+        .from('material_availability')
+        .select('material_type, bar_size, lot_number, bar_length_inches, available_bars, available_inches')
+      if (error) throw error
+      setInventoryStock((data || []).map(r => ({
+        material_type: r.material_type,
+        bar_size: r.bar_size,
+        lot_number: r.lot_number,
+        bar_length_inches: r.bar_length_inches || 0,
+        available_bars: r.available_bars,
+        available_inches: r.available_inches,
+      })))
     } catch (err) {
       console.error('Error loading inventory stock:', err)
       setInventoryStock([])

@@ -13,6 +13,8 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronRight,
+  ClipboardCheck,
+  Printer,
   Check,
   AlertTriangle,
   Beaker,
@@ -43,10 +45,10 @@ export default function Armory({ profile }) {
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment'],
-    finishing:        ['inventory', 'reconciliation', 'receiving'],
-    machinist:        ['inventory', 'reconciliation'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
+    finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
+    machinist:        ['inventory', 'adjustments', 'reconciliation'],
     scheduler:        ['customers'],
     customer_service: ['customers'],
     president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
@@ -184,9 +186,25 @@ export default function Armory({ profile }) {
   const [ruleForm, setRuleForm] = useState({ material_type_id: '', bar_size_id: '', min_bars: '', notes: '' })
   const [ruleModalError, setRuleModalError] = useState('')
   const [ruleSaving, setRuleSaving] = useState(false)
+  // --- Inventory adjustments (cycle counts) ---
+  const [adjSubTab, setAdjSubTab] = useState('count')          // 'count' | 'review'
+  const [adjustments, setAdjustments] = useState([])           // pending + history
+  const [pendingAdjCount, setPendingAdjCount] = useState(0)
+  const [countRack, setCountRack] = useState('')
+  const [countMaterial, setCountMaterial] = useState('')
+  const [countSize, setCountSize] = useState('')
+  const [countInputs, setCountInputs] = useState({})           // { material_receiving_id: '12' }
+  const [countReason, setCountReason] = useState('')
+  const [countSubmitting, setCountSubmitting] = useState(false)
+  const [countResult, setCountResult] = useState(null)
+  const [adjReviewFilter, setAdjReviewFilter] = useState('pending') // 'pending' | 'history'
+  const [expandedSessions, setExpandedSessions] = useState({})
+  const [reviewNotes, setReviewNotes] = useState({})           // { session_id: 'note' }
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [adjError, setAdjError] = useState('')
   const [invSortDir, setInvSortDir] = useState('asc')
   const [assigningRack, setAssigningRack] = useState(null)
-  const [rawMenuOpen, setRawMenuOpen] = useState(false) // Raw Materials tab-group dropdown
+  const [openMenu, setOpenMenu] = useState(null) // which tab-group dropdown is open ('finished_goods' | 'raw_materials' | null)
   // material_receiving_id → cert document count (single batched query)
   const [materialDocCounts, setMaterialDocCounts] = useState({})
   // Lot Documents modal (after-the-fact uploads from the Inventory tab)
@@ -383,44 +401,34 @@ export default function Armory({ profile }) {
 
   const loadInventory = useCallback(async () => {
     try {
-      const { data: receiving } = await supabase
-        .from('material_receiving')
-        .select('id, material_id, material_type, bar_size, bar_length_inches, lot_number, quantity, vendor, rack, received_at, po_number, price_per_bar')
+      // Availability comes from the material_availability view (received − used +
+      // approved adjustments). Same row shape as before so the inventory tab,
+      // By-Size roll-up, and replenishment derivations are unchanged.
+      const { data, error } = await supabase
+        .from('material_availability')
+        .select('*')
         .order('received_at', { ascending: false })
+      if (error) throw error
 
-      const { data: usage } = await supabase
-        .from('material_usage')
-        .select('material_receiving_id, material_id, lot_number, quantity_used, quantity_used_inches')
-
-      const usageMap = {}
-      for (const u of (usage || [])) {
-        if (!u.material_receiving_id) continue
-        if (!usageMap[u.material_receiving_id]) usageMap[u.material_receiving_id] = { bars: 0, inches: 0 }
-        usageMap[u.material_receiving_id].bars += (u.quantity_used || 0)
-        usageMap[u.material_receiving_id].inches += (u.quantity_used_inches || 0)
-      }
-
-      const rows = (receiving || []).map(r => {
-        const used = usageMap[r.id] || { bars: 0, inches: 0 }
-        const receivedInches = (r.quantity || 0) * (r.bar_length_inches || 0)
-        const availableInches = receivedInches - used.inches
+      const rows = (data || []).map(r => {
+        const receivedInches = (r.received_bars || 0) * (r.bar_length_inches || 0)
         const availableBars = r.bar_length_inches > 0
-          ? availableInches / r.bar_length_inches
-          : (r.quantity - used.bars)
+          ? (r.available_inches / r.bar_length_inches)
+          : r.available_bars
         return {
-          id: r.id,
+          id: r.material_receiving_id,
           material_type: r.material_type,
           bar_size: r.bar_size,
           lot_number: r.lot_number,
           vendor: r.vendor || '—',
           rack: r.rack || null,
           received_at: r.received_at,
-          received_bars: r.quantity,
+          received_bars: r.received_bars,
           received_inches: receivedInches,
           bar_length_inches: r.bar_length_inches,
-          used_bars: used.bars,
-          used_inches: used.inches,
-          available_inches: Math.max(0, availableInches),
+          used_bars: r.used_bars,
+          used_inches: r.used_inches,
+          available_inches: Math.max(0, r.available_inches),
           // Signed (unclamped) so negative availability surfaces for chase-down.
           available_bars: availableBars,
           po_number: r.po_number || null,
@@ -476,6 +484,85 @@ export default function Armory({ profile }) {
       console.error('Error loading open flag count:', err)
     }
   }, [])
+
+  const loadAdjustments = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('inventory_adjustment_requests')
+        .select('*, requester:requested_by(full_name), reviewer:reviewed_by(full_name)')
+        .order('requested_at', { ascending: false })
+      if (error) throw error
+      setAdjustments(data || [])
+      setPendingAdjCount((data || []).filter(a => a.status === 'pending').length)
+    } catch (err) {
+      console.error('Error loading adjustments:', err)
+    }
+  }, [])
+
+  const loadPendingAdjCount = useCallback(async () => {
+    try {
+      const { count } = await supabase
+        .from('inventory_adjustment_requests')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'pending')
+      setPendingAdjCount(count || 0)
+    } catch (err) {
+      console.error('Error loading pending adjustment count:', err)
+    }
+  }, [])
+
+  const handleSubmitCount = async (items) => {
+    setCountSubmitting(true)
+    setAdjError('')
+    setCountResult(null)
+    try {
+      const sessionId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+      const { data, error } = await supabase.rpc('submit_inventory_adjustments', {
+        p_count_session_id: sessionId,
+        p_items: items,
+        p_reason: countReason?.trim() || null,
+      })
+      if (error) throw error
+      setCountResult(data)
+      setCountInputs({})
+      setCountReason('')
+      await loadInventory()
+      await loadAdjustments()
+    } catch (err) {
+      console.error('Failed to submit count:', err)
+      setAdjError(err.message || 'Could not submit the count.')
+    } finally {
+      setCountSubmitting(false)
+    }
+  }
+
+  const handleReviewLine = async (adjId, decision, notes) => {
+    setReviewBusy(true); setAdjError('')
+    try {
+      const { error } = await supabase.rpc('review_inventory_adjustment', {
+        p_adjustment_id: adjId, p_decision: decision, p_notes: notes || null,
+      })
+      if (error) throw error
+      await loadAdjustments(); await loadInventory()
+    } catch (err) {
+      console.error('Review failed:', err); setAdjError(err.message || 'Review failed.')
+    } finally { setReviewBusy(false) }
+  }
+
+  const handleReviewSession = async (sessionId, decision, notes) => {
+    setReviewBusy(true); setAdjError('')
+    try {
+      const { error } = await supabase.rpc('review_inventory_adjustment_session', {
+        p_count_session_id: sessionId, p_decision: decision, p_notes: notes || null,
+      })
+      if (error) throw error
+      await loadAdjustments(); await loadInventory()
+    } catch (err) {
+      console.error('Session review failed:', err); setAdjError(err.message || 'Review failed.')
+    } finally { setReviewBusy(false) }
+  }
 
   const loadReplenishment = useCallback(async () => {
     try {
@@ -723,6 +810,14 @@ export default function Armory({ profile }) {
     loadReplenishment()
     loadInventory()
   }, [loadReplenishment, loadInventory])
+
+  useEffect(() => {
+    loadPendingAdjCount()
+  }, [loadPendingAdjCount])
+
+  useEffect(() => {
+    if (activeTab === 'adjustments') { loadAdjustments(); loadInventory() }
+  }, [activeTab, loadAdjustments, loadInventory])
 
   // Filter parts based on search, tab, and active state
   const filteredParts = parts.filter(p => {
@@ -1808,27 +1903,29 @@ export default function Armory({ profile }) {
           <div className="flex gap-1">
             {(() => {
               // Round B will add 'replenishment' to this group — single-line change.
-              const RAW_MATERIALS_TAB_IDS = ['barsizes', 'material_master', 'inventory', 'reconciliation', 'receiving', 'replenishment']
+              const RAW_MATERIALS_TAB_IDS = ['materials', 'barsizes', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment']
               const allTabs = [
                 { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
                 { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
-                { id: 'materials', label: 'Materials', icon: Layers, count: null },
+                { id: 'materials', label: 'Material Types', icon: Layers, count: null },
                 { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
                 { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
-                { id: 'material_master', label: 'RM Master Data', icon: Layers, count: null },
+                { id: 'material_master', label: 'Material Catalog', icon: Layers, count: null },
                 { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
+                { id: 'adjustments', label: 'Adjustments', icon: ClipboardCheck, count: pendingAdjCount || null },
                 { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
                 { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
                 { id: 'replenishment', label: 'Replenishment Rules', icon: Bell, count: belowMinCount || null },
                 { id: 'customers', label: 'Customers', icon: Users, count: null },
                 { id: 'users', label: 'Users', icon: Users, count: null },
               ]
-              const topLevel = allTabs.filter(t => !RAW_MATERIALS_TAB_IDS.includes(t.id) && canSeeTab(t.id))
-              const grouped = allTabs.filter(t => RAW_MATERIALS_TAB_IDS.includes(t.id) && canSeeTab(t.id))
-              const groupActive = grouped.some(t => t.id === activeTab)
-              const groupCount = grouped.reduce((s, t) => s + (t.count > 0 ? t.count : 0), 0)
-              const beforeGroup = topLevel.filter(t => t.id !== 'customers' && t.id !== 'users')
-              const afterGroup = topLevel.filter(t => t.id === 'customers' || t.id === 'users')
+              const FINISHED_GOODS_TAB_IDS = ['assemblies', 'components', 'routing']
+              const TAB_GROUPS = [
+                { key: 'finished_goods', label: 'Finished Goods', icon: Package, ids: FINISHED_GOODS_TAB_IDS },
+                { key: 'raw_materials', label: 'Raw Materials', icon: Layers, ids: RAW_MATERIALS_TAB_IDS },
+              ]
+              const groupedIds = new Set([...FINISHED_GOODS_TAB_IDS, ...RAW_MATERIALS_TAB_IDS])
+              const standaloneTabs = allTabs.filter(t => !groupedIds.has(t.id) && canSeeTab(t.id))
               const renderTopBtn = (t) => (
                 <button
                   key={t.id}
@@ -1844,49 +1941,57 @@ export default function Armory({ profile }) {
                   )}
                 </button>
               )
+              const renderGroup = (g) => {
+                const members = allTabs.filter(t => g.ids.includes(t.id) && canSeeTab(t.id))
+                if (members.length === 0) return null
+                const active = members.some(t => t.id === activeTab)
+                const count = members.reduce((s, t) => s + (t.count > 0 ? t.count : 0), 0)
+                const isOpen = openMenu === g.key
+                const GIcon = g.icon
+                return (
+                  <div key={g.key} className="relative">
+                    <button
+                      onClick={() => setOpenMenu(isOpen ? null : g.key)}
+                      className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                        active ? 'border-skynet-accent text-skynet-accent' : 'border-transparent text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <GIcon size={16} />
+                      {g.label}
+                      {count > 0 && (
+                        <span className={`px-1.5 py-0.5 text-xs rounded ${active ? 'bg-skynet-accent/20' : 'bg-gray-800'}`}>{count}</span>
+                      )}
+                      <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    {isOpen && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setOpenMenu(null)} />
+                        <div className="absolute left-0 top-full z-50 w-56 bg-gray-900 border border-gray-700 rounded-b-lg shadow-xl py-1">
+                          {members.map(t => (
+                            <button
+                              key={t.id}
+                              onClick={() => { setActiveTab(t.id); setOpenMenu(null) }}
+                              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm transition-colors ${
+                                activeTab === t.id ? 'text-skynet-accent bg-skynet-accent/10' : 'text-gray-300 hover:text-white hover:bg-gray-800'
+                              }`}
+                            >
+                              <t.icon size={16} />
+                              <span className="flex-1 text-left">{t.label}</span>
+                              {t.count > 0 && (
+                                <span className="px-1.5 py-0.5 text-xs rounded bg-gray-800">{t.count}</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )
+              }
               return (
                 <>
-                  {beforeGroup.map(renderTopBtn)}
-                  {grouped.length > 0 && (
-                    <div className="relative">
-                      <button
-                        onClick={() => setRawMenuOpen(o => !o)}
-                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                          groupActive ? 'border-skynet-accent text-skynet-accent' : 'border-transparent text-gray-400 hover:text-white'
-                        }`}
-                      >
-                        <Layers size={16} />
-                        Raw Materials
-                        {groupCount > 0 && (
-                          <span className={`px-1.5 py-0.5 text-xs rounded ${groupActive ? 'bg-skynet-accent/20' : 'bg-gray-800'}`}>{groupCount}</span>
-                        )}
-                        <ChevronDown size={14} className={`transition-transform ${rawMenuOpen ? 'rotate-180' : ''}`} />
-                      </button>
-                      {rawMenuOpen && (
-                        <>
-                          <div className="fixed inset-0 z-40" onClick={() => setRawMenuOpen(false)} />
-                          <div className="absolute left-0 top-full z-50 w-56 bg-gray-900 border border-gray-700 rounded-b-lg shadow-xl py-1">
-                            {grouped.map(t => (
-                              <button
-                                key={t.id}
-                                onClick={() => { setActiveTab(t.id); setRawMenuOpen(false) }}
-                                className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm transition-colors ${
-                                  activeTab === t.id ? 'text-skynet-accent bg-skynet-accent/10' : 'text-gray-300 hover:text-white hover:bg-gray-800'
-                                }`}
-                              >
-                                <t.icon size={16} />
-                                <span className="flex-1 text-left">{t.label}</span>
-                                {t.count > 0 && (
-                                  <span className="px-1.5 py-0.5 text-xs rounded bg-gray-800">{t.count}</span>
-                                )}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {afterGroup.map(renderTopBtn)}
+                  {TAB_GROUPS.map(renderGroup)}
+                  {standaloneTabs.map(renderTopBtn)}
                 </>
               )
             })()}
@@ -2224,10 +2329,10 @@ export default function Armory({ profile }) {
         {activeTab === 'material_master' && (
           <div className="space-y-6">
 
-            {/* ── Section 1: Material Definitions ── */}
+            {/* ── Section 1: Material Catalog ── */}
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-white">Material Definitions</h2>
+                <h2 className="text-lg font-semibold text-white">Material Catalog</h2>
                 {canSeeTab('material_master') && (
                   <button
                     onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setMaterialModalError(''); setExistingInactive(null); setShowMaterialMasterModal(true) }}
@@ -3132,6 +3237,304 @@ export default function Armory({ profile }) {
             )}
           </div>
         )}
+
+        {/* Inventory Adjustments Tab */}
+        {activeTab === 'adjustments' && (() => {
+          const isApprover = ['admin', 'compliance'].includes(profile?.role)
+          const countRows = inventoryRows.filter(r => {
+            if (countRack === 'Staging' && r.rack !== null) return false
+            if (countRack && countRack !== 'Staging' && r.rack !== countRack) return false
+            if (countMaterial && r.material_type !== countMaterial) return false
+            if (countSize && r.bar_size !== countSize) return false
+            return true
+          })
+          const countItems = countRows
+            .filter(r => {
+              const v = countInputs[r.id]
+              return v !== undefined && v !== '' && Number(v) !== Math.round(r.available_bars)
+            })
+            .map(r => ({ material_receiving_id: r.id, counted_bars: Number(countInputs[r.id]) }))
+
+          const handlePrintCountSheet = () => {
+            const sorted = [...countRows].sort((a, b) =>
+              (a.rack || 'Staging').localeCompare(b.rack || 'Staging')
+              || (a.material_type || '').localeCompare(b.material_type || '')
+              || cmpSize(a.bar_size, b.bar_size)
+              || (a.lot_number || '').localeCompare(b.lot_number || '')
+            )
+            const scopeBits = []
+            if (countRack) scopeBits.push(`Rack: ${countRack}`)
+            if (countMaterial) scopeBits.push(`Material: ${countMaterial}`)
+            if (countSize) scopeBits.push(`Size: ${countSize}`)
+            const scopeLabel = scopeBits.length ? scopeBits.join('  |  ') : 'All racks'
+            const printed = new Date().toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            const rowsHtml = sorted.map(r => `
+              <tr>
+                <td>${esc(r.rack || 'Staging')}</td>
+                <td>${esc(r.material_type)}</td>
+                <td>${esc(r.bar_size)}</td>
+                <td>${esc(r.lot_number || '—')}</td>
+                <td class="num">${Math.round(r.available_bars)}</td>
+                <td class="blank"></td>
+                <td class="blank"></td>
+              </tr>`).join('')
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cycle Count Sheet</title>
+              <style>
+                *{box-sizing:border-box;}
+                body{font-family:Arial,Helvetica,sans-serif;color:#000;margin:24px;}
+                h1{font-size:18px;margin:0 0 4px;}
+                .meta{font-size:12px;color:#333;margin-bottom:3px;}
+                .sign{font-size:12px;margin:10px 0 14px;}
+                table{width:100%;border-collapse:collapse;font-size:12px;}
+                th,td{border:1px solid #000;padding:6px 8px;text-align:left;}
+                th{background:#eee;text-transform:uppercase;font-size:11px;}
+                td.num{text-align:right;}
+                td.blank{width:90px;}
+                .foot{font-size:11px;color:#555;margin-top:12px;}
+                @page{margin:12mm;}
+                @media print{body{margin:0;}}
+              </style></head><body>
+              <h1>SkyNet — Cycle Count Sheet</h1>
+              <div class="meta">${esc(scopeLabel)}</div>
+              <div class="meta">Printed: ${esc(printed)} &nbsp;&middot;&nbsp; ${sorted.length} lots</div>
+              <div class="sign">Counted by: ____________________________&nbsp;&nbsp;&nbsp;&nbsp;Date: ______________</div>
+              <table>
+                <thead><tr>
+                  <th>Rack</th><th>Material</th><th>Bar Size</th><th>Lot #</th>
+                  <th>System</th><th>Counted</th><th>Notes</th>
+                </tr></thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+              <p class="foot">Write the physical count in the &ldquo;Counted&rdquo; column, then enter values in SkyNet &rarr; Armory &rarr; Adjustments &rarr; Cycle Count.</p>
+              </body></html>`
+            const w = window.open('', '_blank')
+            if (!w) { setAdjError('Pop-up blocked — allow pop-ups for this site to print the count sheet.'); return }
+            w.document.write(html)
+            w.document.close()
+            w.focus()
+            w.print()
+          }
+
+          const reviewRows = adjustments.filter(a => adjReviewFilter === 'pending' ? a.status === 'pending' : a.status !== 'pending')
+          const sessions = {}
+          for (const a of reviewRows) {
+            if (!sessions[a.count_session_id]) sessions[a.count_session_id] = { id: a.count_session_id, lines: [], requester: a.requester?.full_name, requested_at: a.requested_at, requested_by: a.requested_by, total: 0 }
+            const s = sessions[a.count_session_id]
+            s.lines.push(a)
+            s.total += Number(a.financial_impact || 0)
+          }
+          const sessionList = Object.values(sessions).sort((x, y) => new Date(y.requested_at) - new Date(x.requested_at))
+
+          return (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Inventory Adjustments</h2>
+                  <p className="text-sm text-gray-500">Cycle-count the racks and submit adjustments for review. Approved counts go live across inventory and the kiosks.</p>
+                </div>
+                <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                  <button onClick={() => setAdjSubTab('count')} className={`px-3 py-1.5 text-sm transition-colors ${adjSubTab === 'count' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Cycle Count</button>
+                  {isApprover && (
+                    <button onClick={() => setAdjSubTab('review')} className={`px-3 py-1.5 text-sm transition-colors ${adjSubTab === 'review' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>
+                      Review{pendingAdjCount > 0 ? ` (${pendingAdjCount})` : ''}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {adjError && <div className="text-sm text-red-400 bg-red-900/10 border border-red-800/40 rounded-lg px-3 py-2">{adjError}</div>}
+
+              {adjSubTab === 'count' && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <select value={countRack} onChange={e => setCountRack(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Racks</option>
+                      <option value="Staging">Staging</option>
+                      <option value="R1">R1</option><option value="R2">R2</option><option value="R3">R3</option><option value="R4">R4</option>
+                    </select>
+                    <select value={countMaterial} onChange={e => setCountMaterial(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Materials</option>
+                      {[...new Set(inventoryRows.map(r => r.material_type))].sort().map(mt => <option key={mt} value={mt}>{mt}</option>)}
+                    </select>
+                    <select value={countSize} onChange={e => setCountSize(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Sizes</option>
+                      {[...new Set(inventoryRows.map(r => r.bar_size).filter(Boolean))].sort((a, b) => cmpSize(a, b)).map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <span className="text-xs text-gray-500">{countRows.length} lots in scope</span>
+                    <button
+                      onClick={handlePrintCountSheet}
+                      disabled={countRows.length === 0}
+                      className="inline-flex items-center gap-2 px-3 py-2 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600 text-sm rounded-lg transition-colors disabled:opacity-40"
+                    >
+                      <Printer size={15} /> Print Count Sheet
+                    </button>
+                  </div>
+
+                  {countResult && (
+                    <div className="text-sm bg-green-900/10 border border-green-800/40 rounded-lg px-3 py-2 text-green-200">
+                      Submitted {countResult.inserted} adjustment{countResult.inserted === 1 ? '' : 's'}{countResult.skipped > 0 ? `, skipped ${countResult.skipped} (already pending)` : ''}. Net impact ${Number(countResult.total_impact || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.
+                    </div>
+                  )}
+
+                  {countRows.length === 0 ? (
+                    <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                      <ClipboardCheck size={48} className="mx-auto text-gray-600 mb-3" />
+                      <p className="text-gray-400">No lots in this scope.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="overflow-x-auto rounded-lg border border-gray-700">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                            <tr>
+                              <th className="px-4 py-3 text-left">Rack</th>
+                              <th className="px-4 py-3 text-left">Material</th>
+                              <th className="px-4 py-3 text-left">Bar Size</th>
+                              <th className="px-4 py-3 text-left">Lot #</th>
+                              <th className="px-4 py-3 text-right">System</th>
+                              <th className="px-4 py-3 text-right">Counted</th>
+                              <th className="px-4 py-3 text-right">Δ</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-700">
+                            {countRows.map(r => {
+                              const sys = Math.round(r.available_bars)
+                              const v = countInputs[r.id]
+                              const hasVal = v !== undefined && v !== ''
+                              const delta = hasVal ? Number(v) - sys : null
+                              return (
+                                <tr key={r.id} className="bg-gray-900 hover:bg-gray-800">
+                                  <td className="px-4 py-3">{r.rack ? <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{r.rack}</span> : <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>}</td>
+                                  <td className="px-4 py-3 text-gray-300">{r.material_type}</td>
+                                  <td className="px-4 py-3 text-gray-300">{r.bar_size}</td>
+                                  <td className="px-4 py-3 font-mono text-gray-300">{r.lot_number || '—'}</td>
+                                  <td className="px-4 py-3 text-right font-mono text-gray-400">{sys}</td>
+                                  <td className="px-4 py-3 text-right">
+                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [r.id]: e.target.value }))} placeholder={String(sys)} className="w-20 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
+                                  </td>
+                                  <td className={`px-4 py-3 text-right font-mono ${delta == null || delta === 0 ? 'text-gray-600' : delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta == null ? '—' : (delta > 0 ? `+${delta}` : delta)}</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <input type="text" value={countReason} onChange={e => setCountReason(e.target.value)} placeholder="Reason / note (optional)" className="flex-1 min-w-[200px] px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
+                        <button
+                          onClick={() => handleSubmitCount(countItems)}
+                          disabled={countSubmitting || countItems.length === 0}
+                          className="px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          {countSubmitting ? 'Submitting…' : `Submit ${countItems.length} Adjustment${countItems.length === 1 ? '' : 's'}`}
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-600">Only lots whose counted value differs from system are submitted. Adjustments require approval before they affect inventory.</p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {adjSubTab === 'review' && isApprover && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2">
+                    {['pending', 'history'].map(f => (
+                      <button key={f} onClick={() => setAdjReviewFilter(f)} className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${adjReviewFilter === f ? 'border-skynet-accent text-skynet-accent bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'}`}>{f === 'pending' ? 'Pending' : 'History'}</button>
+                    ))}
+                  </div>
+
+                  {sessionList.length === 0 ? (
+                    <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                      <ClipboardCheck size={48} className="mx-auto text-gray-600 mb-3" />
+                      <p className="text-gray-400">No {adjReviewFilter} adjustments.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {sessionList.map(s => {
+                        const open = !!expandedSessions[s.id]
+                        const isOwn = s.requested_by === profile?.id && profile?.role !== 'admin'  // admins may self-approve
+                        const pending = adjReviewFilter === 'pending'
+                        return (
+                          <div key={s.id} className="border border-gray-700 rounded-lg overflow-hidden">
+                            <button onClick={() => setExpandedSessions(m => ({ ...m, [s.id]: !open }))} className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-gray-800/60 hover:bg-gray-800 text-left">
+                              <div className="flex items-center gap-2">
+                                {open ? <ChevronDown size={16} className="text-gray-400" /> : <ChevronRight size={16} className="text-gray-400" />}
+                                <div>
+                                  <div className="text-sm text-gray-200">{s.requester || '—'} · {s.lines.length} line{s.lines.length === 1 ? '' : 's'}</div>
+                                  <div className="text-xs text-gray-500">{new Date(s.requested_at).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+                                </div>
+                              </div>
+                              <div className={`text-sm font-mono ${s.total < 0 ? 'text-red-400' : s.total > 0 ? 'text-amber-300' : 'text-gray-400'}`}>
+                                {s.total < 0 ? '-' : ''}${Math.abs(s.total).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </div>
+                            </button>
+                            {open && (
+                              <div className="p-3 space-y-3 bg-gray-900">
+                                <div className="overflow-x-auto rounded border border-gray-700">
+                                  <table className="w-full text-sm">
+                                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                                      <tr>
+                                        <th className="px-3 py-2 text-left">Material</th>
+                                        <th className="px-3 py-2 text-left">Size</th>
+                                        <th className="px-3 py-2 text-left">Lot #</th>
+                                        <th className="px-3 py-2 text-right">System</th>
+                                        <th className="px-3 py-2 text-right">Counted</th>
+                                        <th className="px-3 py-2 text-right">Δ</th>
+                                        <th className="px-3 py-2 text-right">$ Impact</th>
+                                        {!pending && <th className="px-3 py-2 text-left">Status</th>}
+                                        {pending && <th className="px-3 py-2 text-center">Line</th>}
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-700">
+                                      {s.lines.map(l => (
+                                        <tr key={l.id} className="bg-gray-900">
+                                          <td className="px-3 py-2 text-gray-300">{l.material_type || '—'}</td>
+                                          <td className="px-3 py-2 text-gray-300">{l.bar_size || '—'}</td>
+                                          <td className="px-3 py-2 font-mono text-gray-300">{l.lot_number || '—'}</td>
+                                          <td className="px-3 py-2 text-right font-mono text-gray-400">{Number(l.system_bars_at_count)}</td>
+                                          <td className="px-3 py-2 text-right font-mono text-gray-200">{Number(l.counted_bars)}</td>
+                                          <td className={`px-3 py-2 text-right font-mono ${Number(l.adjustment_delta) < 0 ? 'text-red-400' : 'text-amber-300'}`}>{Number(l.adjustment_delta) > 0 ? `+${Number(l.adjustment_delta)}` : Number(l.adjustment_delta)}</td>
+                                          <td className="px-3 py-2 text-right font-mono text-gray-300">{l.financial_impact != null ? `${Number(l.financial_impact) < 0 ? '-' : ''}$${Math.abs(Number(l.financial_impact)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}</td>
+                                          {!pending && (
+                                            <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded ${l.status === 'approved' ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}`} title={l.review_notes || ''}>{l.status}</span></td>
+                                          )}
+                                          {pending && (
+                                            <td className="px-3 py-2 text-center whitespace-nowrap">
+                                              <button disabled={reviewBusy || isOwn} onClick={() => handleReviewLine(l.id, 'approved', reviewNotes[s.id] || null)} className="text-xs px-2 py-1 bg-green-700 hover:bg-green-600 text-white rounded disabled:opacity-40 mr-1">Approve</button>
+                                              <button disabled={reviewBusy || isOwn || !(reviewNotes[s.id] || '').trim()} onClick={() => handleReviewLine(l.id, 'rejected', reviewNotes[s.id])} className="text-xs px-2 py-1 bg-red-800 hover:bg-red-700 text-white rounded disabled:opacity-40">Reject</button>
+                                            </td>
+                                          )}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                {pending && (
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <input type="text" value={reviewNotes[s.id] || ''} onChange={e => setReviewNotes(m => ({ ...m, [s.id]: e.target.value }))} placeholder="Review note (required to reject)" className="flex-1 min-w-[200px] px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
+                                    {isOwn ? (
+                                      <span className="text-xs text-amber-400">You submitted this session — another approver must review it.</span>
+                                    ) : (
+                                      <>
+                                        <button disabled={reviewBusy} onClick={() => handleReviewSession(s.id, 'approved', reviewNotes[s.id] || null)} className="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-sm rounded-lg disabled:opacity-50">Approve All</button>
+                                        <button disabled={reviewBusy || !(reviewNotes[s.id] || '').trim()} onClick={() => handleReviewSession(s.id, 'rejected', reviewNotes[s.id])} className="px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg disabled:opacity-50">Reject All</button>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* Customers Tab */}
         {activeTab === 'customers' && <CustomersTab profile={profile} />}

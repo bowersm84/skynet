@@ -211,24 +211,19 @@ export default function MaterialKiosk() {
 
   const loadInventoryStock = useCallback(async () => {
     try {
-      const { data: receiving } = await supabase
-        .from('material_receiving').select('id, material_type, bar_size, lot_number, quantity')
-      const { data: usage } = await supabase
-        .from('material_usage').select('material_receiving_id, quantity_used')
-      const usedByReceiving = {}
-      for (const u of usage || []) {
-        if (!u.material_receiving_id) continue
-        usedByReceiving[u.material_receiving_id] = (usedByReceiving[u.material_receiving_id] || 0) + (u.quantity_used || 0)
-      }
-      const available = (receiving || [])
+      // available_bars from the material_availability view (received − used + approved
+      // adjustments). Signed/unclamped so empty/negative lots stay selectable — the DB
+      // trigger flags the discrepancy rather than blocking staging.
+      const { data, error } = await supabase
+        .from('material_availability')
+        .select('material_receiving_id, material_type, bar_size, lot_number, available_bars')
+      if (error) throw error
+      setInventoryStock((data || [])
+        .filter(r => r.lot_number)
         .map(r => ({
           material_type: r.material_type, bar_size: r.bar_size, lot_number: r.lot_number,
-          // Signed (unclamped): empty/negative lots stay selectable; the DB trigger
-          // flags the discrepancy rather than blocking staging.
-          available_bars: (r.quantity || 0) - (usedByReceiving[r.id] || 0),
-        }))
-        .filter(r => r.lot_number)
-      setInventoryStock(available)
+          available_bars: r.available_bars,
+        })))
     } catch (err) { console.error('Error loading inventory stock:', err); setInventoryStock([]) }
   }, [])
 

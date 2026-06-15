@@ -1185,3 +1185,37 @@ SKY74 — kiosk PRODUCTION Complete (`handleCompleteJob` + `completeForm` + the 
 
 ### D-S63-06 — Maintenance creation atomized; planned routed through the resolve flow; "move next" is a repack
 `CreateMaintenanceModal` routes maintenance creation through the `create_maintenance_atomic` RPC: the maintenance WO + the DTP/DTU block insert + the production shove now commit in ONE transaction, so the deferred `jobs_no_machine_overlap` constraint only ever sees the final, conflict-free schedule (same atomic-RPC pattern as `reschedule_with_cascade` / `unschedule_with_cascade` / `change_end_with_cascade`). The overlap pre-check now runs for BOTH planned and unplanned (it was unplanned-only), so planned maintenance landing on assigned production opens the same resolve modal. The resolve modal's two manual loops are gone: `return_to_queue` passes the overlapping job ids as `p_requeue_ids` (the RPC pulls them off the machine); `move_next` passes an empty list and the RPC repacks all movable production around the block and cascades downstream — no more client-side per-job time math. Job-number generation (last DTP-/DTU- + 1) and the unplanned machine `status='down'` update stay client-side. On any failure nothing is left behind (single transaction), removing the prior orphaned-WO/job risk when a later write tripped the constraint.
+
+---
+
+## 2026-06-15 — Outsourcing consolidation: receive a combined lot as ONE card (CR)
+
+Follow-up to the shipped "Combine Like Products" feature (Option B: consolidated sends share
+`outbound_sends.consolidation_group_id`; each batch keeps its own finishing_send_id / job / step /
+quantity row).
+
+Field report (Ashley/Matt): parts ship to the vendor as ONE box and return in ONE bag, but the
+At Vendor list rendered one card per batch and the group-return form asked for a per-batch quantity.
+Receiving a 10-batch lot meant 10 cards / 10 qty fields.
+
+### D-OCON-CR1 — At Vendor + Returned collapse to one card per consolidation group
+`OutsourcedJobs.jsx` collapses every `consolidation_group_id` into a single synthetic group card
+(constituent batches listed inside with per-batch FLN/qty and a summed total). Non-consolidated sends
+are unchanged (one card each). Purely a display change — the underlying per-batch `outbound_sends`
+rows are untouched, so the Job Traveler and the effective-qty rollup keep per-batch granularity.
+No schema change.
+
+### D-OCON-CR2 — Receive the whole lot with a single total quantity
+The per-batch quantity inputs are replaced by one "Total Qty Returned" field, defaulting to the total
+sent. On confirm the lot's shared vendor lot/cert + return date are written to every row in the group,
+and the single total is distributed back across the rows so each job/step rollup stays exact: full
+return (total == sum sent) gives each row its own sent qty; a short return apportions proportionally by
+sent qty with the rounding remainder on the last row, so the per-row sum equals the entered total. Cert
+upload on a group card writes the cert path to all rows in the group.
+
+### Why distribute rather than store one lot-level number
+`getEffectiveQty` (effectiveQty.js) sums `quantity_returned` across a job's sends for the latest routing
+step; the rollup only cares about the SUM, so distributing the lot total across rows keeps every rollup
+correct while preserving the material-lot traceability that is the whole point of consolidation. The
+president's traceability rule — one material lot per send-out — is unaffected; combining still happens
+only at the compliance → outsourcing handoff.

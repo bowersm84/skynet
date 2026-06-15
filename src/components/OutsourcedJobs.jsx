@@ -107,6 +107,26 @@ export default function OutsourcedJobs({ profile }) {
     return m
   })()
 
+  // Collapse a flat list of outbound_sends into "cards": each consolidation group becomes
+  // ONE synthetic group card (isGroup) carrying its constituent rows; every non-grouped row
+  // passes through unchanged. Group position follows the first member, so the upstream sort
+  // (expected_return / returned_at) is preserved. Display-only — underlying rows are untouched.
+  const collapseConsolidated = (list) => {
+    const cards = []
+    const groupIndex = {}
+    for (const s of list) {
+      const gid = s.consolidation_group_id
+      if (!gid) { cards.push(s); continue }
+      if (gid in groupIndex) { cards[groupIndex[gid]].rows.push(s); continue }
+      groupIndex[gid] = cards.length
+      cards.push({ isGroup: true, id: `grp-${gid}`, consolidation_group_id: gid, rows: [s] })
+    }
+    return cards
+  }
+
+  const atVendorCards = collapseConsolidated(atVendor)
+  const returnedCards = collapseConsolidated(returned)
+
   const computeBatchLetters = async (jobIds) => {
     if (!jobIds.length) return {}
     const { data, error } = await supabase
@@ -766,7 +786,7 @@ export default function OutsourcedJobs({ profile }) {
       const returnDate = form.return_date ? localDateToISO(form.return_date) : new Date().toISOString()
       const vendorLot = form.vendor_lot_number.trim()
 
-      // 1. Bulk-update all rows in the group (same vendor_lot, return_date; per-row qty defaults to its quantity)
+      // 1. Bulk-update all rows in the group (shared vendor_lot + return_date for the whole lot).
       const { error: bulkErr } = await supabase
         .from('outbound_sends')
         .update({
@@ -778,12 +798,32 @@ export default function OutsourcedJobs({ profile }) {
         .eq('consolidation_group_id', groupId)
       if (bulkErr) throw bulkErr
 
-      // Per-row quantity_returned (defaults to row.quantity)
+      // Per-row quantity_returned — the lot is received as ONE total. Distribute that total
+      // across the constituent rows so each job/step rollup stays exact:
+      //  • full return (total == sum sent): each row keeps its own sent quantity
+      //  • short return: apportion proportionally by sent qty, remainder to the last row so
+      //    the per-row sum equals the entered total exactly.
+      const sentTotal = groupRows.reduce((a, r) => a + (r.quantity || 0), 0)
+      const totalReturned = parseInt(form.total_returned ?? sentTotal)
+      const qtyByRow = {}
+      if (!Number.isFinite(totalReturned) || totalReturned === sentTotal || sentTotal === 0) {
+        for (const r of groupRows) qtyByRow[r.id] = r.quantity || 0
+      } else {
+        let allocated = 0
+        groupRows.forEach((r, i) => {
+          if (i === groupRows.length - 1) {
+            qtyByRow[r.id] = Math.max(0, totalReturned - allocated)
+          } else {
+            const share = Math.round(totalReturned * (r.quantity || 0) / sentTotal)
+            qtyByRow[r.id] = share
+            allocated += share
+          }
+        })
+      }
       for (const r of groupRows) {
-        const qty = parseInt(form[`qty_${r.id}`] ?? r.quantity)
         await supabase
           .from('outbound_sends')
-          .update({ quantity_returned: qty })
+          .update({ quantity_returned: qtyByRow[r.id] })
           .eq('id', r.id)
       }
 
@@ -886,16 +926,19 @@ export default function OutsourcedJobs({ profile }) {
     }
   }
 
-  const handleAttachCert = async (sendId, file) => {
+  const handleAttachCert = async (sendId, file, groupId = null) => {
     if (!file) return
-    setUploadingCertId(sendId)
+    setUploadingCertId(groupId || sendId)
     try {
-      const path = `outbound-certs/${sendId}/${file.name}`
+      const path = groupId
+        ? `outbound-certs/group-${groupId}/${file.name}`
+        : `outbound-certs/${sendId}/${file.name}`
       await uploadDocument(file, path)
-      const { error } = await supabase
+      let query = supabase
         .from('outbound_sends')
         .update({ cert_document_path: path, updated_at: new Date().toISOString() })
-        .eq('id', sendId)
+      query = groupId ? query.eq('consolidation_group_id', groupId) : query.eq('id', sendId)
+      const { error } = await query
       if (error) throw error
       await fetchAll()
     } catch (err) {
@@ -925,6 +968,192 @@ export default function OutsourcedJobs({ profile }) {
       <span className={`text-xs font-medium px-2 py-0.5 rounded border ${config.color}`}>
         {stepName || config.label}
       </span>
+    )
+  }
+
+  // ── Consolidated group card: AT VENDOR ──
+  // All rows share part / vendor / operation / material lot (the consolidation gate) and were
+  // shipped as ONE lot. Render ONE card with the constituent batches listed and a single total;
+  // receiving applies to the whole lot at once.
+  const renderAtVendorGroupCard = (card) => {
+    const rows = card.rows
+    const head = rows[0]
+    const meta = getSendDisplayMeta(head)
+    const gid = card.consolidation_group_id
+    const totalQty = rows.reduce((a, r) => a + (r.quantity || 0), 0)
+    const overdue = isPastToday(head.expected_return_at)
+    const isUploading = uploadingCertId === gid
+    const certRow = rows.find(r => r.cert_document_path)
+
+    return (
+      <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {getStepBadge(meta.stepName, head.operation_type)}
+            {head.vendor_name && <span className="text-sm text-white font-medium">{head.vendor_name}</span>}
+            <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-skynet-accent/10 text-skynet-accent border-skynet-accent/40 flex items-center gap-1">
+              <Combine size={10} />
+              Consolidated Lot ({rows.length})
+            </span>
+          </div>
+          <span className="text-xs px-2 py-0.5 rounded bg-blue-900/30 text-blue-300 flex-shrink-0">At Vendor</span>
+        </div>
+
+        <div className="flex items-center gap-3 text-sm">
+          <span className="text-skynet-accent font-mono">{meta.partNumber}</span>
+          {meta.partDescription && <span className="text-gray-500 truncate">{meta.partDescription}</span>}
+        </div>
+
+        <div className="space-y-1 rounded-lg bg-gray-800/40 border border-gray-800 p-2">
+          {rows.map(r => {
+            const rm = getSendDisplayMeta(r)
+            return (
+              <div key={r.id} className="flex items-center gap-2 text-[11px] flex-wrap">
+                <span className="text-white font-mono">{rm.jobNumber}</span>
+                {r.batchLetter && (
+                  <span className="px-1.5 py-0.5 rounded font-mono bg-cyan-900/40 text-cyan-300">Batch {r.batchLetter}</span>
+                )}
+                <span className="text-cyan-400 font-mono">FLN: {rm.lotValue || '—'}</span>
+                {rm.woNumber && <span className="text-gray-500">· {rm.woNumber}</span>}
+                <span className="text-gray-400 ml-auto">{r.quantity} pcs</span>
+              </div>
+            )
+          })}
+          <div className="flex items-center justify-between pt-1 mt-1 border-t border-gray-700">
+            <span className="text-[11px] text-gray-400">Total sent ({rows.length} batches)</span>
+            <span className="text-xs text-white font-semibold">{totalQty} pcs</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 text-xs flex-wrap">
+          <span className="text-gray-400">
+            Sent: <span className="text-gray-300">{formatDateLocal(head.sent_at)}</span>
+            {head.sent_by_profile?.full_name && <span className="text-gray-600"> by {head.sent_by_profile.full_name}</span>}
+          </span>
+          {(head.expected_return_at || canEdit) && (
+            editingExpectedId === gid ? (
+              <span className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-gray-400 text-xs">Expected:</span>
+                <input
+                  type="date"
+                  value={editingExpectedValue}
+                  onChange={e => setEditingExpectedValue(e.target.value)}
+                  className="px-1.5 py-0.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-skynet-accent focus:outline-none"
+                  autoFocus
+                />
+                <button onClick={() => handleUpdateExpectedReturn(head, editingExpectedValue || null)} disabled={saving} className="text-skynet-accent hover:text-blue-400 disabled:opacity-50" title="Save"><Check size={13} /></button>
+                <button onClick={() => { setEditingExpectedId(null); setEditingExpectedValue('') }} className="text-gray-500 hover:text-white" title="Cancel"><X size={13} /></button>
+                <span className="text-[10px] text-gray-500 italic">applies to whole lot</span>
+              </span>
+            ) : (
+              <span className={`flex items-center gap-1 ${overdue ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
+                {overdue && <AlertCircle size={12} />}
+                Expected:{' '}
+                <span className={overdue ? '' : 'text-gray-300'}>{head.expected_return_at ? formatDateOnly(head.expected_return_at) : '—'}</span>
+                {canEdit && (
+                  <button onClick={() => { setEditingExpectedId(gid); setEditingExpectedValue(head.expected_return_at || '') }} className="ml-1 text-gray-500 hover:text-skynet-accent transition-colors" title="Edit expected return date"><Pencil size={11} /></button>
+                )}
+              </span>
+            )
+          )}
+        </div>
+
+        {certRow && (
+          <button onClick={() => handleViewCert(certRow.cert_document_path)} className="flex items-center gap-1.5 text-xs text-skynet-accent hover:text-blue-400 transition-colors">
+            <FileText size={12} /> View Cert
+          </button>
+        )}
+
+        {canEdit && (
+          <div className="flex items-center gap-2 pt-2 border-t border-gray-800">
+            <button
+              onClick={() => {
+                setGroupReturnOpen(gid)
+                setGroupReturnForm(prev => ({
+                  ...prev,
+                  [gid]: {
+                    vendor_lot_number: '',
+                    return_date: new Date().toISOString().split('T')[0],
+                    total_returned: String(totalQty),
+                  }
+                }))
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-medium rounded-lg transition-colors"
+            >
+              <RotateCcw size={13} /> Receive Whole Lot
+            </button>
+            <label className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer ${isUploading ? 'bg-gray-700 text-gray-400' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}>
+              {isUploading ? <Clock size={13} className="animate-spin" /> : <Upload size={13} />}
+              {certRow ? 'Replace Cert' : 'Attach Cert'}
+              <input type="file" accept=".pdf" className="hidden" disabled={isUploading} onChange={(e) => handleAttachCert(head.id, e.target.files?.[0], gid)} />
+            </label>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Consolidated group card: RETURNED ──
+  const renderReturnedGroupCard = (card) => {
+    const rows = card.rows
+    const head = rows[0]
+    const meta = getSendDisplayMeta(head)
+    const totalReturned = rows.reduce((a, r) => a + (r.quantity_returned ?? r.quantity ?? 0), 0)
+    const certRow = rows.find(r => r.cert_document_path)
+
+    return (
+      <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {getStepBadge(meta.stepName, head.operation_type)}
+            {head.vendor_name && <span className="text-sm text-white font-medium">{head.vendor_name}</span>}
+            <span className="text-[10px] font-medium px-2 py-0.5 rounded border bg-skynet-accent/10 text-skynet-accent border-skynet-accent/40 flex items-center gap-1">
+              <Combine size={10} />
+              Consolidated Lot ({rows.length})
+            </span>
+          </div>
+          <span className="text-xs px-2 py-0.5 rounded bg-green-900/30 text-green-400 flex-shrink-0">Returned</span>
+        </div>
+
+        <div className="flex items-center gap-3 text-sm">
+          <span className="text-skynet-accent font-mono">{meta.partNumber}</span>
+          {meta.partDescription && <span className="text-gray-500 truncate">{meta.partDescription}</span>}
+        </div>
+
+        <div className="space-y-1 rounded-lg bg-gray-800/40 border border-gray-800 p-2">
+          {rows.map(r => {
+            const rm = getSendDisplayMeta(r)
+            return (
+              <div key={r.id} className="flex items-center gap-2 text-[11px] flex-wrap">
+                <span className="text-white font-mono">{rm.jobNumber}</span>
+                {r.batchLetter && (
+                  <span className="px-1.5 py-0.5 rounded font-mono bg-cyan-900/40 text-cyan-300">Batch {r.batchLetter}</span>
+                )}
+                <span className="text-cyan-400 font-mono">FLN: {rm.lotValue || '—'}</span>
+                <span className="text-gray-400 ml-auto">{r.quantity_returned ?? r.quantity} pcs</span>
+              </div>
+            )
+          })}
+          <div className="flex items-center justify-between pt-1 mt-1 border-t border-gray-700">
+            <span className="text-[11px] text-gray-400">Total returned ({rows.length} batches)</span>
+            <span className="text-xs text-white font-semibold">{totalReturned} pcs</span>
+          </div>
+        </div>
+
+        {head.vendor_lot_number && (
+          <div className="text-xs text-gray-400">Vendor Lot/Cert: <span className="text-white font-medium">{head.vendor_lot_number}</span></div>
+        )}
+        <div className="flex items-center gap-4 text-xs text-gray-400">
+          <span>Returned: <span className="text-green-300">{formatDateLocal(head.returned_at)}</span></span>
+          {head.returned_by_profile?.full_name && <span className="text-gray-600">by {head.returned_by_profile.full_name}</span>}
+        </div>
+
+        {certRow && (
+          <button onClick={() => handleViewCert(certRow.cert_document_path)} className="flex items-center gap-1.5 text-xs text-skynet-accent hover:text-blue-400 transition-colors">
+            <FileText size={12} /> View Cert
+          </button>
+        )}
+      </div>
     )
   }
 
@@ -1152,7 +1381,7 @@ export default function OutsourcedJobs({ profile }) {
         <div className="flex items-center gap-2 mb-3 px-2 py-1.5 bg-gray-800 rounded-lg">
           <Truck size={14} className="text-blue-400" />
           <span className="text-white font-medium text-sm">At Vendor</span>
-          <span className="text-gray-500 text-xs">({atVendor.length})</span>
+          <span className="text-gray-500 text-xs">({atVendorCards.length})</span>
         </div>
 
         {groupReturnOpen && (() => {
@@ -1165,7 +1394,7 @@ export default function OutsourcedJobs({ profile }) {
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-medium text-white flex items-center gap-2">
                   <Combine size={14} className="text-skynet-accent" />
-                  Return Whole Group ({groupRows.length} items)
+                  Receive Whole Lot ({groupRows.length} batches)
                 </h4>
                 <button
                   onClick={() => setGroupReturnOpen(null)}
@@ -1193,27 +1422,39 @@ export default function OutsourcedJobs({ profile }) {
                   />
                 </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="block text-gray-500 text-[10px]">Quantity returned per item</label>
-                {groupRows.map(r => {
-                  const meta = getSendDisplayMeta(r)
-                  return (
-                    <div key={r.id} className="flex items-center gap-3 px-3 py-1.5 rounded bg-gray-800/60 border border-gray-700">
-                      <span className="text-xs text-white font-mono flex-1">
-                        {meta.jobNumber} · Batch {r.batchLetter} · FLN {meta.lotValue}
-                      </span>
+              {(() => {
+                const sentTotal = groupRows.reduce((a, r) => a + (r.quantity || 0), 0)
+                return (
+                  <>
+                    <div>
+                      <label className="block text-gray-500 text-[10px] mb-1">Total Qty Returned *</label>
                       <input
                         type="number"
                         min="0"
-                        value={form[`qty_${r.id}`] ?? ''}
-                        onChange={e => setGroupReturnForm(prev => ({ ...prev, [gid]: { ...form, [`qty_${r.id}`]: e.target.value } }))}
-                        className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-white text-xs text-center focus:border-skynet-accent focus:outline-none"
+                        value={form.total_returned ?? ''}
+                        onChange={e => setGroupReturnForm(prev => ({ ...prev, [gid]: { ...form, total_returned: e.target.value } }))}
+                        className="w-40 px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs text-center focus:border-skynet-accent focus:outline-none"
                       />
-                      <span className="text-xs text-gray-500">/ {r.quantity}</span>
+                      <p className="text-[10px] text-gray-500 mt-1">
+                        Received as one lot — defaults to total sent ({sentTotal} pcs across {groupRows.length} batches). Per-batch quantities are recorded automatically.
+                      </p>
                     </div>
-                  )
-                })}
-              </div>
+                    <div className="space-y-1 pt-1">
+                      {groupRows.map(r => {
+                        const meta = getSendDisplayMeta(r)
+                        return (
+                          <div key={r.id} className="flex items-center gap-3 px-3 py-1 rounded bg-gray-800/40 border border-gray-800 text-[11px]">
+                            <span className="text-gray-300 font-mono flex-1">
+                              {meta.jobNumber} · Batch {r.batchLetter} · FLN {meta.lotValue}
+                            </span>
+                            <span className="text-gray-500">{r.quantity} pcs</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )
+              })()}
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => handleReturnGroup(gid)}
@@ -1221,7 +1462,7 @@ export default function OutsourcedJobs({ profile }) {
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
                 >
                   {saving ? <Clock size={13} className="animate-spin" /> : <Check size={13} />}
-                  Confirm Group Return
+                  Confirm Lot Return
                 </button>
               </div>
             </div>
@@ -1232,7 +1473,8 @@ export default function OutsourcedJobs({ profile }) {
           <p className="text-gray-600 text-sm italic text-center py-6">No parts currently at vendors</p>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {atVendor.map(send => {
+            {atVendorCards.map(send => {
+              if (send.isGroup) return renderAtVendorGroupCard(send)
               const isReturning = returnFormOpen === send.id
               const form = returnForm[send.id] || {}
               const isUploading = uploadingCertId === send.id
@@ -1487,7 +1729,7 @@ export default function OutsourcedJobs({ profile }) {
           {showReturned ? <ChevronDown size={14} className="text-gray-400" /> : <ChevronRight size={14} className="text-gray-400" />}
           <Check size={14} className="text-green-400" />
           <span className="text-white font-medium text-sm">{showReturned ? 'Hide' : 'Show'} Returned</span>
-          <span className="text-gray-500 text-xs">({returned.length})</span>
+          <span className="text-gray-500 text-xs">({returnedCards.length})</span>
         </button>
 
         {showReturned && (
@@ -1495,7 +1737,8 @@ export default function OutsourcedJobs({ profile }) {
             <p className="text-gray-600 text-sm italic text-center py-4">No returned sends yet</p>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              {returned.map(send => {
+              {returnedCards.map(send => {
+                if (send.isGroup) return renderReturnedGroupCard(send)
                 const meta = getSendDisplayMeta(send)
                 return (
                 <div key={send.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">

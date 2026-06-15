@@ -626,6 +626,10 @@ CREATE TABLE public.material_receiving (
   notes text,
   created_at timestamp with time zone DEFAULT now(),
   rack text,
+  po_number text,
+  weight_lbs numeric,
+  price_per_lb numeric,
+  price_per_bar numeric,
   CONSTRAINT material_receiving_pkey PRIMARY KEY (id),
   CONSTRAINT material_receiving_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
   CONSTRAINT material_receiving_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id)
@@ -884,4 +888,41 @@ CREATE TABLE public.material_loads (
   CONSTRAINT material_loads_pkey PRIMARY KEY (id),
   CONSTRAINT material_loads_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT material_loads_staged_by_fkey FOREIGN KEY (staged_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.material_reconciliation_flags (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  flag_type text NOT NULL CHECK (flag_type = ANY (ARRAY['unknown_lot'::text, 'negative_inventory'::text])),
+  lot_number text NOT NULL,
+  material_type text,
+  bar_size text,
+  material_receiving_id uuid,
+  material_usage_id uuid,
+  job_id uuid,
+  quantity_delta integer,
+  status text NOT NULL DEFAULT 'open'::text CHECK (status = ANY (ARRAY['open'::text, 'resolved'::text, 'ignored'::text])),
+  occurrence_count integer NOT NULL DEFAULT 1,
+  raised_at timestamp with time zone NOT NULL DEFAULT now(),
+  last_seen_at timestamp with time zone NOT NULL DEFAULT now(),
+  resolved_by uuid,
+  resolved_at timestamp with time zone,
+  resolution_notes text,
+  CONSTRAINT material_reconciliation_flags_pkey PRIMARY KEY (id),
+  CONSTRAINT material_reconciliation_flags_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
+  CONSTRAINT material_reconciliation_flags_material_usage_id_fkey FOREIGN KEY (material_usage_id) REFERENCES public.material_usage(id),
+  CONSTRAINT material_reconciliation_flags_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT material_reconciliation_flags_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.material_documents (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  material_receiving_id uuid NOT NULL,
+  document_type text NOT NULL DEFAULT 'material_cert'::text CHECK (document_type = ANY (ARRAY['material_cert'::text, 'packing_slip'::text, 'other'::text])),
+  file_name text NOT NULL,
+  file_path text NOT NULL,
+  file_size bigint,
+  mime_type text,
+  uploaded_by uuid,
+  uploaded_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT material_documents_pkey PRIMARY KEY (id),
+  CONSTRAINT material_documents_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
+  CONSTRAINT material_documents_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id)
 );

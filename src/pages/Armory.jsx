@@ -175,8 +175,10 @@ export default function Armory({ profile }) {
   const [invFilterSize, setInvFilterSize] = useState('')
   const [invSearchLot, setInvSearchLot] = useState('')
   const [invSortKey, setInvSortKey] = useState('material_type') // material_type | bar_size | lot_number | available_bars
+  const [invViewMode, setInvViewMode] = useState('lot') // 'lot' | 'size' (roll-up by material + size)
   const [invSortDir, setInvSortDir] = useState('asc')
   const [assigningRack, setAssigningRack] = useState(null)
+  const [rawMenuOpen, setRawMenuOpen] = useState(false) // Raw Materials tab-group dropdown
   // material_receiving_id → cert document count (single batched query)
   const [materialDocCounts, setMaterialDocCounts] = useState({})
   // Lot Documents modal (after-the-fact uploads from the Inventory tab)
@@ -608,8 +610,8 @@ export default function Armory({ profile }) {
   }, [activeTab, loadInventory])
 
   useEffect(() => {
-    if (activeTab === 'reconciliation') loadReconciliation()
-  }, [activeTab, loadReconciliation])
+    if (activeTab === 'reconciliation') { loadReconciliation(); loadInventory() }
+  }, [activeTab, loadReconciliation, loadInventory])
 
   useEffect(() => {
     loadOpenFlagCount()
@@ -1677,39 +1679,89 @@ export default function Armory({ profile }) {
       <div className="border-b border-gray-800 bg-gray-900/50">
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex gap-1">
-            {[
-              { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
-              { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
-              { id: 'materials', label: 'Materials', icon: Layers, count: null },
-              { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
-              { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
-              { id: 'material_master', label: 'Raw Material', icon: Layers, count: null },
-              { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
-              { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
-              { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
-              { id: 'customers', label: 'Customers', icon: Users, count: null },
-              { id: 'users', label: 'Users', icon: Users, count: null }
-            ].filter(tab => canSeeTab(tab.id)).map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab.id
-                    ? 'border-skynet-accent text-skynet-accent'
-                    : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                <tab.icon size={16} />
-                {tab.label}
-                {tab.count > 0 && (
-                  <span className={`px-1.5 py-0.5 text-xs rounded ${
-                    activeTab === tab.id ? 'bg-skynet-accent/20' : 'bg-gray-800'
-                  }`}>
-                    {tab.count}
-                  </span>
-                )}
-              </button>
-            ))}
+            {(() => {
+              // Round B will add 'replenishment' to this group — single-line change.
+              const RAW_MATERIALS_TAB_IDS = ['barsizes', 'material_master', 'inventory', 'reconciliation', 'receiving']
+              const allTabs = [
+                { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
+                { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
+                { id: 'materials', label: 'Materials', icon: Layers, count: null },
+                { id: 'routing', label: 'Routing Templates', icon: Route, count: null },
+                { id: 'barsizes', label: 'Bar Sizes', icon: Database, count: null },
+                { id: 'material_master', label: 'RM Master Data', icon: Layers, count: null },
+                { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
+                { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
+                { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
+                { id: 'customers', label: 'Customers', icon: Users, count: null },
+                { id: 'users', label: 'Users', icon: Users, count: null },
+              ]
+              const topLevel = allTabs.filter(t => !RAW_MATERIALS_TAB_IDS.includes(t.id) && canSeeTab(t.id))
+              const grouped = allTabs.filter(t => RAW_MATERIALS_TAB_IDS.includes(t.id) && canSeeTab(t.id))
+              const groupActive = grouped.some(t => t.id === activeTab)
+              const groupCount = grouped.reduce((s, t) => s + (t.count > 0 ? t.count : 0), 0)
+              const beforeGroup = topLevel.filter(t => t.id !== 'customers' && t.id !== 'users')
+              const afterGroup = topLevel.filter(t => t.id === 'customers' || t.id === 'users')
+              const renderTopBtn = (t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setActiveTab(t.id)}
+                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                    activeTab === t.id ? 'border-skynet-accent text-skynet-accent' : 'border-transparent text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <t.icon size={16} />
+                  {t.label}
+                  {t.count > 0 && (
+                    <span className={`px-1.5 py-0.5 text-xs rounded ${activeTab === t.id ? 'bg-skynet-accent/20' : 'bg-gray-800'}`}>{t.count}</span>
+                  )}
+                </button>
+              )
+              return (
+                <>
+                  {beforeGroup.map(renderTopBtn)}
+                  {grouped.length > 0 && (
+                    <div className="relative">
+                      <button
+                        onClick={() => setRawMenuOpen(o => !o)}
+                        className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                          groupActive ? 'border-skynet-accent text-skynet-accent' : 'border-transparent text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        <Layers size={16} />
+                        Raw Materials
+                        {groupCount > 0 && (
+                          <span className={`px-1.5 py-0.5 text-xs rounded ${groupActive ? 'bg-skynet-accent/20' : 'bg-gray-800'}`}>{groupCount}</span>
+                        )}
+                        <ChevronDown size={14} className={`transition-transform ${rawMenuOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                      {rawMenuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setRawMenuOpen(false)} />
+                          <div className="absolute left-0 top-full z-50 w-56 bg-gray-900 border border-gray-700 rounded-b-lg shadow-xl py-1">
+                            {grouped.map(t => (
+                              <button
+                                key={t.id}
+                                onClick={() => { setActiveTab(t.id); setRawMenuOpen(false) }}
+                                className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm transition-colors ${
+                                  activeTab === t.id ? 'text-skynet-accent bg-skynet-accent/10' : 'text-gray-300 hover:text-white hover:bg-gray-800'
+                                }`}
+                              >
+                                <t.icon size={16} />
+                                <span className="flex-1 text-left">{t.label}</span>
+                                {t.count > 0 && (
+                                  <span className="px-1.5 py-0.5 text-xs rounded bg-gray-800">{t.count}</span>
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {afterGroup.map(renderTopBtn)}
+                </>
+              )
+            })()}
           </div>
         </div>
       </div>
@@ -2206,7 +2258,13 @@ export default function Armory({ profile }) {
         {/* Inventory Tab */}
         {activeTab === 'inventory' && (
           <div className="space-y-4">
-            <h2 className="text-lg font-semibold text-white">Raw Material Inventory</h2>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h2 className="text-lg font-semibold text-white">Raw Material Inventory</h2>
+              <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                <button onClick={() => setInvViewMode('lot')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'lot' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Lot</button>
+                <button onClick={() => setInvViewMode('size')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'size' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Size</button>
+              </div>
+            </div>
             {/* Filters */}
             <div className="flex items-center gap-3 flex-wrap">
               <select
@@ -2300,8 +2358,8 @@ export default function Armory({ profile }) {
               )
             })()}
 
-            {/* Table */}
-            {filteredInventoryRows.length === 0 ? (
+            {/* Lot-level table (By Lot view) */}
+            {invViewMode === 'lot' && (filteredInventoryRows.length === 0 ? (
               <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                 <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
                 <p className="text-gray-400">No inventory records found.</p>
@@ -2431,7 +2489,78 @@ export default function Armory({ profile }) {
                   </tbody>
                 </table>
               </div>
-            )}
+            ))}
+
+            {/* Size roll-up (By Size view) */}
+            {invViewMode === 'size' && (() => {
+              const groups = {}
+              for (const r of filteredInventoryRows) {
+                const key = `${r.material_type}|||${r.bar_size}`
+                if (!groups[key]) groups[key] = { material_type: r.material_type, bar_size: r.bar_size, totalBars: 0, lotCount: 0, vendors: new Set(), value: 0 }
+                const g = groups[key]
+                g.totalBars += (r.available_bars || 0)
+                g.lotCount += 1
+                if (r.vendor && r.vendor !== '—') g.vendors.add(r.vendor)
+                if (r.price_per_bar != null && r.available_bars > 0) g.value += r.available_bars * r.price_per_bar
+              }
+              const rows = Object.values(groups).sort((a, b) =>
+                (a.material_type || '').localeCompare(b.material_type || '') || cmpSize(a.bar_size, b.bar_size)
+              )
+              if (rows.length === 0) {
+                return (
+                  <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                    <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
+                    <p className="text-gray-400">No inventory records found.</p>
+                  </div>
+                )
+              }
+              const grandBars = rows.reduce((s, g) => s + g.totalBars, 0)
+              const grandValue = rows.reduce((s, g) => s + g.value, 0)
+              return (
+                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Material Type</th>
+                        <th className="px-4 py-3 text-left">Bar Size</th>
+                        <th className="px-4 py-3 text-right">Total Avail (bars)</th>
+                        <th className="px-4 py-3 text-right">Lots</th>
+                        <th className="px-4 py-3 text-left">Vendors</th>
+                        <th className="px-4 py-3 text-right">Est. Value</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700">
+                      {rows.map(g => {
+                        const isNeg = g.totalBars < 0
+                        return (
+                          <tr key={`${g.material_type}|${g.bar_size}`} className="bg-gray-900 hover:bg-gray-800 transition-colors">
+                            <td className="px-4 py-3 text-gray-300">{g.material_type}</td>
+                            <td className="px-4 py-3 text-gray-300">{g.bar_size}</td>
+                            <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : 'text-white'}`}>{g.totalBars.toFixed(1)}</td>
+                            <td className="px-4 py-3 text-right text-gray-400">{g.lotCount}</td>
+                            <td className="px-4 py-3 text-gray-400 text-xs">{[...g.vendors].sort().join(', ') || '—'}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">
+                              {g.value > 0 ? `$${g.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                    <tfoot className="bg-gray-800/60 text-gray-200 text-xs uppercase">
+                      <tr>
+                        <td className="px-4 py-3 font-semibold" colSpan={2}>Total ({rows.length} size groups)</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{grandBars.toFixed(1)}</td>
+                        <td className="px-4 py-3"></td>
+                        <td className="px-4 py-3"></td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">
+                          {grandValue > 0 ? `$${grandValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )
+            })()}
           </div>
         )}
 
@@ -2439,6 +2568,64 @@ export default function Armory({ profile }) {
         {activeTab === 'reconciliation' && (
           <div className="space-y-4">
             <h2 className="text-lg font-semibold text-white">Inventory Reconciliation</h2>
+
+            {/* Staging — receipts needing a rack assignment */}
+            {(() => {
+              const stagingRows = inventoryRows.filter(r => r.rack === null)
+              if (stagingRows.length === 0) return null
+              return (
+                <div className="bg-amber-900/10 border border-amber-800/40 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <PackageCheck size={16} className="text-amber-400" />
+                    <h3 className="text-sm font-semibold text-amber-200">Staging — needs rack assignment ({stagingRows.length})</h3>
+                  </div>
+                  <div className="overflow-x-auto rounded border border-amber-800/30">
+                    <table className="w-full text-sm">
+                      <thead className="bg-amber-900/20 text-amber-200/70 uppercase text-xs">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Material</th>
+                          <th className="px-3 py-2 text-left">Bar Size</th>
+                          <th className="px-3 py-2 text-left">Lot #</th>
+                          <th className="px-3 py-2 text-left">Vendor</th>
+                          <th className="px-3 py-2 text-right">Bars</th>
+                          <th className="px-3 py-2 text-left">Received</th>
+                          <th className="px-3 py-2 text-center">Assign Rack</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-amber-900/20">
+                        {stagingRows.map(row => (
+                          <tr key={row.id} className="hover:bg-amber-900/10">
+                            <td className="px-3 py-2 text-gray-200">{row.material_type}</td>
+                            <td className="px-3 py-2 text-gray-200">{row.bar_size}</td>
+                            <td className="px-3 py-2 font-mono text-gray-300">{row.lot_number || '—'}</td>
+                            <td className="px-3 py-2 text-gray-300">{row.vendor}</td>
+                            <td className="px-3 py-2 text-right text-gray-200">{row.received_bars}</td>
+                            <td className="px-3 py-2 text-gray-400 whitespace-nowrap">
+                              {row.received_at ? new Date(row.received_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <select
+                                value={row.rack || ''}
+                                onChange={e => handleAssignRack(row.id, e.target.value)}
+                                className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent"
+                              >
+                                <option value="">Staging</option>
+                                <option value="R1">R1</option>
+                                <option value="R2">R2</option>
+                                <option value="R3">R3</option>
+                                <option value="R4">R4</option>
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )
+            })()}
+
+            <h3 className="text-sm font-semibold text-gray-300 pt-1">Discrepancy Flags</h3>
 
             {/* Filter pills */}
             <div className="flex items-center gap-2">

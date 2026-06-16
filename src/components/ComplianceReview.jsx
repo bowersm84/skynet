@@ -643,7 +643,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         ? parentJob.good_pieces
         : jobQty
       const allQtySent = totalSentQty >= effectiveTarget
-      const canAdvance = allQtySent && ['in_progress', 'manufacturing_complete'].includes(parentJob?.status)
+      // Only an explicit operator Complete (which sets manufacturing_complete) lets
+      // a job leave finishing. Approving a batch while the job is still in_progress
+      // must NOT advance it — orders overrun target and James keeps sending pieces.
+      const canAdvance = allQtySent && parentJob?.status === 'manufacturing_complete'
 
       if (canAdvance) {
         const { data: externalSteps } = await supabase

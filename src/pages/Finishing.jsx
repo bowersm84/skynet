@@ -5,6 +5,7 @@ import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/travele
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { batchRequiresChemicals } from '../lib/routing'
 import { evaluateJobShortfall } from '../lib/shortfall'
+import { resolveCompletionStatus } from '../lib/finishingCompletion'
 import CustomerDisplay from '../components/CustomerDisplay'
 import {
   Lock,
@@ -1425,8 +1426,8 @@ export default function Finishing() {
   }
 
   // Manual completion: James explicitly closes a pickup-queue job once all pieces
-  // are sent. Mirrors kiosk completion (good_pieces from finishing-sends total,
-  // shortfall eval) but excludes compliance-rejected sends from the good count.
+  // are sent. Status resolves via resolveCompletionStatus (mirrors kiosk Complete):
+  // sits at manufacturing_complete while batches await compliance, else advances.
   const handlePickupComplete = async (job) => {
     const msg = job._remainingQty > 0
       ? `${job.job_number} has sent ${job._sentQty} of ${job.quantity} (target) — ${job._remainingQty} short. Complete anyway?`
@@ -1443,10 +1444,12 @@ export default function Finishing() {
         .filter(s => s.compliance_status !== 'rejected')
         .reduce((sum, s) => sum + (s.quantity || 0), 0)
 
+      const nextStatus = await resolveCompletionStatus(job.id)
+
       const { error } = await supabase
         .from('jobs')
         .update({
-          status: 'manufacturing_complete',
+          status: nextStatus,
           actual_end: now,
           good_pieces: finishingTotal,
           bad_pieces: 0,
@@ -2366,7 +2369,7 @@ export default function Finishing() {
                             onClick={() => handlePickupComplete(j)}
                             disabled={pickupCompleting === j.id}
                             className="px-3 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-sm font-medium rounded flex items-center gap-2 whitespace-nowrap"
-                            title="Mark job manufacturing complete"
+                            title="Mark job complete and leave the finishing phase"
                           >
                             {pickupCompleting === j.id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
                             Complete

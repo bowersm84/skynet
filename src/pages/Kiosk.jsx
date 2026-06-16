@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { resolveCompletionStatus } from '../lib/finishingCompletion'
 import { 
   Lock,
   ArrowLeft,
@@ -3217,8 +3218,8 @@ export default function Kiosk() {
         }
       }
 
-      // Jobs go to manufacturing_complete; finishing is handled via finishing_sends
-      const nextStatus = 'manufacturing_complete'
+      // Job status after completion is resolved below (after any final batch is
+      // inserted) so resolveCompletionStatus sees the freshly-sent pending batch.
 
       // SKY74 — no auto-send. If the operator chose to send a final batch, insert exactly
       // that operator-entered quantity (never prefilled). Otherwise nothing new is sent.
@@ -3273,6 +3274,11 @@ export default function Kiosk() {
           time_per_unit = parseFloat((totalMinutes / finishingTotal).toFixed(2))
         }
       }
+
+      // Sits at manufacturing_complete while any finishing batch still awaits
+      // compliance; advances straight through when all batches are already
+      // resolved (compliance no longer advances from in_progress).
+      const nextStatus = await resolveCompletionStatus(activeJob.id)
 
       const { error } = await supabase
         .from('jobs')

@@ -1219,3 +1219,71 @@ step; the rollup only cares about the SUM, so distributing the lot total across 
 correct while preserving the material-lot traceability that is the whole point of consolidation. The
 president's traceability rule — one material lot per send-out — is unaffected; combining still happens
 only at the compliance → outsourcing handoff.
+---
+
+## 2026-06-12 → 06-17 — Raw Material Inventory Arc (Reconciliation, Pricing, Documents, Replenishment, Cycle-Count Adjustments, Two-Group Nav)
+
+> A connected arc: load real inventory → make discrepancies visible (reconciliation) → capture cost → support late receipts → roll up + replenish → cycle-count with approval → restructure the now-dense Armory nav. Availability becomes a single DB-side definition. Multi-role + a purchaser role are designed at the end (implementation pending).
+
+### D-INVLOAD-01 — Initial load re-links checkout usage rather than decrementing counts
+The 73-line inventory load inserts the **raw** physical counts into `material_receiving` (stamped `received_at` just before the checkout window) and then re-links the existing checkout `material_usage` rows to the new receipts. Counts net out automatically (received − used), so a lot that was over-pulled lands at its true negative (lot 2563 → −1) and the reconciliation trigger flags it. **Why:** preserves the full audit trail and the usage history; no manual count math, no fudging the received quantity (which is the AS9100 truth).
+
+### D-INVLOAD-02 — Vendor/PO is mandatory going forward, not retroactively
+Five load lines had no findable vendor/PO and were loaded with those columns null (the column is nullable). The "vendor + PO required" rule is enforced at the **Armory receiving UI** for new receipts, not applied retroactively to the historical load. Normalizations baked into the load: `41L41`→`41L40` (typo), `C12L14`→`12L14`, `7075`→`7075-T651 Aluminum` (standard bar temper), `316L` as a new material type distinct from `316`. Density left null for the whole load.
+
+### D-RECON-01 — Reconciliation flags are trigger-raised with one-open-flag-per-lot dedup
+`material_reconciliation_flags` is populated by an `AFTER INSERT` trigger on `material_usage`: `unknown_lot` when the staged lot has no receiving link, `negative_inventory` when received − used goes negative. A partial-unique pattern keeps **one open/ignored flag per (type, lot)** — repeat occurrences bump `occurrence_count` instead of inserting duplicates; an `ignored` flag stays silent forever. **Why:** the trigger covers both kiosks and any future staging surface without duplicating logic; dedup prevents flag spam (e.g. blank-studs lot 50509 flags once).
+
+### D-RECON-02 — Availability is signed (unclamped); the floor is never blocked
+Every availability computation is signed — empty/negative lots stay **selectable** at both kiosks so staging from them is allowed. The trigger flags the discrepancy; we never block the pull. **Why:** physical material gets pulled regardless of what the system thinks; flag-and-chase beats blocking a machinist mid-job. Anon-role queries silently return empty (S7), so the kiosk read path must run authenticated — which it does (the reconciliation flags came from real prod kiosk checkouts).
+
+### D-RMPRICE-01 — Pricing lives on the receipt, not the material master
+`po_number`, `weight_lbs`, `price_per_lb`, `price_per_bar` are columns on `material_receiving`, not on the `materials` master. **Why:** cost varies per lot/PO; the receipt is the correct home. These snapshots feed inventory Est. Value and the frozen financial impact of cycle-count adjustments (D-ADJ-02).
+
+### D-RMPRICE-02 — Receiving must write bar_size in the catalog format
+`material_receiving.bar_size` must be the `bar_sizes.size` string (e.g. `"0.875 dia"`), not `"0.875\""`. The Armory receiving writer was emitting the quoted format, so Armory-logged receipts never matched kiosk usage. **Why:** the kiosks link `material_usage` → `material_receiving` by `bar_size` string equality; a format mismatch silently breaks the link (and would raise false unknown-lot flags).
+
+### D-MATDOC-01 — Material certs in their own table, reusing existing S3 plumbing
+`material_documents` (one row per cert/doc per receiving row; `document_type` cert/packing_slip/other) stores files in S3 under `material-certs/{receiving_id}/` via the existing `s3.js` helpers. Upload at receipt time and after-the-fact from the Inventory tab; counts loaded via one batched `.in()` query, never per-row. **Why:** multiple docs per lot; the cert traceability chain is `job → material_usage → material_receiving → material_documents`.
+
+### D-LINK-01 — Late receipts resolve by linking staged usage, not decrementing
+`link_unknown_lot_usage` (SECURITY DEFINER) links **all** orphaned `material_usage` rows for a lot to the chosen receipt, resolves the `unknown_lot` flag with an auto-note, and — because the trigger only fires on INSERT — raises/refreshes a `negative_inventory` flag itself if the linked consumption exceeds the receipt. **Why:** material is routinely pulled before its receiving paperwork clears compliance; the correct resolution is attaching the staging history to the eventual receipt (availability then nets out), preserving traceability rather than mutating the received quantity.
+
+### D-LINK-02 — One link path, two entry points
+The Reconciliation "smart Resolve" and the receiving-save nudge share a single client helper around the RPC. When a receipt is logged for a lot with an open `unknown_lot` flag, the receiving modal immediately offers "Link N staged bars & resolve" — the path the compliance-lag scenario actually flows through most of the time.
+
+### D-RMNAV-01 — Dense Armory nav collapses into group dropdowns
+Armory tabs are grouped under top-level dropdowns: **Finished Goods** (Products, Parts, Routing Templates) and **Raw Materials** (Material Types, Bar Sizes, Material Catalog, Inventory, Adjustments, Reconciliation, Receiving, Replenishment Rules); Customers and Users stay standalone. The render is generic over a group list (one open at a time), and each dropdown closes via a full-screen fixed backdrop — no document listeners, no new deps. Group membership is render-only; `canSeeTab` still gates by role, so a role sees only its accessible members.
+
+### D-RMNAV-02 — The two material-definition tabs are renamed to disambiguate layers
+They are different layers: **"Materials"** (writes `material_types`, the alloy/grade dictionary) → **"Material Types"**; **"RM Master Data"** (writes the `materials` table — specific type+size+vendor stock items with density; body was titled "Material Definitions") → **"Material Catalog"** with the body retitled to match. **Why:** both names read as "material definitions" and collided; the new names name what each *is*, and they sit adjacent in the group.
+
+### D-ROLLUP-01 — Inventory By-Size roll-up + staging surfaced in Reconciliation
+The Inventory tab gets a By Lot / By Size toggle; By Size groups `material_type + bar_size`, summing `available_bars` across lots with lot count, vendors, and Est. Value. Separately, receipts still sitting at rack = Staging surface in the **Reconciliation** tab with an inline rack-assign control (reusing `handleAssignRack`). **Why:** answers "how many bars of each size do I have" without mental math; staging shouldn't linger unassigned.
+
+### D-REPLEN-01 — Min-stock rules keyed by type+size, evaluated against full inventory
+`material_replenishment_rules` (`material_type_id` + `bar_size_id` + `min_bars`, unique per type+size). Below-min is computed against the **full** inventory total for a type+size (thresholds are vendor-agnostic), surfaced in the By-Size roll-up (Min column + "Below min" badge) and the tab badge. **In-app only** this round; email (SES Edge Function + schedule + crossing-state dedup + recipient list) is deferred. **Why:** keying to full totals means filtering the view never produces a false "below min".
+
+### D-ADJ-01 — Cycle-count adjustments freeze the delta, not the count
+`inventory_adjustment_requests` holds one row per lot counted, grouped by `count_session_id`. The stored `adjustment_delta` is **frozen at submission** as `counted − (received − used)_at_count` — not the counted number. **Why:** a frozen delta composes correctly with bars pulled between count and approval (`current(received−used) + delta` still equals the physical reality), and it composes even on top of prior approved adjustments.
+
+### D-ADJ-02 — Submission is server-side and tamper-proof; one pending per lot
+`submit_inventory_adjustments` (SECURITY DEFINER) snapshots system qty from the availability view, freezes the delta and the financial impact (`delta × price_per_bar_at_count`) server-side, skips zero-delta lines, and is protected by a partial unique index (**one pending adjustment per lot**). A second count on the same lot is reported skipped, never double-applied. **Why:** the client can't fabricate deltas or impacts; the unique index mirrors the one-open-flag reconciliation pattern.
+
+### D-ADJ-03 — Approval flips status; self-approval blocked except for admin
+`review_inventory_adjustment` / `review_inventory_adjustment_session` (role-checked) just set status; the availability view picks up approved deltas automatically, so an approved count goes live across inventory **and** both kiosks at once. Self-approval is blocked at line and session level — **except admin** (often the sole approver in a small shop); **compliance remains blocked**, so separation of duties holds where it matters. The exemption is checked via role membership, not a single primary role.
+
+### D-AVAIL-01 — One availability definition: the material_availability view
+`material_availability` (a `security_invoker` view) is the single source of truth: `available = received − used + Σ(approved adjustment deltas)`. All three surfaces — Armory `loadInventory` and both kiosk `loadInventoryStock` — read the view instead of each re-summing `material_usage`. **Why:** approved adjustments must move availability *everywhere* or a kiosk lets a machinist pull a bar the adjusted count says isn't there; centralizing also kills the triplicated client-side availability math that caused the D-RMPRICE-02 drift. `security_invoker` so the kiosks' existing authenticated-role RLS still governs the read; `GRANT SELECT ... TO authenticated`. The inventory tables stay `authenticated`-all for writes (gating is UI + RPC), so RLS guardrail CI is unaffected.
+
+### D-AVAIL-02 — View exposes both whole-bar and inches availability
+The view returns `available_bars` (whole-bar: received − used_bars + delta — what the kiosks use) **and** `available_inches` (inches-based + delta — what Armory shows so partial-bar remnants stay precise). Cycle counts use the whole-bar system number (rack counts are whole bars). The pre-existing Armory-vs-kiosk presentation difference (fractional vs. whole) is preserved deliberately — unifying it would be a behavior change outside this arc's scope.
+
+### D-ADJ-04 — Count sheet prints as a standalone tally, not via the Print Package
+The "Print Count Sheet" button opens a self-contained `window.open` HTML sheet (in-scope lots sorted by rack, with System qty + blank Counted/Notes columns and a Counted-by/Date line), not the heavier Print Package/Print Hub machinery. **Why:** a cycle-count tally is a write-and-return form, a different artifact from a formal traveler/document; lightweight isolated print avoids fighting the dark-theme app CSS.
+
+### D-MROLE-01 — Multi-role via a roles[] supplement to the primary role *(decided; implementation pending)*
+A user may hold multiple roles: `profiles.role` stays the **primary**; `profiles.roles text[]` holds additional roles; effective set = `role ∪ roles`. A `user_has_role(uid, VARIADIC roles)` SQL helper (`role = ANY OR roles &&`) backs the RPCs/RLS; a frontend `hasRole(profile, …)` + a tab-access **union** back the UI. **Foundational-but-scoped:** applied in Armory (tab union + write gates), the inventory RPCs, and the sales-dashboard/route guards; peripheral role checks keep reading the primary `role` and migrate opportunistically. **Why:** Sawyer needs Customer Service + Purchaser; a `user_roles` join table is overkill at this shop size; `roles` defaults `'{}'` so every existing single-role user is unaffected. Implementation per `MultiRole_Purchaser_Implementation_Plan.md` — not yet shipped.
+
+### D-PURCH-01 — Purchaser role matrix *(decided; implementation pending)*
+Purchaser **views** Finished Goods + Raw Materials and **writes** inventory adjustments (submit only — not an approver), replenishment rules, and reconciliation (resolve + link); read-only on master data, Receiving, and Finished Goods; no Customers/Users. Receiving gets its **own** `canReceive` gate (admin/compliance/finishing) split out from `canWriteMasterData` (admin/compliance) — otherwise repurposing the shared `canWrite` would silently strip **finishing's** ability to log receipts. The reconciliation link RPC and the adjustment-submit RPC are extended to `purchaser`; the approve RPCs are not. Implementation pending.

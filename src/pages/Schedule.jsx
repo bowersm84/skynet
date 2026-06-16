@@ -50,6 +50,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [partMachineDurations, setPartMachineDurations] = useState([])
   const [loading, setLoading] = useState(true)
   const [weekOffset, setWeekOffset] = useState(0)
+  const [windowDays, setWindowDays] = useState(7) // grid zoom: 7 / 14 / 28 days visible
   
   // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
@@ -113,7 +114,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const resizePreviewRef = useRef(null)
   
   // Grouping state - can group by location or machine type
-  const [groupingMode, setGroupingMode] = useState('location') // 'location' or 'type'
+  // Grouping is fixed to 'location' (the toggle UI was removed for header space —
+  // see D-SCHED-DECLUT01). Setter dropped since nothing sets it anymore.
+  const [groupingMode] = useState('location') // 'location' or 'type'
   const [collapsedGroups, setCollapsedGroups] = useState(['Taveres'])
   
   // Maintenance modal state
@@ -121,7 +124,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
   // View mode toggle: 'grid' = timeline (default), 'list' = per-machine lineup
   const [viewMode, setViewMode] = useState('grid')
-  // Full future scheduled job list — used only in list view
+  // Full future scheduled job list (all weeks) — used by list view AND all
+  // end-date / unschedule cascade math (week slice misses later-week neighbors)
   const [allScheduledJobs, setAllScheduledJobs] = useState([])
   // List view drag-and-drop hover target
   // { type: 'after', jobId } | { type: 'machine', machineId } | null
@@ -168,11 +172,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const getWeekDates = () => {
     const today = new Date()
     const startOfWeek = new Date(today)
-    startOfWeek.setDate(today.getDate() + (weekOffset * 7))
+    startOfWeek.setDate(today.getDate() + (weekOffset * windowDays))
     startOfWeek.setHours(0, 0, 0, 0)
     
     const dates = []
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < windowDays; i++) {
       const date = new Date(startOfWeek)
       date.setDate(startOfWeek.getDate() + i)
       dates.push(date)
@@ -183,7 +187,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const weekDates = getWeekDates()
   
   const weekStart = weekDates[0]
-  const weekEnd = new Date(weekDates[6])
+  const weekEnd = new Date(weekDates[weekDates.length - 1])
   weekEnd.setHours(23, 59, 59, 999)
 
   // Hours for zoomed day view
@@ -238,7 +242,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       supabase.removeChannel(changeRequestsSubscription)
       supabase.removeChannel(lotSplitsSubscription)
     }
-  }, [weekOffset])
+  }, [weekOffset, windowDays])
 
   const fetchData = async () => {
     setLoading(true)
@@ -548,7 +552,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     weekDates.forEach(date => {
       totalScheduled += getScheduledMinutesForDay(machineId, date)
     })
-    const totalShiftMinutes = SHIFT_MINUTES * 7 // 7 days
+    const totalShiftMinutes = SHIFT_MINUTES * windowDays
     return Math.round((totalScheduled / totalShiftMinutes) * 100)
   }
 
@@ -564,7 +568,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
     // View bounds — used both for clipping and for "extends to end of view"
     // treatment of ongoing jobs that don't yet have a scheduled_end recorded.
-    const viewEnd = new Date(weekDates[6])
+    const viewEnd = new Date(weekDates[weekDates.length - 1])
     viewEnd.setHours(23, 59, 59, 999)
 
     const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
@@ -910,7 +914,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     try {
       let cascadeChanges = []
       if (job.assigned_machine_id) {
-        const queue = getMachineQueue(scheduledJobs, job.assigned_machine_id)
+        const queue = getMachineQueue(allScheduledJobs, job.assigned_machine_id)
         cascadeChanges = computeEndChangeCascade(queue, job.id, newEnd).changes
       }
       await applyEndDateChange({ supabase, job, newEnd, cascadeChanges })
@@ -999,7 +1003,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       const newEnd = new Date(req.requested_end)
       let cascadeChanges = []
       if (job.assigned_machine_id) {
-        const queue = getMachineQueue(scheduledJobs, job.assigned_machine_id)
+        const queue = getMachineQueue(allScheduledJobs, job.assigned_machine_id)
         cascadeChanges = computeEndChangeCascade(queue, job.id, newEnd).changes
       }
       await applyEndDateChange({ supabase, job, newEnd, cascadeChanges })
@@ -1050,7 +1054,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       // Compute cascade if closeGap is checked AND there's a machine assigned
       let cascadeChanges = []
       if (closeGap && unscheduleConfirm.assigned_machine_id) {
-        const queue = getMachineQueue(scheduledJobs, unscheduleConfirm.assigned_machine_id)
+        const queue = getMachineQueue(allScheduledJobs, unscheduleConfirm.assigned_machine_id)
         const removal = computeRemovalCascade(queue, unscheduleConfirm.id)
         cascadeChanges = removal.changes
       }
@@ -1506,7 +1510,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
   const getWeekRangeLabel = () => {
     const start = weekDates[0]
-    const end = weekDates[6]
+    const end = weekDates[weekDates.length - 1]
     const startStr = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
     const endStr = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     return `${startStr} - ${endStr}`
@@ -1812,7 +1816,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
         // Calculate the week offset needed
         const dayDiff = Math.floor((jobDate - today) / (1000 * 60 * 60 * 24))
-        const neededWeekOffset = Math.floor(dayDiff / 7)
+        const neededWeekOffset = Math.floor(dayDiff / windowDays)
         setWeekOffset(neededWeekOffset)
 
         // Zoom into the day
@@ -2000,15 +2004,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         </div>
 
         <div className="flex items-center gap-4">
-          <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-            <Calendar size={24} className="text-skynet-accent" />
-            {zoomedDay ? 'Day View' : 'Command View'}
-          </h2>
-          {scheduledJobs.length > 0 && (
-            <span className="text-sm text-gray-400">
-              ({scheduledJobs.length} scheduled this week)
-            </span>
-          )}
+          {/* Title + weekly count removed for space — page is labeled "Command" in the top breadcrumb */}
           {/* DOWN machines indicator */}
           {downMachineCount > 0 && (
             <span className="flex items-center gap-1 text-sm text-red-400 bg-red-900/30 px-2 py-1 rounded">
@@ -2168,10 +2164,10 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           {canEdit && (
             <button
               onClick={() => setShowMaintenanceModal(true)}
-              className="flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-colors mr-2"
+              className="flex items-center justify-center p-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg transition-colors mr-2"
+              title="Schedule Maintenance"
             >
               <Settings size={16} />
-              <span className="hidden sm:inline">Schedule Maintenance</span>
             </button>
           )}
 
@@ -2206,39 +2202,27 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             </button>
           </div>
 
-          {/* Grouping mode toggle */}
-          <div className="flex items-center bg-gray-800 rounded-lg p-0.5 mr-2">
-            <button
-              onClick={() => {
-                setGroupingMode('location')
-                setCollapsedGroups(['Taveres']) // Reset collapse state
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                groupingMode === 'location' 
-                  ? 'bg-skynet-accent text-white' 
-                  : 'text-gray-400 hover:text-white'
-              }`}
-              title="Group by Location"
-            >
-              <MapPin size={14} />
-              <span className="hidden sm:inline">Location</span>
-            </button>
-            <button
-              onClick={() => {
-                setGroupingMode('type')
-                setCollapsedGroups([]) // Start with all expanded
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                groupingMode === 'type' 
-                  ? 'bg-purple-600 text-white' 
-                  : 'text-gray-400 hover:text-white'
-              }`}
-              title="Group by Brand"
-            >
-              <Wrench size={14} />
-              <span className="hidden sm:inline">Brand</span>
-            </button>
-          </div>
+          {/* Timeline zoom: number of days visible in the grid window */}
+          {viewMode === 'grid' && !zoomedDay && (
+            <div className="flex items-center bg-gray-800 rounded-lg p-0.5 mr-2">
+              {[{ d: 7, label: 'Week' }, { d: 14, label: '2-Week' }, { d: 28, label: '4-Week' }].map(opt => (
+                <button
+                  key={opt.d}
+                  onClick={() => { setWindowDays(opt.d); setWeekOffset(0) }}
+                  className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                    windowDays === opt.d
+                      ? 'bg-skynet-accent text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                  title={`Show ${opt.d} days`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Grouping toggle removed for space — grouping stays fixed to Location (groupingMode default 'location') */}
 
           {/* Zoom out button when zoomed in */}
           {zoomedDay && (
@@ -2506,7 +2490,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
           {/* Machine Rows / Swim Lanes */}
           <div className={`flex-1 overflow-auto`} ref={bodyScrollRef} onScroll={handleBodyScroll}>
-            <div className={zoomedDay ? 'min-w-max' : ''}>
+            <div className={(zoomedDay || windowDays > 7) ? 'min-w-max' : ''}>
             {/* Day View Hour Headers - inside scrollable area */}
             {zoomedDay && (
               <div className="flex border-b border-gray-700 sticky top-0 z-20 bg-gray-900">
@@ -3413,7 +3397,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         const start = job.scheduled_start ? new Date(job.scheduled_start) : null
         const newEnd = endDateEditValue ? new Date(endDateEditValue) : null
         const validEnd = !!newEnd && !isNaN(newEnd.getTime()) && (!start || newEnd > start)
-        const queue = job.assigned_machine_id ? getMachineQueue(scheduledJobs, job.assigned_machine_id) : []
+        const queue = job.assigned_machine_id ? getMachineQueue(allScheduledJobs, job.assigned_machine_id) : []
         const cascade = validEnd ? computeEndChangeCascade(queue, job.id, newEnd) : { changes: [] }
         const newMinutes = (validEnd && start) ? Math.max(1, Math.round((newEnd - start) / 60000)) : null
         const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'
@@ -3498,7 +3482,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       {/* Unschedule Confirmation Modal */}
       {unscheduleConfirm && (() => {
         const queue = unscheduleConfirm.assigned_machine_id
-          ? getMachineQueue(scheduledJobs, unscheduleConfirm.assigned_machine_id)
+          ? getMachineQueue(allScheduledJobs, unscheduleConfirm.assigned_machine_id)
           : []
         const cascade = computeRemovalCascade(queue, unscheduleConfirm.id)
         const downstreamCount = cascade.changes.length

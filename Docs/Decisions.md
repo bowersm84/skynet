@@ -1287,3 +1287,53 @@ A user may hold multiple roles: `profiles.role` stays the **primary**; `profiles
 
 ### D-PURCH-01 — Purchaser role matrix *(decided; implementation pending)*
 Purchaser **views** Finished Goods + Raw Materials and **writes** inventory adjustments (submit only — not an approver), replenishment rules, and reconciliation (resolve + link); read-only on master data, Receiving, and Finished Goods; no Customers/Users. Receiving gets its **own** `canReceive` gate (admin/compliance/finishing) split out from `canWriteMasterData` (admin/compliance) — otherwise repurposing the shared `canWrite` would silently strip **finishing's** ability to log receipts. The reconciliation link RPC and the adjustment-submit RPC are extended to `purchaser`; the approve RPCs are not. Implementation pending.
+
+---
+
+## 2026-06-16 — End-date & unschedule cascade completeness
+
+### D-S55-CASC01 — End-date & unschedule cascades must walk the full cross-week machine queue (2026-06-16)
+**Problem:** Adjust End Date on J-000052 (push end out ~19 days) failed with
+`jobs_no_machine_overlap` despite the preview showing the one visible downstream
+job shifting cleanly. 
+**Root cause:** `handleEndDateSave`, the change-request apply path, the end-date
+modal preview, and both unschedule cascade sites computed from the visible-week
+slice `scheduledJobs`. A downstream job on the same machine in a later week was
+never shifted, so the deferred exclusion constraint failed at commit. Same defect
+class as D-S75 (modal queue was week-sliced).
+**Fix:** All five cascade sites now use `allScheduledJobs` (full future list,
+already loaded on every fetch via `loadAllScheduledJobs`). No RPC/schema change —
+`change_end_with_cascade` defers correctly; the input was incomplete. Corrected the
+stale "used only in list view" comment.
+**Files:** `src/pages/Schedule.jsx`.
+
+---
+
+## 2026-06-16 — Schedule grid zoom
+
+### D-SCHED-ZOOM01 — Variable grid window (Week / 2-Week / 4-Week zoom) (2026-06-16)
+**What:** Added a timeline zoom control to the Schedule grid. Replaced the hardcoded
+7-day window with a `windowDays` state (7/14/28). `getWeekDates`, the utilization
+denominator, view-bound/range-label `weekDates[6]` references, and the jump-to-job
+offset all generalize to `windowDays`. Data fetch already bounded by weekStart/weekEnd
+(derived from weekDates) so it widens automatically; refetch dep extended to include
+`windowDays`. Body wrapper uses `min-w-max` at >7 days so the existing min-w-[150px]
+columns scroll horizontally with header/body scroll-sync intact.
+**Behavior:** Changing zoom resets weekOffset to 0 (re-anchors to today); prev/next
+pages by one full window. Zoom is session-only (resets to Week on reload).
+**Not affected:** cascade/overlap logic (time-based), RPCs, schema, zoomed-day view.
+**Files:** `src/pages/Schedule.jsx`.
+
+---
+
+## 2026-06-16 — Command View header de-clutter
+
+### D-SCHED-DECLUT01 — Command View header de-cluttered (2026-06-16)
+**What:** Removed three items from the Schedule grid header toolbar to recover
+horizontal space: (1) the "Command View"/"Day View" title block and the
+"(N scheduled this week)" count; (2) the Location/Brand grouping toggle — grouping
+is now fixed to the `groupingMode` default ('location'), state and downstream render
+logic unchanged; (3) the "Schedule Maintenance" text label — the button is now
+icon-only (Settings icon, tooltip retained) since it is the sole entry point to
+CreateMaintenanceModal.
+**Files:** `src/pages/Schedule.jsx`. No schema/RPC change.

@@ -578,6 +578,7 @@ export default function Finishing() {
           finishing_sends(id, quantity, compliance_status)
         `)
         .eq('is_standalone_finishing', false)
+        .eq('is_maintenance', false)
         .in('status', ['ready', 'assigned', 'in_setup', 'in_progress'])
 
       if (pickupError) {
@@ -2475,6 +2476,9 @@ export default function Finishing() {
                               className="text-gray-500"
                             />
                           </p>
+                          {send.job?.assigned_machine?.name && (
+                            <p className="text-gray-300 text-xs mt-1 font-medium">{send.job.assigned_machine.name}</p>
+                          )}
                           <div className="flex items-center gap-4 mt-2">
                             <span className="text-white text-sm">Qty: {send.quantity}</span>
                             {send.sent_at && (

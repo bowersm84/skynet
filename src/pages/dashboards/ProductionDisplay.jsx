@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { deriveMachineStatus } from '../../lib/machineStatus'
-import { Power } from 'lucide-react'
+import { Power, ChevronRight, ChevronDown, Loader2 } from 'lucide-react'
+import { fetchCOAllocationsForTraveler } from '../../lib/traveler'
 
 // ---- Date helpers (module-level, pure, local timezone) ----
 // Skybolt is closed Sat/Sun. "Last business day" walks backward from today
@@ -332,7 +333,8 @@ export default function ProductionDisplay() {
         assigned_machine_id,
         missed_production_entries (quantity),
         component:parts!component_id(part_number, description),
-        machine:machines!assigned_machine_id(code, name)
+        machine:machines!assigned_machine_id(code, name),
+        work_order:work_orders(id, wo_number, order_type)
       `)
       .in('status', ['in_setup', 'in_progress', 'ready', 'assigned'])
       .not('assigned_machine_id', 'is', null)
@@ -826,6 +828,28 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
   const [pickerValue, setPickerValue] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [justRequested, setJustRequested] = useState(false)
+  // Customer-order dropdown — lazy-loaded on first expand
+  const [coExpanded, setCoExpanded] = useState(false)
+  const [coRows, setCoRows] = useState(null) // null = not yet loaded
+  const [coLoading, setCoLoading] = useState(false)
+  const isStock = job.work_order?.order_type === 'make_to_stock'
+
+  const toggleCO = async () => {
+    const next = !coExpanded
+    setCoExpanded(next)
+    if (next && coRows === null && !coLoading && !isStock) {
+      setCoLoading(true)
+      try {
+        const rows = await fetchCOAllocationsForTraveler(supabase, job.work_order?.id)
+        setCoRows(rows || [])
+      } catch (e) {
+        console.error('Failed to load CO allocations:', e)
+        setCoRows([])
+      } finally {
+        setCoLoading(false)
+      }
+    }
+  }
   // Row-level highlight states (replaces the old colored left-border traffic light).
   // Behind wins over this-week for background/border when both apply — it's more
   // urgent. UP NEXT cell still gets its own amber treatment internally either way.
@@ -859,8 +883,18 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
     : '—'
 
   return (
-    <div className={`flex items-center gap-3 ${containerClasses} px-3 py-2 rounded`}>
-      <div className="flex-1 min-w-0">
+    <div className={`${containerClasses} rounded`}>
+      <div className="flex items-center gap-3 px-3 py-2">
+        <button
+          type="button"
+          onClick={toggleCO}
+          className="shrink-0 text-gray-500 hover:text-blue-300 transition-colors"
+          title={coExpanded ? 'Hide customer order info' : 'Show customer order info'}
+          aria-expanded={coExpanded}
+        >
+          {coExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-3 flex-wrap">
           <span className="text-white font-mono text-base font-semibold truncate">
             {job.component?.part_number || '—'}
@@ -979,6 +1013,50 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
           <div className="text-gray-600 text-sm font-mono">—</div>
         )}
       </div>
+      </div>
+      {coExpanded && (
+        <div className="px-3 pb-3 pt-1 border-t border-gray-800/60">
+          {coLoading ? (
+            <div className="flex items-center gap-2 text-gray-500 text-xs font-mono py-2">
+              <Loader2 size={12} className="animate-spin" /> Loading customer order…
+            </div>
+          ) : isStock ? (
+            <div className="text-gray-500 text-xs font-mono py-2">Stock order — no customer allocation.</div>
+          ) : !coRows || coRows.length === 0 ? (
+            <div className="text-gray-500 text-xs font-mono py-2">No customer order linked (stock/forecast).</div>
+          ) : (
+            <table className="w-full text-xs font-mono mt-1">
+              <thead>
+                <tr className="text-gray-500 uppercase tracking-wider text-[10px] text-left">
+                  <th className="py-1 pr-3 font-medium">Customer</th>
+                  <th className="py-1 pr-3 font-medium">CO #</th>
+                  <th className="py-1 pr-3 font-medium">Line</th>
+                  <th className="py-1 pr-3 font-medium text-right">Qty Allocated</th>
+                  <th className="py-1 font-medium">Due</th>
+                </tr>
+              </thead>
+              <tbody>
+                {coRows.map((a, i) => {
+                  const line = a.customer_order_line
+                  const co = line?.customer_order
+                  const due = line?.due_date
+                    ? new Date(line.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                    : '—'
+                  return (
+                    <tr key={i} className="text-gray-300 border-t border-gray-800/50">
+                      <td className="py-1 pr-3">{co?.customer?.name || '—'}</td>
+                      <td className="py-1 pr-3 text-blue-400">{co?.co_number || '—'}</td>
+                      <td className="py-1 pr-3">{line?.line_number ?? '—'}</td>
+                      <td className="py-1 pr-3 text-right">{(a.quantity_allocated || 0).toLocaleString()}</td>
+                      <td className="py-1">{due}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   )
 }

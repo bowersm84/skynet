@@ -926,3 +926,42 @@ CREATE TABLE public.material_documents (
   CONSTRAINT material_documents_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
   CONSTRAINT material_documents_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.material_replenishment_rules (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  material_type_id uuid NOT NULL,
+  bar_size_id uuid NOT NULL,
+  min_bars numeric NOT NULL CHECK (min_bars >= 0::numeric),
+  is_active boolean NOT NULL DEFAULT true,
+  notes text,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT material_replenishment_rules_pkey PRIMARY KEY (id),
+  CONSTRAINT material_replenishment_rules_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
+  CONSTRAINT material_replenishment_rules_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id),
+  CONSTRAINT material_replenishment_rules_bar_size_id_fkey FOREIGN KEY (bar_size_id) REFERENCES public.bar_sizes(id)
+);
+CREATE TABLE public.inventory_adjustment_requests (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  count_session_id uuid NOT NULL,
+  material_receiving_id uuid NOT NULL,
+  material_type text,
+  bar_size text,
+  lot_number text,
+  counted_bars numeric NOT NULL,
+  system_bars_at_count numeric NOT NULL,
+  adjustment_delta numeric NOT NULL,
+  price_per_bar_at_count numeric,
+  financial_impact numeric,
+  reason text,
+  status text NOT NULL DEFAULT 'pending'::text CHECK (status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text])),
+  requested_by uuid NOT NULL,
+  requested_at timestamp with time zone NOT NULL DEFAULT now(),
+  reviewed_by uuid,
+  reviewed_at timestamp with time zone,
+  review_notes text,
+  CONSTRAINT inventory_adjustment_requests_pkey PRIMARY KEY (id),
+  CONSTRAINT inventory_adjustment_requests_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
+  CONSTRAINT inventory_adjustment_requests_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES public.profiles(id),
+  CONSTRAINT inventory_adjustment_requests_reviewed_by_fkey FOREIGN KEY (reviewed_by) REFERENCES public.profiles(id)
+);

@@ -1337,3 +1337,17 @@ logic unchanged; (3) the "Schedule Maintenance" text label — the button is now
 icon-only (Settings icon, tooltip retained) since it is the sole entry point to
 CreateMaintenanceModal.
 **Files:** `src/pages/Schedule.jsx`. No schema/RPC change.
+
+---
+
+## 2026-06-16 — Production Dashboard customer-order dropdown
+
+### D-PRODDASH-CO01 — Customer-order dropdown on Today's Production rows (2026-06-16)
+**What:** Each active-job row in the Production Dashboard's Today's Production list is
+now expandable (chevron toggle) to show the customer-order allocations for that job's
+work order: Customer, CO#, Line, Qty Allocated, Due. Data via the existing
+fetchCOAllocationsForTraveler helper, lazy-loaded on first expand (no preload across
+the ~16 running rows). make_to_stock jobs show "Stock order — no customer allocation";
+jobs with no active allocations (incl. maintenance/DTU) show "No customer order linked."
+Added work_order:(id, wo_number, order_type) to the active-jobs select to support this.
+**Files:** `src/pages/dashboards/ProductionDisplay.jsx`. No schema/RPC change.

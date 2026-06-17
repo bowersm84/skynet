@@ -220,11 +220,13 @@ CREATE TABLE public.work_order_assemblies (
   assembly_lot_number text,
   assembly_lot_entered_by uuid,
   assembly_lot_entered_at timestamp with time zone,
+  parent_work_order_assembly_id uuid,
   CONSTRAINT work_order_assemblies_pkey PRIMARY KEY (id),
   CONSTRAINT work_order_assemblies_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT work_order_assemblies_assembly_id_fkey FOREIGN KEY (assembly_id) REFERENCES public.parts(id),
   CONSTRAINT work_order_assemblies_assembly_started_by_fkey FOREIGN KEY (assembly_started_by) REFERENCES public.profiles(id),
   CONSTRAINT work_order_assemblies_assembly_completed_by_fkey FOREIGN KEY (assembly_completed_by) REFERENCES public.profiles(id),
+  CONSTRAINT work_order_assemblies_parent_fkey FOREIGN KEY (parent_work_order_assembly_id) REFERENCES public.work_order_assemblies(id),
   CONSTRAINT work_order_assemblies_assembly_lot_entered_by_fkey FOREIGN KEY (assembly_lot_entered_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.document_types (
@@ -429,16 +431,18 @@ CREATE TABLE public.bar_sizes (
 CREATE TABLE public.assembly_component_checkins (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   work_order_assembly_id uuid NOT NULL,
-  job_id uuid NOT NULL,
+  job_id uuid,
   checked_in_at timestamp with time zone DEFAULT now(),
   checked_in_by uuid,
   quantity_received integer NOT NULL DEFAULT 1,
   condition_notes text,
   created_at timestamp with time zone DEFAULT now(),
+  source_work_order_assembly_id uuid,
   CONSTRAINT assembly_component_checkins_pkey PRIMARY KEY (id),
   CONSTRAINT assembly_component_checkins_work_order_assembly_id_fkey FOREIGN KEY (work_order_assembly_id) REFERENCES public.work_order_assemblies(id),
   CONSTRAINT assembly_component_checkins_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT assembly_component_checkins_checked_in_by_fkey FOREIGN KEY (checked_in_by) REFERENCES public.profiles(id)
+  CONSTRAINT assembly_component_checkins_checked_in_by_fkey FOREIGN KEY (checked_in_by) REFERENCES public.profiles(id),
+  CONSTRAINT assembly_component_checkins_source_fkey FOREIGN KEY (source_work_order_assembly_id) REFERENCES public.work_order_assemblies(id)
 );
 CREATE TABLE public.part_routing_steps (
   id uuid NOT NULL DEFAULT gen_random_uuid(),

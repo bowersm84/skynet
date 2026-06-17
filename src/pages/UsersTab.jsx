@@ -9,10 +9,40 @@ const ROLE_OPTIONS = [
   { value: 'finishing', label: 'Finishing' },
   { value: 'scheduler', label: 'Scheduler' },
   { value: 'customer_service', label: 'Customer Service' },
+  { value: 'purchaser', label: 'Purchaser' },
   { value: 'assembly', label: 'Assembly' },
   { value: 'president', label: 'President (Bridge + read-only)' },
   { value: 'viewer', label: 'Viewer (read-only)' },
 ]
+
+// Additional-roles multi-select. Lists every role except the chosen primary;
+// writes an array of role keys to form.roles (persisted via manage-users -> profiles.roles).
+function AdditionalRolesPicker({ primaryRole, value, onChange }) {
+  const toggle = (role) => {
+    if (value.includes(role)) onChange(value.filter(r => r !== role))
+    else onChange([...value, role])
+  }
+  const options = ROLE_OPTIONS.filter(r => r.value !== primaryRole)
+  return (
+    <div>
+      <label className="block text-sm text-gray-400 mb-1">Additional Roles</label>
+      <div className="grid grid-cols-2 gap-2 p-3 bg-gray-800 border border-gray-700 rounded-lg">
+        {options.map(r => (
+          <label key={r.value} className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={value.includes(r.value)}
+              onChange={() => toggle(r.value)}
+              className="rounded border-gray-600 bg-gray-700 text-skynet-accent focus:ring-skynet-accent"
+            />
+            {r.label}
+          </label>
+        ))}
+      </div>
+      <p className="text-gray-600 text-xs mt-1">Extra access layered on top of the primary role. The primary is excluded from this list.</p>
+    </div>
+  )
+}
 
 export default function UsersTab({ profile }) {
   const [users, setUsers] = useState([])
@@ -31,7 +61,7 @@ export default function UsersTab({ profile }) {
     setLoading(true)
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, email, full_name, username, role, home_location_id, can_float, can_approve_compliance, is_salesperson, is_active, pin_code, created_at')
+      .select('id, email, full_name, username, role, roles, home_location_id, can_float, can_approve_compliance, is_salesperson, is_active, pin_code, created_at')
       .order('created_at', { ascending: false })
     if (error) {
       setActionStatus({ type: 'error', message: `Failed to load users: ${error.message}` })
@@ -217,6 +247,9 @@ export default function UsersTab({ profile }) {
                   <td className="px-4 py-3 text-gray-300">{user.full_name || <span className="text-gray-600">—</span>}</td>
                   <td className="px-4 py-3">
                     <span className="text-skynet-accent capitalize">{(user.role || '').replace('_', ' ')}</span>
+                    {(user.roles || []).map(r => (
+                      <span key={r} className="ml-1 text-xs px-1.5 py-0.5 bg-skynet-accent/15 text-skynet-accent rounded capitalize">+{r.replace('_', ' ')}</span>
+                    ))}
                   </td>
                   <td className="px-4 py-3">{getStatusBadge(user)}</td>
                   <td className="px-4 py-3 text-xs text-gray-400">
@@ -319,6 +352,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
     temp_password: '',
     full_name: '',
     role: 'machinist',
+    roles: [],
     home_location_id: locations[0]?.id || '',
     can_float: false,
     can_approve_compliance: false,
@@ -348,6 +382,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
           username,
           full_name: form.full_name,
           role: form.role,
+          roles: form.roles,
           home_location_id: form.home_location_id || null,
           can_float: form.can_float,
           can_approve_compliance: form.can_approve_compliance,
@@ -361,6 +396,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
           email,
           full_name: form.full_name,
           role: form.role,
+          roles: form.roles,
           home_location_id: form.home_location_id || null,
           can_float: form.can_float,
           can_approve_compliance: form.can_approve_compliance,
@@ -474,7 +510,7 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
               <label className="block text-sm text-gray-400 mb-1">Role</label>
               <select
                 value={form.role}
-                onChange={(e) => setForm({ ...form, role: e.target.value })}
+                onChange={(e) => setForm({ ...form, role: e.target.value, roles: (form.roles || []).filter(r => r !== e.target.value) })}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
               >
                 {ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
@@ -492,6 +528,12 @@ function InviteUserModal({ locations, onSubmit, onSubmitNoEmail, onClose }) {
               </select>
             </div>
           </div>
+
+          <AdditionalRolesPicker
+            primaryRole={form.role}
+            value={form.roles || []}
+            onChange={(roles) => setForm({ ...form, roles })}
+          />
 
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm text-gray-300">
@@ -546,6 +588,7 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
   const [form, setForm] = useState({
     full_name: user.full_name || '',
     role: user.role,
+    roles: user.roles || [],
     home_location_id: user.home_location_id || '',
     can_float: user.can_float || false,
     can_approve_compliance: user.can_approve_compliance || false,
@@ -597,7 +640,7 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
               <label className="block text-sm text-gray-400 mb-1">Role</label>
               <select
                 value={form.role}
-                onChange={(e) => setForm({ ...form, role: e.target.value })}
+                onChange={(e) => setForm({ ...form, role: e.target.value, roles: (form.roles || []).filter(r => r !== e.target.value) })}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
               >
                 {ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
@@ -615,6 +658,12 @@ function EditUserModal({ user, locations, onSubmit, onClose }) {
               </select>
             </div>
           </div>
+
+          <AdditionalRolesPicker
+            primaryRole={form.role}
+            value={form.roles || []}
+            onChange={(roles) => setForm({ ...form, roles })}
+          />
 
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm text-gray-300">

@@ -17,7 +17,7 @@ import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
 import SalesDashboard from './pages/dashboards/SalesDashboard'
-import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard } from './lib/roles'
+import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -184,7 +184,7 @@ function MainApp() {
 
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
-  const canAccessArmory = ['admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role)
+  const canAccessArmory = hasRole(profile, 'admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer', 'purchaser')
   const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role) || profile?.is_salesperson === true
 
   // SKY56 — all authenticated roles get the Dashboards menu; the Bridge entry

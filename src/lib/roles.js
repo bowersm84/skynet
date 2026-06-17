@@ -16,8 +16,28 @@ export function canSeeBridge(role) {
 // is_salesperson=true (any base role) OR admin / customer_service / president / viewer.
 // Compliance, scheduler, and kiosk roles (machinist, finishing, assembly) are excluded.
 // Single source of truth for the /dashboards/sales route guard AND the dropdown entry.
+// Effective role set: primary `role` ∪ additional `roles[]`.
+// Single-role users (everyone pre-multi-role) get just [role] since roles defaults to {}.
+export function userRoles(profile) {
+  return [...new Set([profile?.role, ...(profile?.roles || [])].filter(Boolean))]
+}
+
+// True if the profile holds ANY of the given roles (primary or additional).
+export function hasRole(profile, ...roles) {
+  return userRoles(profile).some(r => roles.includes(r))
+}
+
+// Master-data + finished-goods writes (Material Types/Catalog, Bar Sizes, Products, Parts, Routing).
+export function canWriteMasterData(profile) {
+  return hasRole(profile, 'admin', 'compliance')
+}
+
+// Receiving writes (Log Receipt). Keeps finishing's existing access; excludes purchaser.
+export function canReceive(profile) {
+  return hasRole(profile, 'admin', 'compliance', 'finishing')
+}
+
 export function canViewSalesDashboard(profile) {
   if (!profile) return false
-  const ALLOWED_ROLES = ['admin', 'customer_service', 'president', 'viewer']
-  return ALLOWED_ROLES.includes(profile.role) || profile.is_salesperson === true
+  return hasRole(profile, 'admin', 'customer_service', 'president', 'viewer') || profile.is_salesperson === true
 }

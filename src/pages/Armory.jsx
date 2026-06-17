@@ -36,10 +36,10 @@ import BOMUpload from '../components/BOMUpload'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
-import { isReadOnlyRole } from '../lib/roles'
+import { userRoles, hasRole, canWriteMasterData, canReceive } from '../lib/roles'
 
 export default function Armory({ profile }) {
-  const canWrite = !isReadOnlyRole(profile?.role)
+  const canWrite = canWriteMasterData(profile)
   // Per-role tab visibility. Single source of truth.
   // Order in each array determines the default tab for that role (first item).
   // Read-only roles (president, viewer) get the read-relevant tab set
@@ -53,8 +53,9 @@ export default function Armory({ profile }) {
     customer_service: ['customers'],
     president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
     viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
+    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
   }
-  const visibleTabIds = TAB_ACCESS_BY_ROLE[profile?.role] || []
+  const visibleTabIds = [...new Set(userRoles(profile).flatMap(r => TAB_ACCESS_BY_ROLE[r] || []))]
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
 
   // Default to first visible tab for this role (falls back to 'assemblies' for admin)
@@ -237,7 +238,7 @@ export default function Armory({ profile }) {
   const [nudgeSaving, setNudgeSaving] = useState(false)
   const [nudgeError, setNudgeError] = useState('')
   // Link actions are restricted to admin/compliance (RPC enforces it too).
-  const canLink = ['admin', 'compliance'].includes(profile?.role)
+  const canLink = hasRole(profile, 'admin', 'compliance', 'purchaser')
   // Receiving form only offers active materials; inactive ones are admin-only.
   const materialVendors = [...new Set(
     materials.filter(m => m.vendor && m.is_active).map(m => m.vendor)
@@ -1845,7 +1846,7 @@ export default function Armory({ profile }) {
     return m
   }, {})
   const belowMinCount = Object.keys(ruleMinByGroup).filter(k => (fullTotalsByGroup[k] || 0) < ruleMinByGroup[k]).length
-  const canEditRules = ['admin', 'compliance'].includes(profile?.role)
+  const canEditRules = hasRole(profile, 'admin', 'compliance', 'purchaser')
 
   // Materials (Raw Material master) tab — filtered + default-sorted (type, then size).
   const matFilterActive = !!(matFilterType || matFilterVendor || matFilterSize)
@@ -2982,12 +2983,14 @@ export default function Armory({ profile }) {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
-              <button
-                onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setReceivingTypeId(''); setReceivingSize(''); setReceivingCertFiles([]); setSavedReceiptId(null); setShowReceivingModal(true) }}
-                className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
-              >
-                <Plus size={18} /> Log Receipt
-              </button>
+              {canReceive(profile) && (
+                <button
+                  onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setReceivingTypeId(''); setReceivingSize(''); setReceivingCertFiles([]); setSavedReceiptId(null); setShowReceivingModal(true) }}
+                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+                >
+                  <Plus size={18} /> Log Receipt
+                </button>
+              )}
             </div>
 
             {receivingLog.length === 0 ? (
@@ -3240,7 +3243,7 @@ export default function Armory({ profile }) {
 
         {/* Inventory Adjustments Tab */}
         {activeTab === 'adjustments' && (() => {
-          const isApprover = ['admin', 'compliance'].includes(profile?.role)
+          const isApprover = hasRole(profile, 'admin', 'compliance')
           const countRows = inventoryRows.filter(r => {
             if (countRack === 'Staging' && r.rack !== null) return false
             if (countRack && countRack !== 'Staging' && r.rack !== countRack) return false
@@ -3453,7 +3456,7 @@ export default function Armory({ profile }) {
                     <div className="space-y-3">
                       {sessionList.map(s => {
                         const open = !!expandedSessions[s.id]
-                        const isOwn = s.requested_by === profile?.id && profile?.role !== 'admin'  // admins may self-approve
+                        const isOwn = s.requested_by === profile?.id && !hasRole(profile, 'admin')  // admins may self-approve
                         const pending = adjReviewFilter === 'pending'
                         return (
                           <div key={s.id} className="border border-gray-700 rounded-lg overflow-hidden">
@@ -5052,7 +5055,7 @@ export default function Armory({ profile }) {
                       >
                         <ExternalLink size={15} />
                       </button>
-                      {profile?.role === 'admin' && (
+                      {hasRole(profile, 'admin') && (
                         <button
                           onClick={() => handleDeleteLotDoc(doc)}
                           className="p-1.5 text-gray-400 hover:text-red-400 rounded transition-colors"

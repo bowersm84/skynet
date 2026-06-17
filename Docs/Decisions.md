@@ -1421,3 +1421,23 @@ Added work_order:(id, wo_number, order_type) to the active-jobs select to suppor
 
 ### D-NEST-CLOSE — Nested Assembly feature complete (2026-06-16)
 **Status:** Batches A–D shipped and verified on TEST behind FEATURES.NESTED_ASSEMBLY (exercised with ASSEMBLY_MODULE=true). Decisions D-NEST-01 through D-NEST-12. Implementation plan renamed to Nested_Assembly_Implementation_Plan_CLOSED.md. Batch structure: A (schema + explode_bom), B1/B2 (Create-WO recursive explosion + submit), C1/C2 (assembly-side consumption + parent readiness) + D-NEST-09 KPI alignment, D1/D2/D3 (Order Lookup nesting, traveler genealogy, sub-assembly external-return check-in). Convention reaffirmed: finished goods are never nested and never the top of a nested tree — the finished_good skip in Assembly.jsx and finished_good→pending_tco routing are correct and untouched. Deferred (tracked, non-blocking): PrintPackageModal genealogy (it has its own trimmed traveler builder with no CO-section table either).
+
+### D-MROLE-02 — Multi-role shipped (2026-06-17)
+`profiles.roles text[]` (default `'{}'`) added; `user_has_role(uid, VARIADIC roles)` SECURITY DEFINER helper live. The `profiles.role` CHECK constraint was extended to include `'purchaser'` so the role is valid as a *primary* too (needed for purchaser-only users and the verification test user); `roles[]` itself is intentionally left unconstrained (small shop; avoids a second enum to maintain). Frontend: `userRoles()`/`hasRole()`/`canWriteMasterData()`/`canReceive()` in `lib/roles.js`; Armory tab visibility is now a **union** across the effective role set; `canViewSalesDashboard` and Armory's capability gates (`canLink`, `canEditRules`, `isApprover`, the self-approve exemption, admin lot-doc delete) route through `hasRole`. `App.jsx` `canAccessArmory` is multi-role aware (+purchaser). The `manage-users` edge function persists `roles` on invite / invite_no_email / update_profile. Peripheral guards (Finishing, Compliance, Bridge, Customer Orders, Mainframe) still read the primary `role` — scoped; migrate opportunistically. Supersedes the "pending" status of D-MROLE-01.
+
+### D-PURCH-02 — Purchaser shipped + scope notes (2026-06-17)
+Purchaser matrix per D-PURCH-01 implemented. UsersTab gained an "Additional Roles" multi-select (excludes the primary; the primary-role picker prunes the chosen role from the additional set) backed by the edge-function `roles` change. Implementation clarifications: (1) the Receiving tab's only write control is the **Log Receipt** button — the receiving table is read-only display and cert upload lives inside that modal — so `canReceive` wraps just that button. (2) The Inventory-tab rack-reassign control was left **ungated** (pre-existing behavior; President/Viewer can already use it today). Out of scope for this rollout; purchaser inherits it under "Inventory = view." Flagged for opportunistic cleanup. The adjustment-submit and reconciliation-link RPCs now admit `purchaser` via `user_has_role`; the approve RPCs do not. Supersedes the "pending" status of D-PURCH-01.
+
+### D-RLS-MAT01 — Material master writable by compliance, not just admin (2026-06-16)
+**Problem:** Compliance (Roger/Tom) hit "new row violates row-level security policy for
+table materials" when adding a material. The app grants compliance the material_master
+tab with write access (Armory TAB_ACCESS_BY_ROLE), but the S7 materials RLS policies
+("Admin insert/update materials") restricted writes to role = 'admin' only — a UI/RLS
+mismatch.
+**Fix:** Replaced the admin-only INSERT and UPDATE policies on public.materials with
+"Material master insert/update (admin, compliance)" allowing role IN ('admin','compliance')
+via the standard profiles/auth.uid() EXISTS pattern. SELECT unchanged (all authenticated);
+hard DELETE stays admin-only (compliance deactivates via is_active, an UPDATE now covered).
+**Applied:** TEST → verified compliance insert → PROD. No app/schema change.
+**Note:** parts and material_types remain open to any authenticated user — looser than
+ideal, flagged for a future RLS-consistency pass, out of scope here.

@@ -1441,3 +1441,20 @@ hard DELETE stays admin-only (compliance deactivates via is_active, an UPDATE no
 **Applied:** TEST → verified compliance insert → PROD. No app/schema change.
 **Note:** parts and material_types remain open to any authenticated user — looser than
 ideal, flagged for a future RLS-consistency pass, out of scope here.
+
+### D-RACK-LOGOUT01 — Rack kiosk inactivity auto-logout (2026-06-17)
+**Problem:** MaterialKiosk had only a manual Log out button (no idle timeout, unlike the
+machine kiosk), so the first operator of the day stayed authenticated and every
+subsequent material check-out (loaded_by/staged_by) was stamped to them.
+**Fix:** Added inactivity auto-logout (3-min window) mirroring Kiosk.jsx — activity
+listeners reset a lastActivity clock; an interval signs out and returns to the PIN
+screen after the window elapses. lastActivity reset on login.
+**Files:** src/pages/MaterialKiosk.jsx.
+
+### D-WOLOOKUP-DOCDEL01 — Delete documents from WO Lookup (admin/compliance) (2026-06-17)
+**What:** Added a per-document delete (trash) button to the WO Lookup modal document
+list, gated to canManageJobDocs (admin, compliance). Deletes the job_documents row then
+removes the storage object (deleteDocument, best-effort) and updates the cache. Extracted
+a shared renderJobDocRow helper used by both the assembly-jobs and fallback-jobs views.
+Paired RLS: "Job docs delete (admin, compliance)" DELETE policy on job_documents.
+**Files:** src/pages/Mainframe.jsx (+ RLS migration).

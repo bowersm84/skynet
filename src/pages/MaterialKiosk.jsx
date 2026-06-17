@@ -54,6 +54,12 @@ export default function MaterialKiosk() {
   const [authError, setAuthError] = useState(null)
   const [authenticating, setAuthenticating] = useState(false)
 
+  // Inactivity auto-logout — the rack is shared and transactional; without this the
+  // first operator of the day stays logged in and every later check-out is stamped to
+  // them. Mirrors the machine kiosk, with a shorter window suited to the rack.
+  const [lastActivity, setLastActivity] = useState(Date.now())
+  const INACTIVITY_TIMEOUT = 3 * 60 * 1000 // 3 minutes
+
   // --- Top-level mode: 'home' | 'stage' | 'finalize' ---
   const [mode, setMode] = useState('home')
 
@@ -163,6 +169,7 @@ export default function MaterialKiosk() {
       supabase.auth.stopAutoRefresh()
 
       setOperator(data.operator)
+      setLastActivity(Date.now())
       setMode('home')
       setPin('')
     } catch (err) {
@@ -196,6 +203,25 @@ export default function MaterialKiosk() {
     await supabase.auth.signOut({ scope: 'local' })
     setOperator(null); setMode('home'); setSelectedMachine(null)
   }
+
+  // Any interaction keeps an actively-used rack logged in mid-task.
+  useEffect(() => {
+    if (!operator) return
+    const bump = () => setLastActivity(Date.now())
+    const events = ['mousedown', 'keydown', 'touchstart', 'pointerdown']
+    events.forEach(e => window.addEventListener(e, bump))
+    return () => events.forEach(e => window.removeEventListener(e, bump))
+  }, [operator])
+
+  // Auto-logout after INACTIVITY_TIMEOUT of no interaction.
+  useEffect(() => {
+    if (!operator) return
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivity > INACTIVITY_TIMEOUT) handleLogout()
+    }, 30000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operator, lastActivity])
 
   // ---------- Catalog loads ----------
   const loadCatalogs = useCallback(async () => {

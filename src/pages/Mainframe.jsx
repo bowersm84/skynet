@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split } from 'lucide-react'
-import { getDocumentUrl } from '../lib/s3'
+import { getDocumentUrl, deleteDocument } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
 import MachineCard from '../components/MachineCard'
@@ -98,6 +98,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const [jobDocCache, setJobDocCache] = useState({})
   const [loadingJobDocs, setLoadingJobDocs] = useState({})
   const [viewingWODoc, setViewingWODoc] = useState(null)
+  const [deletingDocId, setDeletingDocId] = useState(null)
   // Add-document modal: { jobId, partId } or null
   const [addDocFor, setAddDocFor] = useState(null)
   const canManageJobDocs = ['admin', 'compliance'].includes(profile?.role)
@@ -1107,6 +1108,50 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       setViewingWODoc(null)
     }
   }
+
+  // Admin/compliance only. Removes the job_documents row (RLS-guarded) first, then the
+  // storage object best-effort, then drops it from the cache so the list updates.
+  const handleDeleteWODoc = async (doc, jobId) => {
+    if (!doc?.id) return
+    if (!confirm(`Delete "${doc.file_name || 'this document'}"? This cannot be undone.`)) return
+    setDeletingDocId(doc.id)
+    try {
+      const { error } = await supabase.from('job_documents').delete().eq('id', doc.id)
+      if (error) throw error
+      if (doc.file_url) {
+        try { await deleteDocument(doc.file_url) }
+        catch (e) { console.error('Storage delete failed (DB row already removed):', e) }
+      }
+      setJobDocCache(prev => ({ ...prev, [jobId]: (prev[jobId] || []).filter(d => d.id !== doc.id) }))
+    } catch (err) {
+      console.error('Delete document error:', err)
+      alert('Failed to delete document: ' + err.message)
+    } finally {
+      setDeletingDocId(null)
+    }
+  }
+
+  // Shared renderer for a document row (view button + admin/compliance delete).
+  const renderJobDocRow = (doc, jobId) => (
+    <div key={doc.id} className="w-full flex items-center gap-1">
+      <button onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
+        <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+          {viewingWODoc === doc.file_url ? <Loader2 size={12} className="animate-spin text-gray-400" /> : <FileText size={12} className="text-gray-400" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors">{doc.file_name || 'Unnamed document'}</p>
+          {doc.document_type?.name && <p className="text-gray-600 text-[10px] truncate">{doc.document_type.name}</p>}
+        </div>
+        {doc.status === 'approved' ? <CheckCircle size={11} className="text-green-500 flex-shrink-0" /> : <Clock size={11} className="text-yellow-500 flex-shrink-0" />}
+        <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
+      </button>
+      {canManageJobDocs && (
+        <button onClick={() => handleDeleteWODoc(doc, jobId)} disabled={deletingDocId === doc.id} title="Delete document" className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded hover:bg-red-900/30 text-gray-500 hover:text-red-400 disabled:opacity-50 transition-colors">
+          {deletingDocId === doc.id ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+        </button>
+      )}
+    </div>
+  )
 
   const handleViewTraveler = async (jobId) => {
     if (!jobId) return
@@ -2968,17 +3013,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                                     </div>
                                                   ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? null : (
                                                     jobDocCache[job.id].map(doc => (
-                                                      <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
-                                                        <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
-                                                          {viewingWODoc === doc.file_url ? <Loader2 size={12} className="animate-spin text-gray-400" /> : <FileText size={12} className="text-gray-400" />}
-                                                        </div>
-                                                        <div className="flex-1 min-w-0">
-                                                          <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors">{doc.file_name || 'Unnamed document'}</p>
-                                                          {doc.document_type?.name && <p className="text-gray-600 text-[10px] truncate">{doc.document_type.name}</p>}
-                                                        </div>
-                                                        {doc.status === 'approved' ? <CheckCircle size={11} className="text-green-500 flex-shrink-0" /> : <Clock size={11} className="text-yellow-500 flex-shrink-0" />}
-                                                        <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
-                                                      </button>
+                                                      renderJobDocRow(doc, job.id)
                                                     ))
                                                   )}
                                                   {canManageJobDocs && (
@@ -3293,17 +3328,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             </div>
                                           ) : !jobDocCache[job.id] || jobDocCache[job.id].length === 0 ? null : (
                                             jobDocCache[job.id].map(doc => (
-                                              <button key={doc.id} onClick={() => handleViewWODoc(doc.file_url)} disabled={!doc.file_url || viewingWODoc === doc.file_url} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-left group">
-                                                <div className="w-6 h-6 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
-                                                  {viewingWODoc === doc.file_url ? <Loader2 size={12} className="animate-spin text-gray-400" /> : <FileText size={12} className="text-gray-400" />}
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                  <p className="text-white text-xs truncate group-hover:text-skynet-accent transition-colors">{doc.file_name || 'Unnamed document'}</p>
-                                                  {doc.document_type?.name && <p className="text-gray-600 text-[10px] truncate">{doc.document_type.name}</p>}
-                                                </div>
-                                                {doc.status === 'approved' ? <CheckCircle size={11} className="text-green-500 flex-shrink-0" /> : <Clock size={11} className="text-yellow-500 flex-shrink-0" />}
-                                                <ExternalLink size={11} className="text-gray-600 group-hover:text-skynet-accent transition-colors flex-shrink-0" />
-                                              </button>
+                                              renderJobDocRow(doc, job.id)
                                             ))
                                           )}
                                           {canManageJobDocs && (

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import { FEATURES } from '../config'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { evaluateJobShortfall } from '../lib/shortfall'
@@ -473,6 +473,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
+      const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -480,6 +481,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
         coAllocations,
+        assemblyChain,
       })
       const win = window.open('', '_blank')
       if (!win) {

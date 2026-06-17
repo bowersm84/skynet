@@ -35,7 +35,7 @@ import {
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 
@@ -1362,6 +1362,7 @@ export default function Kiosk() {
         console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
+      const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1369,6 +1370,7 @@ export default function Kiosk() {
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
         coAllocations,
+        assemblyChain,
       })
       const win = window.open('', '_blank')
       if (!win) {

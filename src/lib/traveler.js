@@ -40,8 +40,44 @@ export async function fetchCOAllocationsForTraveler(supabase, workOrderId) {
   return data || []
 }
 
+// Walk the assembly genealogy a component job feeds into: from the job's
+// immediate work_order_assembly up through its parents to the top assembly.
+// Returns [{ part_number, description, assembly_lot_number, status, is_sub }]
+// ordered immediate → top, or [] if the job isn't a component of an assembly.
+// Pass the result as `assemblyChain` on travelerData.
+export async function fetchAssemblyChainForTraveler(supabase, jobId) {
+  if (!jobId) return []
+  const { data: job } = await supabase
+    .from('jobs')
+    .select('work_order_id, work_order_assembly_id')
+    .eq('id', jobId)
+    .single()
+  if (!job?.work_order_assembly_id) return []
+  const { data: woas } = await supabase
+    .from('work_order_assemblies')
+    .select('id, parent_work_order_assembly_id, assembly_lot_number, status, assembly:parts!assembly_id(part_number, description)')
+    .eq('work_order_id', job.work_order_id)
+  if (!woas) return []
+  const byId = new Map(woas.map(w => [w.id, w]))
+  const chain = []
+  const seen = new Set()
+  let cur = byId.get(job.work_order_assembly_id)
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    chain.push({
+      part_number: cur.assembly?.part_number || null,
+      description: cur.assembly?.description || null,
+      assembly_lot_number: cur.assembly_lot_number || null,
+      status: cur.status,
+      is_sub: !!cur.parent_work_order_assembly_id,
+    })
+    cur = cur.parent_work_order_assembly_id ? byId.get(cur.parent_work_order_assembly_id) : null
+  }
+  return chain
+}
+
 export function buildTravelerHTML(travelerData) {
-  const { job, steps, finishingBatches = [], outboundSends = [], coAllocations } = travelerData
+  const { job, steps, finishingBatches = [], outboundSends = [], coAllocations, assemblyChain } = travelerData
   const wo = job.work_order
   const comp = job.component
 
@@ -289,6 +325,35 @@ export function buildTravelerHTML(travelerData) {
     </table>`
   })()
 
+  // Assembly Genealogy — only renders when the caller passes assemblyChain and
+  // the part is a component of an assembly. Shows the chain this component feeds:
+  // immediate (sub-)assembly up to the finished assembly, with each ALN.
+  const assemblyChainHTML = (() => {
+    if (!Array.isArray(assemblyChain) || assemblyChain.length === 0) return ''
+    const cellHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
+    const cellCSS = 'padding:6px 8px; border:1px solid #000;'
+    const rows = assemblyChain.map((a, i) => `
+        <tr>
+          <td style="${cellCSS}">${i === 0 ? 'Assembled into' : '&#8627; then into'}</td>
+          <td style="${cellCSS}">${_esc(a.part_number) || '&mdash;'}</td>
+          <td style="${cellCSS}">${a.is_sub ? 'Sub-assembly' : 'Finished assembly'}</td>
+          <td style="${cellCSS}">${_esc(a.assembly_lot_number) || '&mdash;'}</td>
+        </tr>`).join('')
+    return `
+    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+      <thead>
+        <tr><th colspan="4" style="${cellHeaderCSS}">Assembly Genealogy &mdash; this part is a component of</th></tr>
+        <tr>
+          <th style="${cellHeaderCSS}">Level</th>
+          <th style="${cellHeaderCSS}">Assembly</th>
+          <th style="${cellHeaderCSS}">Role</th>
+          <th style="${cellHeaderCSS}">Assembly Lot (ALN)</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+  })()
+
   const blankRows = Array.from({ length: 3 }).map(() =>
     `<tr>${Array.from({ length: 8 }).map(() => `<td style="${routingCellCSS}">&nbsp;</td>`).join('')}</tr>`
   ).join('')
@@ -332,6 +397,7 @@ export function buildTravelerHTML(travelerData) {
       </tbody>
     </table>
     ${coSectionHTML}
+    ${assemblyChainHTML}
     <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
       <colgroup>
         <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%) -->

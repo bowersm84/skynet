@@ -1351,3 +1351,73 @@ the ~16 running rows). make_to_stock jobs show "Stock order — no customer allo
 jobs with no active allocations (incl. maintenance/DTU) show "No customer order linked."
 Added work_order:(id, wo_number, order_type) to the active-jobs select to support this.
 **Files:** `src/pages/dashboards/ProductionDisplay.jsx`. No schema/RPC change.
+
+---
+
+## 2026-06-16 — Nested Assembly (Batch A: schema + BOM explosion)
+
+### D-NEST-01 — Assembly hierarchy inside a work order via self-FK (2026-06-16)
+**What:** Added `work_order_assemblies.parent_work_order_assembly_id` (nullable self-FK → work_order_assemblies.id). NULL = top assembly (every existing/single-level WO); non-null = sub-assembly whose output feeds the referenced parent woa. Partial index on the column (WHERE parent IS NOT NULL) for child lookups.
+**Why:** A WO must hold a tree of assemblies to build an assembly-within-an-assembly (SK2600-2SW → SK26C2W2 → SK26C2W1). Fully backward-compatible — all current rows have parent = NULL and behave exactly as before. Gated downstream behind FEATURES.NESTED_ASSEMBLY.
+**Files:** `Docs/migrations/2026-06-16_nested_assembly_batch_a.sql`.
+
+### D-NEST-02 — Sub-assembly check-in: extend the existing primitive (Option A) (2026-06-16)
+**What:** `assembly_component_checkins` now accepts EITHER a component job OR a sub-assembly as its source: added `source_work_order_assembly_id` (nullable FK → work_order_assemblies), made `job_id` nullable, and added an XOR CHECK (`(job_id IS NOT NULL) <> (source_work_order_assembly_id IS NOT NULL)`) so exactly one source is set. A component job clears compliance and checks in via job_id (unchanged); a completed sub-assembly woa checks into its parent via source_work_order_assembly_id (Batch C wires the trigger in handleCompleteAssembly).
+**Why (rejected Option B):** A synthetic phantom job per sub-assembly would pollute the jobs table with non-manufactured rows and complicate scheduling, traveler, and KPI queries. Extending the check-in primitive keeps sub-assemblies out of the jobs table. All existing rows (job_id set, source NULL) satisfy the new CHECK — no data migration.
+**Files:** `Docs/migrations/2026-06-16_nested_assembly_batch_a.sql`.
+
+### D-NEST-03 — explode_bom() recursive RPC for full-depth BOM (2026-06-16)
+**What:** Added `public.explode_bom(p_part_id uuid, p_top_qty int)` — SECURITY DEFINER, STABLE, recursive CTE returning one row per node: path (uuid[]), depth, parent_part_id, component_id, part_number, description, part_type, sort_order, bom_quantity, cumulative_quantity (= product of bom quantities down the path × top qty), is_cycle. Cycle guard: a node whose component_id already appears in its own path is flagged is_cycle=true and not descended into; hard depth cap of 20. Granted EXECUTE to authenticated.
+**Why RPC not PostgREST:** Per the standing 2-level nesting limit, an embedded `.select()` cannot fetch an arbitrary-depth BOM. The recursive CTE is the only reliable server-side explosion. A part recurring across different branches (e.g. the 17-4 pin in both the top BOM and the sub-assembly BOM) is NOT a cycle — it returns as distinct path rows; consumers must key on `path`, not part_id.
+**Files:** `Docs/migrations/2026-06-16_nested_assembly_batch_a.sql`.
+
+### D-NEST-04 — Convention: finished goods are never nested; nested tops are 'assembly' (2026-06-16)
+**What:** Confirmed the part_type convention for nesting. Finished goods (e.g. SK212-12) come off the machines complete and route straight to the customer or via outsourcing — they are never assembled and never the top of a nested tree. The top of any nested assembly tree is always an `assembly`-typed part. The finished_good skip in Assembly.jsx (`if (woa.assembly?.part_type === 'finished_good') continue`) and the finished_good → pending_tco routing in ComplianceReview.jsx are therefore CORRECT and left untouched.
+**Quantity propagation:** explode_bom multiplies bom_quantity through every level so qty>1 components cascade correctly. There are zero qty>1 BOM rows in the system today, so making explosion quantity-correct now has zero blast radius on current data and forecloses a latent error when qty>1 BOMs are added. This also closes the latent 1:1 bug in addJobFromBOM, to be wired in Batch B.
+
+### D-NEST-05 — Create WO nested BOM tree + selection, no submit yet (Batch B1) (2026-06-16)
+**What:** Behind FEATURES.NESTED_ASSEMBLY, Create WO loads an assembly's full BOM via explode_bom(part, 1) and renders it as an expandable tree (NestedBomTree): assembly/finished_good nodes are collapsible sub-assembly groups, manufactured leaves are job toggles, purchased leaves are display-only, cycle nodes are flagged and not expanded. Per-node quantity = node.cumulative_quantity (top=1) × (orderQty + stock), computed client-side so changing qty never re-hits the RPC. Selection lives in new index-keyed state (nestedTreeByIndex / nestedSelectedByIndex), separate from the flat selectedAssemblies[i].jobs.
+**Submit:** Intentionally NOT wired in B1 — handleProductionSubmit throws a clear "lands in B2" error for any assembly row when the flag is on, so no half-formed nested structure can be written. Finished-good / manufactured rows submit normally; flag-off is byte-for-byte unchanged.
+**Why client-side qty:** explode_bom is called once per selected assembly with top qty 1; multiplying by order+stock in the component avoids an RPC per keystroke.
+**Known pre-existing (not nesting):** coLinesByAssembly and the new nested state are keyed by selectedAssemblies index; addAssembly (prepend) and removeAssembly (filter) shift indices and can misalign these maps for multi-row WOs. Out of scope here; the single-row demand-driven default is unaffected. Flagged for a future fix.
+**Files:** src/config.js, src/lib/nestedAssembly.js (new), src/components/NestedBomTree.jsx (new), src/components/CreateWorkOrderModal.jsx.
+
+### D-NEST-06 — Create WO recursive submit for nested assemblies (Batch B2) (2026-06-16)
+**What:** Removed the B1 submit block. On submit, Create WO now walks the explode_bom tree (submitNestedTree in lib/nestedAssembly.js): the existing code still creates the TOP woa (with its Assembly Route edits + CO allocations); below it the helper creates one woa per sub-assembly node with parent_work_order_assembly_id pointing at its enclosing woa (depth-1 → top woa), and one job per SELECTED manufactured leaf with work_order_assembly_id = the nearest enclosing woa. Quantities multiply through every level: node qty = explode_bom unit qty (top=1) × (top order + stock). Sub-woa and nested-job routing copy straight from part_routing_steps; nested jobs also pull current part_documents forward. CO allocations remain at the top WO.
+**Job numbering:** threaded through the helper (startJobNum in / nextJobNum out) so the J-###### sequence stays contiguous across flat and nested rows in one submit.
+**Empty-WO check + button gate:** both the submit-time check and the component-level totalJobs (which gates the Create button and the "N jobs will be created" text) now count nested selections, so a pure-nested WO is no longer treated as empty.
+**Quantity fix (#4):** the latent addJobFromBOM 1:1 bug is moot on the nested path — nested job qty comes from explode_bom's multiplied cumulative qty, not the flat adder.
+**Files:** src/lib/nestedAssembly.js, src/components/CreateWorkOrderModal.jsx.
+
+### D-NEST-07 — Sub-assembly check-in on completion + scoped job flip (Batch C1) (2026-06-16)
+**What:** In Assembly.jsx handleCompleteAssembly, a completed sub-assembly (a woa with parent_work_order_assembly_id set) with no outstanding routing steps now goes to status 'complete' (consumed by parent) instead of 'pending_tco', and inserts an assembly_component_checkins row into its parent (source_work_order_assembly_id = the sub-assembly woa, job_id NULL, quantity_received = good qty) — the Option A primitive from Batch A. Top-level assemblies (no parent) still go to pending_tco for TCO.
+**Scoped job flip:** the post-completion job flip to pending_tco is now scoped to the completing woa's own jobs (.eq('work_order_assembly_id', completeItem.id)) instead of the whole work order, so completing a sub-assembly no longer prematurely flips the parent woa's component jobs. No change for single-assembly WOs (one woa owns all jobs).
+**Load:** added parent_work_order_assembly_id to the work_order_assemblies select.
+**Deferred to C2:** parent-blocked-until-subs-complete readiness, computeSupplyQty over woa-backed components, and the blocked-card UI. **Deferred to Batch D:** the check-in for a sub-assembly that itself has external routing steps (fires on outbound return in OutsourcedJobs, not at completion).
+**Files:** src/components/Assembly.jsx.
+
+### D-NEST-08 — Parent readiness over sub-assemblies + scoped start (Batch C2) (2026-06-16)
+**What:** Assembly.jsx now treats a parent woa's child sub-assemblies as inputs, not just its component jobs. A parent is assemblable only when all its component jobs are ready AND every child sub-assembly (work_order_assemblies where parent_work_order_assembly_id = the parent) is 'complete'. When jobs are ready but a child sub-assembly isn't, the parent surfaces in the queue flagged blocked — amber border, "Waiting on sub-assembly: X" line, and a Blocked badge in place of Start. computeSupplyQty now also folds in woa-backed components: a child's good_quantity is its supply (an incomplete child caps the parent at 0). Sub-only parents (no direct jobs) are no longer skipped.
+**Scoped start:** handleStartAssembly's job flip to in_assembly is scoped to the starting woa's own jobs (work_order_assembly_id), matching the C1 completion fix — starting a sub-assembly no longer drags the parent woa's jobs into in_assembly. No change for single-assembly WOs.
+**Files:** src/components/Assembly.jsx.
+
+### D-NEST-09 — Assembly KPI count aligned with nested readiness (2026-06-16)
+**What:** The Assembly tile count in Mainframe.jsx computed readiness independently of Assembly.jsx and required each counted woa to have ≥1 direct component job (woaJobs.length > 0), so a sub-only parent (whose only manufactured input is a sub-assembly) was skipped while the Assembly panel correctly showed it — the tile undercounted. Fixed: the KPI loop now mirrors Assembly.jsx (C2) — child sub-assemblies count as inputs, sub-only parents are counted, and parent_work_order_assembly_id was added to the KPI's work_order_assemblies fetch. The tile now matches the panel's queue + in-progress set (blocked parents included, completed sub-assemblies excluded).
+**Files:** src/pages/Mainframe.jsx.
+
+### D-NEST-10 — Order Lookup shows sub-assemblies nested under their parent (Batch D1) (2026-06-16)
+**What:** The WO detail in Mainframe's Order Lookup previously flat-mapped work_order_assemblies, so a nested WO rendered the parent and its sub-assembly as unrelated sibling cards. Now the woa list is ordered parents-first, each followed by its children (depth-first); sub-assembly cards are indented with a purple left rule and the header carries a "Sub-assembly of <parent part #>" badge. Added parent_work_order_assembly_id to the WO-detail work_order_assemblies fetch.
+**Scope:** display only — card content, routing, and job rendering unchanged. Single-level WOs (no parent links) render exactly as before.
+**Files:** src/pages/Mainframe.jsx.
+
+### D-NEST-11 — Traveler shows assembly genealogy (Batch D2) (2026-06-16)
+**What:** The Job Traveler now renders an "Assembly Genealogy" section for component jobs that feed an assembly: the chain from the part's immediate (sub-)assembly up to the finished assembly, each with its role (Sub-assembly / Finished assembly) and ALN. Added fetchAssemblyChainForTraveler(supabase, jobId) to lib/traveler.js (walks the job's woa up its parent chain) and an assemblyChain field on travelerData; the section renders only when a chain is present. Wired into the four shared traveler surfaces (Kiosk, Finishing, ComplianceReview, Mainframe Order Lookup) via the existing fullJob pattern. Non-assembly component travelers are unchanged (empty chain → no section).
+**Deferred:** PrintPackageModal uses its own trimmed traveler builder (no CO-section table either); adding genealogy there is a separate follow-up.
+**Files:** src/lib/traveler.js, src/pages/Mainframe.jsx, src/pages/Finishing.jsx, src/pages/Kiosk.jsx, src/components/ComplianceReview.jsx.
+
+### D-NEST-12 — Sub-assembly with external routing checks into parent on return (Batch D3) (2026-06-16)
+**What:** A sub-assembly that itself has external routing (plating/HT after assembly) is left ready_for_outsource by handleCompleteAssembly — C1's check-in deliberately does not fire while external work is outstanding. When its last external send returns and ALL its routing steps are complete, OutsourcedJobs now mirrors C1: if the WOA has a parent, it sets the WOA to 'complete' (consumed) instead of pending_tco and inserts the parent check-in (work_order_assembly_id=parent, source_work_order_assembly_id=sub, job_id=null, quantity_received=woa.good_quantity, fallback quantityReturned). Top-level assemblies still go to pending_tco. Only the assembly-path return block (keyed on allStepsComplete) is affected; the two finishing/job-path blocks (allExternalComplete) are unchanged.
+**Files:** src/components/OutsourcedJobs.jsx.
+
+### D-NEST-CLOSE — Nested Assembly feature complete (2026-06-16)
+**Status:** Batches A–D shipped and verified on TEST behind FEATURES.NESTED_ASSEMBLY (exercised with ASSEMBLY_MODULE=true). Decisions D-NEST-01 through D-NEST-12. Implementation plan renamed to Nested_Assembly_Implementation_Plan_CLOSED.md. Batch structure: A (schema + explode_bom), B1/B2 (Create-WO recursive explosion + submit), C1/C2 (assembly-side consumption + parent readiness) + D-NEST-09 KPI alignment, D1/D2/D3 (Order Lookup nesting, traveler genealogy, sub-assembly external-return check-in). Convention reaffirmed: finished goods are never nested and never the top of a nested tree — the finished_good skip in Assembly.jsx and finished_good→pending_tco routing are correct and untouched. Deferred (tracked, non-blocking): PrintPackageModal genealogy (it has its own trimmed traveler builder with no CO-section table either).

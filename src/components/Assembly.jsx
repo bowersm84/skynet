@@ -66,15 +66,23 @@ export default function Assembly({ profile, onUpdate }) {
   // Each component job's effective qty is normalized to "possible assemblies"
   // using the BOM ratio implied by (job.quantity / woa.quantity), then we take
   // the floor of the min across all components (limited by the scarcest part).
-  const computeSupplyQty = (woa, woaJobs) => {
+  const computeSupplyQty = (woa, woaJobs, childSubs = []) => {
     const targetQty = woa?.quantity ?? 0
     const jobs = (woaJobs || []).filter(j => !j.is_maintenance && j.quantity)
-    if (!jobs.length || !targetQty) return targetQty
+    const subs = (childSubs || []).filter(s => s.quantity)
+    if ((!jobs.length && !subs.length) || !targetQty) return targetQty
 
     let minPossibleAssemblies = Infinity
     for (const job of jobs) {
       const eq = getEffectiveQty(job)
       const possible = Math.floor((eq.qty * targetQty) / job.quantity)
+      if (possible < minPossibleAssemblies) minPossibleAssemblies = possible
+    }
+    // Sub-assembly-backed components: a child's good_quantity is its supply;
+    // an incomplete child (good_quantity 0/null) caps the parent at 0.
+    for (const sub of subs) {
+      const subGood = sub.good_quantity ?? 0
+      const possible = Math.floor((subGood * targetQty) / sub.quantity)
       if (possible < minPossibleAssemblies) minPossibleAssemblies = possible
     }
     return minPossibleAssemblies === Infinity ? targetQty : minPossibleAssemblies
@@ -125,6 +133,7 @@ export default function Assembly({ profile, onUpdate }) {
             good_quantity,
             bad_quantity,
             assembly_id,
+            parent_work_order_assembly_id,
             assembly_lot_number,
             assembly:parts!work_order_assemblies_assembly_id_fkey (
               id,
@@ -183,14 +192,25 @@ export default function Assembly({ profile, onUpdate }) {
             const woaJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
             
             // Check if all jobs for this assembly are ready
-            const allJobsReady = woaJobs.length > 0 && woaJobs.every(j => 
+            // Child sub-assemblies feeding THIS assembly (nested BOM). A parent is
+            // assemblable only when each child sub-assembly is 'complete'.
+            const childSubs = (wo.work_order_assemblies || []).filter(
+              w => w.parent_work_order_assembly_id === woa.id
+            )
+            const subsComplete = childSubs.every(w => w.status === 'complete')
+            const blockedOn = childSubs
+              .filter(w => w.status !== 'complete')
+              .map(w => w.assembly?.part_number)
+              .filter(Boolean)
+
+            const allJobsReady = woaJobs.every(j =>
               ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
             )
             
             // Must have at least one job still needing assembly
-            const hasAssemblyWork = woaJobs.some(j => 
-              ['ready_for_assembly', 'in_assembly'].includes(j.status)
-            )
+            const hasAssemblyWork =
+              woaJobs.some(j => ['ready_for_assembly', 'in_assembly'].includes(j.status)) ||
+              (woaJobs.length === 0 && childSubs.length > 0)
 
             // Skip if this assembly's jobs aren't ready yet
             if (!allJobsReady || !hasAssemblyWork) continue
@@ -211,9 +231,11 @@ export default function Assembly({ profile, onUpdate }) {
               work_order_id: wo.id,
               // woa.assembly already contains { id, part_number, description } from nested query
               targetQty: woa.quantity,
-              supplyQty: computeSupplyQty(woa, woaJobs),
+              supplyQty: computeSupplyQty(woa, woaJobs, childSubs),
               routingSteps: woa.work_order_assembly_routing_steps || [],
-              woaJobs
+              woaJobs,
+              blocked: !subsComplete && childSubs.length > 0,
+              blockedOn,
             }
 
             if (woa.status === 'in_progress' || woa.status === 'paused') {
@@ -375,14 +397,16 @@ export default function Assembly({ profile, onUpdate }) {
           .eq('status', 'pending')
       }
 
-      // Update all jobs on this work order to 'in_assembly' status
+      // Update this assembly's own jobs to 'in_assembly'. Scope to the woa, not the
+      // whole WO: starting a sub-assembly must not drag the parent woa's component
+      // jobs into in_assembly. Same set for single-assembly WOs.
       const { data: jobsData, error: jobsError } = await supabase
         .from('jobs')
-        .update({ 
+        .update({
           status: 'in_assembly',
           updated_at: new Date().toISOString()
         })
-        .eq('work_order_id', startItem.work_order_id)
+        .eq('work_order_assembly_id', startItem.id)
         .eq('status', 'ready_for_assembly')
         .select()
 
@@ -524,7 +548,13 @@ export default function Assembly({ profile, onUpdate }) {
       const stillPending = (finalSteps || []).some(
         s => !['complete', 'skipped', 'removed'].includes(s.status)
       )
-      const newWoaStatus = stillPending ? 'ready_for_outsource' : 'pending_tco'
+      // Nested assembly: a sub-assembly (one with a parent) is consumed by its
+      // parent rather than TCO'd on its own. When fully done it goes straight to
+      // 'complete' and a check-in row records its qty into the parent woa.
+      const isSubAssembly = !!completeItem.parent_work_order_assembly_id
+      const newWoaStatus = stillPending
+        ? 'ready_for_outsource'
+        : (isSubAssembly ? 'complete' : 'pending_tco')
       const { error: woaErr } = await supabase
         .from('work_order_assemblies')
         .update({
@@ -538,12 +568,31 @@ export default function Assembly({ profile, onUpdate }) {
         .eq('id', completeItem.id)
       if (woaErr) throw woaErr
 
-      // 5. Job status flip — only when all routing steps complete (no external work outstanding)
+      // Check the completed sub-assembly into its parent (Option A primitive).
+      // job_id stays NULL; the XOR CHECK requires exactly one source.
+      if (isSubAssembly && !stillPending) {
+        const { error: checkinErr } = await supabase
+          .from('assembly_component_checkins')
+          .insert({
+            work_order_assembly_id: completeItem.parent_work_order_assembly_id,
+            source_work_order_assembly_id: completeItem.id,
+            quantity_received: goodQty,
+            checked_in_by: profile?.id || null,
+            checked_in_at: completedAt,
+            condition_notes: 'Sub-assembly completed and consumed into parent.',
+          })
+        if (checkinErr) console.error('Sub-assembly check-in failed (non-fatal):', checkinErr)
+      }
+
+      // 5. Job status flip — only when all routing steps complete (no external work
+      // outstanding). Scope to THIS woa's own jobs: in a nested WO, completing a
+      // sub-assembly must not flip the parent woa's component jobs. For a single-
+      // assembly WO this is the same set (one woa owns all jobs).
       if (!stillPending) {
         const { error: jobsError } = await supabase
           .from('jobs')
           .update({ status: 'pending_tco', updated_at: new Date().toISOString() })
-          .eq('work_order_id', completeItem.work_order_id)
+          .eq('work_order_assembly_id', completeItem.id)
           .in('status', ['ready_for_assembly', 'in_assembly'])
         if (jobsError) console.error('Error updating jobs:', jobsError)
       }
@@ -982,7 +1031,7 @@ export default function Assembly({ profile, onUpdate }) {
                   <div 
                     key={item.id} 
                     className={`bg-gray-800/50 border rounded-lg p-3 hover:border-gray-600 transition-colors ${
-                      item.missingAssembly ? 'border-yellow-600/50' : 'border-gray-700'
+                      item.missingAssembly ? 'border-yellow-600/50' : item.blocked ? 'border-amber-700/50' : 'border-gray-700'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -1018,10 +1067,19 @@ export default function Assembly({ profile, onUpdate }) {
                             ⚠ Work order missing assembly configuration
                           </p>
                         )}
+                        {item.blocked && (
+                          <p className="text-xs text-amber-400/90 mt-1">
+                            ⏳ Waiting on sub-assembly: {item.blockedOn.join(', ')}
+                          </p>
+                        )}
                       </div>
                       {item.missingAssembly ? (
                         <span className="text-xs text-yellow-500 px-3 py-1.5 border border-yellow-600/50 rounded ml-3">
                           Needs Setup
+                        </span>
+                      ) : item.blocked ? (
+                        <span className="text-xs text-amber-400 px-3 py-1.5 border border-amber-600/50 rounded ml-3 whitespace-nowrap">
+                          Blocked
                         </span>
                       ) : (
                         <button

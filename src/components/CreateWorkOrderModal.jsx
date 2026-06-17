@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { getOpenCOLinesForPart } from '../lib/customerOrders'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
+import { FEATURES } from '../config'
+import { fetchExplodedBom, submitNestedTree } from '../lib/nestedAssembly'
+import NestedBomTree from './NestedBomTree'
 
 // Searchable product picker — replaces native <select> for the Product field.
 // Filters by part_number + description + customer. Groups results by part_type.
@@ -148,6 +151,30 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   const [notes, setNotes] = useState('')
   const [selectedAssemblies, setSelectedAssemblies] = useState([])
 
+  // Nested assembly (FEATURES.NESTED_ASSEMBLY). One entry per selectedAssemblies
+  // row, keyed by index. tree = { loading, nodes, error } from explode_bom (top
+  // qty 1); selections = { [nodeKey]: true } of chosen manufactured leaves.
+  const [nestedTreeByIndex, setNestedTreeByIndex] = useState({})
+  const [nestedSelectedByIndex, setNestedSelectedByIndex] = useState({})
+
+  // Load the full BOM tree for a row's top assembly (top qty 1; the tree
+  // multiplies by order+stock at render). Keyed by selectedAssemblies index.
+  const loadNestedTree = async (index, partId) => {
+    setNestedTreeByIndex(prev => ({ ...prev, [index]: { loading: true, nodes: [], error: null } }))
+    const { nodes, error } = await fetchExplodedBom(partId)
+    setNestedTreeByIndex(prev => ({ ...prev, [index]: { loading: false, nodes, error } }))
+  }
+
+  // Toggle a manufactured leaf in/out of the selected-jobs set for a row.
+  const toggleNestedLeaf = (index, node) => {
+    setNestedSelectedByIndex(prev => {
+      const row = { ...(prev[index] || {}) }
+      if (row[node.key]) delete row[node.key]
+      else row[node.key] = true
+      return { ...prev, [index]: row }
+    })
+  }
+
   // Routing cache: { [partId]: [steps] }
   const [routingCache, setRoutingCache] = useState({})
   // CO line allocations per assembly row.
@@ -282,6 +309,8 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     setDueDate('')
     setNotes('')
     setSelectedAssemblies([])
+    setNestedTreeByIndex({})
+    setNestedSelectedByIndex({})
     setCoLinesByAssembly({})
     setLoadingCoLines({})
     setRoutingCache({})
@@ -336,6 +365,13 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     setCoLinesByAssembly({ 0: { lines: preselectedCoLines, allocations } })
 
     fetchComponentRouting(preselectedPartId)
+    if (FEATURES.NESTED_ASSEMBLY && part.part_type === 'assembly') {
+      setNestedSelectedByIndex({ 0: {} })
+      setNestedTreeByIndex({ 0: { loading: true, nodes: [], error: null } })
+      fetchExplodedBom(preselectedPartId).then(({ nodes, error }) =>
+        setNestedTreeByIndex({ 0: { loading: false, nodes, error } })
+      )
+    }
   }, [isOpen, preselectedPartId, preselectedCoLines, assemblies, loadingAssemblies, fetchComponentRouting])
 
   const addAssembly = () => {
@@ -354,6 +390,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     const updated = [...selectedAssemblies]
     updated[index].assemblyId = assemblyId
     updated[index].jobs = [] // Reset jobs when assembly changes
+    if (FEATURES.NESTED_ASSEMBLY) {
+      setNestedTreeByIndex(prev => { const n = { ...prev }; delete n[index]; return n })
+      setNestedSelectedByIndex(prev => { const n = { ...prev }; delete n[index]; return n })
+    }
 
     // If this is a finished good or manufactured part, auto-add a single job for the part itself
     const selectedPart = assemblies.find(a => a.id === assemblyId)
@@ -373,6 +413,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     // S6: Fetch assembly routing so the route renders on the assembly card
     if (selectedPart && selectedPart.part_type === 'assembly') {
       fetchComponentRouting(selectedPart.id)
+      if (FEATURES.NESTED_ASSEMBLY) {
+        loadNestedTree(index, selectedPart.id)
+      }
     }
 
     setSelectedAssemblies(updated)
@@ -508,8 +551,15 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   }
 
   const handleProductionSubmit = async () => {
-    const totalJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
-    if (totalJobs === 0) {
+    // Count flat jobs (finished-good / manufactured / single-level) and nested
+    // selections (manufactured leaves chosen in the BOM tree) together so a
+    // pure-nested WO isn't rejected as empty.
+    const totalFlatJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
+    const totalNestedJobs = FEATURES.NESTED_ASSEMBLY
+      ? Object.values(nestedSelectedByIndex).reduce(
+          (sum, sel) => sum + Object.values(sel || {}).filter(Boolean).length, 0)
+      : 0
+    if (totalFlatJobs + totalNestedJobs === 0) {
       throw new Error('Please add at least one job')
     }
 
@@ -778,6 +828,25 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
           }
         }
       }
+
+      // Nested assembly: below the top woa, recursively create the sub-assembly
+      // woas (with parent links) and a job per selected manufactured leaf. The
+      // flat job loop above created nothing for nested rows (assembly.jobs is
+      // empty); nestedSelectedByIndex holds the real selections.
+      if (FEATURES.NESTED_ASSEMBLY && assemblyPart.part_type === 'assembly' && woaId) {
+        const treeState = nestedTreeByIndex[assemblyIdx]
+        const selectedKeys = nestedSelectedByIndex[assemblyIdx] || {}
+        const multiplier = effectiveOrderQty + (assembly.additionalForStock || 0)
+        nextJobNum = await submitNestedTree({
+          workOrderId: workOrder.id,
+          topWoaId: woaId,
+          treeNodes: treeState?.nodes || [],
+          selectedKeys,
+          multiplier,
+          profileId: profile?.id || null,
+          startJobNum: nextJobNum,
+        })
+      }
     }
 
     // Derive WO header fields from linked COs
@@ -815,7 +884,12 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     onClose()
   }
 
-  const totalJobs = selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0)
+  const totalJobs =
+    selectedAssemblies.reduce((sum, a) => sum + a.jobs.length, 0) +
+    (FEATURES.NESTED_ASSEMBLY
+      ? Object.values(nestedSelectedByIndex).reduce(
+          (sum, sel) => sum + Object.values(sel || {}).filter(Boolean).length, 0)
+      : 0)
   const hasInvalidTotals = selectedAssemblies.some((a) => a.additionalForStock < 0)
 
   const reorderPartRouting = (partId, fromIdx, toIdx) => {
@@ -1430,6 +1504,14 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                             </div>
 
                             {/* Available Parts from BOM */}
+                            {FEATURES.NESTED_ASSEMBLY ? (
+                              <NestedBomTree
+                                topQty={(selected.orderQuantity || 0) + (selected.additionalForStock || 0)}
+                                treeState={nestedTreeByIndex[assemblyIndex]}
+                                selected={nestedSelectedByIndex[assemblyIndex] || {}}
+                                onToggleLeaf={(node) => toggleNestedLeaf(assemblyIndex, node)}
+                              />
+                            ) : (
                             <div className="space-y-1 mb-3">
                               {getAssemblyById(selected.assemblyId)?.assembly_bom
                                 ?.filter(bom => bom.component?.part_type !== 'assembly')
@@ -1485,6 +1567,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   )
                                 })}
                             </div>
+                            )}
 
                             {/* Selected Jobs */}
                             {selected.jobs.length > 0 && (

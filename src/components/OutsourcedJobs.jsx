@@ -681,12 +681,39 @@ export default function OutsourcedJobs({ profile }) {
               && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
 
             if (allStepsComplete) {
-              // 4. WOA → pending_tco
+              // 4. WOA completion. A sub-assembly (parent set) that has now finished
+              //    its own external work is CONSUMED into its parent: mark it 'complete'
+              //    and check it in to the parent (mirrors the C1 path in Assembly.jsx for
+              //    sub-assemblies that complete with no external work). A top-level
+              //    assembly goes to pending_tco for close-out, as before.
+              const { data: woaRow } = await supabase
+                .from('work_order_assemblies')
+                .select('parent_work_order_assembly_id, good_quantity')
+                .eq('id', woaId)
+                .single()
+              const parentWoaId = woaRow?.parent_work_order_assembly_id || null
+
               const { error: woaErr } = await supabase
                 .from('work_order_assemblies')
-                .update({ status: 'pending_tco' })
+                .update({ status: parentWoaId ? 'complete' : 'pending_tco' })
                 .eq('id', woaId)
               if (woaErr) throw woaErr
+
+              // 4b. Sub-assembly → insert the parent check-in (job_id null, source set).
+              if (parentWoaId) {
+                const { error: checkinErr } = await supabase
+                  .from('assembly_component_checkins')
+                  .insert({
+                    work_order_assembly_id: parentWoaId,
+                    source_work_order_assembly_id: woaId,
+                    job_id: null,
+                    quantity_received: woaRow?.good_quantity ?? quantityReturned,
+                    checked_in_by: profile.id,
+                    checked_in_at: new Date().toISOString(),
+                    condition_notes: 'Sub-assembly external work returned',
+                  })
+                if (checkinErr) console.error('Sub-assembly check-in insert failed (non-fatal):', checkinErr)
+              }
 
               // 5. Linked component jobs → pending_tco
               const { error: jobsErr } = await supabase

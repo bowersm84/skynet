@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { batchRequiresChemicals } from '../lib/routing'
 import { evaluateJobShortfall } from '../lib/shortfall'
@@ -1037,6 +1037,7 @@ export default function Finishing() {
         console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
+      const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1044,6 +1045,7 @@ export default function Finishing() {
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
         coAllocations,
+        assemblyChain,
       })
       const win = window.open('', '_blank')
       if (!win) {

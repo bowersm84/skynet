@@ -37,4 +37,15 @@ export const FEATURES = {
    * Pilot: flip true for the one material area only.
    */
   MATERIAL_KIOSK: true,
+
+  /**
+   * Nested Assembly (assembly-within-assembly). When false: Create WO renders
+   * the existing single-level BOM list and submits flat — no behavior change.
+   * When true: Create WO loads the full BOM tree via explode_bom and renders it
+   * as an expandable tree (sub-assembly groups, manufactured-leaf job toggles).
+   * Layered on ASSEMBLY_MODULE — only meaningful once assembly is live.
+   * Batch B1: tree UI + selection (no submit). Batch B2: recursive submit.
+   * Keep false in PROD; flip true on TEST for nested-assembly testing.
+   */
+  NESTED_ASSEMBLY: true,
 }

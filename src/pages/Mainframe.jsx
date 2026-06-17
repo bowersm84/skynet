@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split } from 'lucide-react'
 import { getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
@@ -217,7 +217,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
           id,
           wo_number,
           order_type,
-          work_order_assemblies (id, assembly_id, status),
+          work_order_assemblies (id, assembly_id, status, parent_work_order_assembly_id),
           jobs (id, status, work_order_assembly_id)
         `)
         .not('order_type', 'eq', 'maintenance')
@@ -229,12 +229,17 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         if (wo.work_order_assemblies && wo.work_order_assemblies.length > 0) {
           for (const woa of wo.work_order_assemblies) {
             const woaJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
-            const allReady = woaJobs.length > 0 && woaJobs.every(j =>
+            // Mirror Assembly.jsx (C2): child sub-assemblies are inputs too, and a
+            // sub-only parent (no direct component job) still counts.
+            const childSubs = (wo.work_order_assemblies || []).filter(
+              w => w.parent_work_order_assembly_id === woa.id
+            )
+            const allReady = woaJobs.every(j =>
               ['ready_for_assembly', 'in_assembly', 'complete'].includes(j.status)
             )
-            const hasWork = woaJobs.some(j =>
-              ['ready_for_assembly', 'in_assembly'].includes(j.status)
-            )
+            const hasWork =
+              woaJobs.some(j => ['ready_for_assembly', 'in_assembly'].includes(j.status)) ||
+              (woaJobs.length === 0 && childSubs.length > 0)
             if (allReady && hasWork && woa.status !== 'complete') {
               assemblyReadyCount++
               assemblyReadyWOSet.add(wo.id)
@@ -501,6 +506,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             good_quantity,
             bad_quantity,
             assembly_lot_number,
+            parent_work_order_assembly_id,
             assembly:parts!assembly_id(id, part_number, description),
             work_order_assembly_routing_steps (
               id, step_order, step_name, step_type, status,
@@ -1158,6 +1164,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         console.warn('Traveler: no work_order id available for CO allocation lookup', { jobId: fullJob.id })
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
+      const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1165,6 +1172,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         finishingBatches: finishingBatches || [],
         outboundSends: outboundSends || [],
         coAllocations,
+        assemblyChain,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -2469,23 +2477,41 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                               )
                             })()}
 
-                            {/* Show assemblies with their jobs */}
+                            {/* Show assemblies with their jobs (parents first, sub-assemblies nested) */}
                             {wo.work_order_assemblies && wo.work_order_assemblies.length > 0 ? (
-                              wo.work_order_assemblies.map(woa => {
+                              (() => {
+                                const allWoas = wo.work_order_assemblies
+                                const ordered = []
+                                const pushTree = (w) => { ordered.push(w); allWoas.filter(c => c.parent_work_order_assembly_id === w.id).forEach(pushTree) }
+                                allWoas.filter(w => !w.parent_work_order_assembly_id).forEach(pushTree)
+                                allWoas.filter(w => !ordered.includes(w)).forEach(w => ordered.push(w))
+                                return ordered
+                              })().map(woa => {
                                 // Only show jobs actually linked to THIS assembly
                                 const assemblyJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []
+                                const isSubAssembly = !!woa.parent_work_order_assembly_id
+                                const parentWoa = isSubAssembly
+                                  ? wo.work_order_assemblies.find(w => w.id === woa.parent_work_order_assembly_id)
+                                  : null
                                 
                                 return (
-                                  <div key={woa.id}>
+                                  <div key={woa.id} className={isSubAssembly ? 'ml-6 border-l-2 border-purple-800/40' : ''}>
                                     {/* Assembly Header */}
                                     <div className="px-4 py-3 bg-gray-800/50 border-b border-gray-700">
                                       <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-3">
-                                          <Package size={18} className="text-skynet-accent" />
+                                          <Package size={18} className={isSubAssembly ? 'text-purple-300' : 'text-skynet-accent'} />
                                           <div>
-                                            <span className="text-skynet-accent font-mono font-medium">
-                                              {woa.assembly?.part_number || 'Unknown Product'}
-                                            </span>
+                                            <div className="flex items-center gap-2">
+                                              <span className={`font-mono font-medium ${isSubAssembly ? 'text-purple-200' : 'text-skynet-accent'}`}>
+                                                {woa.assembly?.part_number || 'Unknown Product'}
+                                              </span>
+                                              {isSubAssembly && (
+                                                <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/40 text-purple-300 rounded border border-purple-700/50 whitespace-nowrap">
+                                                  Sub-assembly of {parentWoa?.assembly?.part_number || '—'}
+                                                </span>
+                                              )}
+                                            </div>
                                             <p className="text-xs text-gray-400">{woa.assembly?.description}</p>
                                           </div>
                                         </div>

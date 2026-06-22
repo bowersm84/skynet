@@ -15,7 +15,7 @@ CREATE TABLE public.profiles (
   id uuid NOT NULL,
   email character varying NOT NULL,
   full_name character varying,
-  role character varying NOT NULL DEFAULT 'machinist'::character varying CHECK (role::text = ANY (ARRAY['admin'::character varying::text, 'compliance'::character varying::text, 'machinist'::character varying::text, 'assembly'::character varying::text, 'display'::character varying::text, 'scheduler'::character varying::text, 'customer_service'::character varying::text, 'finishing'::character varying::text, 'president'::character varying::text, 'viewer'::character varying::text])),
+  role character varying NOT NULL DEFAULT 'machinist'::character varying CHECK (role::text = ANY (ARRAY['admin'::text, 'compliance'::text, 'machinist'::text, 'assembly'::text, 'display'::text, 'scheduler'::text, 'customer_service'::text, 'finishing'::text, 'president'::text, 'viewer'::text, 'purchaser'::text])),
   home_location_id uuid,
   can_float boolean DEFAULT false,
   pin_code character varying,
@@ -26,6 +26,7 @@ CREATE TABLE public.profiles (
   username text DEFAULT split_part((email)::text, '@'::text, 1),
   must_change_password boolean NOT NULL DEFAULT false,
   is_salesperson boolean NOT NULL DEFAULT false,
+  roles ARRAY NOT NULL DEFAULT '{}'::text[],
   CONSTRAINT profiles_pkey PRIMARY KEY (id),
   CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id),
   CONSTRAINT profiles_home_location_id_fkey FOREIGN KEY (home_location_id) REFERENCES public.locations(id)

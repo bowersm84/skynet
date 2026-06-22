@@ -1458,3 +1458,31 @@ removes the storage object (deleteDocument, best-effort) and updates the cache. 
 a shared renderJobDocRow helper used by both the assembly-jobs and fallback-jobs views.
 Paired RLS: "Job docs delete (admin, compliance)" DELETE policy on job_documents.
 **Files:** src/pages/Mainframe.jsx (+ RLS migration).
+
+### D-CLOSEDWO-SEARCH01 — Closed work order search in Order Lookup (2026-06-22)
+Added a server-side "Closed" mode to the Work Orders tab of the Order Lookup so
+admin/compliance can retrieve TCO'd / cancelled / closed WOs on demand (FAA/AS9100
+records retrieval), replacing ad-hoc SQL. New RPC search_closed_work_orders(p_term,
+p_limit=50), SECURITY DEFINER, matches wo_number, customer, job_number, component
+part_number, and assembly part_number (ILIKE) for status IN
+('complete','cancelled','closed'), ordered by COALESCE(closed_at, created_at) desc;
+backed by pg_trgm GIN indexes + FK indexes (migration
+2026-06-22_closed_wo_search_batchA.sql). Mainframe.jsx hydrates matched WO ids through
+the existing embedded select (extracted to WO_LOOKUP_SELECT) and hydration helper
+(hydrateWOExtras), so the existing drill-down, document viewer, and Job Traveler render
+unchanged. Closed mode is search-driven (no results until a term is entered), bounded to
+top 50, gated to admin/compliance in the UI (RPC itself is authenticated, ids-only).
+Decisions baked in: included 'closed' status so cancelled-maintenance WOs are retrievable;
+included assembly part numbers for parity with active search. Active lookup path
+unchanged. Batch C (optional date filter, test script, spec bump) remains.
+
+### D-CLOSEDWO-SEARCH02 — Closed WO search date window + Batch C closeout (2026-06-22)
+Layered an optional date window onto search_closed_work_orders (new 3rd arg p_since
+timestamptz default null; filters COALESCE(closed_at, created_at) >= p_since). Closed mode
+UI gains a "Last 12 months" (default) / "All time" selector; default bounds history without
+extra typing, "All time" passes p_since=null. Backward compatible — the 2-arg-style call was
+replaced everywhere it is used. Migration: 2026-06-22_closed_wo_search_datewindow.sql.
+Batch C test script intentionally skipped per owner (manual TEST verification sufficient:
+J-000058 retrievable under both windows; future-dated window returns 0). Closed WO Search
+arc complete (Batch A primitive, Batch B UI, Batch C date window); spec bumped to v4.1;
+plan renamed Closed_WO_Search_Implementation_Plan_1_CLOSED.md.

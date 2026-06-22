@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split, Archive } from 'lucide-react'
 import { getDocumentUrl, deleteDocument } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
@@ -81,7 +81,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   const [woLookupLoading, setWOLookupLoading] = useState(false)
   const [woLookupSearch, setWOLookupSearch] = useState('')
   const [expandedWOs, setExpandedWOs] = useState({})
-  
+
+  // Closed WO search mode (Batch B — server-side RPC search of TCO'd/cancelled/closed WOs)
+  const [woLookupMode, setWOLookupMode] = useState('active') // 'active' | 'closed'
+  const [closedWOLookupData, setClosedWOLookupData] = useState([])
+  const [closedWOLookupLoading, setClosedWOLookupLoading] = useState(false)
+  const [closedSearchPerformed, setClosedSearchPerformed] = useState(false)
+  const [closedDateWindow, setClosedDateWindow] = useState('12m') // '12m' | 'all'
+  const closedSearchDebounceRef = useRef(null)
+  const CLOSED_SEARCH_LIMIT = 50
+
   // WO Edit modal state
   const [editingWO, setEditingWO] = useState(null)
   
@@ -477,14 +486,10 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     return activeMaintenanceJobs.find(j => j.assigned_machine_id === machineId)
   }
 
-  // Fetch all active work orders with their jobs for lookup
-  const fetchWOLookup = async () => {
-    setWOLookupLoading(true)
-    try {
-      // Get all work orders with their assemblies and jobs
-      const { data: workOrders, error: woError } = await supabase
-        .from('work_orders')
-        .select(`
+  // Shared embedded select for the WO lookup. Reused by both the active path
+  // (fetchWOLookup) and the closed-search path (fetchClosedWOLookup) so closed
+  // results hydrate into the identical shape the drill-down/traveler/docs expect.
+  const WO_LOOKUP_SELECT = `
           id,
           wo_number,
           customer,
@@ -555,7 +560,100 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               created_at
             )
           )
+        `
+
+  // Hydrate WO-lookup extras (WOA outbound_sends + batch-letter maps + active CO
+  // allocations) onto a list of WOs in place. Shared by the active and closed paths.
+  const hydrateWOExtras = async (woList) => {
+    // Hydrate WOA-level outbound_sends (polymorphic — no FK, fetched separately)
+    const allWoaIds = []
+    for (const wo of woList) {
+      for (const woa of (wo.work_order_assemblies || [])) {
+        if (woa.id) allWoaIds.push(woa.id)
+      }
+    }
+
+    let asmSendsByWoa = {}
+    if (allWoaIds.length > 0) {
+      const { data: asmSends, error: asmErr } = await supabase
+        .from('outbound_sends')
+        .select(`
+          id, source_id, routing_step_id, operation_type, quantity, sent_at,
+          expected_return_at, returned_at, vendor_name, vendor_lot_number,
+          quantity_returned, created_at
         `)
+        .eq('source_type', 'work_order_assembly')
+        .in('source_id', allWoaIds)
+        .order('created_at', { ascending: true })
+
+      if (asmErr) {
+        console.error('Error fetching WOA outbound_sends:', asmErr)
+      } else {
+        for (const send of asmSends || []) {
+          if (!asmSendsByWoa[send.source_id]) asmSendsByWoa[send.source_id] = []
+          asmSendsByWoa[send.source_id].push(send)
+        }
+      }
+    }
+
+    // Attach the sends list (and a batch-letter map) to each WOA so render code can use them
+    for (const wo of woList) {
+      for (const woa of (wo.work_order_assemblies || [])) {
+        const sends = asmSendsByWoa[woa.id] || []
+        woa.assembly_outbound_sends = sends
+        // Per-WOA per-step batch lettering: A, B, C... ordered by created_at within each routing_step_id
+        const byStep = {}
+        for (const s of sends) {
+          const k = s.routing_step_id || '_'
+          if (!byStep[k]) byStep[k] = []
+          byStep[k].push(s)
+        }
+        const letterMap = {}
+        for (const stepId in byStep) {
+          byStep[stepId].forEach((s, i) => { letterMap[s.id] = String.fromCharCode(65 + i) })
+        }
+        woa.assembly_send_letter_map = letterMap
+      }
+    }
+
+    // Hydrate active CO allocations per WO. Used for the customer/due display rule.
+    // Polymorphic shape mirrors what EditWorkOrderModal loads on open.
+    const allWoIds = woList.map(w => w.id).filter(Boolean)
+    let allocsByWo = {}
+    if (allWoIds.length > 0) {
+      const { data: allocsData, error: allocsErr } = await supabase
+        .from('customer_order_allocations')
+        .select(`
+          id, work_order_id, quantity_allocated, customer_order_line_id,
+          customer_order_lines (
+            id, line_number, due_date, part_id,
+            customer_orders ( co_number, customers ( id, name ) )
+          )
+        `)
+        .in('work_order_id', allWoIds)
+        .eq('is_active', true)
+      if (allocsErr) {
+        console.error('Failed to fetch WO allocations:', allocsErr)
+      } else {
+        for (const a of allocsData || []) {
+          if (!allocsByWo[a.work_order_id]) allocsByWo[a.work_order_id] = []
+          allocsByWo[a.work_order_id].push(a)
+        }
+      }
+    }
+    for (const wo of woList) {
+      wo.active_allocations = allocsByWo[wo.id] || []
+    }
+  }
+
+  // Fetch all active work orders with their jobs for lookup
+  const fetchWOLookup = async () => {
+    setWOLookupLoading(true)
+    try {
+      // Get all work orders with their assemblies and jobs
+      const { data: workOrders, error: woError } = await supabase
+        .from('work_orders')
+        .select(WO_LOOKUP_SELECT)
         .order('created_at', { ascending: false })
 
       if (woError) throw woError
@@ -583,86 +681,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
         return latestJob && new Date(wo.created_at) > sevenDaysAgo
       }) || []
 
-      // Hydrate WOA-level outbound_sends (polymorphic — no FK, fetched separately)
-      const allWoaIds = []
       const finalWOs = [...activeWOs, ...completedWOs]
-      for (const wo of finalWOs) {
-        for (const woa of (wo.work_order_assemblies || [])) {
-          if (woa.id) allWoaIds.push(woa.id)
-        }
-      }
-
-      let asmSendsByWoa = {}
-      if (allWoaIds.length > 0) {
-        const { data: asmSends, error: asmErr } = await supabase
-          .from('outbound_sends')
-          .select(`
-            id, source_id, routing_step_id, operation_type, quantity, sent_at,
-            expected_return_at, returned_at, vendor_name, vendor_lot_number,
-            quantity_returned, created_at
-          `)
-          .eq('source_type', 'work_order_assembly')
-          .in('source_id', allWoaIds)
-          .order('created_at', { ascending: true })
-
-        if (asmErr) {
-          console.error('Error fetching WOA outbound_sends:', asmErr)
-        } else {
-          for (const send of asmSends || []) {
-            if (!asmSendsByWoa[send.source_id]) asmSendsByWoa[send.source_id] = []
-            asmSendsByWoa[send.source_id].push(send)
-          }
-        }
-      }
-
-      // Attach the sends list (and a batch-letter map) to each WOA so render code can use them
-      for (const wo of finalWOs) {
-        for (const woa of (wo.work_order_assemblies || [])) {
-          const sends = asmSendsByWoa[woa.id] || []
-          woa.assembly_outbound_sends = sends
-          // Per-WOA per-step batch lettering: A, B, C... ordered by created_at within each routing_step_id
-          const byStep = {}
-          for (const s of sends) {
-            const k = s.routing_step_id || '_'
-            if (!byStep[k]) byStep[k] = []
-            byStep[k].push(s)
-          }
-          const letterMap = {}
-          for (const stepId in byStep) {
-            byStep[stepId].forEach((s, i) => { letterMap[s.id] = String.fromCharCode(65 + i) })
-          }
-          woa.assembly_send_letter_map = letterMap
-        }
-      }
-
-      // Hydrate active CO allocations per WO. Used for the customer/due display rule.
-      // Polymorphic shape mirrors what EditWorkOrderModal loads on open.
-      const allWoIds = finalWOs.map(w => w.id).filter(Boolean)
-      let allocsByWo = {}
-      if (allWoIds.length > 0) {
-        const { data: allocsData, error: allocsErr } = await supabase
-          .from('customer_order_allocations')
-          .select(`
-            id, work_order_id, quantity_allocated, customer_order_line_id,
-            customer_order_lines (
-              id, line_number, due_date, part_id,
-              customer_orders ( co_number, customers ( id, name ) )
-            )
-          `)
-          .in('work_order_id', allWoIds)
-          .eq('is_active', true)
-        if (allocsErr) {
-          console.error('Failed to fetch WO allocations:', allocsErr)
-        } else {
-          for (const a of allocsData || []) {
-            if (!allocsByWo[a.work_order_id]) allocsByWo[a.work_order_id] = []
-            allocsByWo[a.work_order_id].push(a)
-          }
-        }
-      }
-      for (const wo of finalWOs) {
-        wo.active_allocations = allocsByWo[wo.id] || []
-      }
+      await hydrateWOExtras(finalWOs)
 
       setWOLookupData(finalWOs)
 
@@ -706,6 +726,64 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       setWOLookupLoading(false)
     }
   }
+
+  // Closed WO search (Batch B) — server-side RPC, bounded to top N. Hydrates the
+  // matched WO ids through the SAME embedded select + hydration as the active path,
+  // so the existing drill-down/traveler/docs render unchanged.
+  const fetchClosedWOLookup = async (rawTerm) => {
+    const term = (rawTerm || '').trim()
+    if (!term) {
+      setClosedWOLookupData([])
+      setClosedSearchPerformed(false)
+      return
+    }
+    setClosedWOLookupLoading(true)
+    try {
+      const pSince = closedDateWindow === '12m'
+        ? new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString()
+        : null
+      const { data: rpcRows, error: rpcErr } = await supabase
+        .rpc('search_closed_work_orders', { p_term: term, p_limit: CLOSED_SEARCH_LIMIT, p_since: pSince })
+      if (rpcErr) throw rpcErr
+      const ids = (rpcRows || []).map(r => r.work_order_id).filter(Boolean)
+      if (ids.length === 0) {
+        setClosedWOLookupData([])
+        setClosedSearchPerformed(true)
+        return
+      }
+      const { data: woData, error: woErr } = await supabase
+        .from('work_orders')
+        .select(WO_LOOKUP_SELECT)
+        .in('id', ids)
+      if (woErr) throw woErr
+      // Preserve RPC ordering (closed_at desc)
+      const orderIndex = new Map(ids.map((id, i) => [id, i]))
+      const ordered = (woData || []).slice().sort(
+        (a, b) => (orderIndex.get(a.id) ?? 1e9) - (orderIndex.get(b.id) ?? 1e9)
+      )
+      await hydrateWOExtras(ordered)
+      setClosedWOLookupData(ordered)
+      setClosedSearchPerformed(true)
+    } catch (err) {
+      console.error('Error fetching closed WO lookup data:', err)
+      setClosedWOLookupData([])
+      setClosedSearchPerformed(true)
+    } finally {
+      setClosedWOLookupLoading(false)
+    }
+  }
+
+  // Debounced trigger for closed search (only active in closed mode with the modal open)
+  useEffect(() => {
+    if (!showWOLookup || woLookupMode !== 'closed') return
+    if (closedSearchDebounceRef.current) clearTimeout(closedSearchDebounceRef.current)
+    closedSearchDebounceRef.current = setTimeout(() => {
+      fetchClosedWOLookup(woLookupSearch)
+    }, 350)
+    return () => {
+      if (closedSearchDebounceRef.current) clearTimeout(closedSearchDebounceRef.current)
+    }
+  }, [woLookupSearch, woLookupMode, showWOLookup, closedDateWindow])
 
   // Open WO Lookup modal
   const handleOpenWOLookup = () => {
@@ -922,6 +1000,10 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       job.component?.customer?.toLowerCase().includes(search)
     )
   })
+
+  // Closed mode shows server-fetched results; active mode shows the client-filtered list.
+  const displayedWOs = woLookupMode === 'closed' ? closedWOLookupData : filteredWOLookup
+  const woLookupBusy = woLookupMode === 'closed' ? closedWOLookupLoading : woLookupLoading
 
   // Group machines by location
   const machinesByLocation = machines.reduce((acc, machine) => {
@@ -2108,6 +2190,10 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                   setShowWOLookup(false)
                   setExpandedJobDocs({})
                   setJobDocCache({})
+                  setWOLookupMode('active')
+                  setClosedWOLookupData([])
+                  setClosedSearchPerformed(false)
+                  setClosedDateWindow('12m')
                 }}
                 className="text-gray-400 hover:text-white p-2"
               >
@@ -2165,11 +2251,54 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             {/* Search Bar (Work Orders tab only — CustomerOrders has its own search) */}
             {orderLookupTab === 'work_orders' && (
               <div className="px-6 py-4 border-b border-gray-800 flex-shrink-0">
+                {(profile?.role === 'admin' || profile?.role === 'compliance') && (
+                  <div className="flex items-center gap-1 mb-3">
+                    <button
+                      onClick={() => setWOLookupMode('active')}
+                      className={`px-3 py-1.5 text-sm rounded border transition-colors ${
+                        woLookupMode === 'active'
+                          ? 'bg-skynet-accent/20 border-skynet-accent text-skynet-accent'
+                          : 'border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >Active</button>
+                    <button
+                      onClick={() => setWOLookupMode('closed')}
+                      className={`px-3 py-1.5 text-sm rounded border transition-colors flex items-center gap-1.5 ${
+                        woLookupMode === 'closed'
+                          ? 'bg-skynet-accent/20 border-skynet-accent text-skynet-accent'
+                          : 'border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    ><Archive size={14} />Closed</button>
+                  </div>
+                )}
+                {woLookupMode === 'closed' && (profile?.role === 'admin' || profile?.role === 'compliance') && (
+                  <div className="flex items-center gap-1 mb-3">
+                    <span className="text-xs text-gray-500 mr-1">Closed within:</span>
+                    <button
+                      onClick={() => setClosedDateWindow('12m')}
+                      className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                        closedDateWindow === '12m'
+                          ? 'bg-skynet-accent/20 border-skynet-accent text-skynet-accent'
+                          : 'border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >Last 12 months</button>
+                    <button
+                      onClick={() => setClosedDateWindow('all')}
+                      className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                        closedDateWindow === 'all'
+                          ? 'bg-skynet-accent/20 border-skynet-accent text-skynet-accent'
+                          : 'border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >All time</button>
+                  </div>
+                )}
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={20} />
                   <input
                     type="text"
-                    placeholder="Search by WO#, Job#, Customer, or Part#..."
+                    placeholder={woLookupMode === 'closed'
+                      ? 'Search closed WOs by WO#, Job#, Customer, or Part#...'
+                      : 'Search by WO#, Job#, Customer, or Part#...'}
                     value={woLookupSearch}
                     onChange={(e) => setWOLookupSearch(e.target.value)}
                     className="w-full pl-10 pr-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
@@ -2215,20 +2344,27 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
               </div>
             ) : (
             <div className="flex-1 overflow-y-auto p-6">
-              {woLookupLoading ? (
+              {woLookupBusy ? (
                 <div className="flex items-center justify-center py-12">
                   <Loader2 size={32} className="animate-spin text-skynet-accent" />
                 </div>
-              ) : filteredWOLookup.length === 0 && filteredStandaloneJobs.length === 0 ? (
+              ) : woLookupMode === 'closed' && !woLookupSearch.trim() ? (
+                <div className="text-center py-12">
+                  <Archive size={48} className="mx-auto text-gray-600 mb-4" />
+                  <p className="text-gray-500">Enter a WO#, Job#, Part#, or Customer to search closed work orders</p>
+                </div>
+              ) : displayedWOs.length === 0 && (woLookupMode === 'closed' || filteredStandaloneJobs.length === 0) ? (
                 <div className="text-center py-12">
                   <ClipboardList size={48} className="mx-auto text-gray-600 mb-4" />
                   <p className="text-gray-500">
-                    {woLookupSearch ? 'No matching work orders found' : 'No active work orders'}
+                    {woLookupMode === 'closed'
+                      ? `No closed work orders match "${woLookupSearch.trim()}"`
+                      : (woLookupSearch ? 'No matching work orders found' : 'No active work orders')}
                   </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {filteredStandaloneJobs.length > 0 && (
+                  {woLookupMode === 'active' && filteredStandaloneJobs.length > 0 && (
                     <div className="border border-cyan-700/40 rounded-lg overflow-hidden bg-cyan-900/10">
                       <button
                         onClick={() => setShowStandaloneSection(prev => !prev)}
@@ -2299,7 +2435,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                       )}
                     </div>
                   )}
-                  {filteredWOLookup.map(wo => {
+                  {displayedWOs.map(wo => {
                     const isExpanded = expandedWOs[wo.id]
                     const allJobsComplete = wo.jobs?.every(j => ['complete', 'cancelled'].includes(j.status))
                     const readyForAssemblyCount = wo.jobs?.filter(j => j.status === 'ready_for_assembly').length || 0
@@ -3365,14 +3501,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
             {orderLookupTab === 'work_orders' && (
               <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between flex-shrink-0 bg-gray-900">
                 <span className="text-sm text-gray-500">
-                  {filteredWOLookup.length} work order{filteredWOLookup.length !== 1 ? 's' : ''} found
+                  {displayedWOs.length} {woLookupMode === 'closed' ? 'closed ' : ''}work order{displayedWOs.length !== 1 ? 's' : ''} found{woLookupMode === 'closed' && displayedWOs.length === CLOSED_SEARCH_LIMIT ? ` (showing top ${CLOSED_SEARCH_LIMIT})` : ''}
                 </span>
                 <button
-                  onClick={fetchWOLookup}
-                  disabled={woLookupLoading}
+                  onClick={() => woLookupMode === 'closed' ? fetchClosedWOLookup(woLookupSearch) : fetchWOLookup()}
+                  disabled={woLookupBusy}
                   className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-sm transition-colors disabled:opacity-50"
                 >
-                  <RefreshCw size={16} className={woLookupLoading ? 'animate-spin' : ''} />
+                  <RefreshCw size={16} className={woLookupBusy ? 'animate-spin' : ''} />
                   Refresh
                 </button>
               </div>

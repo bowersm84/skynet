@@ -1295,7 +1295,7 @@ function DemandView({ profile, setActionStatus }) {
                               <td className="px-3 py-2 text-gray-300">{line.customer_name}</td>
                               <td className="px-3 py-2 text-gray-500 text-xs">#{line.line_number}</td>
                               <td className="px-3 py-2 text-gray-400 text-xs">
-                                {line.entry_date ? formatDate(line.entry_date) : '—'}
+                                {line.entry_date ? new Date(line.entry_date).toLocaleDateString() : '—'}
                               </td>
                               <td className="px-3 py-2 text-right font-mono text-amber-300">
                                 {line.remaining.toLocaleString()}

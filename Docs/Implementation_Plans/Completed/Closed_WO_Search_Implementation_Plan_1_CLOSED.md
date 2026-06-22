@@ -174,3 +174,49 @@ and trigram/ILIKE support on `wo_number`, `job_number`, `parts.part_number` as n
 - Editing or reopening closed WOs (read-only retrieval only).
 - A separate compliance "records export" (PDF package) — possible future follow-on; the
   Job Traveler already covers single-job retrieval.
+
+---
+
+## 9. Closeout (2026-06-22)
+
+**Status:** CLOSED — shipped to TEST and PROD.
+
+**Delivered**
+- **Batch A — primitive.** `search_closed_work_orders(p_term, p_limit)` RPC (Option A,
+  SECURITY DEFINER, ids-only, ordered by `COALESCE(closed_at, created_at)` desc) plus
+  pg_trgm GIN indexes (`wo_number`, `customer`, `jobs.job_number`, `parts.part_number`)
+  and FK indexes. Verified on TEST against J-000058 (WO-2606-0014 / SK220-2S) — found by
+  job #, WO #, and part #. Migration `2026-06-22_closed_wo_search_batchA.sql`.
+- **Batch B — Closed mode.** Active/Closed toggle in the Work Orders tab (gated to
+  admin/compliance). Closed mode is search-driven and server-side: the RPC returns matched
+  WO ids, which hydrate through the existing embedded select (extracted to
+  `WO_LOOKUP_SELECT`) and shared hydration helper (`hydrateWOExtras`), so the existing
+  drill-down, document viewer, and Job Traveler render unchanged. Bounded to top 50;
+  empty-term prompt; loading / no-results states; mode reset on modal close. Active path
+  unchanged (two call-site swaps only).
+- **Batch C — date window.** RPC gained optional `p_since timestamptz` (3rd arg, default
+  null; backward compatible). Closed mode UI gained a "Last 12 months" (default) / "All
+  time" selector. Migration `2026-06-22_closed_wo_search_datewindow.sql`.
+
+**Decisions baked in (vs. original §6)**
+1. Search primitive: **Option A (RPC)**.
+2. Access: RPC stays `authenticated` (ids-only, low sensitivity); the **Closed mode** is
+   UI-gated to admin/compliance — decoupled, easy to widen later.
+3. Bounding: search-driven + "Last 12 months / All time" window (Batch C).
+4. "Closed" definition: `wo.status IN ('complete','cancelled','closed')` — **`'closed'`
+   added** beyond the original §6.4 so cancelled DTU/maintenance WOs
+   (Schedule.jsx sets `status='closed'`) stay retrievable.
+- **Assembly part numbers** added to the RPC match set (parity with the active lookup
+  search, which already matched assembly part #).
+
+**Intentionally skipped**
+- Batch C `.docx` test script — owner opted out; manual TEST verification sufficient
+  (J-000058 retrievable under both windows; future-dated window returns 0).
+
+**Follow-ons (unchanged from §8, still out of scope)**
+- Refactor of the active lookup's unbounded fetch-all (separate performance pass).
+- Compliance records-export PDF package (possible future; Job Traveler covers single-job).
+
+**Artifacts**
+- Decisions: `D-CLOSEDWO-SEARCH01` (Batch A/B), `D-CLOSEDWO-SEARCH02` (Batch C + closeout).
+- Spec bumped to **v4.1** (Closed WO Search subsection).

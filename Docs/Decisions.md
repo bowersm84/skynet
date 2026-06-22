@@ -1486,3 +1486,19 @@ Batch C test script intentionally skipped per owner (manual TEST verification su
 J-000058 retrievable under both windows; future-dated window returns 0). Closed WO Search
 arc complete (Batch A primitive, Batch B UI, Batch C date window); spec bumped to v4.1;
 plan renamed Closed_WO_Search_Implementation_Plan_1_CLOSED.md.
+
+### D-DEMAND-ENTERED01 — Demand tab "Entered" shows Invalid Date (2026-06-22)
+**Problem (SKY82):** The Customer Orders → Demand tab "Entered" column rendered "Invalid Date" on every line. lib/customerOrders.js maps entry_date = customer_order_lines.created_at (a timestamptz), but the Demand render passed it through formatDate(), which splits on "-" expecting a YYYY-MM-DD DATE and produced NaN on the time-bearing day token.
+**Fix:** Render entry_date with `new Date(line.entry_date).toLocaleDateString()`, mirroring the Orders tab's created_at rendering. formatDate() left unchanged (still correct/local-noon for the DATE columns due_date and earliest_due). No lib or schema change.
+**Files:** src/pages/CustomerOrders.jsx.
+
+### D-RLS-DOWNTIME01 — Kiosk can't end downtimes; open UPDATE on machine_downtime_logs (2026-06-22)
+**Problem (SKY79):** Machinists could fill in a downtime's end time in the kiosk but submit did nothing. machine_downtime_logs had INSERT/SELECT/DELETE open to authenticated (true) but UPDATE gated by "logged_by = auth.uid()". The machine kiosk runs under a single shared auth session yet stamps logged_by with the PIN operator's profile id (Kiosk.jsx: logged_by: operator.id), so the row's logged_by never equals the session auth.uid() — the UPDATE matched zero rows with no error (silent RLS no-op).
+**Fix:** Dropped "Users can update their own downtime logs"; added "machine_downtime_logs_update_authenticated" (UPDATE, authenticated, USING true, WITH CHECK true), matching this table's INSERT/SELECT/DELETE posture and jobs.UPDATE. No new exposure (table is already operator-shared). Admin ALL policy left as-is.
+**Applied:** TEST → verified end-downtime in kiosk → PROD. No app/schema change.
+
+### D-PARTS-HARDDEL01 — Hard-delete for unreferenced parts (SKY88) (2026-06-22)
+**Problem (SKY88):** The Armory parts trash was a soft delete (is_active=false). On an already-inactive part (e.g. "Pending Master Data" placeholders) it set false->false — UPDATE succeeded with no error, fetchData ran, and the Inactive filter still matched the row, so "nothing happened." No way to actually remove a part once deactivated. Not RLS/permission (parts UPDATE/DELETE open to authenticated; confirm dialog fired; a privileged UPDATE proved table mechanics).
+**Fix:** Brought parts to parity with the materials master. The single trash is split into (1) a Deactivate/Activate toggle (handleTogglePartActive, soft) and (2) a hard Delete gated by a blocking-reference count, opening a confirmation modal. Blocking refs (deactivate-only, AS9100 traceability): jobs.part_id/component_id, customer_order_lines.part_id, work_order_assemblies.assembly_id, assembly_bom.component_id. partRefCounts (computed in fetchData) counts only those. Hard delete calls RPC delete_part(p_part_id) (SECURITY DEFINER, search_path=public): re-checks authz (admin/compliance via role+roles) and the blocking set server-side, then deletes owned config (part_routing_steps, part_machine_durations, part_document_requirements, part_documents, the part's own assembly_bom rows) and the part atomically. Old handleDeletePart removed.
+**Files:** src/pages/Armory.jsx; migration 2026-06-22_delete_part_rpc.sql.
+**Caveat:** part_documents S3 objects are not cleaned (DB rows only) — acceptable for placeholder parts; flagged if bulk part purging becomes common.

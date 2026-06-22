@@ -262,6 +262,10 @@ export default function Armory({ profile }) {
   // Loading states
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(null)
+  // Blocking-reference counts per part id (jobs/orders/WO-assembly/BOM-component);
+  // gates hard-delete. partToDelete drives the confirmation modal.
+  const [partRefCounts, setPartRefCounts] = useState({})
+  const [partToDelete, setPartToDelete] = useState(null)
 
   // Fetch all data
   const fetchData = useCallback(async () => {
@@ -290,6 +294,26 @@ export default function Armory({ profile }) {
 
       if (partsError) throw partsError
       setParts(partsData || [])
+
+      // Blocking-reference counts per part id: a part is hard-deletable only when it
+      // has NO manufacturing/order history or live BOM membership. Owned config
+      // (routing, durations, doc reqs/records, its own BOM) is cleaned by delete_part
+      // and is intentionally NOT counted here.
+      const [
+        { data: jobRefs }, { data: colRefs }, { data: woaRefs }, { data: bomCompRefs },
+      ] = await Promise.all([
+        supabase.from('jobs').select('part_id, component_id'),
+        supabase.from('customer_order_lines').select('part_id'),
+        supabase.from('work_order_assemblies').select('assembly_id'),
+        supabase.from('assembly_bom').select('component_id'),
+      ])
+      const pRefs = {}
+      const bump = (id) => { if (id) pRefs[id] = (pRefs[id] || 0) + 1 }
+      for (const r of (jobRefs || [])) { bump(r.part_id); bump(r.component_id) }
+      for (const r of (colRefs || [])) bump(r.part_id)
+      for (const r of (woaRefs || [])) bump(r.assembly_id)
+      for (const r of (bomCompRefs || [])) bump(r.component_id)
+      setPartRefCounts(pRefs)
 
       // Pending CO line count per part (open lines on non-cancelled COs).
       // Used to sort inactive parts with pending demand to the top and badge them.
@@ -1170,22 +1194,37 @@ export default function Armory({ profile }) {
     }
   }
 
-  // Delete part (soft delete)
-  const handleDeletePart = async (partId) => {
-    if (!confirm('Are you sure you want to delete this part?')) return
-    
-    setDeleting(partId)
+  // Deactivate / reactivate a part (soft). Referenced parts can only be toggled,
+  // never hard-deleted (AS9100 traceability).
+  const handleTogglePartActive = async (part) => {
+    setDeleting(part.id)
     try {
       const { error } = await supabase
         .from('parts')
-        .update({ is_active: false, updated_at: new Date().toISOString() })
-        .eq('id', partId)
-
+        .update({ is_active: !part.is_active, updated_at: new Date().toISOString() })
+        .eq('id', part.id)
       if (error) throw error
       await fetchData()
     } catch (err) {
-      console.error('Error deleting part:', err)
-      alert('Failed to delete: ' + err.message)
+      console.error('Error toggling part active:', err)
+      alert('Failed to update: ' + err.message)
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  // Hard-delete a part via delete_part RPC (server re-checks blocking refs and cleans
+  // owned config in one transaction). Only reachable when partRefCounts === 0.
+  const handleDeletePartHard = async () => {
+    if (!partToDelete) return
+    setDeleting(partToDelete.id)
+    try {
+      const { error } = await supabase.rpc('delete_part', { p_part_id: partToDelete.id })
+      if (error) throw error
+      setPartToDelete(null)
+      await fetchData()
+    } catch (err) {
+      alert('Failed to delete part: ' + err.message)
     } finally {
       setDeleting(null)
     }
@@ -2168,17 +2207,43 @@ export default function Armory({ profile }) {
                             <Edit2 size={18} />
                           </button>
                           <button
-                            onClick={() => handleDeletePart(part.id)}
+                            onClick={() => handleTogglePartActive(part)}
                             disabled={deleting === part.id}
-                            className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
-                            title="Delete"
+                            className={`p-2 rounded transition-colors disabled:opacity-50 ${
+                              part.is_active
+                                ? 'text-gray-400 hover:text-red-400 hover:bg-red-900/20'
+                                : 'text-gray-400 hover:text-green-400 hover:bg-green-900/20'
+                            }`}
+                            title={part.is_active ? 'Deactivate' : 'Activate'}
                           >
                             {deleting === part.id ? (
                               <Loader2 size={18} className="animate-spin" />
+                            ) : part.is_active ? (
+                              <PowerOff size={18} />
                             ) : (
-                              <Trash2 size={18} />
+                              <Power size={18} />
                             )}
                           </button>
+                          {(() => {
+                            const refCount = partRefCounts[part.id] || 0
+                            const canDelete = refCount === 0
+                            return (
+                              <button
+                                onClick={() => canDelete && setPartToDelete(part)}
+                                disabled={!canDelete || deleting === part.id}
+                                className={`p-2 rounded transition-colors ${
+                                  canDelete
+                                    ? 'text-red-400 hover:text-red-300 hover:bg-red-900/20'
+                                    : 'text-gray-400 opacity-40 cursor-not-allowed'
+                                }`}
+                                title={canDelete
+                                  ? 'Delete permanently'
+                                  : `Cannot delete — referenced in ${refCount} record(s). Deactivate instead.`}
+                              >
+                                <Trash2 size={18} />
+                              </button>
+                            )
+                          })()}
                         </div>
                       )}
                     </div>
@@ -4495,6 +4560,42 @@ export default function Armory({ profile }) {
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}
                 {editingMaterialMaster ? 'Save Changes' : 'Add Material'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Part Confirmation Modal */}
+      {partToDelete && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="text-red-400 flex-shrink-0 mt-0.5" size={20} />
+              <div className="space-y-2">
+                <h3 className="text-lg font-bold text-white">Permanently delete this part?</h3>
+                <div className="text-sm text-gray-300 space-y-0.5">
+                  <div><span className="text-gray-500">Part #:</span> {partToDelete.part_number}</div>
+                  <div><span className="text-gray-500">Description:</span> {partToDelete.description || '—'}</div>
+                </div>
+                <p className="text-sm text-red-300">Removes the part and its routing, machine times, and document requirements. This cannot be undone.</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setPartToDelete(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white"
+                disabled={deleting === partToDelete.id}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeletePartHard}
+                disabled={deleting === partToDelete.id}
+                className="px-6 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {deleting === partToDelete.id && <Loader2 size={16} className="animate-spin" />}
+                Delete
               </button>
             </div>
           </div>

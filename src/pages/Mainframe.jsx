@@ -84,6 +84,10 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
 
   // Closed WO search mode (Batch B — server-side RPC search of TCO'd/cancelled/closed WOs)
   const [woLookupMode, setWOLookupMode] = useState('active') // 'active' | 'closed'
+  // SKY87 — per-product (work_order_assembly) collapse in the WO detail hierarchy.
+  const [collapsedProducts, setCollapsedProducts] = useState(new Set())
+  // SKY87 — per-part (component) collapse within a product's job list.
+  const [collapsedParts, setCollapsedParts] = useState(new Set())
   const [closedWOLookupData, setClosedWOLookupData] = useState([])
   const [closedWOLookupLoading, setClosedWOLookupLoading] = useState(false)
   const [closedSearchPerformed, setClosedSearchPerformed] = useState(false)
@@ -950,6 +954,23 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
   //   verified_count      (James's post-finishing verify) →
   //   incoming_count      (James's on-receipt count) →
   //   quantity            (machinist's original send count)
+  // SKY87 — group a job list by component part, preserving first-seen order.
+  // scopeKey namespaces the collapse key so the same part under different
+  // products collapses independently.
+  const groupJobsByComponent = (jobList, scopeKey) => {
+    const out = []
+    const idx = {}
+    for (const j of jobList) {
+      const key = j.component_id || j.component?.part_number || j.id
+      if (idx[key] === undefined) {
+        idx[key] = out.length
+        out.push({ partKey: `${scopeKey}:${key}`, part_number: j.component?.part_number || '—', description: j.component?.description || '', jobs: [] })
+      }
+      out[idx[key]].jobs.push(j)
+    }
+    return out
+  }
+
   const getBatchQty = (send) => {
     if (send.compliance_good_qty != null) {
       return { qty: send.compliance_good_qty, annotate: send.quantity !== send.compliance_good_qty ? send.quantity : null }
@@ -2583,6 +2604,96 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                         {/* Expanded Assembly & Jobs Hierarchy */}
                         {isExpanded && (
                           <div className="border-t border-gray-700 bg-gray-900/50">
+                            {/* Build Summary — products (assemblies) + component parts beneath, with total built through finishing (SKY87) */}
+                            {(() => {
+                              const jobs = wo.jobs || []
+                              const woas = wo.work_order_assemblies || []
+                              const groupComponents = (jobList) => {
+                                const byPart = {}
+                                for (const j of jobList) {
+                                  const key = j.component_id || j.component?.part_number || j.id
+                                  if (!byPart[key]) {
+                                    byPart[key] = { part_number: j.component?.part_number || '—', description: j.component?.description || '', ordered: 0, built: 0, anyVerified: false }
+                                  }
+                                  const eq = getEffectiveQty(j)
+                                  byPart[key].ordered += j.quantity || 0
+                                  byPart[key].built += eq?.qty || 0
+                                  if (eq?.verified) byPart[key].anyVerified = true
+                                }
+                                return Object.values(byPart)
+                              }
+                              const orderedWoas = (() => {
+                                const ordered = []
+                                const pushTree = (w) => { ordered.push(w); woas.filter(c => c.parent_work_order_assembly_id === w.id).forEach(pushTree) }
+                                woas.filter(w => !w.parent_work_order_assembly_id).forEach(pushTree)
+                                woas.filter(w => !ordered.includes(w)).forEach(w => ordered.push(w))
+                                return ordered
+                              })()
+                              const unassigned = jobs.filter(j => !j.work_order_assembly_id)
+                              const CompTable = ({ rows }) => (
+                                <table className="w-full text-xs mt-1">
+                                  <thead className="text-gray-500">
+                                    <tr className="border-b border-gray-800">
+                                      <th className="text-left font-medium py-1 pr-3">Part</th>
+                                      <th className="text-left font-medium py-1 pr-3">Description</th>
+                                      <th className="text-right font-medium py-1 pr-3">Ordered</th>
+                                      <th className="text-right font-medium py-1">Built</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {rows.map((r, i) => (
+                                      <tr key={i} className="border-b border-gray-800/60 last:border-b-0">
+                                        <td className="py-1 pr-3 font-mono text-gray-300">{r.part_number}</td>
+                                        <td className="py-1 pr-3 text-gray-500 truncate max-w-xs">{r.description || '—'}</td>
+                                        <td className="py-1 pr-3 text-right text-gray-400">{r.ordered.toLocaleString()}</td>
+                                        <td className={`py-1 text-right font-medium ${r.built > 0 ? 'text-skynet-accent' : 'text-gray-500'}`}>{r.built.toLocaleString()}{!r.anyVerified && r.built > 0 ? '*' : ''}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )
+                              return (
+                                <div className="px-4 py-3 bg-gray-900/40 border-b border-gray-800">
+                                  <div className="text-[10px] uppercase tracking-wide text-gray-500 font-medium mb-2">Build Summary</div>
+                                  {orderedWoas.length > 0 ? (
+                                    <div className="space-y-3">
+                                      {orderedWoas.map(woa => {
+                                        const woaJobs = jobs.filter(j => j.work_order_assembly_id === woa.id)
+                                        const rows = groupComponents(woaJobs)
+                                        const asmBuilt = computeAvailableQty(woa)
+                                        const asmTarget = woa.quantity ?? ((woa.order_quantity || 0) + (woa.stock_quantity || 0))
+                                        return (
+                                          <div key={woa.id} className={woa.parent_work_order_assembly_id ? 'ml-4 border-l-2 border-purple-800/40 pl-3' : ''}>
+                                            <div className="flex items-center justify-between">
+                                              <div className="flex items-center gap-2 min-w-0">
+                                                <Package size={13} className="text-purple-400 flex-shrink-0" />
+                                                <span className="font-mono text-sm text-purple-200">{woa.assembly?.part_number || '—'}</span>
+                                                <span className="text-xs text-gray-500 truncate">{woa.assembly?.description || ''}</span>
+                                              </div>
+                                              <div className="text-xs text-gray-400 flex-shrink-0">
+                                                Assembly built: <span className={asmBuilt > 0 ? 'text-skynet-accent font-medium' : 'text-gray-500'}>{asmBuilt.toLocaleString()}</span>
+                                                <span className="text-gray-600"> / {asmTarget.toLocaleString()}</span>
+                                              </div>
+                                            </div>
+                                            {rows.length > 0 ? <CompTable rows={rows} /> : <div className="text-xs text-gray-600 mt-1">No component jobs.</div>}
+                                          </div>
+                                        )
+                                      })}
+                                      {unassigned.length > 0 && (
+                                        <div>
+                                          <div className="text-xs text-gray-500 mb-0.5">Other components</div>
+                                          <CompTable rows={groupComponents(unassigned)} />
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <CompTable rows={groupComponents(jobs)} />
+                                  )}
+                                  <div className="text-[10px] text-gray-600 mt-2">Built = good pieces through finishing; * = machinist count pending compliance.{!FEATURES.ASSEMBLY_MODULE ? ' Assembly counts populate once the Assembly module is enabled.' : ''}</div>
+                                </div>
+                              )
+                            })()}
+
                             {/* CO Fulfillment summary */}
                             {(() => {
                               const cached = woFulfillmentCache[wo.id]
@@ -2680,7 +2791,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                     {/* Assembly Header */}
                                     <div className="px-4 py-3 bg-gray-800/50 border-b border-gray-700">
                                       <div className="flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
+                                        <div
+                                          className="flex items-center gap-3 cursor-pointer select-none"
+                                          onClick={() => setCollapsedProducts(prev => { const n = new Set(prev); n.has(woa.id) ? n.delete(woa.id) : n.add(woa.id); return n })}
+                                        >
+                                          <ChevronRight size={16} className={`text-gray-500 transition-transform ${collapsedProducts.has(woa.id) ? '' : 'rotate-90'}`} />
                                           <Package size={18} className={isSubAssembly ? 'text-purple-300' : 'text-skynet-accent'} />
                                           <div>
                                             <div className="flex items-center gap-2">
@@ -2724,6 +2839,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                       </div>
                                     </div>
 
+                                    {!collapsedProducts.has(woa.id) && (<>
                                     {/* Assembly Routing — only render if WOA has any routing steps with non-trivial route */}
                                     {woa.work_order_assembly_routing_steps?.length > 0 && (() => {
                                       const sortedAsmSteps = [...woa.work_order_assembly_routing_steps]
@@ -2853,7 +2969,18 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             <div className="col-span-3 text-right">Actions</div>
                                           </div>
                                         </div>
-                                        {assemblyJobs.map(job => {
+                                        {groupJobsByComponent(assemblyJobs, woa.id).map(grp => (
+                                          <div key={grp.partKey}>
+                                            <div
+                                              className="px-4 py-2 pl-10 bg-gray-800/30 border-b border-gray-800 flex items-center gap-2 cursor-pointer select-none hover:bg-gray-800/50"
+                                              onClick={() => setCollapsedParts(prev => { const n = new Set(prev); n.has(grp.partKey) ? n.delete(grp.partKey) : n.add(grp.partKey); return n })}
+                                            >
+                                              <ChevronRight size={14} className={`text-gray-500 transition-transform ${collapsedParts.has(grp.partKey) ? '' : 'rotate-90'}`} />
+                                              <span className="font-mono text-sm text-gray-200">{grp.part_number}</span>
+                                              <span className="text-xs text-gray-500 truncate min-w-0">{grp.description}</span>
+                                              <span className="text-[10px] text-gray-500 ml-auto flex-shrink-0 pl-2">{grp.jobs.length} job{grp.jobs.length !== 1 ? 's' : ''}</span>
+                                            </div>
+                                            {!collapsedParts.has(grp.partKey) && grp.jobs.map(job => {
                                           const canCancel = !['complete', 'cancelled'].includes(job.status) && canWrite
                                           const canSplit = canSplitJobs(profile?.role) && isSplittable(job)
                                           return (
@@ -3166,12 +3293,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                             </div>
                                           )
                                         })}
+                                          </div>
+                                        ))}
                                       </>
                                     ) : (
                                       <div className="px-4 py-3 pl-10 text-sm text-gray-500 italic border-b border-gray-700">
                                         No jobs linked to this assembly
                                       </div>
                                     )}
+                                    </>)}
                                   </div>
                                 )
                               })
@@ -3188,7 +3318,18 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                     <div className="col-span-3 text-right">Actions</div>
                                   </div>
                                 </div>
-                                {wo.jobs.map(job => {
+                                {groupJobsByComponent(wo.jobs, wo.id).map(grp => (
+                                  <div key={grp.partKey}>
+                                    <div
+                                      className="px-4 py-2 bg-gray-800/30 border-b border-gray-800 flex items-center gap-2 cursor-pointer select-none hover:bg-gray-800/50"
+                                      onClick={() => setCollapsedParts(prev => { const n = new Set(prev); n.has(grp.partKey) ? n.delete(grp.partKey) : n.add(grp.partKey); return n })}
+                                    >
+                                      <ChevronRight size={14} className={`text-gray-500 transition-transform ${collapsedParts.has(grp.partKey) ? '' : 'rotate-90'}`} />
+                                      <span className="font-mono text-sm text-gray-200">{grp.part_number}</span>
+                                      <span className="text-xs text-gray-500 truncate min-w-0">{grp.description}</span>
+                                      <span className="text-[10px] text-gray-500 ml-auto flex-shrink-0 pl-2">{grp.jobs.length} job{grp.jobs.length !== 1 ? 's' : ''}</span>
+                                    </div>
+                                    {!collapsedParts.has(grp.partKey) && grp.jobs.map(job => {
                                   const statusBadge = getStatusBadge(job.status)
                                   const canCancel = !['complete', 'cancelled'].includes(job.status)
                                   const canSplit = canSplitJobs(profile?.role) && isSplittable(job)
@@ -3481,6 +3622,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
                                     </div>
                                   )
                                 })}
+                                  </div>
+                                ))}
                               </>
                             ) : (
                               <div className="px-4 py-6 text-center text-gray-500">

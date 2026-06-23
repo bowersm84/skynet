@@ -1558,3 +1558,22 @@ plan renamed Closed_WO_Search_Implementation_Plan_1_CLOSED.md.
 **What:** Reverted all SKY89 co-production/linked-jobs work (D-JOBLINK-01..08) from the frontend (restored Schedule/Kiosk/Mainframe/Finishing/ComplianceReview to the last pre-SKY89 commit, deleted src/lib/coProduction.js) and dropped the DB objects (jobs.combined_batch_id, idx_jobs_combined_batch, link_jobs, unlink_jobs, distribute_batch_completion). SKY87 (D-WOLOOKUP-ROLLUP*) retained.
 **Why:** Co-scheduling linked members on one machine collides with the jobs_no_machine_overlap exclusion constraint, and non-atomic kiosk completion duplicated finishing sends on retry. Needs a proper batch-entity design — see Docs/Linked_Jobs_Implementation_Plan.md. To be revisited in a dedicated sprint with the scheduler.
 **Files:** src/pages/Schedule.jsx, src/pages/Kiosk.jsx, src/pages/Mainframe.jsx, src/pages/Finishing.jsx, components/ComplianceReview.jsx, src/lib/coProduction.js (deleted).
+
+### D-INV-BARLENGTH01 — Available bars by length in inventory + cycle count (SKY85) (2026-06-23)
+**What:** Surfaced bar length (standardized to 4 ft = 48" and 12 ft = 144") as a visible dimension. The Inventory "By Size" roll-up now splits each material+size row's available bars into 4 ft and 12 ft columns (plus an "Other" column shown only when non-48/144 stock exists), with matching footer totals. The on-screen Cycle Count table and the printed Cycle Count Sheet gained a Length column. Shared fmtBarLength helper (Number-coerced; renders 4 ft / 12 ft, else raw inches).
+**Why:** James needed to see how many bars of each length are on hand (SKY85). Length already flowed through material_availability.bar_length_inches per receipt; this only surfaces/aggregates it — no schema or query change.
+**Scope notes:** Replenishment min-on-hand stays keyed to material+size (length is informational); the Lot view already shows per-receipt rows. Frontend-only, no migration.
+**Files:** src/pages/Armory.jsx.
+
+### D-INV-BARLENGTH02 — Cycle count by length: 4 ft / 12 ft columns (SKY85) (2026-06-23)
+**What:** Reworked the Cycle Count table and printed Count Sheet from one row per receipt (Length + single Counted) to one row per rack|material|bar_size|lot with separate 4 ft and 12 ft count inputs; an "Other" column appears only when non-48/144 stock exists. Each input stays bound to its own material_receiving_id, so countItems and handleSubmitCount are unchanged. Supersedes the Length/single-Counted layout from D-INV-BARLENGTH01 (the By-Size roll-up from that change is unaffected).
+**Why:** Counters needed to enter 4 ft and 12 ft physically on one line per lot rather than as separate rows.
+**Edge handling:** Multiple receipts of the same lot+length stack as multiple inputs in the cell (rare). Non-48/144 receipts route to the Other column (length-labeled), keeping them countable.
+**Files:** src/pages/Armory.jsx.
+
+### D-INV-BARLENGTH03 — Cycle count: enter new lengths + drop "Other" (SKY85) (2026-06-23)
+**What:** The Cycle Count grid now shows a 4 ft and a 12 ft input on every lot row regardless of which length has a receipt. Entering a count on a length with no receipt creates a 0-qty receipt for that lot+length (RPC create_count_discovery_receipt, SECURITY DEFINER, clones material/size/rack/vendor from a reference receipt in the lot) and files the normal adjustment (+N) against it through the existing submit/review flow — nothing goes live until approved. Removed the "Other" length column from grid and printed sheet; 48" => 4 ft, everything else => 12 ft (only 48/144 are valid). New handleSubmitCountWithDiscovery creates discovery receipts then calls submit_inventory_adjustments; button uses totalCountChanges.
+**Why:** Shop cuts 12 ft and returns 4 ft, so a lot needs counts at a length it has no receipt for. inventory_adjustment_requests.material_receiving_id is NOT NULL, so the count needs a receipt to target — hence the 0-qty discovery receipt.
+**Edge/limits:** Rejected discoveries leave a harmless 0-qty receipt (shows no stock; cleanup later if needed). A 142" receipt (lot 2623) now buckets as 12 ft and should be corrected to 144 in receiving.
+**Files:** src/pages/Armory.jsx; migration create_count_discovery_receipt.
+**Pinned:** bolt-master "blank" lots (5-digit placeholders) — separate solution still owed.

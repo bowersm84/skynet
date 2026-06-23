@@ -2795,9 +2795,13 @@ export default function Armory({ profile }) {
               const groups = {}
               for (const r of filteredInventoryRows) {
                 const key = `${r.material_type}|||${r.bar_size}`
-                if (!groups[key]) groups[key] = { material_type: r.material_type, bar_size: r.bar_size, totalBars: 0, lotCount: 0, vendors: new Set(), value: 0 }
+                if (!groups[key]) groups[key] = { material_type: r.material_type, bar_size: r.bar_size, totalBars: 0, bars4: 0, bars12: 0, barsOther: 0, lotCount: 0, vendors: new Set(), value: 0 }
                 const g = groups[key]
                 g.totalBars += (r.available_bars || 0)
+                const len = Number(r.bar_length_inches)
+                if (len === 48) g.bars4 += (r.available_bars || 0)
+                else if (len === 144) g.bars12 += (r.available_bars || 0)
+                else g.barsOther += (r.available_bars || 0)
                 g.lotCount += 1
                 if (r.vendor && r.vendor !== '—') g.vendors.add(r.vendor)
                 if (r.price_per_bar != null && r.available_bars > 0) g.value += r.available_bars * r.price_per_bar
@@ -2814,6 +2818,9 @@ export default function Armory({ profile }) {
                 )
               }
               const grandBars = rows.reduce((s, g) => s + g.totalBars, 0)
+              const grand4 = rows.reduce((s, g) => s + g.bars4, 0)
+              const grand12 = rows.reduce((s, g) => s + g.bars12, 0)
+              const grandOther = rows.reduce((s, g) => s + g.barsOther, 0)
               const grandValue = rows.reduce((s, g) => s + g.value, 0)
               return (
                 <div className="overflow-x-auto rounded-lg border border-gray-700">
@@ -2822,6 +2829,9 @@ export default function Armory({ profile }) {
                       <tr>
                         <th className="px-4 py-3 text-left">Material Type</th>
                         <th className="px-4 py-3 text-left">Bar Size</th>
+                        <th className="px-4 py-3 text-right">4 ft (bars)</th>
+                        <th className="px-4 py-3 text-right">12 ft (bars)</th>
+                        {grandOther > 0 && <th className="px-4 py-3 text-right">Other (bars)</th>}
                         <th className="px-4 py-3 text-right">Total Avail (bars)</th>
                         <th className="px-4 py-3 text-right">Min</th>
                         <th className="px-4 py-3 text-right">Lots</th>
@@ -2840,6 +2850,9 @@ export default function Armory({ profile }) {
                           <tr key={`${g.material_type}|${g.bar_size}`} className="bg-gray-900 hover:bg-gray-800 transition-colors">
                             <td className="px-4 py-3 text-gray-300">{g.material_type}</td>
                             <td className="px-4 py-3 text-gray-300">{g.bar_size}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">{g.bars4.toFixed(1)}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">{g.bars12.toFixed(1)}</td>
+                            {grandOther > 0 && <td className="px-4 py-3 text-right font-mono text-gray-400">{g.barsOther.toFixed(1)}</td>}
                             <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isBelow ? 'text-amber-300 font-semibold' : 'text-white'}`}>{g.totalBars.toFixed(1)}</td>
                             <td className="px-4 py-3 text-right font-mono">
                               {minVal != null ? (
@@ -2861,6 +2874,9 @@ export default function Armory({ profile }) {
                     <tfoot className="bg-gray-800/60 text-gray-200 text-xs uppercase">
                       <tr>
                         <td className="px-4 py-3 font-semibold" colSpan={2}>Total ({rows.length} size groups)</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{grand4.toFixed(1)}</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{grand12.toFixed(1)}</td>
+                        {grandOther > 0 && <td className="px-4 py-3 text-right font-mono font-semibold">{grandOther.toFixed(1)}</td>}
                         <td className="px-4 py-3 text-right font-mono font-semibold">{grandBars.toFixed(1)}</td>
                         <td className="px-4 py-3"></td>
                         <td className="px-4 py-3"></td>
@@ -3316,20 +3332,66 @@ export default function Armory({ profile }) {
             if (countSize && r.bar_size !== countSize) return false
             return true
           })
-          const countItems = countRows
-            .filter(r => {
-              const v = countInputs[r.id]
-              return v !== undefined && v !== '' && Number(v) !== Math.round(r.available_bars)
-            })
-            .map(r => ({ material_receiving_id: r.id, counted_bars: Number(countInputs[r.id]) }))
-
-          const handlePrintCountSheet = () => {
-            const sorted = [...countRows].sort((a, b) =>
+          // SKY85 — group receipts by rack|material|size|lot; each row gets a 4 ft and a 12 ft
+          // input. 48" => 4 ft, everything else => 12 ft (only 48/144 are valid). key drives the
+          // "new length" input keys; refId is any existing receipt in the lot, cloned when a new
+          // length is discovered.
+          const countGroups = (() => {
+            const m = {}
+            for (const r of countRows) {
+              const key = `${r.rack || 'Staging'}|||${r.material_type}|||${r.bar_size}|||${r.lot_number || ''}`
+              if (!m[key]) m[key] = { key, rack: r.rack, material_type: r.material_type, bar_size: r.bar_size, lot_number: r.lot_number, four: [], twelve: [], refId: r.id }
+              if (Number(r.bar_length_inches) === 48) m[key].four.push(r)
+              else m[key].twelve.push(r)
+            }
+            return Object.values(m).sort((a, b) =>
               (a.rack || 'Staging').localeCompare(b.rack || 'Staging')
               || (a.material_type || '').localeCompare(b.material_type || '')
               || cmpSize(a.bar_size, b.bar_size)
               || (a.lot_number || '').localeCompare(b.lot_number || '')
             )
+          })()
+          // Adjustments to existing receipts (counted differs from system).
+          const existingAdjItems = countGroups.flatMap(g =>
+            [...g.four, ...g.twelve]
+              .filter(r => { const v = countInputs[r.id]; return v !== undefined && v !== '' && Number(v) !== Math.round(r.available_bars) })
+              .map(r => ({ material_receiving_id: r.id, counted_bars: Number(countInputs[r.id]) }))
+          )
+          // New-length discoveries: a length with no receipt that got a count > 0.
+          const newLengthEntries = countGroups.flatMap(g =>
+            [48, 144]
+              .filter(len => (len === 48 ? g.four : g.twelve).length === 0)
+              .map(len => ({ refId: g.refId, len, key: `new::${g.key}::${len}` }))
+          )
+            .filter(ne => { const v = countInputs[ne.key]; return v !== undefined && v !== '' && Number(v) > 0 })
+            .map(ne => ({ ...ne, counted: Number(countInputs[ne.key]) }))
+          const totalCountChanges = existingAdjItems.length + newLengthEntries.length
+
+          const handleSubmitCountWithDiscovery = async () => {
+            if (totalCountChanges === 0) return
+            const createdItems = []
+            if (newLengthEntries.length > 0) {
+              setCountSubmitting(true); setAdjError('')
+              try {
+                for (const ne of newLengthEntries) {
+                  const { data: newId, error } = await supabase.rpc('create_count_discovery_receipt', {
+                    p_ref_receiving_id: ne.refId, p_bar_length_inches: ne.len,
+                  })
+                  if (error) throw error
+                  createdItems.push({ material_receiving_id: newId, counted_bars: ne.counted })
+                }
+              } catch (err) {
+                setAdjError('Could not record a discovered length: ' + (err.message || err))
+                setCountSubmitting(false)
+                return
+              }
+            }
+            await handleSubmitCount([...existingAdjItems, ...createdItems])
+          }
+
+          const handlePrintCountSheet = () => {
+            const sorted = countGroups
+            const lenSys = (receipts) => receipts.reduce((s, r) => s + Math.round(r.available_bars), 0)
             const scopeBits = []
             if (countRack) scopeBits.push(`Rack: ${countRack}`)
             if (countMaterial) scopeBits.push(`Material: ${countMaterial}`)
@@ -3337,13 +3399,15 @@ export default function Armory({ profile }) {
             const scopeLabel = scopeBits.length ? scopeBits.join('  |  ') : 'All racks'
             const printed = new Date().toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            const rowsHtml = sorted.map(r => `
+            const rowsHtml = sorted.map(g => `
               <tr>
-                <td>${esc(r.rack || 'Staging')}</td>
-                <td>${esc(r.material_type)}</td>
-                <td>${esc(r.bar_size)}</td>
-                <td>${esc(r.lot_number || '—')}</td>
-                <td class="num">${Math.round(r.available_bars)}</td>
+                <td>${esc(g.rack || 'Staging')}</td>
+                <td>${esc(g.material_type)}</td>
+                <td>${esc(g.bar_size)}</td>
+                <td>${esc(g.lot_number || '—')}</td>
+                <td class="num">${g.four.length ? lenSys(g.four) : '—'}</td>
+                <td class="blank"></td>
+                <td class="num">${g.twelve.length ? lenSys(g.twelve) : '—'}</td>
                 <td class="blank"></td>
                 <td class="blank"></td>
               </tr>`).join('')
@@ -3365,12 +3429,13 @@ export default function Armory({ profile }) {
               </style></head><body>
               <h1>SkyNet — Cycle Count Sheet</h1>
               <div class="meta">${esc(scopeLabel)}</div>
-              <div class="meta">Printed: ${esc(printed)} &nbsp;&middot;&nbsp; ${sorted.length} lots</div>
+              <div class="meta">Printed: ${esc(printed)} &nbsp;&middot;&nbsp; ${sorted.length} rows</div>
               <div class="sign">Counted by: ____________________________&nbsp;&nbsp;&nbsp;&nbsp;Date: ______________</div>
               <table>
                 <thead><tr>
                   <th>Rack</th><th>Material</th><th>Bar Size</th><th>Lot #</th>
-                  <th>System</th><th>Counted</th><th>Notes</th>
+                  <th>4 ft Sys</th><th>4 ft Count</th><th>12 ft Sys</th><th>12 ft Count</th>
+                  <th>Notes</th>
                 </tr></thead>
                 <tbody>${rowsHtml}</tbody>
               </table>
@@ -3460,28 +3525,48 @@ export default function Armory({ profile }) {
                               <th className="px-4 py-3 text-left">Material</th>
                               <th className="px-4 py-3 text-left">Bar Size</th>
                               <th className="px-4 py-3 text-left">Lot #</th>
-                              <th className="px-4 py-3 text-right">System</th>
-                              <th className="px-4 py-3 text-right">Counted</th>
-                              <th className="px-4 py-3 text-right">Δ</th>
+                              <th className="px-4 py-3 text-right">4 ft</th>
+                              <th className="px-4 py-3 text-right">12 ft</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-700">
-                            {countRows.map(r => {
-                              const sys = Math.round(r.available_bars)
-                              const v = countInputs[r.id]
-                              const hasVal = v !== undefined && v !== ''
-                              const delta = hasVal ? Number(v) - sys : null
+                            {countGroups.map((g) => {
+                              const existingInput = (r) => {
+                                const sys = Math.round(r.available_bars)
+                                const v = countInputs[r.id]
+                                const hasVal = v !== undefined && v !== ''
+                                const delta = hasVal ? Number(v) - sys : null
+                                return (
+                                  <div key={r.id} className="flex items-center gap-2 justify-end">
+                                    <span className="text-xs text-gray-500 font-mono">{sys}</span>
+                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [r.id]: e.target.value }))} placeholder={String(sys)} className="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
+                                    {delta != null && delta !== 0 && <span className={`text-xs font-mono ${delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta > 0 ? `+${delta}` : delta}</span>}
+                                  </div>
+                                )
+                              }
+                              const newInput = (lenInches) => {
+                                const nk = `new::${g.key}::${lenInches}`
+                                const v = countInputs[nk]
+                                return (
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <span className="text-xs text-gray-600 font-mono">0</span>
+                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [nk]: e.target.value }))} placeholder="0" title="No receipt at this length yet — entering a count creates it (pending approval)" className="w-16 px-2 py-1 bg-gray-800 border border-dashed border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
+                                  </div>
+                                )
+                              }
+                              const lenCell = (bucket, lenInches) => (
+                                bucket.length > 0
+                                  ? <div className="space-y-1">{bucket.map(existingInput)}</div>
+                                  : newInput(lenInches)
+                              )
                               return (
-                                <tr key={r.id} className="bg-gray-900 hover:bg-gray-800">
-                                  <td className="px-4 py-3">{r.rack ? <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{r.rack}</span> : <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>}</td>
-                                  <td className="px-4 py-3 text-gray-300">{r.material_type}</td>
-                                  <td className="px-4 py-3 text-gray-300">{r.bar_size}</td>
-                                  <td className="px-4 py-3 font-mono text-gray-300">{r.lot_number || '—'}</td>
-                                  <td className="px-4 py-3 text-right font-mono text-gray-400">{sys}</td>
-                                  <td className="px-4 py-3 text-right">
-                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [r.id]: e.target.value }))} placeholder={String(sys)} className="w-20 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
-                                  </td>
-                                  <td className={`px-4 py-3 text-right font-mono ${delta == null || delta === 0 ? 'text-gray-600' : delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta == null ? '—' : (delta > 0 ? `+${delta}` : delta)}</td>
+                                <tr key={g.key} className="bg-gray-900 hover:bg-gray-800">
+                                  <td className="px-4 py-3">{g.rack ? <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{g.rack}</span> : <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>}</td>
+                                  <td className="px-4 py-3 text-gray-300">{g.material_type}</td>
+                                  <td className="px-4 py-3 text-gray-300">{g.bar_size}</td>
+                                  <td className="px-4 py-3 font-mono text-gray-300">{g.lot_number || '—'}</td>
+                                  <td className="px-4 py-3">{lenCell(g.four, 48)}</td>
+                                  <td className="px-4 py-3">{lenCell(g.twelve, 144)}</td>
                                 </tr>
                               )
                             })}
@@ -3491,11 +3576,11 @@ export default function Armory({ profile }) {
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <input type="text" value={countReason} onChange={e => setCountReason(e.target.value)} placeholder="Reason / note (optional)" className="flex-1 min-w-[200px] px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
                         <button
-                          onClick={() => handleSubmitCount(countItems)}
-                          disabled={countSubmitting || countItems.length === 0}
+                          onClick={handleSubmitCountWithDiscovery}
+                          disabled={countSubmitting || totalCountChanges === 0}
                           className="px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
                         >
-                          {countSubmitting ? 'Submitting…' : `Submit ${countItems.length} Adjustment${countItems.length === 1 ? '' : 's'}`}
+                          {countSubmitting ? 'Submitting…' : `Submit ${totalCountChanges} Adjustment${totalCountChanges === 1 ? '' : 's'}`}
                         </button>
                       </div>
                       <p className="text-xs text-gray-600">Only lots whose counted value differs from system are submitted. Adjustments require approval before they affect inventory.</p>

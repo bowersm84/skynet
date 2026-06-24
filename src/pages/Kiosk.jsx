@@ -181,6 +181,11 @@ export default function Kiosk() {
     bars_loaded: 0
   })
   const [materialTypes, setMaterialTypes] = useState([])
+  // Blank-lot kiosk capture (Bolt Masters): type/dash forced when the entered lot is not on hand;
+  // activeBlankInfo hydrates the Materials panel so it always shows type/dash/lot for blanks.
+  const [blankType, setBlankType] = useState('')
+  const [blankDash, setBlankDash] = useState('')
+  const [activeBlankInfo, setActiveBlankInfo] = useState(null)
   const [barSizes, setBarSizes] = useState([])
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
   const [jobLoads, setJobLoads] = useState([]) // Per-load history (append-only display log) for current job
@@ -894,6 +899,25 @@ export default function Kiosk() {
           : j.status === activeStatus
       )
       setActiveJob(active || null)
+
+      // Bolt Masters run blanks (no job_materials load row). Hydrate the active job's blank
+      // type/dash from its receipt/stub so the Materials panel can always show something.
+      if (active && machine?.code?.toLowerCase().startsWith('bm') && active.blank_lot_number) {
+        const { data: blankRcv } = await supabase
+          .from('material_receiving')
+          .select('material_type, bar_size, lot_number')
+          .eq('category', 'blank')
+          .eq('lot_number', active.blank_lot_number)
+          .order('received_at', { ascending: false })
+          .limit(1)
+        setActiveBlankInfo(
+          blankRcv && blankRcv.length > 0
+            ? blankRcv[0]
+            : { material_type: null, bar_size: null, lot_number: active.blank_lot_number }
+        )
+      } else {
+        setActiveBlankInfo(null)
+      }
     } catch (err) {
       console.error('Error loading jobs:', err)
     } finally {
@@ -2480,6 +2504,8 @@ export default function Kiosk() {
   const handleOpenBlankLot = async () => {
     if (!activeJob) return
     setSelectedBlankLot('')
+    setBlankType('')
+    setBlankDash('')
     await loadBlankLots()
     setShowBlankLotModal(true)
   }
@@ -2494,6 +2520,37 @@ export default function Kiosk() {
         productionLotNumber = await generateProductionLotNumber(blankLot)
       }
       const now = new Date().toISOString()
+
+      // If the entered lot isn't on hand, capture it as a qty-0 "stub" receipt so it shows in
+      // Inventory → Blanks and the blank cycle count, and reconciles when the real receipt lands.
+      const onHand = blankLots.some(b => b.lot_number === blankLot)
+      if (!onHand) {
+        const { data: existingRcv } = await supabase
+          .from('material_receiving')
+          .select('id')
+          .eq('category', 'blank')
+          .eq('lot_number', blankLot)
+          .limit(1)
+        if (!existingRcv || existingRcv.length === 0) {
+          const { error: stubErr } = await supabase
+            .from('material_receiving')
+            .insert({
+              category: 'blank',
+              material_id: null,
+              material_type: blankType,
+              bar_size: blankDash,
+              bar_length_inches: null,
+              lot_number: blankLot,
+              quantity: 0,
+              vendor: 'AJ Fasteners',
+              rack: 'Blank Rack',
+              notes: 'Entered at kiosk — not yet received',
+              received_by: operator.id
+            })
+          if (stubErr) console.error('Blank stub receipt failed (non-blocking):', stubErr)
+        }
+      }
+
       const { error } = await supabase
         .from('jobs')
         .update({
@@ -2511,6 +2568,8 @@ export default function Kiosk() {
       setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber, blank_lot_number: blankLot }))
       setShowBlankLotModal(false)
       setSelectedBlankLot('')
+      setBlankType('')
+      setBlankDash('')
       await loadJobs()
     } catch (err) {
       console.error('Error starting blank job:', err)
@@ -4634,6 +4693,21 @@ export default function Kiosk() {
                           </div>
                         )}
                       </div>
+                    ) : isBoltMaster ? (
+                      <div className="space-y-1.5 text-sm">
+                        <div className="flex items-center gap-2">
+                          <span className="text-white">{activeBlankInfo?.material_type || 'Blank'}</span>
+                          {activeBlankInfo?.bar_size && (
+                            <>
+                              <span className="text-gray-500">•</span>
+                              <span className="text-gray-400">Dash {activeBlankInfo.bar_size}</span>
+                            </>
+                          )}
+                        </div>
+                        <div className="text-gray-600 text-xs">
+                          Lot: {activeBlankInfo?.lot_number || activeJob.blank_lot_number || '—'}
+                        </div>
+                      </div>
                     ) : (
                       <p className="text-gray-500 text-sm italic">No materials loaded</p>
                     )}
@@ -5399,6 +5473,38 @@ export default function Kiosk() {
               ) : (
                 <p className="text-xs text-gray-500">No blank lots received yet — enter the lot number from the physical material above.</p>
               )}
+
+              {selectedBlankLot.trim() && !blankLots.some(b => b.lot_number === selectedBlankLot.trim()) && (
+                <div className="space-y-3 border-t border-gray-700 pt-3">
+                  <p className="text-xs text-amber-400">This lot isn't on hand. Enter its details so it's tracked — it'll show in inventory and reconcile once the receipt is logged.</p>
+                  <div>
+                    <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Type</label>
+                    <select
+                      value={blankType}
+                      onChange={e => setBlankType(e.target.value)}
+                      className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="">Select type…</option>
+                      {materialTypes.filter(t => t.name?.toLowerCase().includes('blank')).map(t => (
+                        <option key={t.id} value={t.name}>{t.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Dash Size</label>
+                    <select
+                      value={blankDash}
+                      onChange={e => setBlankDash(e.target.value)}
+                      className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    >
+                      <option value="">Select dash…</option>
+                      {Array.from({ length: 20 }, (_, i) => i + 1).map(n => (
+                        <option key={n} value={String(n)}>{n}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-3">
@@ -5407,7 +5513,11 @@ export default function Kiosk() {
               </button>
               <button
                 onClick={handleStartBlankJob}
-                disabled={actionLoading || !selectedBlankLot.trim()}
+                disabled={
+                  actionLoading ||
+                  !selectedBlankLot.trim() ||
+                  (!blankLots.some(b => b.lot_number === selectedBlankLot.trim()) && (!blankType || !blankDash))
+                }
                 className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center gap-2"
               >
                 {actionLoading && <Loader2 size={16} className="animate-spin" />}

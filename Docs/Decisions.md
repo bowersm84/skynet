@@ -1635,3 +1635,12 @@ plan renamed Closed_WO_Search_Implementation_Plan_1_CLOSED.md.
 **Why:** An in_progress maintenance job had no close path anywhere — the kiosk excludes maintenance from completion (!is_maintenance) and the Schedule Close button was gated to status='assigned' ("Maintenance in progress cannot be closed from here"), so a started downtime held the machine DOWN with no way to clear it (e.g. DTU-000003 on MZ-3, fixed by hand). The existing handleCancelMaintenance handler already supports in_progress; only its trigger was gated.
 **Edge:** Kiosk completion frees the machine only for unplanned maintenance (planned maintenance doesn't set the machine DOWN); the job/work-order are completed in both cases.
 **Files:** src/pages/Kiosk.jsx, src/pages/Schedule.jsx.
+
+### D-BLANKS-09 — Kiosk blank-lot stub capture + Materials panel display (Bolt Masters)
+Date: 2026-06-24
+Context: Bolt Master jobs record the blank lot on the job but write no job_materials row, so the kiosk Materials panel showed "No materials loaded", and a bare lot number entered for an un-received lot carried no type/dash for inventory or reconciliation.
+Decision:
+- Select Blank Lot modal now forces Blank Type (from material_types where name ILIKE '%blank%', matching D-BLANKS-05) and Blank Dash (1–20) when the entered lot is NOT on hand; Confirm & Start is gated on both.
+- handleStartBlankJob creates a lightweight qty-0 "stub" material_receiving row (category='blank', vendor 'AJ Fasteners', rack 'Blank Rack', note "Entered at kiosk — not yet received") for any entered lot not already present as a blank receipt. No migration. The lot then appears in Inventory → Blanks and the blank cycle count; at finishing, consume_blank_lot matches the stub, and a later formal receipt reconciles via the D-BLANKS-07 auto-link.
+- Materials panel: for Bolt Masters it now shows blank type • dash • lot (hydrated in loadJobs from the lot's latest blank receipt/stub, falling back to jobs.blank_lot_number) instead of "No materials loaded".
+Frontend-only (Kiosk.jsx). No SQL.

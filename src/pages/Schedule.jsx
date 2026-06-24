@@ -3330,8 +3330,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       <Edit3 size={16} />
                       Edit Schedule
                     </button>
-                    {/* Cancel/Complete button - only show if job hasn't started */}
-                    {selectedJob.status === 'assigned' && (
+                    {/* Cancel/Complete button - assigned (not yet started) or in progress */}
+                    {(selectedJob.status === 'assigned' || selectedJob.status === 'in_progress') && (
                       <button
                         onClick={() => {
                           // Set defaults for end date/time to now
@@ -3352,9 +3352,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   </div>
                   <p className="text-sm text-gray-500 flex items-center gap-2">
                     <Info size={14} />
-                    {selectedJob.status === 'assigned' 
-                      ? 'Click Close to complete early or cancel this maintenance order.'
-                      : 'Maintenance in progress cannot be closed from here.'}
+                    {(selectedJob.status === 'assigned' || selectedJob.status === 'in_progress')
+                      ? 'Click Close to complete or cancel this maintenance order.'
+                      : 'This maintenance order cannot be closed from here.'}
                   </p>
                 </div>
               ) : (

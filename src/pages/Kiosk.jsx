@@ -2402,6 +2402,25 @@ export default function Kiosk() {
   }
 
   // ========== LOT NUMBER GENERATION ==========
+  // Resolve the job's material lot from the DB. job_materials is the authoritative per-job
+  // material row (job_id is UNIQUE). Used at PLN generation so a lot loaded at the raw-material
+  // kiosk before the job was started here is still captured, instead of relying on the machine
+  // kiosk's possibly-stale local jobMaterials state.
+  const resolveJobMaterialLot = async (jobId) => {
+    if (!jobId) return ''
+    try {
+      const { data } = await supabase
+        .from('job_materials')
+        .select('lot_number')
+        .eq('job_id', jobId)
+        .maybeSingle()
+      return (data?.lot_number || '').trim()
+    } catch (err) {
+      console.warn('Could not resolve job material lot for PLN:', err)
+      return ''
+    }
+  }
+
   const generateProductionLotNumber = async (materialLot) => {
     const now = new Date()
     const datePart = now.toISOString().slice(2, 10).replace(/-/g, '') // YYMMDD
@@ -2416,10 +2435,17 @@ export default function Kiosk() {
 
       if (error) throw error
       const seq = String(data).padStart(4, '0')
-      return `${prefix}-${lotPart}-${datePart}-${seq}`
+      // Embed the material lot when known (PLN-<lot>-YYMMDD-NNNN); otherwise omit the empty
+      // segment so a material-less job reads PLN-YYMMDD-NNNN, not PLN--YYMMDD-NNNN.
+      return lotPart
+        ? `${prefix}-${lotPart}-${datePart}-${seq}`
+        : `${prefix}-${datePart}-${seq}`
     } catch (err) {
       // Fallback: timestamp-based number if RPC fails
-      const fallback = `${prefix}-${lotPart}-${datePart}-${now.getTime().toString().slice(-4)}`
+      const seqFallback = now.getTime().toString().slice(-4)
+      const fallback = lotPart
+        ? `${prefix}-${lotPart}-${datePart}-${seqFallback}`
+        : `${prefix}-${datePart}-${seqFallback}`
       console.warn('Lot number RPC failed, using fallback:', fallback, err)
       return fallback
     }
@@ -2790,10 +2816,12 @@ export default function Kiosk() {
   const handleConfirmMaterials = async () => {
     setActionLoading(true)
     try {
-      // Generate PLN on production start if not already set (PLN-<lot>-YYMMDD-NNNN)
+      // Generate PLN on production start if not already set (PLN-<lot>-YYMMDD-NNNN). Resolve the
+      // lot from the DB so a raw-material-kiosk load before start is captured, falling back to
+      // local state.
       let productionLotNumber = activeJob.production_lot_number
       if (!productionLotNumber) {
-        const materialLot = jobMaterials[0]?.lot_number || ''
+        const materialLot = (await resolveJobMaterialLot(activeJob.id)) || jobMaterials[0]?.lot_number || ''
         productionLotNumber = await generateProductionLotNumber(materialLot)
       }
 
@@ -2829,10 +2857,13 @@ export default function Kiosk() {
   const handleConfirmMaterialOverride = async () => {
     setActionLoading(true)
     try {
-      // Generate PLN on production start if not already set
+      // Generate PLN on production start if not already set. Even on the override path, resolve
+      // the lot from the DB — material may have been loaded at the raw-material kiosk before the
+      // machinist hit override, and it should still appear in the PLN.
       let productionLotNumber = activeJob.production_lot_number
       if (!productionLotNumber) {
-        productionLotNumber = await generateProductionLotNumber()
+        const materialLot = await resolveJobMaterialLot(activeJob.id)
+        productionLotNumber = await generateProductionLotNumber(materialLot)
       }
 
       const now = new Date().toISOString()
@@ -3699,6 +3730,47 @@ export default function Kiosk() {
   const isMaintenance = (job) => {
     return job?.is_maintenance || job?.work_order?.order_type === 'maintenance'
   }
+
+  // Complete an active maintenance/downtime from the machine kiosk. Mirrors the scheduler's
+  // "complete" close (job -> complete, end now, work order -> complete) and frees the machine
+  // when the downtime was unplanned (unplanned maintenance had set the machine DOWN).
+  const handleCompleteMaintenance = async () => {
+    if (!activeJob || !isMaintenance(activeJob)) return
+    if (!window.confirm('Mark this downtime complete and return the machine to service?')) return
+    setActionLoading(true)
+    try {
+      const now = new Date().toISOString()
+      const workOrderId = activeJob.work_order_id || activeJob.work_order?.id
+      const machineId = activeJob.assigned_machine_id || machine?.id
+      const wasUnplanned = activeJob.work_order?.maintenance_type === 'unplanned'
+
+      const { error } = await supabase
+        .from('jobs')
+        .update({ status: 'complete', actual_end: now, scheduled_end: now, updated_at: now })
+        .eq('id', activeJob.id)
+      if (error) throw error
+
+      if (workOrderId) {
+        await supabase.from('work_orders')
+          .update({ status: 'complete', updated_at: now })
+          .eq('id', workOrderId)
+      }
+      if (wasUnplanned && machineId) {
+        await supabase.from('machines')
+          .update({ status: 'available', status_reason: null, status_updated_at: now })
+          .eq('id', machineId)
+      }
+
+      setActiveJob(null)
+      await loadJobs()
+      await loadMachine()
+    } catch (err) {
+      console.error('Error completing maintenance:', err)
+      alert('Could not complete the downtime: ' + (err.message || err))
+    } finally {
+      setActionLoading(false)
+    }
+  }
   
   // Get maintenance type color
   const getMaintenanceColor = (job) => {
@@ -4188,6 +4260,18 @@ export default function Kiosk() {
                         <p className="text-white font-mono">{formatTime(activeJob.scheduled_end)}</p>
                       </div>
                     </div>
+
+                    {/* Complete the downtime from the kiosk (machinist / admin) */}
+                    {canOperate && activeJob.status === 'in_progress' && (
+                      <button
+                        onClick={handleCompleteMaintenance}
+                        disabled={actionLoading}
+                        className="w-full mb-3 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
+                        Complete Downtime — Return Machine to Service
+                      </button>
+                    )}
 
                     {/* Maintenance Action Buttons */}
                     {canOperate && !isBoltMaster && activeJob.status === 'in_progress' && (

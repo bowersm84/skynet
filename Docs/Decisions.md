@@ -1623,3 +1623,15 @@ plan renamed Closed_WO_Search_Implementation_Plan_1_CLOSED.md.
 ### D-BLANKS-08 — Receiving buttons: parallel naming "Receive Bars" / "Receive Blanks" (2026-06-23)
 **What:** Renamed the bar receiving flow from "Log Receipt" / "Log Material Receipt" to "Receive Bars" (header button, empty-state hint, modal title, modal submit), pairing it with the "Receive Blanks" button. Display text only.
 **Files:** src/pages/Armory.jsx.
+
+### D-PLN-MATLOT01 — PLN captures material lot from DB, not stale kiosk state (2026-06-24)
+**What:** PLN generation now resolves the job's material lot from job_materials (DB) at generation time via new resolveJobMaterialLot(jobId), on both the material-confirm and material-override paths, instead of reading only the machine kiosk's local jobMaterials state. generateProductionLotNumber also omits the empty lot segment when no lot is known (PLN-YYMMDD-NNNN instead of PLN--YYMMDD-NNNN).
+**Why:** When material is loaded at the raw-material kiosk before the job is started on the machine kiosk, the machine kiosk's local jobMaterials is stale/empty at production start, so the lot was dropped from the PLN — e.g. J-000083 generated PLN-260624-0001 with no lot, corrected by hand to PLN-2592-260624-0001. job_materials.job_id is UNIQUE, so the DB read is the authoritative per-job lot.
+**Edge:** The override path still records material_override=true even if a lot is found; that's intentional — it preserves the operator's skip action while keeping PLN traceability.
+**Files:** src/pages/Kiosk.jsx.
+
+### D-MAINT-CLOSE01 — Close in-progress maintenance/downtime from kiosk or scheduler (2026-06-24)
+**What:** Added a "Complete Downtime — Return Machine to Service" button to the kiosk maintenance (Active Downtime) panel via handleCompleteMaintenance (job->complete, end now, work order->complete, frees the machine when unplanned), and un-gated the Schedule "Close Maintenance Order" control to also appear for in_progress maintenance (was assigned-only).
+**Why:** An in_progress maintenance job had no close path anywhere — the kiosk excludes maintenance from completion (!is_maintenance) and the Schedule Close button was gated to status='assigned' ("Maintenance in progress cannot be closed from here"), so a started downtime held the machine DOWN with no way to clear it (e.g. DTU-000003 on MZ-3, fixed by hand). The existing handleCancelMaintenance handler already supports in_progress; only its trigger was gated.
+**Edge:** Kiosk completion frees the machine only for unplanned maintenance (planned maintenance doesn't set the machine DOWN); the job/work-order are completed in both cases.
+**Files:** src/pages/Kiosk.jsx, src/pages/Schedule.jsx.

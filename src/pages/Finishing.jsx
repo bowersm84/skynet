@@ -1194,6 +1194,39 @@ export default function Finishing() {
 
         if (error) throw error
 
+        // Blanks Phase 2: deduct the blank lot by James's verified finishing count (the
+        // trusted good count; machinist/kiosk counts are not used). Fires only for
+        // bolt-master/blank jobs (jobs.blank_lot_number set). Idempotency is per
+        // finishing send inside consume_blank_lot, so re-completing won't double-deduct.
+        try {
+          const blankJobId = batch.job_id || batch.job?.id
+          if (blankJobId && verifiedCount > 0) {
+            const { data: blankJobRow } = await supabase
+              .from('jobs').select('blank_lot_number').eq('id', blankJobId).single()
+            const blankLot = blankJobRow?.blank_lot_number
+            if (blankLot) {
+              const { error: blankErr } = await supabase.rpc('consume_blank_lot', {
+                p_finishing_send_id: batch.id,
+                p_job_id: blankJobId,
+                p_lot_number: blankLot,
+                p_quantity: verifiedCount,
+                p_used_by: operator.id
+              })
+              if (blankErr) {
+                console.error('Blank consumption failed (non-blocking):', blankErr)
+                supabase.from('audit_logs').insert({
+                  event_type: 'inventory_warning',
+                  job_id: blankJobId,
+                  operator_id: operator.id,
+                  details: { warning: 'Blank consumption failed at finishing', lot_number: blankLot, verified_count: verifiedCount, finishing_send_id: batch.id }
+                }).then(() => {}, () => {})
+              }
+            }
+          }
+        } catch (blankCatch) {
+          console.error('Blank consumption hook error (non-blocking):', blankCatch)
+        }
+
         // Log significant discrepancies (>5%) to audit_logs
         if (discrepancy !== 0) {
           try {

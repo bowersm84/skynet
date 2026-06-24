@@ -188,6 +188,11 @@ export default function Kiosk() {
   const [inventoryStock, setInventoryStock] = useState([]) // Available stock rows for dropdown grouping
   const [materialsMaster, setMaterialsMaster] = useState([]) // materials master (type+size) for material_master_id resolution
 
+  // Blanks Phase 2 (bolt-master): pick an on-hand blank lot at start, store on the job.
+  const [showBlankLotModal, setShowBlankLotModal] = useState(false)
+  const [blankLots, setBlankLots] = useState([])
+  const [selectedBlankLot, setSelectedBlankLot] = useState('')
+
   // Finishing send state
   const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
   const [finishingSendQty, setFinishingSendQty] = useState('')
@@ -2420,6 +2425,75 @@ export default function Kiosk() {
     }
   }
 
+  // ========== BLANKS (bolt-master) ==========
+  const loadBlankLots = async () => {
+    try {
+      const { data: avail } = await supabase
+        .from('material_availability')
+        .select('material_receiving_id, material_type, bar_size, lot_number, available_bars')
+      const rows = avail || []
+      const ids = rows.map(r => r.material_receiving_id).filter(Boolean)
+      const blankIds = new Set()
+      if (ids.length > 0) {
+        const { data: cats } = await supabase
+          .from('material_receiving')
+          .select('id, category')
+          .in('id', ids)
+        for (const c of (cats || [])) if (c.category === 'blank') blankIds.add(c.id)
+      }
+      setBlankLots(rows
+        .filter(r => blankIds.has(r.material_receiving_id) && (r.available_bars || 0) > 0)
+        .map(r => ({ lot_number: r.lot_number, material_type: r.material_type, bar_size: r.bar_size, available: r.available_bars || 0 }))
+        .sort((a, b) => (a.material_type || '').localeCompare(b.material_type || '') || (a.lot_number || '').localeCompare(b.lot_number || '')))
+    } catch (err) {
+      console.error('Error loading blank lots:', err)
+      setBlankLots([])
+    }
+  }
+
+  const handleOpenBlankLot = async () => {
+    if (!activeJob) return
+    setSelectedBlankLot('')
+    await loadBlankLots()
+    setShowBlankLotModal(true)
+  }
+
+  const handleStartBlankJob = async () => {
+    const blankLot = selectedBlankLot.trim()
+    if (!blankLot) { alert('Enter the blank lot loaded in this machine to start production.'); return }
+    setActionLoading(true)
+    try {
+      let productionLotNumber = activeJob.production_lot_number
+      if (!productionLotNumber) {
+        productionLotNumber = await generateProductionLotNumber(blankLot)
+      }
+      const now = new Date().toISOString()
+      const { error } = await supabase
+        .from('jobs')
+        .update({
+          status: 'in_progress',
+          production_start: now,
+          production_lot_number: productionLotNumber,
+          blank_lot_number: blankLot,
+          material_confirmed: true,
+          material_confirmed_at: now,
+          material_confirmed_by: operator.id,
+          updated_at: now
+        })
+        .eq('id', activeJob.id)
+      if (error) throw error
+      setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber, blank_lot_number: blankLot }))
+      setShowBlankLotModal(false)
+      setSelectedBlankLot('')
+      await loadJobs()
+    } catch (err) {
+      console.error('Error starting blank job:', err)
+      alert('Failed to start production: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   // ========== MATERIALS ==========
   const handleOpenMaterials = async () => {
     if (!activeJob) return
@@ -4116,7 +4190,7 @@ export default function Kiosk() {
                     </div>
 
                     {/* Maintenance Action Buttons */}
-                    {canOperate && activeJob.status === 'in_progress' && (
+                    {canOperate && !isBoltMaster && activeJob.status === 'in_progress' && (
 						<button 
 						  onClick={handleOpenMaterials}
 						  className="text-xs text-skynet-accent hover:text-blue-400 flex items-center gap-1"
@@ -4432,7 +4506,7 @@ export default function Kiosk() {
                         <Layers size={16} />
                         Materials {jobMaterials.length > 0 ? `(${jobMaterials.length})` : ''}
                       </h3>
-                      {canOperate && activeJob.status === 'in_progress' && (
+                      {canOperate && !isBoltMaster && activeJob.status === 'in_progress' && (
                         <button 
                           onClick={handleOpenMaterials}
                           className="text-xs text-skynet-accent hover:text-blue-400 flex items-center gap-1"
@@ -4517,8 +4591,8 @@ export default function Kiosk() {
                                 </button>
                               ) : (
                                 <div className="flex-1 flex flex-col gap-1">
-                                  <button onClick={handleOpenMaterials} disabled={actionLoading} className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
-                                    <Package size={20} />Load Materials + Start Job
+                                  <button onClick={isBoltMaster ? handleOpenBlankLot : handleOpenMaterials} disabled={actionLoading} className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                                    <Package size={20} />{isBoltMaster ? 'Select Blank Lot + Start Job' : 'Load Materials + Start Job'}
                                   </button>
                                   <button onClick={handleOpenTooling} className="text-xs text-gray-500 hover:text-gray-400 transition-colors flex items-center justify-center gap-1">
                                     <Wrench size={12} />Add Tooling (optional)
@@ -5190,6 +5264,76 @@ export default function Kiosk() {
       )}
 
       {/* Materials Modal */}
+      {showBlankLotModal && activeJob && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-800">
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <Package className="text-blue-400" size={24} />
+                Select Blank Lot
+              </h2>
+              <p className="text-gray-500 text-sm mt-1">{activeJob.job_number} - {activeJob.component?.part_number}</p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <p className="text-sm text-gray-400">Enter the blank lot loaded in this machine. Inventory is deducted from this lot by the verified finishing count when James completes finishing. If the lot isn't received yet, enter it anyway — it reconciles once the receipt is logged.</p>
+
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Lot #</label>
+                <input
+                  type="text"
+                  value={selectedBlankLot}
+                  onChange={e => setSelectedBlankLot(e.target.value)}
+                  placeholder="e.g. 50509"
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              {blankLots.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">On hand — tap to use</p>
+                  {blankLots.map(b => {
+                    const sel = selectedBlankLot.trim() === b.lot_number
+                    return (
+                      <button
+                        key={b.lot_number}
+                        onClick={() => setSelectedBlankLot(b.lot_number)}
+                        className={`w-full text-left px-4 py-3 rounded-lg border transition-colors flex items-center justify-between ${sel ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:bg-gray-700'}`}
+                      >
+                        <div>
+                          <p className="text-white font-mono text-sm">{b.lot_number}</p>
+                          <p className="text-gray-400 text-xs mt-0.5">Type {b.material_type} · Dash {b.bar_size || '—'}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-white font-mono text-sm">{(b.available || 0).toLocaleString()}</p>
+                          <p className="text-gray-500 text-xs">avail</p>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">No blank lots received yet — enter the lot number from the physical material above.</p>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-3">
+              <button onClick={() => { setShowBlankLotModal(false); setSelectedBlankLot('') }} className="px-4 py-2 text-gray-400 hover:text-white">
+                Cancel
+              </button>
+              <button
+                onClick={handleStartBlankJob}
+                disabled={actionLoading || !selectedBlankLot.trim()}
+                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center gap-2"
+              >
+                {actionLoading && <Loader2 size={16} className="animate-spin" />}
+                Confirm & Start Production
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showMaterialModal && activeJob && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
           <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">

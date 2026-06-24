@@ -172,6 +172,11 @@ export default function Armory({ profile }) {
   const [receivingCertFiles, setReceivingCertFiles] = useState([])
   // Set when the receipt saved but a cert upload failed — guards against duplicate saves.
   const [savedReceiptId, setSavedReceiptId] = useState(null)
+  // Blanks receiving (isolated modal): uncut cold-headed studs, 1 blank = 1 part.
+  const BLANK_EMPTY = { vendor: 'AJ Fasteners', blank_type: '', dash: '', quantity: '', total_cost: '', lot_number: '', po_number: '', rack: 'Blank Rack', notes: '' }
+  const [showBlankModal, setShowBlankModal] = useState(false)
+  const [blankForm, setBlankForm] = useState(BLANK_EMPTY)
+  const [blankError, setBlankError] = useState('')
   const [inventoryRows, setInventoryRows] = useState([])
   const [invFilterMaterial, setInvFilterMaterial] = useState('')
   const [invFilterRack, setInvFilterRack] = useState('')
@@ -180,6 +185,7 @@ export default function Armory({ profile }) {
   const [invSearchLot, setInvSearchLot] = useState('')
   const [invSortKey, setInvSortKey] = useState('material_type') // material_type | bar_size | lot_number | available_bars
   const [invViewMode, setInvViewMode] = useState('lot') // 'lot' | 'size' (roll-up by material + size)
+  const [invCategory, setInvCategory] = useState('bar') // 'bar' | 'blank' - Inventory Bars/Blanks switch
   // Replenishment rules (min on-hand thresholds per material type + bar size)
   const [replenishmentRules, setReplenishmentRules] = useState([])
   const [showRuleModal, setShowRuleModal] = useState(false)
@@ -460,6 +466,19 @@ export default function Armory({ profile }) {
           price_per_bar: r.price_per_bar != null ? Number(r.price_per_bar) : null,
         }
       })
+      // Attach bar/blank category (not in the material_availability view) via one batched lookup.
+      const recvIds = rows.map(r => r.id).filter(Boolean)
+      if (recvIds.length > 0) {
+        const { data: cats } = await supabase
+          .from('material_receiving')
+          .select('id, category')
+          .in('id', recvIds)
+        const catById = {}
+        for (const c of (cats || [])) catById[c.id] = c.category
+        for (const r of rows) r.category = catById[r.id] || 'bar'
+      } else {
+        for (const r of rows) r.category = 'bar'
+      }
       setInventoryRows(rows)
     } catch (err) {
       console.error('Error loading inventory:', err)
@@ -1820,6 +1839,80 @@ export default function Armory({ profile }) {
     }
   }
 
+  const handleSaveBlank = async () => {
+    const qty = parseInt(blankForm.quantity, 10)
+    const total = parseFloat(blankForm.total_cost)
+    if (!blankForm.vendor.trim() || !blankForm.blank_type || !blankForm.dash || !blankForm.lot_number.trim() || !(qty > 0) || !(total >= 0)) {
+      setBlankError('Vendor, blank type, dash, lot #, quantity, and total cost are required.')
+      return
+    }
+    setBlankError('')
+    setSaving(true)
+    try {
+      const { data: newRow, error } = await supabase
+        .from('material_receiving')
+        .insert({
+          material_id: null,
+          category: 'blank',
+          material_type: blankForm.blank_type,
+          bar_size: blankForm.dash,
+          bar_length_inches: null,
+          lot_number: blankForm.lot_number.trim(),
+          quantity: qty,
+          vendor: blankForm.vendor.trim(),
+          po_number: blankForm.po_number?.trim() || null,
+          weight_lbs: null,
+          price_per_lb: null,
+          price_per_bar: qty > 0 ? total / qty : null,
+          rack: blankForm.rack?.trim() || 'Blank Rack',
+          notes: blankForm.notes?.trim() || null,
+          received_by: profile.id,
+          received_at: new Date().toISOString(),
+        })
+        .select()
+        .single()
+      if (error) throw error
+
+      // Blanks Phase 3 auto-reconcile: link any orphaned usage for this lot to the new
+      // receipt and resolve open unknown_lot flag(s), so a lot entered before it was
+      // received clears itself once received. (Bars use a confirm-nudge; blanks auto-link
+      // because the receiver is explicitly logging this exact lot.) Non-blocking.
+      try {
+        const savedLot = blankForm.lot_number.trim()
+        if (newRow?.id && savedLot) {
+          await supabase
+            .from('material_usage')
+            .update({ material_receiving_id: newRow.id })
+            .eq('lot_number', savedLot)
+            .is('material_receiving_id', null)
+          await supabase
+            .from('material_reconciliation_flags')
+            .update({
+              status: 'resolved',
+              material_receiving_id: newRow.id,
+              resolved_by: profile.id,
+              resolved_at: new Date().toISOString(),
+              resolution_notes: `Auto-linked to blank receipt for lot ${savedLot}`,
+            })
+            .eq('lot_number', savedLot)
+            .eq('flag_type', 'unknown_lot')
+            .eq('status', 'open')
+        }
+      } catch (linkErr) {
+        console.error('Blank auto-reconcile failed (non-blocking):', linkErr)
+      }
+
+      await fetchData()
+      setShowBlankModal(false)
+      setBlankForm(BLANK_EMPTY)
+      setBlankError('')
+    } catch (err) {
+      setBlankError('Error saving blanks receipt: ' + (err.message || 'unknown error'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleAssignRack = async (receivingId, newRack) => {
     try {
       await supabase
@@ -1843,7 +1936,9 @@ export default function Armory({ profile }) {
     else { setInvSortKey(key); setInvSortDir('asc') }
   }
 
+  const blankInventoryRows = inventoryRows.filter(r => (r.category || 'bar') === 'blank')
   const filteredInventoryRows = inventoryRows
+    .filter(r => (r.category || 'bar') === 'bar')
     .filter(r => {
       if (invFilterMaterial && r.material_type !== invFilterMaterial) return false
       if (invFilterRack === 'Staging' && r.rack !== null) return false
@@ -1870,7 +1965,7 @@ export default function Armory({ profile }) {
   // Replenishment: total available bars per material+size across ALL lots
   // (thresholds are vendor-agnostic), the active min per group, and below-min count.
   const rmGroupKey = (typeName, sizeStr) => `${typeName}|||${sizeStr}`
-  const fullTotalsByGroup = inventoryRows.reduce((m, r) => {
+  const fullTotalsByGroup = inventoryRows.filter(r => (r.category || 'bar') === 'bar').reduce((m, r) => {
     const k = rmGroupKey(r.material_type, r.bar_size)
     m[k] = (m[k] || 0) + (r.available_bars || 0)
     return m
@@ -2559,11 +2654,21 @@ export default function Armory({ profile }) {
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <h2 className="text-lg font-semibold text-white">Raw Material Inventory</h2>
-              <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
-                <button onClick={() => setInvViewMode('lot')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'lot' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Lot</button>
-                <button onClick={() => setInvViewMode('size')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'size' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Size</button>
+              <div className="flex items-center gap-2">
+                <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                  <button onClick={() => setInvCategory('bar')} className={`px-3 py-1.5 text-sm transition-colors ${invCategory === 'bar' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Bars</button>
+                  <button onClick={() => setInvCategory('blank')} className={`px-3 py-1.5 text-sm transition-colors ${invCategory === 'blank' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Blanks</button>
+                </div>
+                {invCategory === 'bar' && (
+                  <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                    <button onClick={() => setInvViewMode('lot')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'lot' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Lot</button>
+                    <button onClick={() => setInvViewMode('size')} className={`px-3 py-1.5 text-sm transition-colors ${invViewMode === 'size' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>By Size</button>
+                  </div>
+                )}
               </div>
             </div>
+            {invCategory === 'bar' ? (
+            <>
             {/* Filters */}
             <div className="flex items-center gap-3 flex-wrap">
               <select
@@ -2890,6 +2995,79 @@ export default function Armory({ profile }) {
                 </div>
               )
             })()}
+            </>
+            ) : (() => {
+              const rows = blankInventoryRows
+              const totalAvail = rows.reduce((s, r) => s + (r.available_bars || 0), 0)
+              const totalValue = rows.reduce((s, r) => (
+                r.price_per_bar != null && r.available_bars > 0 ? s + r.available_bars * r.price_per_bar : s
+              ), 0)
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                    <span>{rows.length} Blank Lots</span>
+                    <span className="text-gray-700">·</span>
+                    <span>{totalAvail.toLocaleString()} Blanks Available</span>
+                    <span className="text-gray-700">·</span>
+                    <span>Est. Value ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  {rows.length === 0 ? (
+                    <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
+                      <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
+                      <p className="text-gray-400">No blank inventory yet.</p>
+                      <p className="text-gray-600 text-sm mt-1">Use "Receive Blanks" on the Receiving tab to populate this list.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-lg border border-gray-700">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                          <tr>
+                            <th className="px-4 py-3 text-left">Rack</th>
+                            <th className="px-4 py-3 text-left">Vendor</th>
+                            <th className="px-4 py-3 text-left">Type</th>
+                            <th className="px-4 py-3 text-left">Dash</th>
+                            <th className="px-4 py-3 text-left">Lot #</th>
+                            <th className="px-4 py-3 text-right">Qty Available</th>
+                            <th className="px-4 py-3 text-right">Cost/Blank</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-700">
+                          {rows
+                            .slice()
+                            .sort((a, b) =>
+                              (a.material_type || '').localeCompare(b.material_type || '')
+                              || cmpSize(a.bar_size, b.bar_size)
+                              || (a.lot_number || '').localeCompare(b.lot_number || '')
+                            )
+                            .map(row => {
+                              const isOut = row.available_bars === 0
+                              const isNeg = row.available_bars < 0
+                              return (
+                                <tr key={row.id} className={`transition-colors ${isOut ? 'bg-red-900/40' : 'bg-gray-900 hover:bg-gray-800'}`}>
+                                  <td className="px-4 py-3"><span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack || 'Blank Rack'}</span></td>
+                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
+                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
+                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.bar_size || '—'}</td>
+                                  <td className={`px-4 py-3 font-mono text-xs ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
+                                  <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : 'text-white'}`}>{(row.available_bars || 0).toLocaleString()}</td>
+                                  <td className="px-4 py-3 text-right font-mono text-gray-300">{row.price_per_bar != null ? `$${Number(row.price_per_bar).toFixed(4)}` : '—'}</td>
+                                </tr>
+                              )
+                            })}
+                        </tbody>
+                        <tfoot className="bg-gray-800/60 text-gray-200 text-xs uppercase">
+                          <tr>
+                            <td className="px-4 py-3 font-semibold" colSpan={5}>Total ({rows.length} blank lots)</td>
+                            <td className="px-4 py-3 text-right font-mono font-semibold">{totalAvail.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right font-mono font-semibold">{totalValue > 0 ? `$${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         )}
 
@@ -3065,12 +3243,20 @@ export default function Armory({ profile }) {
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">Raw Material Receiving Log</h2>
               {canReceive(profile) && (
-                <button
-                  onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setReceivingTypeId(''); setReceivingSize(''); setReceivingCertFiles([]); setSavedReceiptId(null); setShowReceivingModal(true) }}
-                  className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
-                >
-                  <Plus size={18} /> Log Receipt
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { setReceivingForm({ material_id: '', vendor: '', po_number: '', lot_number: '', quantity: '', bar_length_inches: '', weight_lbs: '', price_per_lb: '', price_per_bar: '', rack: '', notes: '' }); setReceivingError(''); setReceivingTypeId(''); setReceivingSize(''); setReceivingCertFiles([]); setSavedReceiptId(null); setShowReceivingModal(true) }}
+                    className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+                  >
+                    <Plus size={18} /> Receive Bars
+                  </button>
+                  <button
+                    onClick={() => { setBlankForm(BLANK_EMPTY); setBlankError(''); setShowBlankModal(true) }}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
+                  >
+                    <Plus size={18} /> Receive Blanks
+                  </button>
+                </div>
               )}
             </div>
 
@@ -3078,7 +3264,7 @@ export default function Armory({ profile }) {
               <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                 <PackageCheck size={48} className="mx-auto text-gray-600 mb-3" />
                 <p className="text-gray-400">No receipts logged yet.</p>
-                <p className="text-gray-600 text-sm mt-1">Click '+ Log Receipt' to record incoming raw material.</p>
+                <p className="text-gray-600 text-sm mt-1">Click '+ Receive Bars' to record incoming raw material.</p>
               </div>
             ) : (
               <div className="overflow-x-auto rounded-lg border border-gray-700">
@@ -3326,6 +3512,7 @@ export default function Armory({ profile }) {
         {activeTab === 'adjustments' && (() => {
           const isApprover = hasRole(profile, 'admin', 'compliance')
           const countRows = inventoryRows.filter(r => {
+            if ((r.category || 'bar') !== 'bar') return false
             if (countRack === 'Staging' && r.rack !== null) return false
             if (countRack && countRack !== 'Staging' && r.rack !== countRack) return false
             if (countMaterial && r.material_type !== countMaterial) return false
@@ -3365,7 +3552,24 @@ export default function Armory({ profile }) {
           )
             .filter(ne => { const v = countInputs[ne.key]; return v !== undefined && v !== '' && Number(v) > 0 })
             .map(ne => ({ ...ne, counted: Number(countInputs[ne.key]) }))
-          const totalCountChanges = existingAdjItems.length + newLengthEntries.length
+          // Blanks (category='blank'): one count per lot, no 4ft/12ft and no discovery
+          // receipts (a blank lot always has its own receipt). Shares countInputs[r.id].
+          const blankCountRows = inventoryRows.filter(r => {
+            if ((r.category || 'bar') !== 'blank') return false
+            if (countRack === 'Staging' && r.rack !== null) return false
+            if (countRack && countRack !== 'Staging' && r.rack !== countRack) return false
+            if (countMaterial && r.material_type !== countMaterial) return false
+            if (countSize && r.bar_size !== countSize) return false
+            return true
+          }).sort((a, b) =>
+            (a.rack || 'Staging').localeCompare(b.rack || 'Staging')
+            || (a.material_type || '').localeCompare(b.material_type || '')
+            || (a.lot_number || '').localeCompare(b.lot_number || '')
+          )
+          const blankAdjItems = blankCountRows
+            .filter(r => { const v = countInputs[r.id]; return v !== undefined && v !== '' && Number(v) !== Math.round(r.available_bars || 0) })
+            .map(r => ({ material_receiving_id: r.id, counted_bars: Number(countInputs[r.id]) }))
+          const totalCountChanges = existingAdjItems.length + newLengthEntries.length + blankAdjItems.length
 
           const handleSubmitCountWithDiscovery = async () => {
             if (totalCountChanges === 0) return
@@ -3386,7 +3590,7 @@ export default function Armory({ profile }) {
                 return
               }
             }
-            await handleSubmitCount([...existingAdjItems, ...createdItems])
+            await handleSubmitCount([...existingAdjItems, ...createdItems, ...blankAdjItems])
           }
 
           const handlePrintCountSheet = () => {
@@ -3510,13 +3714,14 @@ export default function Armory({ profile }) {
                     </div>
                   )}
 
-                  {countRows.length === 0 ? (
+                  {(countRows.length === 0 && blankCountRows.length === 0) ? (
                     <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                       <ClipboardCheck size={48} className="mx-auto text-gray-600 mb-3" />
                       <p className="text-gray-400">No lots in this scope.</p>
                     </div>
                   ) : (
                     <>
+                      {countRows.length > 0 && (
                       <div className="overflow-x-auto rounded-lg border border-gray-700">
                         <table className="w-full text-sm">
                           <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
@@ -3573,6 +3778,46 @@ export default function Armory({ profile }) {
                           </tbody>
                         </table>
                       </div>
+                      )}
+                      {blankCountRows.length > 0 && (
+                        <div className="overflow-x-auto rounded-lg border border-gray-700">
+                          <div className="px-4 py-2 text-xs uppercase tracking-wide text-gray-500 bg-gray-800/60">Blanks</div>
+                          <table className="w-full text-sm">
+                            <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                              <tr>
+                                <th className="px-4 py-3 text-left">Rack</th>
+                                <th className="px-4 py-3 text-left">Type</th>
+                                <th className="px-4 py-3 text-left">Dash</th>
+                                <th className="px-4 py-3 text-left">Lot #</th>
+                                <th className="px-4 py-3 text-right">Blanks</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-700">
+                              {blankCountRows.map(r => {
+                                const sys = Math.round(r.available_bars || 0)
+                                const v = countInputs[r.id]
+                                const hasVal = v !== undefined && v !== ''
+                                const delta = hasVal ? Number(v) - sys : null
+                                return (
+                                  <tr key={r.id} className="bg-gray-900 hover:bg-gray-800">
+                                    <td className="px-4 py-3">{r.rack ? <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{r.rack}</span> : <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>}</td>
+                                    <td className="px-4 py-3 text-gray-300">{r.material_type}</td>
+                                    <td className="px-4 py-3 text-gray-300">{r.bar_size || '—'}</td>
+                                    <td className="px-4 py-3 font-mono text-gray-300">{r.lot_number || '—'}</td>
+                                    <td className="px-4 py-3">
+                                      <div className="flex items-center gap-2 justify-end">
+                                        <span className="text-xs text-gray-500 font-mono">{sys}</span>
+                                        <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [r.id]: e.target.value }))} placeholder={String(sys)} className="w-20 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
+                                        {delta != null && delta !== 0 && <span className={`text-xs font-mono ${delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta > 0 ? `+${delta}` : delta}</span>}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <input type="text" value={countReason} onChange={e => setCountReason(e.target.value)} placeholder="Reason / note (optional)" className="flex-1 min-w-[200px] px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
                         <button
@@ -4729,7 +4974,7 @@ export default function Armory({ profile }) {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-bold text-white">Log Material Receipt</h2>
+              <h2 className="text-lg font-bold text-white">Receive Bars</h2>
               <button onClick={closeReceivingModal} className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
@@ -4991,7 +5236,7 @@ export default function Armory({ profile }) {
                     className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
                   >
                     {saving && <Loader2 size={16} className="animate-spin" />}
-                    Log Receipt
+                    Receive Bars
                   </button>
                 </>
               )}
@@ -4999,6 +5244,154 @@ export default function Armory({ profile }) {
           </div>
         </div>
       )}
+
+      {/* Receive Blanks Modal (isolated; bars path untouched) */}
+      {showBlankModal && (() => {
+        const qty = parseInt(blankForm.quantity, 10)
+        const total = parseFloat(blankForm.total_cost)
+        const costPerBlank = (qty > 0 && isFinite(total)) ? total / qty : null
+        return (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+            <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-white">Receive Blanks</h2>
+                <button onClick={() => { setShowBlankModal(false); setBlankError('') }} className="text-gray-400 hover:text-white">
+                  <X size={20} />
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">Uncut cold-headed studs (Bolt Master only). One blank = one part.</p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Vendor *</label>
+                  <input
+                    type="text"
+                    value={blankForm.vendor}
+                    onChange={e => setBlankForm(f => ({ ...f, vendor: e.target.value }))}
+                    placeholder="e.g. Acme Cold Form"
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Type *</label>
+                  <select
+                    value={blankForm.blank_type}
+                    onChange={e => setBlankForm(f => ({ ...f, blank_type: e.target.value }))}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">— Select type —</option>
+                    {materialTypes
+                      .filter(t => (t.name || '').toLowerCase().includes('blank'))
+                      .map(t => (<option key={t.id} value={t.name}>{t.name}</option>))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Dash *</label>
+                  <select
+                    value={blankForm.dash}
+                    onChange={e => setBlankForm(f => ({ ...f, dash: e.target.value }))}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  >
+                    <option value="">— Select dash —</option>
+                    {Array.from({ length: 20 }, (_, i) => String(i + 1)).map(d => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Lot # *</label>
+                  <input
+                    type="text"
+                    value={blankForm.lot_number}
+                    onChange={e => setBlankForm(f => ({ ...f, lot_number: e.target.value }))}
+                    placeholder="e.g. 50509"
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Total Quantity (blanks) *</label>
+                  <input
+                    type="number" min="1" step="1"
+                    value={blankForm.quantity}
+                    onChange={e => setBlankForm(f => ({ ...f, quantity: e.target.value }))}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Total Cost ($) *</label>
+                  <input
+                    type="number" min="0" step="0.01"
+                    value={blankForm.total_cost}
+                    onChange={e => setBlankForm(f => ({ ...f, total_cost: e.target.value }))}
+                    placeholder="e.g. 1100"
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                  {costPerBlank != null && (
+                    <p className="text-xs text-gray-500 mt-1">≈ ${costPerBlank.toFixed(4)}/blank</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">PO Number</label>
+                  <input
+                    type="text"
+                    value={blankForm.po_number}
+                    onChange={e => setBlankForm(f => ({ ...f, po_number: e.target.value }))}
+                    placeholder="optional"
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Rack</label>
+                  <input
+                    type="text"
+                    value={blankForm.rack}
+                    onChange={e => setBlankForm(f => ({ ...f, rack: e.target.value }))}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                  />
+                  <p className="text-xs text-gray-600 mt-1">Defaults to "Blank Rack".</p>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
+                  <textarea
+                    value={blankForm.notes}
+                    onChange={e => setBlankForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={2}
+                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
+                  />
+                </div>
+              </div>
+
+              {blankError && (
+                <div className="px-3 py-2 bg-red-900/40 border border-red-700 rounded-lg text-sm text-red-300">
+                  {blankError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button onClick={() => { setShowBlankModal(false); setBlankError('') }} className="px-4 py-2 text-gray-400 hover:text-white">
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveBlank}
+                  disabled={saving || !blankForm.vendor.trim() || !blankForm.blank_type || !blankForm.dash || !blankForm.lot_number.trim() || !blankForm.quantity || blankForm.total_cost === ''}
+                  className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                >
+                  {saving && <Loader2 size={16} className="animate-spin" />}
+                  Receive Blanks
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Reconciliation Resolve Modal */}
       {resolvingFlag && (() => {

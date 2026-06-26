@@ -1681,3 +1681,27 @@ Decision: The kiosk blank-lot picker's "not on hand" stub path now reads the bla
 ### D-BLANK-CATALOG-04 — Header-sort on both catalog tables
 Date: 2026-06-25
 Decision: Added clickable column header-sort to the Material Catalog (bars) and Blank Catalog tables, each with independent sort state (matCatSort / blankCatSort) and a shared cycleCatSort helper. Bars sorts Material Type/Bar Size/Density/Vendor; Blanks sorts Series/Material/Length/Alloy/Vendor (Length numeric-then-string).
+
+### D-BLANK-CATALOG-02 — Blank catalog expansion (76 types) + blank_type_id FK
+Date: 2026-06-25 (logged retroactively — decision dates alongside CATALOG-01)
+Context: D-BLANK-CATALOG-01 created blank_types and seeded the rows derivable from the AJ Fasteners certs (39). The physical shelf holds more than the certs cover, and the catalog needed a foreign key on material_receiving so a blank receipt can point at its catalog row (the Phase 2 deferral noted in D-BLANK-CATALOG-01).
+Decision:
+- Catalog expanded from 39 to 76 types: +37 covering the rest of the shelf — the 2600-Stainless rows, the 2700 gaps (Steel and Stainless), and the unmarked 4000 stock (1", 1-1/2", 2") plus 4000-Steel dash gaps. alloy set per the rule Steel=4037 / Stainless=302, with the 4000-Stainless dash-13 exception = 303. Unmarked rows carry is_unmarked=true and an inch-length stud_length. Counts after load: 2600-SS 12, 2600-Steel 9, 2700-SS 12, 2700-Steel 10, 4000-SS 17, 4000-Steel 16 (= 76). Seed is idempotent (ON CONFLICT (stud_series, material_type, stud_length) DO NOTHING).
+- material_receiving.blank_type_id — new column, uuid references blank_types(id), indexed. Links a blank receipt to its catalog row (alter table material_receiving add column if not exists blank_type_id ...). This is the FK that D-BLANK-RECEIVE-01 and D-BLANK-CONSUME-02 write and that the opening-inventory backfill (D-BLANK-INV-LOAD-01) populates.
+SQL only (catalog seed + FK migration); no frontend.
+
+### D-BLANK-INV-LOAD-01 — Opening blank inventory load + blank_type_id backfill (PROD cutover)
+Date: 2026-06-26
+Context: With the catalog (D-BLANK-CATALOG-01/02), the catalog-driven receive/consume paths (D-BLANK-RECEIVE-01, D-BLANK-CONSUME-01/02), and the inventory UI (D-BLANK-INV-UI-01) in place, the physical blank shelf was loaded as opening inventory so availability, consumption, and the cycle count run against real starting stock.
+Decision:
+- 91-row load into material_receiving, each row category='blank', from a hand-transcribed physical count (six count sheets read by eye — OCR was unreliable on the older AJ Fasteners scans). Every row stamped received_at='2026-06-25 12:00:00+00', vendor 'AJ Fasteners', rack 'Blank Rack'; received_by resolved via a CTE (select id from profiles where role='admin' order by created_at asc limit 1) so the script is environment-agnostic. material_type written as "<series> <material>", bar_size as the dash (or '1"'/'1-1/2"'/'2"' for unmarked stock, matching the catalog).
+- Lot number REQUIRED on every row — un-lotted lines excluded (traceability). price_per_bar re-derived per row from a Fishbowl PO/unit-cost analysis (all 91 exact, no fallback). Totals: 91 rows, 1,626,449 pieces, $206,717.05.
+- Step-6 backfill: linked blank_type_id on all 91 rows by split_part(material_type,' ',1)=stud_series AND split_part(material_type,' ',2)=material_type AND bar_size=stud_length; verify unlinked=0 (all linked). A '1.5"'→'1-1/2"' normalization precedes the link (no-op in prod).
+- Cleanup if needed: delete from material_receiving where category='blank' and received_at='2026-06-25 12:00:00+00'.
+Cutover lesson (migration discipline): the blank schema objects had been applied to TEST only — prod initially had just the blank_types table. Before the load + backfill could run, prod needed material_receiving.blank_type_id added, jobs.blank_dash added, and consume_blank_lot upgraded from the original lot-only signature to the lot+dash 6-arg version (p_dash text default null). Prod order: schema objects → frontend deploy → catalog (76) → inventory (91) → step-6 backfill. All four schema objects and the p_dash arg were verified present before loading. Mirrors the D-MAY28-01 lesson: a table/column/RPC must exist on a Supabase project before the code or load that depends on it runs there.
+
+### D-WOLOOKUP-CANCELLED01 — Active WO Lookup excludes cancelled/closed WOs (2026-06-24)
+**What:** The active WO Lookup (Mainframe fetchWOLookup) now filters out work_orders with status 'cancelled' or 'closed' via a lookupWOs pre-filter, before its job-status/recency branches feed activeWOs and completedWOs.
+**Why:** The active lookup keyed visibility only off job statuses + created_at and ignored work_orders.status, so a cancelled WO whose jobs were all terminal and created within the last 7 days still appeared under Active (the "recently completed" branch) — e.g. WO-2606-0052 after cancellation, causing confusion. Cancelled/closed WOs belong in the Closed tab.
+**Files:** src/pages/Mainframe.jsx.
+SQL only (catalog_PROD.sql 76 rows, load_blanks_PROD.sql 91 rows, step-6 backfill); frontend was the separate v4.1 deploy. Blank subsystem fully live on prod June 26, 2026.

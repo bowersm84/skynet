@@ -662,9 +662,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
 
       if (woError) throw woError
 
+      // The Active tab must never show cancelled or closed work orders (those belong to the
+      // Closed tab). This view keys off job status + recency, so without this guard a cancelled
+      // WO whose jobs are all terminal and was created in the last 7 days still appears here.
+      const lookupWOs = (workOrders || []).filter(wo => !['cancelled', 'closed'].includes(wo.status))
+
       // Filter to only WOs that have jobs not in 'complete' or 'cancelled' status
       // OR include WOs where all jobs are complete (to show finished WOs)
-      const activeWOs = workOrders?.filter(wo => {
+      const activeWOs = lookupWOs.filter(wo => {
         if (!wo.jobs || wo.jobs.length === 0) return false
         // Show WO if any job is not complete/cancelled
         return wo.jobs.some(j => !['complete', 'cancelled'].includes(j.status))
@@ -674,7 +679,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
       const sevenDaysAgo = new Date()
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
       
-      const completedWOs = workOrders?.filter(wo => {
+      const completedWOs = lookupWOs.filter(wo => {
         if (!wo.jobs || wo.jobs.length === 0) return false
         const allComplete = wo.jobs.every(j => ['complete', 'cancelled'].includes(j.status))
         if (!allComplete) return false

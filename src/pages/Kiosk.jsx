@@ -185,6 +185,8 @@ export default function Kiosk() {
   // activeBlankInfo hydrates the Materials panel so it always shows type/dash/lot for blanks.
   const [blankType, setBlankType] = useState('')
   const [blankDash, setBlankDash] = useState('')
+  const [blankTypes, setBlankTypes] = useState([])
+  const [blankTypeId, setBlankTypeId] = useState('')
   const [activeBlankInfo, setActiveBlankInfo] = useState(null)
   const [barSizes, setBarSizes] = useState([])
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
@@ -197,6 +199,8 @@ export default function Kiosk() {
   const [showBlankLotModal, setShowBlankLotModal] = useState(false)
   const [blankLots, setBlankLots] = useState([])
   const [selectedBlankLot, setSelectedBlankLot] = useState('')
+  const [selectedBlankDash, setSelectedBlankDash] = useState('')
+  const [selectedBlankId, setSelectedBlankId] = useState(null)
 
   // Finishing send state
   const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
@@ -2493,8 +2497,8 @@ export default function Kiosk() {
       }
       setBlankLots(rows
         .filter(r => blankIds.has(r.material_receiving_id) && (r.available_bars || 0) > 0)
-        .map(r => ({ lot_number: r.lot_number, material_type: r.material_type, bar_size: r.bar_size, available: r.available_bars || 0 }))
-        .sort((a, b) => (a.material_type || '').localeCompare(b.material_type || '') || (a.lot_number || '').localeCompare(b.lot_number || '')))
+        .map(r => ({ id: r.material_receiving_id, lot_number: r.lot_number, material_type: r.material_type, bar_size: r.bar_size, available: r.available_bars || 0 }))
+        .sort((a, b) => (a.material_type || '').localeCompare(b.material_type || '') || (a.lot_number || '').localeCompare(b.lot_number || '') || (a.bar_size || '').localeCompare(b.bar_size || '')))
     } catch (err) {
       console.error('Error loading blank lots:', err)
       setBlankLots([])
@@ -2504,8 +2508,13 @@ export default function Kiosk() {
   const handleOpenBlankLot = async () => {
     if (!activeJob) return
     setSelectedBlankLot('')
+    setSelectedBlankDash('')
+    setSelectedBlankId(null)
     setBlankType('')
     setBlankDash('')
+    setBlankTypeId('')
+    const { data: btRows } = await supabase.from('blank_types').select('*').eq('is_active', true)
+    setBlankTypes(btRows || [])
     await loadBlankLots()
     setShowBlankLotModal(true)
   }
@@ -2539,6 +2548,7 @@ export default function Kiosk() {
               material_id: null,
               material_type: blankType,
               bar_size: blankDash,
+              blank_type_id: blankTypeId || null,
               bar_length_inches: null,
               lot_number: blankLot,
               quantity: 0,
@@ -2551,6 +2561,8 @@ export default function Kiosk() {
         }
       }
 
+      const blankDashVal = (selectedBlankDash || blankDash || '').trim() || null
+
       const { error } = await supabase
         .from('jobs')
         .update({
@@ -2558,6 +2570,7 @@ export default function Kiosk() {
           production_start: now,
           production_lot_number: productionLotNumber,
           blank_lot_number: blankLot,
+          blank_dash: blankDashVal,
           material_confirmed: true,
           material_confirmed_at: now,
           material_confirmed_by: operator.id,
@@ -2568,8 +2581,11 @@ export default function Kiosk() {
       setActiveJob(prev => ({ ...prev, production_lot_number: productionLotNumber, blank_lot_number: blankLot }))
       setShowBlankLotModal(false)
       setSelectedBlankLot('')
+      setSelectedBlankDash('')
+      setSelectedBlankId(null)
       setBlankType('')
       setBlankDash('')
+      setBlankTypeId('')
       await loadJobs()
     } catch (err) {
       console.error('Error starting blank job:', err)
@@ -5441,7 +5457,13 @@ export default function Kiosk() {
                 <input
                   type="text"
                   value={selectedBlankLot}
-                  onChange={e => setSelectedBlankLot(e.target.value)}
+                  onChange={e => {
+                    const v = e.target.value
+                    setSelectedBlankLot(v)
+                    const matches = blankLots.filter(b => b.lot_number === v.trim())
+                    if (matches.length === 1) { setSelectedBlankId(matches[0].id); setSelectedBlankDash(matches[0].bar_size || '') }
+                    else { setSelectedBlankId(null); setSelectedBlankDash('') }
+                  }}
                   placeholder="e.g. 50509"
                   className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono focus:outline-none focus:border-blue-500"
                 />
@@ -5450,12 +5472,12 @@ export default function Kiosk() {
               {blankLots.length > 0 ? (
                 <div className="space-y-2">
                   <p className="text-xs text-gray-500 uppercase tracking-wide">On hand — tap to use</p>
-                  {blankLots.map(b => {
-                    const sel = selectedBlankLot.trim() === b.lot_number
+                  {blankLots.filter(b => !selectedBlankLot.trim() || (b.lot_number || '').toLowerCase().includes(selectedBlankLot.trim().toLowerCase())).map(b => {
+                    const sel = selectedBlankId === b.id
                     return (
                       <button
-                        key={b.lot_number}
-                        onClick={() => setSelectedBlankLot(b.lot_number)}
+                        key={b.id}
+                        onClick={() => { setSelectedBlankLot(b.lot_number); setSelectedBlankDash(b.bar_size || ''); setSelectedBlankId(b.id) }}
                         className={`w-full text-left px-4 py-3 rounded-lg border transition-colors flex items-center justify-between ${sel ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-800 hover:bg-gray-700'}`}
                       >
                         <div>
@@ -5480,28 +5502,35 @@ export default function Kiosk() {
                   <div>
                     <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Type</label>
                     <select
-                      value={blankType}
-                      onChange={e => setBlankType(e.target.value)}
+                      value={blankTypeId}
+                      onChange={e => {
+                        const id = e.target.value
+                        setBlankTypeId(id)
+                        const bt = blankTypes.find(b => b.id === id)
+                        setBlankType(bt ? `${bt.stud_series} ${bt.material_type}` : '')
+                        setBlankDash(bt ? bt.stud_length : '')
+                      }}
                       className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                     >
-                      <option value="">Select type…</option>
-                      {materialTypes.filter(t => t.name?.toLowerCase().includes('blank')).map(t => (
-                        <option key={t.id} value={t.name}>{t.name}</option>
-                      ))}
+                      <option value="">Select blank type…</option>
+                      {blankTypes
+                        .slice()
+                        .sort((a, b) =>
+                          (a.stud_series || '').localeCompare(b.stud_series || '')
+                          || (a.material_type || '').localeCompare(b.material_type || '')
+                          || ((a.is_unmarked ? 1 : 0) - (b.is_unmarked ? 1 : 0))
+                          || ((parseInt(a.stud_length) || 999) - (parseInt(b.stud_length) || 999))
+                          || (a.stud_length || '').localeCompare(b.stud_length || '')
+                        )
+                        .map(b => (
+                          <option key={b.id} value={b.id}>
+                            {b.stud_series} {b.material_type} · {b.is_unmarked ? `${b.stud_length} (unmarked)` : `Dash ${b.stud_length}`}
+                          </option>
+                        ))}
                     </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Dash Size</label>
-                    <select
-                      value={blankDash}
-                      onChange={e => setBlankDash(e.target.value)}
-                      className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
-                    >
-                      <option value="">Select dash…</option>
-                      {Array.from({ length: 20 }, (_, i) => i + 1).map(n => (
-                        <option key={n} value={String(n)}>{n}</option>
-                      ))}
-                    </select>
+                    {blankTypes.length === 0 && (
+                      <p className="text-xs text-amber-400 mt-1">No blank types in the catalog yet — add them in Armory first.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -5516,7 +5545,9 @@ export default function Kiosk() {
                 disabled={
                   actionLoading ||
                   !selectedBlankLot.trim() ||
-                  (!blankLots.some(b => b.lot_number === selectedBlankLot.trim()) && (!blankType || !blankDash))
+                  (blankLots.some(b => b.lot_number === selectedBlankLot.trim())
+                    ? !selectedBlankDash
+                    : !blankTypeId)
                 }
                 className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center gap-2"
               >

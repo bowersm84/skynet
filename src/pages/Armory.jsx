@@ -45,15 +45,15 @@ export default function Armory({ profile }) {
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
     finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
     machinist:        ['inventory', 'adjustments', 'reconciliation'],
     scheduler:        ['customers'],
     customer_service: ['customers'],
-    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
-    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
-    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
+    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
+    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
+    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
   }
   const visibleTabIds = [...new Set(userRoles(profile).flatMap(r => TAB_ACCESS_BY_ROLE[r] || []))]
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -150,6 +150,20 @@ export default function Armory({ profile }) {
   const [existingInactive, setExistingInactive] = useState(null)
   // Material chosen for hard-delete; drives the delete confirmation modal.
   const [materialToDelete, setMaterialToDelete] = useState(null)
+  // Blank catalog (studs' Material Master): structured blank_types CRUD (D-BLANK-CATALOG-01)
+  const [blankTypes, setBlankTypes] = useState([])
+  const [showBlankTypeModal, setShowBlankTypeModal] = useState(false)
+  const [editingBlankType, setEditingBlankType] = useState(null)
+  const BLANK_TYPE_EMPTY = { material_type: '', stud_series: '', stud_length: '', is_unmarked: false, alloy: '', vendor: '', notes: '' }
+  const [blankTypeForm, setBlankTypeForm] = useState(BLANK_TYPE_EMPTY)
+  const [blankTypeModalError, setBlankTypeModalError] = useState('')
+  const [existingInactiveBlank, setExistingInactiveBlank] = useState(null)
+  const [blankFilterSeries, setBlankFilterSeries] = useState('')
+  const [blankFilterMaterial, setBlankFilterMaterial] = useState('')
+  const [matCatSort, setMatCatSort] = useState({ key: 'material_type', dir: 'asc' })
+  const [blankCatSort, setBlankCatSort] = useState({ key: 'stud_series', dir: 'asc' })
+  const cycleCatSort = (cur, setCur, key) => setCur({ key, dir: cur.key === key && cur.dir === 'asc' ? 'desc' : 'asc' })
+  const [catalogCategory, setCatalogCategory] = useState('bar') // Material Catalog: 'bar' | 'blank'
   const [receivingForm, setReceivingForm] = useState({
     material_id: '',
     vendor: '',
@@ -173,7 +187,7 @@ export default function Armory({ profile }) {
   // Set when the receipt saved but a cert upload failed — guards against duplicate saves.
   const [savedReceiptId, setSavedReceiptId] = useState(null)
   // Blanks receiving (isolated modal): uncut cold-headed studs, 1 blank = 1 part.
-  const BLANK_EMPTY = { vendor: 'AJ Fasteners', blank_type: '', dash: '', quantity: '', total_cost: '', lot_number: '', po_number: '', rack: 'Blank Rack', notes: '' }
+  const BLANK_EMPTY = { vendor: 'AJ Fasteners', blank_type_id: '', quantity: '', total_cost: '', lot_number: '', po_number: '', rack: 'Blank Rack', notes: '' }
   const [showBlankModal, setShowBlankModal] = useState(false)
   const [blankForm, setBlankForm] = useState(BLANK_EMPTY)
   const [blankError, setBlankError] = useState('')
@@ -182,6 +196,10 @@ export default function Armory({ profile }) {
   const [invFilterRack, setInvFilterRack] = useState('')
   const [invFilterVendor, setInvFilterVendor] = useState('')
   const [invFilterSize, setInvFilterSize] = useState('')
+  const [invBlankFilterType, setInvBlankFilterType] = useState('')
+  const [invBlankFilterVendor, setInvBlankFilterVendor] = useState('')
+  const [invBlankFilterDash, setInvBlankFilterDash] = useState('')
+  const [invBlankSearchLot, setInvBlankSearchLot] = useState('')
   const [invSearchLot, setInvSearchLot] = useState('')
   const [invSortKey, setInvSortKey] = useState('material_type') // material_type | bar_size | lot_number | available_bars
   const [invViewMode, setInvViewMode] = useState('lot') // 'lot' | 'size' (roll-up by material + size)
@@ -366,6 +384,15 @@ export default function Armory({ profile }) {
         .order('is_active', { ascending: false })
         .order('vendor')
       if (!materialMasterError) setMaterials(materialMasterData || [])
+
+      // Blank catalog (active + inactive; active-first, then series/length)
+      const { data: blankTypeData, error: blankTypeError } = await supabase
+        .from('blank_types')
+        .select('*')
+        .order('is_active', { ascending: false })
+        .order('stud_series')
+        .order('stud_length')
+      if (!blankTypeError) setBlankTypes(blankTypeData || [])
 
       // Reference counts: how many material_receiving + material_usage rows
       // point at each material? Used to disable hard-delete on referenced rows.
@@ -1601,6 +1628,93 @@ export default function Armory({ profile }) {
     }
   }
 
+  // ── Blank catalog handlers (mirror material master; deactivate-only, no hard delete) ──
+  const handleSaveBlankType = async () => {
+    setSaving(true)
+    setBlankTypeModalError('')
+    setExistingInactiveBlank(null)
+    try {
+      const f = blankTypeForm
+      if (!f.material_type || !f.stud_series || !f.stud_length) {
+        setBlankTypeModalError('Material type, stud series, and stud length are required.')
+        return
+      }
+      let dupQuery = supabase
+        .from('blank_types')
+        .select('id, is_active')
+        .eq('stud_series', f.stud_series)
+        .eq('material_type', f.material_type)
+        .eq('stud_length', f.stud_length)
+      if (editingBlankType) dupQuery = dupQuery.neq('id', editingBlankType.id)
+      const { data: existing, error: dupErr } = await dupQuery.maybeSingle()
+      if (dupErr) throw dupErr
+      if (existing) {
+        if (existing.is_active) { setBlankTypeModalError('This series / material / length already exists and is active.'); return }
+        setExistingInactiveBlank(existing); return
+      }
+      const payload = {
+        material_type: f.material_type,
+        stud_series: f.stud_series,
+        stud_length: f.stud_length,
+        is_unmarked: !!f.is_unmarked,
+        alloy: f.alloy?.trim() || null,
+        vendor: f.vendor?.trim() || null,
+        notes: f.notes?.trim() || null,
+        updated_at: new Date().toISOString()
+      }
+      if (editingBlankType) {
+        const { error } = await supabase.from('blank_types').update(payload).eq('id', editingBlankType.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase.from('blank_types').insert({ ...payload, is_active: true })
+        if (error) throw error
+      }
+      setShowBlankTypeModal(false)
+      setEditingBlankType(null)
+      setBlankTypeForm(BLANK_TYPE_EMPTY)
+      await fetchData()
+    } catch (err) {
+      setBlankTypeModalError('Error saving blank type: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleToggleBlankTypeActive = async (bt) => {
+    try {
+      const { error } = await supabase
+        .from('blank_types')
+        .update({ is_active: !bt.is_active, updated_at: new Date().toISOString() })
+        .eq('id', bt.id)
+      if (error) throw error
+      await fetchData()
+    } catch (err) {
+      alert('Failed to toggle blank type: ' + err.message)
+    }
+  }
+
+  const handleReactivateExistingBlank = async () => {
+    if (!existingInactiveBlank) return
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('blank_types')
+        .update({ is_active: true, updated_at: new Date().toISOString() })
+        .eq('id', existingInactiveBlank.id)
+      if (error) throw error
+      setShowBlankTypeModal(false)
+      setEditingBlankType(null)
+      setExistingInactiveBlank(null)
+      setBlankTypeModalError('')
+      setBlankTypeForm(BLANK_TYPE_EMPTY)
+      await fetchData()
+    } catch (err) {
+      setBlankTypeModalError('Failed to reactivate: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleDeleteMaterialMaster = async () => {
     if (!materialToDelete) return
     setDeleting(materialToDelete.id)
@@ -1842,8 +1956,9 @@ export default function Armory({ profile }) {
   const handleSaveBlank = async () => {
     const qty = parseInt(blankForm.quantity, 10)
     const total = parseFloat(blankForm.total_cost)
-    if (!blankForm.vendor.trim() || !blankForm.blank_type || !blankForm.dash || !blankForm.lot_number.trim() || !(qty > 0) || !(total >= 0)) {
-      setBlankError('Vendor, blank type, dash, lot #, quantity, and total cost are required.')
+    const selectedBlank = blankTypes.find(b => b.id === blankForm.blank_type_id)
+    if (!blankForm.vendor.trim() || !selectedBlank || !blankForm.lot_number.trim() || !(qty > 0) || !(total >= 0)) {
+      setBlankError('Vendor, blank type, lot #, quantity, and total cost are required.')
       return
     }
     setBlankError('')
@@ -1854,8 +1969,9 @@ export default function Armory({ profile }) {
         .insert({
           material_id: null,
           category: 'blank',
-          material_type: blankForm.blank_type,
-          bar_size: blankForm.dash,
+          material_type: `${selectedBlank.stud_series} ${selectedBlank.material_type}`,
+          bar_size: selectedBlank.stud_length,
+          blank_type_id: selectedBlank.id,
           bar_length_inches: null,
           lot_number: blankForm.lot_number.trim(),
           quantity: qty,
@@ -2038,7 +2154,7 @@ export default function Armory({ profile }) {
           <div className="flex gap-1">
             {(() => {
               // Round B will add 'replenishment' to this group — single-line change.
-              const RAW_MATERIALS_TAB_IDS = ['materials', 'barsizes', 'material_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment']
+              const RAW_MATERIALS_TAB_IDS = ['materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment']
               const allTabs = [
                 { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
                 { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
@@ -2487,13 +2603,19 @@ export default function Armory({ profile }) {
         )}
 
         {/* Material Master Tab */}
-        {activeTab === 'material_master' && (
+        {activeTab === 'material_master' && catalogCategory === 'bar' && (
           <div className="space-y-6">
 
             {/* ── Section 1: Material Catalog ── */}
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-white">Material Catalog</h2>
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-semibold text-white">Material Catalog</h2>
+                  <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                    <button onClick={() => setCatalogCategory('bar')} className={`px-3 py-1.5 text-sm transition-colors ${catalogCategory === 'bar' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Bars</button>
+                    <button onClick={() => setCatalogCategory('blank')} className={`px-3 py-1.5 text-sm transition-colors ${catalogCategory === 'blank' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Blanks</button>
+                  </div>
+                </div>
                 {canSeeTab('material_master') && (
                   <button
                     onClick={() => { setEditingMaterialMaster(null); setMaterialMasterForm({ material_type_id: '', bar_size_inches: '', density_lbs_per_cubic_inch: '', vendor: '', notes: '' }); setMaterialModalError(''); setExistingInactive(null); setShowMaterialMasterModal(true) }}
@@ -2555,10 +2677,10 @@ export default function Armory({ profile }) {
                   <table className="w-full text-sm">
                     <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
                       <tr>
-                        <th className="px-4 py-3 text-left">Material Type</th>
-                        <th className="px-4 py-3 text-left">Bar Size (in)</th>
-                        <th className="px-4 py-3 text-left">Density (lb/in³)</th>
-                        <th className="px-4 py-3 text-left">Vendor</th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(matCatSort, setMatCatSort, 'material_type')} className="inline-flex items-center gap-1 uppercase hover:text-white">Material Type {matCatSort.key === 'material_type' && (matCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(matCatSort, setMatCatSort, 'bar_size_inches')} className="inline-flex items-center gap-1 uppercase hover:text-white">Bar Size (in) {matCatSort.key === 'bar_size_inches' && (matCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(matCatSort, setMatCatSort, 'density')} className="inline-flex items-center gap-1 uppercase hover:text-white">Density (lb/in³) {matCatSort.key === 'density' && (matCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(matCatSort, setMatCatSort, 'vendor')} className="inline-flex items-center gap-1 uppercase hover:text-white">Vendor {matCatSort.key === 'vendor' && (matCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
                         <th className="px-4 py-3 text-left">Notes</th>
                         {canSeeTab('material_master') && <th className="px-4 py-3 text-left">Actions</th>}
                       </tr>
@@ -2570,7 +2692,13 @@ export default function Armory({ profile }) {
                             No materials match the current filters.
                           </td>
                         </tr>
-                      ) : filteredMaterials.map(m => {
+                      ) : [...filteredMaterials].sort((a, b) => {
+                        const d = matCatSort.dir === 'desc' ? -1 : 1
+                        if (matCatSort.key === 'bar_size_inches') return ((Number(a.bar_size_inches) || 0) - (Number(b.bar_size_inches) || 0)) * d
+                        if (matCatSort.key === 'density') return ((Number(a.density_lbs_per_cubic_inch) || 0) - (Number(b.density_lbs_per_cubic_inch) || 0)) * d
+                        if (matCatSort.key === 'vendor') return ((a.vendor || '').localeCompare(b.vendor || '')) * d
+                        return ((a.material_type?.name || '').localeCompare(b.material_type?.name || '')) * d
+                      }).map(m => {
                         const refCount = materialRefCounts[m.id] || 0
                         const canDelete = refCount === 0
                         return (
@@ -2647,6 +2775,137 @@ export default function Armory({ profile }) {
               )}
             </div>
 
+          </div>
+        )}
+        {activeTab === 'material_master' && catalogCategory === 'blank' && (
+          <div className="space-y-6">
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-semibold text-white">Blank Catalog</h2>
+                  <div className="inline-flex rounded-lg border border-gray-700 overflow-hidden">
+                    <button onClick={() => setCatalogCategory('bar')} className={`px-3 py-1.5 text-sm transition-colors ${catalogCategory === 'bar' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Bars</button>
+                    <button onClick={() => setCatalogCategory('blank')} className={`px-3 py-1.5 text-sm transition-colors ${catalogCategory === 'blank' ? 'bg-skynet-accent text-white' : 'text-gray-400 hover:text-white'}`}>Blanks</button>
+                  </div>
+                </div>
+                {canSeeTab('blank_master') && (
+                  <button
+                    onClick={() => { setEditingBlankType(null); setBlankTypeForm(BLANK_TYPE_EMPTY); setBlankTypeModalError(''); setExistingInactiveBlank(null); setShowBlankTypeModal(true) }}
+                    className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors"
+                  >
+                    <Plus size={18} /> Add Blank Type
+                  </button>
+                )}
+              </div>
+
+              {blankTypes.length === 0 ? (
+                <p className="text-gray-400 text-sm">No blank types yet. Add the studs you stock (series, material, length).</p>
+              ) : (() => {
+                const shown = blankTypes.filter(bt =>
+                  (!blankFilterSeries || bt.stud_series === blankFilterSeries) &&
+                  (!blankFilterMaterial || bt.material_type === blankFilterMaterial)
+                )
+                return (
+                <>
+                <div className="flex items-center gap-3 flex-wrap mb-3">
+                  <select value={blankFilterSeries} onChange={e => setBlankFilterSeries(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                    <option value="">All Series</option>
+                    <option value="4000">4000</option>
+                    <option value="2600">2600</option>
+                    <option value="2700">2700</option>
+                  </select>
+                  <select value={blankFilterMaterial} onChange={e => setBlankFilterMaterial(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                    <option value="">All Materials</option>
+                    <option value="Steel">Steel</option>
+                    <option value="Stainless">Stainless</option>
+                  </select>
+                  <span className="text-xs text-gray-500">{shown.length} of {blankTypes.length}</span>
+                  {(blankFilterSeries || blankFilterMaterial) && (
+                    <button onClick={() => { setBlankFilterSeries(''); setBlankFilterMaterial('') }} className="text-xs text-skynet-accent hover:underline">Clear</button>
+                  )}
+                </div>
+
+                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(blankCatSort, setBlankCatSort, 'stud_series')} className="inline-flex items-center gap-1 uppercase hover:text-white">Series {blankCatSort.key === 'stud_series' && (blankCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(blankCatSort, setBlankCatSort, 'material_type')} className="inline-flex items-center gap-1 uppercase hover:text-white">Material {blankCatSort.key === 'material_type' && (blankCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(blankCatSort, setBlankCatSort, 'stud_length')} className="inline-flex items-center gap-1 uppercase hover:text-white">Length {blankCatSort.key === 'stud_length' && (blankCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(blankCatSort, setBlankCatSort, 'alloy')} className="inline-flex items-center gap-1 uppercase hover:text-white">Alloy {blankCatSort.key === 'alloy' && (blankCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left"><button onClick={() => cycleCatSort(blankCatSort, setBlankCatSort, 'vendor')} className="inline-flex items-center gap-1 uppercase hover:text-white">Vendor {blankCatSort.key === 'vendor' && (blankCatSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}</button></th>
+                        <th className="px-4 py-3 text-left">Notes</th>
+                        {canSeeTab('blank_master') && <th className="px-4 py-3 text-left">Actions</th>}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700">
+                      {shown.length === 0 ? (
+                        <tr><td colSpan={canSeeTab('blank_master') ? 7 : 6} className="px-4 py-6 text-center text-gray-500 text-sm">No blank types match the current filters.</td></tr>
+                      ) : [...shown].sort((a, b) => {
+                        const d = blankCatSort.dir === 'desc' ? -1 : 1
+                        if (blankCatSort.key === 'material_type') return ((a.material_type || '').localeCompare(b.material_type || '')) * d
+                        if (blankCatSort.key === 'stud_length') return (((parseInt(a.stud_length) || 999) - (parseInt(b.stud_length) || 999)) || (a.stud_length || '').localeCompare(b.stud_length || '')) * d
+                        if (blankCatSort.key === 'alloy') return ((a.alloy || '').localeCompare(b.alloy || '')) * d
+                        if (blankCatSort.key === 'vendor') return ((a.vendor || '').localeCompare(b.vendor || '')) * d
+                        return ((a.stud_series || '').localeCompare(b.stud_series || '')) * d
+                      }).map(bt => (
+                        <tr key={bt.id} className={`bg-gray-900 hover:bg-gray-800 transition-colors ${bt.is_active ? '' : 'opacity-50'}`}>
+                          <td className="px-4 py-3 text-white font-medium">
+                            {bt.stud_series}
+                            {!bt.is_active && (<span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">Inactive</span>)}
+                          </td>
+                          <td className="px-4 py-3 text-gray-300">{bt.material_type}</td>
+                          <td className="px-4 py-3 text-gray-300">
+                            {bt.is_unmarked
+                              ? <span>{bt.stud_length}<span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300">unmarked · any dash</span></span>
+                              : <>Dash {bt.stud_length}</>}
+                          </td>
+                          <td className="px-4 py-3 text-gray-300">{bt.alloy || '—'}</td>
+                          <td className="px-4 py-3 text-gray-300">{bt.vendor || '—'}</td>
+                          <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{bt.notes || '—'}</td>
+                          {canSeeTab('blank_master') && (
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => {
+                                    setEditingBlankType(bt)
+                                    setBlankTypeForm({
+                                      material_type: bt.material_type || '',
+                                      stud_series: bt.stud_series || '',
+                                      stud_length: bt.stud_length || '',
+                                      is_unmarked: !!bt.is_unmarked,
+                                      alloy: bt.alloy || '',
+                                      vendor: bt.vendor || '',
+                                      notes: bt.notes || ''
+                                    })
+                                    setBlankTypeModalError('')
+                                    setExistingInactiveBlank(null)
+                                    setShowBlankTypeModal(true)
+                                  }}
+                                  className="p-1.5 text-gray-400 hover:text-white rounded transition-colors"
+                                  title="Edit"
+                                >
+                                  <Edit2 size={15} />
+                                </button>
+                                <button
+                                  onClick={() => handleToggleBlankTypeActive(bt)}
+                                  className={`p-1.5 rounded transition-colors ${bt.is_active ? 'text-gray-400 hover:text-red-400 hover:bg-red-900/20' : 'text-gray-400 hover:text-green-400 hover:bg-green-900/20'}`}
+                                  title={bt.is_active ? 'Deactivate' : 'Activate'}
+                                >
+                                  {bt.is_active ? <PowerOff size={15} /> : <Power size={15} />}
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                </>
+                )
+              })()}
+            </div>
           </div>
         )}
         {/* Inventory Tab */}
@@ -2997,13 +3256,51 @@ export default function Armory({ profile }) {
             })()}
             </>
             ) : (() => {
-              const rows = blankInventoryRows
+              const filtered = blankInventoryRows.filter(r =>
+                (!invBlankFilterType || r.material_type === invBlankFilterType)
+                && (!invBlankFilterVendor || r.vendor === invBlankFilterVendor)
+                && (!invBlankFilterDash || (r.bar_size || '') === invBlankFilterDash)
+                && (!invBlankSearchLot || (r.lot_number || '').toLowerCase().includes(invBlankSearchLot.trim().toLowerCase()))
+              )
+              const dir = invSortDir === 'desc' ? -1 : 1
+              const rows = filtered.slice().sort((a, b) => {
+                let p
+                if (invSortKey === 'available_bars') p = (a.available_bars ?? 0) - (b.available_bars ?? 0)
+                else if (invSortKey === 'bar_size') p = cmpSize(a.bar_size, b.bar_size)
+                else if (invSortKey === 'lot_number') p = (a.lot_number || '').localeCompare(b.lot_number || '')
+                else p = (a.material_type || '').localeCompare(b.material_type || '')
+                return (p || cmpSize(a.bar_size, b.bar_size) || (a.lot_number || '').localeCompare(b.lot_number || '')) * dir
+              })
               const totalAvail = rows.reduce((s, r) => s + (r.available_bars || 0), 0)
+              const totalRecv = rows.reduce((s, r) => s + (r.received_bars || 0), 0)
+              const totalUsed = rows.reduce((s, r) => s + (r.used_bars || 0), 0)
               const totalValue = rows.reduce((s, r) => (
                 r.price_per_bar != null && r.available_bars > 0 ? s + r.available_bars * r.price_per_bar : s
               ), 0)
+              const sortIcon = (k) => invSortKey === k ? (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />) : null
               return (
                 <div className="space-y-4">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <select value={invBlankFilterType} onChange={e => setInvBlankFilterType(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Types</option>
+                      {[...new Set(blankInventoryRows.map(r => r.material_type).filter(Boolean))].sort().map(t => (<option key={t} value={t}>{t}</option>))}
+                    </select>
+                    <select value={invBlankFilterDash} onChange={e => setInvBlankFilterDash(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Dashes</option>
+                      {[...new Set(blankInventoryRows.map(r => r.bar_size).filter(Boolean))].sort((a, b) => cmpSize(a, b)).map(s => (<option key={s} value={s}>{s}</option>))}
+                    </select>
+                    <select value={invBlankFilterVendor} onChange={e => setInvBlankFilterVendor(e.target.value)} className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent">
+                      <option value="">All Vendors</option>
+                      {[...new Set(blankInventoryRows.map(r => r.vendor).filter(Boolean))].sort().map(v => (<option key={v} value={v}>{v}</option>))}
+                    </select>
+                    <div className="relative">
+                      <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                      <input type="text" value={invBlankSearchLot} onChange={e => setInvBlankSearchLot(e.target.value)} placeholder="Search lot #…" className="pl-8 pr-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
+                    </div>
+                    {(invBlankFilterType || invBlankFilterDash || invBlankFilterVendor || invBlankSearchLot) && (
+                      <button onClick={() => { setInvBlankFilterType(''); setInvBlankFilterDash(''); setInvBlankFilterVendor(''); setInvBlankSearchLot('') }} className="text-xs text-skynet-accent hover:underline">Clear</button>
+                    )}
+                  </div>
                   <div className="flex items-center gap-3 text-xs text-gray-500">
                     <span>{rows.length} Blank Lots</span>
                     <span className="text-gray-700">·</span>
@@ -3014,8 +3311,8 @@ export default function Armory({ profile }) {
                   {rows.length === 0 ? (
                     <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                       <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
-                      <p className="text-gray-400">No blank inventory yet.</p>
-                      <p className="text-gray-600 text-sm mt-1">Use "Receive Blanks" on the Receiving tab to populate this list.</p>
+                      <p className="text-gray-400">No blank inventory matches.</p>
+                      <p className="text-gray-600 text-sm mt-1">Adjust the filters, or use "Receive Blanks" on the Receiving tab.</p>
                     </div>
                   ) : (
                     <div className="overflow-x-auto rounded-lg border border-gray-700">
@@ -3024,40 +3321,39 @@ export default function Armory({ profile }) {
                           <tr>
                             <th className="px-4 py-3 text-left">Rack</th>
                             <th className="px-4 py-3 text-left">Vendor</th>
-                            <th className="px-4 py-3 text-left">Type</th>
-                            <th className="px-4 py-3 text-left">Dash</th>
-                            <th className="px-4 py-3 text-left">Lot #</th>
-                            <th className="px-4 py-3 text-right">Qty Available</th>
+                            <th className="px-4 py-3 text-left"><button onClick={() => toggleInvSort('material_type')} className="inline-flex items-center gap-1 uppercase hover:text-white">Type {sortIcon('material_type')}</button></th>
+                            <th className="px-4 py-3 text-left"><button onClick={() => toggleInvSort('bar_size')} className="inline-flex items-center gap-1 uppercase hover:text-white">Dash {sortIcon('bar_size')}</button></th>
+                            <th className="px-4 py-3 text-left"><button onClick={() => toggleInvSort('lot_number')} className="inline-flex items-center gap-1 uppercase hover:text-white">Lot # {sortIcon('lot_number')}</button></th>
+                            <th className="px-4 py-3 text-right">Rec'd</th>
+                            <th className="px-4 py-3 text-right">Used</th>
+                            <th className="px-4 py-3 text-right"><button onClick={() => toggleInvSort('available_bars')} className="inline-flex items-center gap-1 uppercase hover:text-white">Available {sortIcon('available_bars')}</button></th>
                             <th className="px-4 py-3 text-right">Cost/Blank</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-700">
-                          {rows
-                            .slice()
-                            .sort((a, b) =>
-                              (a.material_type || '').localeCompare(b.material_type || '')
-                              || cmpSize(a.bar_size, b.bar_size)
-                              || (a.lot_number || '').localeCompare(b.lot_number || '')
+                          {rows.map(row => {
+                            const isOut = row.available_bars === 0
+                            const isNeg = row.available_bars < 0
+                            return (
+                              <tr key={row.id} className={`transition-colors ${isOut ? 'bg-red-900/40' : 'bg-gray-900 hover:bg-gray-800'}`}>
+                                <td className="px-4 py-3"><span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack || 'Blank Rack'}</span></td>
+                                <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
+                                <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
+                                <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.bar_size || '—'}</td>
+                                <td className={`px-4 py-3 font-mono text-xs ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
+                                <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{(row.received_bars || 0).toLocaleString()}</td>
+                                <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{(row.used_bars || 0).toLocaleString()}</td>
+                                <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : 'text-white'}`}>{(row.available_bars || 0).toLocaleString()}</td>
+                                <td className="px-4 py-3 text-right font-mono text-gray-300">{row.price_per_bar != null ? `$${Number(row.price_per_bar).toFixed(4)}` : '—'}</td>
+                              </tr>
                             )
-                            .map(row => {
-                              const isOut = row.available_bars === 0
-                              const isNeg = row.available_bars < 0
-                              return (
-                                <tr key={row.id} className={`transition-colors ${isOut ? 'bg-red-900/40' : 'bg-gray-900 hover:bg-gray-800'}`}>
-                                  <td className="px-4 py-3"><span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack || 'Blank Rack'}</span></td>
-                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
-                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
-                                  <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.bar_size || '—'}</td>
-                                  <td className={`px-4 py-3 font-mono text-xs ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
-                                  <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : 'text-white'}`}>{(row.available_bars || 0).toLocaleString()}</td>
-                                  <td className="px-4 py-3 text-right font-mono text-gray-300">{row.price_per_bar != null ? `$${Number(row.price_per_bar).toFixed(4)}` : '—'}</td>
-                                </tr>
-                              )
-                            })}
+                          })}
                         </tbody>
                         <tfoot className="bg-gray-800/60 text-gray-200 text-xs uppercase">
                           <tr>
                             <td className="px-4 py-3 font-semibold" colSpan={5}>Total ({rows.length} blank lots)</td>
+                            <td className="px-4 py-3 text-right font-mono font-semibold">{totalRecv.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right font-mono font-semibold">{totalUsed.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right font-mono font-semibold">{totalAvail.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right font-mono font-semibold">{totalValue > 0 ? `$${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}</td>
                           </tr>
@@ -4896,6 +5192,96 @@ export default function Armory({ profile }) {
         </div>
       )}
 
+      {/* Blank Type Modal */}
+      {showBlankTypeModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">{editingBlankType ? 'Edit Blank Type' : 'Add Blank Type'}</h2>
+              <button onClick={() => setShowBlankTypeModal(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Material Type *</label>
+                <select value={blankTypeForm.material_type} onChange={e => setBlankTypeForm(f => ({ ...f, material_type: e.target.value }))} className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent">
+                  <option value="">— Select —</option>
+                  <option value="Steel">Steel</option>
+                  <option value="Stainless">Stainless</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Stud Series *</label>
+                <select value={blankTypeForm.stud_series} onChange={e => setBlankTypeForm(f => ({ ...f, stud_series: e.target.value }))} className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent">
+                  <option value="">— Select —</option>
+                  <option value="4000">4000</option>
+                  <option value="2600">2600</option>
+                  <option value="2700">2700</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Stud Length *</label>
+                <select
+                  value={blankTypeForm.stud_length}
+                  onChange={e => { const v = e.target.value; const unmarked = ['1"', '1-1/2"', '2"'].includes(v); setBlankTypeForm(f => ({ ...f, stud_length: v, is_unmarked: unmarked })) }}
+                  className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
+                >
+                  <option value="">— Select —</option>
+                  <optgroup label="Dash (marked)">
+                    {Array.from({ length: 15 }, (_, i) => String(i + 1)).map(d => (<option key={d} value={d}>Dash {d}</option>))}
+                  </optgroup>
+                  <optgroup label="Unmarked stock (4000 series — any dash)">
+                    <option value={'1"'}>1"</option>
+                    <option value={'1-1/2"'}>1-1/2"</option>
+                    <option value={'2"'}>2"</option>
+                  </optgroup>
+                </select>
+                {blankTypeForm.is_unmarked && (<p className="text-[11px] text-blue-300 mt-1">Unmarked blank — machinist selects the target dash at run time.</p>)}
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Alloy</label>
+                <input type="text" value={blankTypeForm.alloy} onChange={e => setBlankTypeForm(f => ({ ...f, alloy: e.target.value }))} placeholder="e.g. 302 (Stainless) or 4037 (Steel)" className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Vendor</label>
+                <input type="text" value={blankTypeForm.vendor} onChange={e => setBlankTypeForm(f => ({ ...f, vendor: e.target.value }))} className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 uppercase tracking-wide">Notes</label>
+                <textarea value={blankTypeForm.notes} onChange={e => setBlankTypeForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none" />
+              </div>
+            </div>
+
+            {existingInactiveBlank ? (
+              <div className="border border-amber-700/50 bg-amber-900/20 rounded-lg p-3 text-sm text-amber-200 space-y-2">
+                <div>An inactive entry for this series / material / length exists. Reactivate it instead of creating a duplicate?</div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setExistingInactiveBlank(null)} className="px-3 py-1.5 text-gray-300 hover:text-white text-xs">Cancel</button>
+                  <button onClick={handleReactivateExistingBlank} disabled={saving} className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-medium rounded flex items-center gap-1">
+                    {saving && <Loader2 size={12} className="animate-spin" />}
+                    Reactivate Existing
+                  </button>
+                </div>
+              </div>
+            ) : blankTypeModalError ? (
+              <div className="border border-red-700/50 bg-red-900/20 rounded-lg p-3 text-sm text-red-200">{blankTypeModalError}</div>
+            ) : null}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setShowBlankTypeModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">Cancel</button>
+              <button
+                onClick={handleSaveBlankType}
+                disabled={saving || !blankTypeForm.material_type || !blankTypeForm.stud_series || !blankTypeForm.stud_length || !!existingInactiveBlank}
+                className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+              >
+                {saving && <Loader2 size={16} className="animate-spin" />}
+                {editingBlankType ? 'Save Changes' : 'Add Blank Type'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Part Confirmation Modal */}
       {partToDelete && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4">
@@ -5276,29 +5662,30 @@ export default function Armory({ profile }) {
                 <div>
                   <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Type *</label>
                   <select
-                    value={blankForm.blank_type}
-                    onChange={e => setBlankForm(f => ({ ...f, blank_type: e.target.value }))}
+                    value={blankForm.blank_type_id}
+                    onChange={e => setBlankForm(f => ({ ...f, blank_type_id: e.target.value }))}
                     className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
                   >
-                    <option value="">— Select type —</option>
-                    {materialTypes
-                      .filter(t => (t.name || '').toLowerCase().includes('blank'))
-                      .map(t => (<option key={t.id} value={t.name}>{t.name}</option>))}
+                    <option value="">— Select blank type —</option>
+                    {blankTypes
+                      .filter(b => b.is_active)
+                      .slice()
+                      .sort((a, b) =>
+                        (a.stud_series || '').localeCompare(b.stud_series || '')
+                        || (a.material_type || '').localeCompare(b.material_type || '')
+                        || ((a.is_unmarked ? 1 : 0) - (b.is_unmarked ? 1 : 0))
+                        || ((parseInt(a.stud_length) || 999) - (parseInt(b.stud_length) || 999))
+                        || (a.stud_length || '').localeCompare(b.stud_length || '')
+                      )
+                      .map(b => (
+                        <option key={b.id} value={b.id}>
+                          {b.stud_series} {b.material_type} · {b.is_unmarked ? `${b.stud_length} (unmarked)` : `Dash ${b.stud_length}`}
+                        </option>
+                      ))}
                   </select>
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400 uppercase tracking-wide">Dash *</label>
-                  <select
-                    value={blankForm.dash}
-                    onChange={e => setBlankForm(f => ({ ...f, dash: e.target.value }))}
-                    className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent"
-                  >
-                    <option value="">— Select dash —</option>
-                    {Array.from({ length: 20 }, (_, i) => String(i + 1)).map(d => (
-                      <option key={d} value={d}>{d}</option>
-                    ))}
-                  </select>
+                  {blankTypes.filter(b => b.is_active).length === 0 && (
+                    <p className="text-xs text-amber-400 mt-1">No blank types in the catalog yet — add them in Armory → Blank Catalog.</p>
+                  )}
                 </div>
 
                 <div>
@@ -5381,7 +5768,7 @@ export default function Armory({ profile }) {
                 </button>
                 <button
                   onClick={handleSaveBlank}
-                  disabled={saving || !blankForm.vendor.trim() || !blankForm.blank_type || !blankForm.dash || !blankForm.lot_number.trim() || !blankForm.quantity || blankForm.total_cost === ''}
+                  disabled={saving || !blankForm.vendor.trim() || !blankForm.blank_type_id || !blankForm.lot_number.trim() || !blankForm.quantity || blankForm.total_cost === ''}
                   className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
                 >
                   {saving && <Loader2 size={16} className="animate-spin" />}

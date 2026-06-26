@@ -1644,3 +1644,40 @@ Decision:
 - handleStartBlankJob creates a lightweight qty-0 "stub" material_receiving row (category='blank', vendor 'AJ Fasteners', rack 'Blank Rack', note "Entered at kiosk — not yet received") for any entered lot not already present as a blank receipt. No migration. The lot then appears in Inventory → Blanks and the blank cycle count; at finishing, consume_blank_lot matches the stub, and a later formal receipt reconciles via the D-BLANKS-07 auto-link.
 - Materials panel: for Bolt Masters it now shows blank type • dash • lot (hydrated in loadJobs from the lot's latest blank receipt/stub, falling back to jobs.blank_lot_number) instead of "No materials loaded".
 Frontend-only (Kiosk.jsx). No SQL.
+
+### D-BLANK-CATALOG-01 — Blank catalog (blank_types) + Blank Catalog tab
+Date: 2026-06-25
+Context: Blanks were stored on material_receiving with free-text material_type + bar_size (dash). The 2000 series splits into 2600 vs 2700, and Steel (4037) vs Stainless (302) must be distinguished — we need to log blank material data like the bar Material Master.
+Decision (Phase 1):
+- New blank_types table (studs' Material Master): material_type CHECK ('Steel','Stainless'); stud_series CHECK ('4000','2600','2700'); stud_length text (dash '1'..'15' marked, or '1"','1-1/2"','2"' unmarked 4000 stock); is_unmarked boolean (auto-set when an inch length is chosen — unmarked blanks are dash-agnostic; machinist picks dash at run time); alloy nullable (302/4037 cert traceability); vendor; notes; is_active. UNIQUE (stud_series, material_type, stud_length). RLS: select to authenticated; manage to admin/compliance/purchaser.
+- New 'blank_master' tab in Armory ("Blank Catalog") in the Raw Materials group next to Material Catalog, mirroring the material_master list + add/edit modal (dup-check, deactivate/reactivate). Deactivate-only (no hard delete) for now.
+- Part-number ↔ blank linking deliberately deferred (not intuitive yet).
+Deferred — Phase 2: blank_type_id FK on material_receiving (added with the AJ blanks seed load, which resolves each row's blank_type_id from this catalog). Phase 3: kiosk blank dropdown reads blank_types; unmarked → run-time dash prompt; consume_blank_lot resolves lot+dash (multi-dash-lot gap); retire the legacy %blank% material_types rows.
+Frontend = Armory.jsx; migration = blank_types. RLS role-check to be verified against existing materials policies.
+
+### D-BLANK-RECEIVE-01 — Receive Blanks reads the blank catalog
+Date: 2026-06-25
+Context: The Receive Blanks form used a legacy free-text material_types %blank% dropdown plus a separate 1–20 dash field, writing an unstructured material_type and no catalog link.
+Decision: The form now selects a single Blank Type from blank_types (active rows), labeled "<series> <material> · Dash <n>" or "… · <length> (unmarked)". On save it writes blank_type_id = the catalog row, material_type = "<series> <material>" (consistent with the loaded physical-count inventory), and bar_size = the catalog stud_length. The separate Dash field and the %blank% material_types dropdown are removed from this form. Requires D-BLANK-CATALOG-01 (blankTypes state) and the blank_type_id FK (D-BLANK-CATALOG-02).
+Deferred: retire the legacy %blank% material_types rows once the kiosk also reads blank_types (next step).
+
+### D-BLANK-CONSUME-01 — Blank consumption resolves by lot + dash
+Date: 2026-06-25
+Context: Jobs stored only blank_lot_number; consume_blank_lot resolved the blank receipt by lot alone, so multi-dash lots (e.g. 50346, 51215, 50045, 50510) deducted an arbitrary dash. The kiosk picker also collapsed every receipt to its lot (duplicate React keys, no dash captured), so the operator couldn't pick the right one.
+Decision: Added jobs.blank_dash. The kiosk blank-lot picker now selects a specific on-hand receipt (keyed by material_receiving_id) and captures its bar_size as blank_dash; typing a lot that maps to exactly one receipt auto-resolves the dash, and Confirm requires a dash for on-hand lots. consume_blank_lot gained p_dash (default null = legacy lot-only) and matches material_receiving on lot + bar_size. Finishing passes the job's blank_dash. Unmarked stock works automatically — its bar_size is the length, so consuming unmarked stock for a dash-N job deducts the unmarked line.
+
+### D-BLANK-INV-UI-01 — Blank inventory filters/sort/columns + kiosk lot narrowing
+Date: 2026-06-25
+Decision: The Blanks inventory table gained Type/Dash/Vendor filters + lot search, clickable header-sort (shared invSortKey/invSortDir with Bars), and Rec'd/Used/Available columns (data already on the availability rows) so deductions are verifiable; footer totals all three. The kiosk blank-lot picker now live-filters its on-hand list by the typed lot so the operator sees it narrow toward the match. Filter state: invBlankFilterType/Vendor/Dash + invBlankSearchLot (separate from the bars filters since blank material_type values differ).
+
+### D-BLANK-CATALOG-03 — Merge Blank Catalog into Material Catalog
+Date: 2026-06-25
+Decision: The standalone Blank Catalog tab was merged into Material Catalog behind a Bars/Blanks toggle (catalogCategory, mirroring the Inventory invCategory switch). Both catalog blocks render under activeTab==='material_master', gated by the toggle; the separate blank_master nav item was removed. blank_master remains in the role/permission arrays so canSeeTab('blank_master') still gates the blank catalog's write actions. No content was relocated.
+
+### D-BLANK-CONSUME-02 — Kiosk stub path uses the blank catalog
+Date: 2026-06-25
+Decision: The kiosk blank-lot picker's "not on hand" stub path now reads the blank_types catalog (loaded when the picker opens) instead of the legacy materialTypes (%blank%), which was empty after receiving moved to the catalog. The two dropdowns (Blank Type + Dash) were replaced by one catalog selector that sets material_type="<series> <material>", bar_size=stud_length, and blank_type_id; Confirm validates blank_type_id for stub lots. Closes the step-4 deferral of the legacy stub dropdown.
+
+### D-BLANK-CATALOG-04 — Header-sort on both catalog tables
+Date: 2026-06-25
+Decision: Added clickable column header-sort to the Material Catalog (bars) and Blank Catalog tables, each with independent sort state (matCatSort / blankCatSort) and a shared cycleCatSort helper. Bars sorts Material Type/Bar Size/Density/Vendor; Blanks sorts Series/Material/Length/Alloy/Vendor (Length numeric-then-string).

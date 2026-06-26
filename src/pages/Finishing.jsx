@@ -1202,15 +1202,17 @@ export default function Finishing() {
           const blankJobId = batch.job_id || batch.job?.id
           if (blankJobId && verifiedCount > 0) {
             const { data: blankJobRow } = await supabase
-              .from('jobs').select('blank_lot_number').eq('id', blankJobId).single()
+              .from('jobs').select('blank_lot_number, blank_dash').eq('id', blankJobId).single()
             const blankLot = blankJobRow?.blank_lot_number
+            const blankDashVal = blankJobRow?.blank_dash || null
             if (blankLot) {
               const { error: blankErr } = await supabase.rpc('consume_blank_lot', {
                 p_finishing_send_id: batch.id,
                 p_job_id: blankJobId,
                 p_lot_number: blankLot,
                 p_quantity: verifiedCount,
-                p_used_by: operator.id
+                p_used_by: operator.id,
+                p_dash: blankDashVal
               })
               if (blankErr) {
                 console.error('Blank consumption failed (non-blocking):', blankErr)

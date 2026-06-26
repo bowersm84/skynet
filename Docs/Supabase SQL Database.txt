@@ -172,6 +172,7 @@ CREATE TABLE public.jobs (
   documents_deferred_at timestamp with time zone,
   has_open_shortfall boolean NOT NULL DEFAULT false,
   co_fulfillment_applied_at timestamp with time zone,
+  blank_lot_number text,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -635,6 +636,7 @@ CREATE TABLE public.material_receiving (
   weight_lbs numeric,
   price_per_lb numeric,
   price_per_bar numeric,
+  category text NOT NULL DEFAULT 'bar'::text CHECK (category = ANY (ARRAY['bar'::text, 'blank'::text])),
   CONSTRAINT material_receiving_pkey PRIMARY KEY (id),
   CONSTRAINT material_receiving_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
   CONSTRAINT material_receiving_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id)
@@ -651,11 +653,13 @@ CREATE TABLE public.material_usage (
   notes text,
   created_at timestamp with time zone DEFAULT now(),
   quantity_used_inches numeric,
+  finishing_send_id uuid,
   CONSTRAINT material_usage_pkey PRIMARY KEY (id),
   CONSTRAINT material_usage_material_receiving_id_fkey FOREIGN KEY (material_receiving_id) REFERENCES public.material_receiving(id),
   CONSTRAINT material_usage_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
   CONSTRAINT material_usage_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
-  CONSTRAINT material_usage_used_by_fkey FOREIGN KEY (used_by) REFERENCES public.profiles(id)
+  CONSTRAINT material_usage_used_by_fkey FOREIGN KEY (used_by) REFERENCES public.profiles(id),
+  CONSTRAINT material_usage_finishing_send_id_fkey FOREIGN KEY (finishing_send_id) REFERENCES public.finishing_sends(id)
 );
 CREATE TABLE public.outbound_sends (
   id uuid NOT NULL DEFAULT gen_random_uuid(),

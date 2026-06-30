@@ -1716,3 +1716,8 @@ SQL only (catalog_PROD.sql 76 rows, load_blanks_PROD.sql 91 rows, step-6 backfil
 **Why:** The compliance officer needed to nest an assembly inside another assembly; the previous list (and the new search over it) excluded assemblies/finished goods entirely.
 **Edge:** parts carry one-level assembly_bom each, so partsById lookups traverse the full tree for the cycle check. Including finished_goods makes the unfiltered list large; the search box narrows it.
 **Files:** src/pages/Armory.jsx.
+
+### D-KIOSK-LOADDATE01 — Short date on the kiosk Loads log (2026-06-30)
+**What:** The kiosk Materials "Loads" list now shows a short date before the time (e.g. "6/30/26, 12:32 PM") via a new formatLoadStamp helper, instead of time only. formatTime is unchanged (still time-only for the setup/production/scheduled displays).
+**Why:** Loads can span days; the time alone didn't show which day a load happened.
+**Files:** src/pages/Kiosk.jsx.

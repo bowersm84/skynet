@@ -3690,6 +3690,13 @@ export default function Kiosk() {
     return new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
   }
 
+  // Short date + time for the loads log, e.g. "6/30/26, 12:32 PM"
+  const formatLoadStamp = (timestamp) => {
+    if (!timestamp) return ''
+    const date = new Date(timestamp).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit' })
+    return `${date}, ${formatTime(timestamp)}`
+  }
+
   const formatDate = (date) => {
     if (!date) return '--'
     return new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -4703,7 +4710,7 @@ export default function Kiosk() {
                             {jobLoads.map(load => (
                               <div key={load.id} className="flex items-baseline gap-2 text-sm">
                                 <span className="text-white font-semibold">{load.bars} {load.material_type?.toLowerCase().includes('blank') ? 'pieces' : 'bars'}</span>
-                                <span className="text-gray-400">— {[load._loaderName, formatTime(load.staged_at)].filter(Boolean).join(' · ')}</span>
+                                <span className="text-gray-400">— {[load._loaderName, formatLoadStamp(load.staged_at)].filter(Boolean).join(' · ')}</span>
                               </div>
                             ))}
                           </div>

@@ -113,6 +113,7 @@ export default function Armory({ profile }) {
   // BOM management
   const [bomComponents, setBomComponents] = useState([])
   const [availableComponents, setAvailableComponents] = useState([])
+  const [bomAddSearch, setBomAddSearch] = useState('')
   
   // Machine preferences for part modal
   const [machines, setMachines] = useState([])
@@ -1282,6 +1283,7 @@ export default function Armory({ profile }) {
     setBomComponents(assembly.assembly_bom || [])
     // Get available components (non-assembly parts)
     setAvailableComponents(parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && p.id !== assembly.id))
+    setBomAddSearch('')
     setShowBOMModal(true)
   }
 
@@ -4879,10 +4881,39 @@ export default function Armory({ profile }) {
                 <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
                   Add Parts
                 </h3>
+                <div className="relative mb-2">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                  <input
+                    type="text"
+                    value={bomAddSearch}
+                    onChange={(e) => setBomAddSearch(e.target.value)}
+                    placeholder="Search by part number or description"
+                    className="w-full pl-9 pr-8 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                  />
+                  {bomAddSearch && (
+                    <button
+                      onClick={() => setBomAddSearch('')}
+                      title="Clear search"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
                 <div className="space-y-1 max-h-60 overflow-y-auto">
-                  {availableComponents
-                    .filter(c => !bomComponents.some(b => b.component?.id === c.id))
-                    .map(comp => (
+                  {(() => {
+                    const q = bomAddSearch.trim().toLowerCase()
+                    const addable = availableComponents
+                      .filter(c => !bomComponents.some(b => b.component?.id === c.id))
+                      .filter(c => !q || `${c.part_number} ${c.description || ''}`.toLowerCase().includes(q))
+                    if (addable.length === 0) {
+                      return (
+                        <p className="text-gray-500 text-sm text-center py-4">
+                          {q ? 'No parts match your search' : 'All available parts have been added'}
+                        </p>
+                      )
+                    }
+                    return addable.map(comp => (
                       <button
                         key={comp.id}
                         onClick={() => addToBOM(comp.id)}
@@ -4899,12 +4930,8 @@ export default function Armory({ profile }) {
                         </div>
                         <ChevronRight size={14} className="text-gray-500" />
                       </button>
-                    ))}
-                  {availableComponents.filter(c => !bomComponents.some(b => b.component?.id === c.id)).length === 0 && (
-                    <p className="text-gray-500 text-sm text-center py-4">
-                      All available parts have been added
-                    </p>
-                  )}
+                    ))
+                  })()}
                 </div>
               </div>
             </div>

@@ -1705,3 +1705,8 @@ Cutover lesson (migration discipline): the blank schema objects had been applied
 **Why:** The active lookup keyed visibility only off job statuses + created_at and ignored work_orders.status, so a cancelled WO whose jobs were all terminal and created within the last 7 days still appeared under Active (the "recently completed" branch) — e.g. WO-2606-0052 after cancellation, causing confusion. Cancelled/closed WOs belong in the Closed tab.
 **Files:** src/pages/Mainframe.jsx.
 SQL only (catalog_PROD.sql 76 rows, load_blanks_PROD.sql 91 rows, step-6 backfill); frontend was the separate v4.1 deploy. Blank subsystem fully live on prod June 26, 2026.
+
+### D-BOM-ADDSEARCH01 — Search box on BOM Add Parts list (2026-06-24)
+**What:** Added a search input to the "Add Parts" section of the Bill of Materials modal (Armory). New bomAddSearch state filters availableComponents (already excluding current BOM parts) by part_number + description, case-insensitive, with a clear (X) button. Empty-state distinguishes "No parts match your search" from "All available parts have been added"; search resets on modal open (openBOMModal).
+**Why:** The available-parts list is long; the compliance officer had to scroll to find a part to add.
+**Files:** src/pages/Armory.jsx.

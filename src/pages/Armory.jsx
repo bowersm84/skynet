@@ -1281,8 +1281,29 @@ export default function Armory({ profile }) {
   const openBOMModal = (assembly) => {
     setSelectedAssembly(assembly)
     setBomComponents(assembly.assembly_bom || [])
-    // Get available components (non-assembly parts)
-    setAvailableComponents(parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && p.id !== assembly.id))
+    // Available to add: component parts AND products (assemblies / finished goods), so a
+    // sub-assembly can be pulled into another assembly. Exclude the assembly itself and any
+    // product whose own BOM already contains this assembly (that would be a circular reference —
+    // addToBOM has no cycle guard, so we prevent it at the source here). parts each carry their
+    // direct assembly_bom, so a partsById map lets us walk the full nested tree.
+    const partsById = new Map(parts.map(p => [p.id, p]))
+    const descendantsOf = (rootId) => {
+      const seen = new Set()
+      const walk = (id) => {
+        for (const b of (partsById.get(id)?.assembly_bom || [])) {
+          const cid = b.component?.id
+          if (cid && !seen.has(cid)) { seen.add(cid); walk(cid) }
+        }
+      }
+      walk(rootId)
+      return seen
+    }
+    setAvailableComponents(parts.filter(p => {
+      if (p.id === assembly.id) return false
+      const isProduct = p.part_type === 'assembly' || p.part_type === 'finished_good'
+      if (isProduct && descendantsOf(p.id).has(assembly.id)) return false
+      return true
+    }))
     setBomAddSearch('')
     setShowBOMModal(true)
   }
@@ -4887,7 +4908,7 @@ export default function Armory({ profile }) {
                     type="text"
                     value={bomAddSearch}
                     onChange={(e) => setBomAddSearch(e.target.value)}
-                    placeholder="Search by part number or description"
+                    placeholder="Search parts and products by number or description"
                     className="w-full pl-9 pr-8 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
                   />
                   {bomAddSearch && (
@@ -4924,6 +4945,11 @@ export default function Armory({ profile }) {
                           <Plus size={14} className="text-green-400" />
                           <span className="text-skynet-accent font-mono text-sm">{comp.part_number}</span>
                           <span className="text-gray-500 text-sm">{comp.description}</span>
+                          {(comp.part_type === 'assembly' || comp.part_type === 'finished_good') && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/40 text-purple-300 rounded border border-purple-800/50 inline-flex items-center gap-1">
+                              <Layers size={9} /> {comp.part_type === 'assembly' ? 'Assembly' : 'Product'}
+                            </span>
+                          )}
                           {comp.requires_passivation && (
                             <Beaker size={12} className="text-cyan-400" />
                           )}

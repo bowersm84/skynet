@@ -1710,3 +1710,9 @@ SQL only (catalog_PROD.sql 76 rows, load_blanks_PROD.sql 91 rows, step-6 backfil
 **What:** Added a search input to the "Add Parts" section of the Bill of Materials modal (Armory). New bomAddSearch state filters availableComponents (already excluding current BOM parts) by part_number + description, case-insensitive, with a clear (X) button. Empty-state distinguishes "No parts match your search" from "All available parts have been added"; search resets on modal open (openBOMModal).
 **Why:** The available-parts list is long; the compliance officer had to scroll to find a part to add.
 **Files:** src/pages/Armory.jsx.
+
+### D-BOM-ADDPRODUCTS01 — BOM Add Parts includes products (assemblies/finished goods) + cycle guard (2026-06-24)
+**What:** openBOMModal's availableComponents now includes all part types (assembly, finished_good, manufactured, purchased) minus the assembly itself, so a sub-assembly/product can be pulled into another assembly via the Add Parts search. Excludes any product whose own nested BOM already contains the target assembly — a client-side circular-reference guard (addToBOM has none), walking the tree via a partsById map. Add-list rows show an "Assembly"/"Product" badge for product types; search placeholder updated.
+**Why:** The compliance officer needed to nest an assembly inside another assembly; the previous list (and the new search over it) excluded assemblies/finished goods entirely.
+**Edge:** parts carry one-level assembly_bom each, so partsById lookups traverse the full tree for the cycle check. Including finished_goods makes the unfiltered list large; the search box narrows it.
+**Files:** src/pages/Armory.jsx.

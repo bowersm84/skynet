@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
@@ -13,6 +13,7 @@ import MaterialKiosk from './pages/MaterialKiosk'
 import Finishing from './pages/Finishing'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
+import CertRepository from './pages/CertRepository'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
@@ -187,6 +188,10 @@ function MainApp() {
   const canAccessArmory = hasRole(profile, 'admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer', 'purchaser')
   const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role) || profile?.is_salesperson === true
 
+  // Cert Repository — visible to ALL authenticated roles (read-only for most;
+  // write actions gated to admin/compliance inside the page). SKY64 + SKY67.
+  const canAccessCerts = !!profile?.role
+
   // SKY56 — all authenticated roles get the Dashboards menu; the Bridge entry
   // is filtered per-role below (president + admin only).
   const canAccessDashboards = !!profile?.role
@@ -200,6 +205,7 @@ function MainApp() {
       case 'schedule': return 'Command'
       case 'armory': return 'Armory'
       case 'customer_orders': return 'Customer Orders'
+      case 'certs': return 'Cert Repository'
       default: return 'Mainframe'
     }
   }
@@ -322,6 +328,17 @@ function MainApp() {
               </button>
             )}
 
+            {/* Cert Repository button - shown when on Mainframe; visible to all authenticated roles */}
+            {currentPage === 'mainframe' && canAccessCerts && (
+              <button
+                onClick={() => setCurrentPage('certs')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <FileCheck size={18} />
+                <span className="text-sm font-medium">Cert Repository</span>
+              </button>
+            )}
+
             {/* Dashboards dropdown - all roles; Bridge entry filtered per-role (SKY56) */}
             {currentPage === 'mainframe' && canAccessDashboards && (
               <div className="relative" ref={dashboardsMenuRef}>
@@ -408,6 +425,9 @@ function MainApp() {
         )}
         {currentPage === 'customer_orders' && canAccessCustomerOrders && (
           <CustomerOrders profile={profile} onNavigate={setCurrentPage} />
+        )}
+        {currentPage === 'certs' && canAccessCerts && (
+          <CertRepository profile={profile} />
         )}
       </main>
 

@@ -1721,3 +1721,127 @@ SQL only (catalog_PROD.sql 76 rows, load_blanks_PROD.sql 91 rows, step-6 backfil
 **What:** The kiosk Materials "Loads" list now shows a short date before the time (e.g. "6/30/26, 12:32 PM") via a new formatLoadStamp helper, instead of time only. formatTime is unchanged (still time-only for the setup/production/scheduled displays).
 **Why:** Loads can span days; the time alone didn't show which day a load happened.
 **Files:** src/pages/Kiosk.jsx.
+
+---
+
+## 2026-07-13 — Cert Repository (SKY64 + SKY67) Phase 1
+
+New `/certs` page (Cert Repository) plus `src/lib/certRepository.js` query/write
+layer. Additive only — new page + new lib + App.jsx route/nav entry. No changes
+to Finishing, Kiosk, MaterialKiosk, or receiving flows. New schema
+(`component_lots`, `component_lot_documents`, `work_order_component_lots`) was
+deployed ahead of the code per the standing prod-touch discipline (a table must
+exist before the code referencing it ships).
+
+### D-CERT-01 — Component lot traceability tables
+Component lot traceability implemented as `component_lots` /
+`component_lot_documents` / `work_order_component_lots`. SK# lot numbers globally
+unique (`component_lots.lot_number` UNIQUE). Lot documents live in S3 under
+`component-lots/{lotId}` (reusing `uploadDocument` from s3.js); the S3 key is
+stored in `component_lot_documents.file_path` (note: `file_path`, matching
+`material_documents`, NOT the `file_url` used by job/part documents).
+
+### D-CERT-02 — WO ↔ component lot association is MANUAL
+WO ↔ component lot association is manual: compliance links lots in the Cert
+Repository WO VIEW (per-purchased-component "Link Lot" picker + "Receive New Lot"
+inline form). Formal allocation at assembly check-in is deferred. The purchased
+component set is discovered from the WO's assemblies' `assembly_bom` rows
+(part_type = 'purchased'); linked lots come from `work_order_component_lots` for
+that WO.
+
+### D-CERT-03 — Parent→child lot chains explicit via parent_lot_id
+Parent→child lot chains are explicit via `component_lots.parent_lot_id` (e.g. raw
+purchase lot → post-plating lot). `process_description` is captured only when a
+parent lot is selected (it describes the parent→child transformation). Lot search
+(`searchLot`) traverses the chain in BOTH directions (up via parent_lot_id, down
+via children) with a cycle-guarded BFS, and renders the lineage as a strip
+(e.g. 51849 → 51859). The universal search spans component_lots,
+material_receiving, job_materials, material_loads, finishing_sends (all five lot
+columns), outbound_sends.vendor_lot_number, and
+work_order_assemblies.assembly_lot_number — exact match first, then ILIKE-partial,
+using only `.eq()`/`.ilike()`/`.in()` filters (never `.not(...,'in',...)`).
+
+### D-CERT-04 — Readable by all roles; writes admin+compliance
+Cert Repository is readable by all authenticated roles (`canAccessCerts =
+!!profile?.role` in App.jsx); write actions (create lot, link/unlink, upload/
+remove docs) are gated to `hasRole(profile, 'admin', 'compliance')` inside the
+page. Betty receives lots; Roger owns documentation completeness. Nav follows the
+existing `currentPage` pattern (like Armory / Customer Orders), not a dedicated
+react-router route.
+
+### D-CERT-05 — Traceability table is the Phase 2 cert-package cover dataset
+The WO VIEW traceability table (header block + one row per component: Part Number
+| Description | Source | Material + Heat/Lot # | PLN | FLN | Vendor Process Lots |
+Qty | Docs) is the Phase 2 cert-package cover-page dataset. The docs-complete
+indicator (per purchased component: n/m linked lots documented, green check when
+every linked lot has ≥1 document) is the future package-build gate. Manufactured
+component rows read from jobs (component_id, machines.code, job_materials/
+material_loads, finishing_sends, outbound_sends, and material cert docs via
+material_usage → material_receiving → material_documents); the WO search includes
+closed WOs (retroactive doc loading is a requirement).
+
+---
+
+## 2026-07-13 — Cert Repository Round 2 (cross-WO sourcing, component rollup, cert status)
+
+Follow-up to the Phase 1 Cert Repository. Additive, confined to
+`src/pages/CertRepository.jsx` and `src/lib/certRepository.js`. New table
+`work_order_component_jobs` (work_order_id, job_id, UNIQUE pair, linked_by,
+linked_at, notes; RLS all-auth read, admin/compliance write) deployed on TEST
+ahead of the code.
+
+### D-CERT-06 — Cross-WO component sourcing links the producing JOB, not copies
+A component on one WO can be sourced from a job produced on a DIFFERENT work order
+or stock run. This is modeled as a link to the producing **job**
+(`work_order_component_jobs`), and the linked job's FULL live document chain
+(job docs, material certs via material_usage→material_receiving→material_documents,
+and outbound vendor certs) is inherited by reference — **no documents are copied**.
+`findJobByLotNumber` (searches finishing_sends production/finishing lot,
+job_materials.lot_number, material_loads.lot_number; .eq/.ilike/.in only) powers a
+confirm-before-link picker; the "Link SkyNet Job" candidate list is filtered to
+jobs whose `component_id` matches the target BOM component. Linked job sources
+render with a "from WO-XXXX" badge and are unlinkable by the wcj row id.
+
+### D-CERT-07 — component_lots now serves manufactured parts too (manual/legacy records)
+The `component_lots` create/link path is no longer purchased-only. Manufactured
+components expose a "Manual Lot Record" action (the same component_lots form,
+labeled for pre-SkyNet / legacy production) alongside "Link SkyNet Job".
+Purchased components keep their existing Link Lot / Receive New Lot behavior
+unchanged. This lets legacy production (made before SkyNet, no job row) be
+represented as a documented lot source.
+
+### D-CERT-08 — Cert package status is computed client-side; ready = every component documented
+`computeCertStatus(traceability)` derives readiness with **no stored status
+column**. Per BOM component: `ready` = ≥1 source AND every attached lot has ≥1
+document AND every job source has ≥1 document somewhere in its live chain;
+`partial` = has a source but a documentation gap; `missing` = no source at all.
+Overall `complete` iff every component is ready. The header shows a pill (green
+"Cert Package Ready" / amber "Cert Package Incomplete — N of M components ready")
+whose click-popover lists each non-ready component's specific gaps (e.g. "no lot
+linked", "lot 51853 has no documents", "job J-000123 has no documents").
+Per-component green/amber/red dots on the traceability and document rows agree with
+the popover. Traceability + Documents both roll up to exactly one entry per BOM
+component (assembly_bom order), with sources revealed on expand — a component with
+multiple sources aggregates qty (sum of good qty) and docs (documented/total
+sources). Assembly- and finished_good-typed BOM entries are excluded from the
+rollup (structural products/sub-assemblies, tracked via work_order_assemblies /
+assembly lots), so cert status reflects only real machined/purchased components.
+
+### D-CERT-09 — Job source rows show PLN/FLN inline in the Documents section
+Each expanded job source header in the Documents section renders the job's PLN and
+FLN inline (muted, comma-separated, deduplicated, em dash for absent values) after
+job #/machine/qty — for at-a-glance lot identification while browsing documents.
+Reuses the existing per-source `pln`/`fln` arrays from the traceability payload
+(no new queries); applies identically to native and linked jobs.
+
+### D-CERT-10 — PLN/FLN on Documents job rows are color-coded with label de-duplication
+PLN/FLN values on the Documents job source rows are color-coded (PLN cyan, FLN
+emerald, font-medium) with the muted "PLN"/"FLN" label dropped when the stored
+value already carries its own prefix (e.g. "FLN-100032"); dedupe/comma/em-dash
+behavior unchanged.
+
+### D-CERT-11 — Drop the PLN/FLN text labels entirely on Documents job rows (supersedes D-CERT-10)
+No text labels on the Documents job source lot numbers — color alone distinguishes
+production (cyan) vs finishing (emerald) lots. A missing value renders nothing (no
+bare em dash). Multi-pair comma separation retained. Supersedes the D-CERT-10
+labeling.

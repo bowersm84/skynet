@@ -426,12 +426,29 @@ export async function getWorkOrderTraceability(workOrderId) {
     const materialType = jobMaterials[0]?.material_type || loads[0]?.material_type || null
     const barSize = jobMaterials[0]?.bar_size || loads[0]?.bar_size || null
 
-    const materialCertDocs = usages.flatMap((u) =>
-      (matDocsByReceiving[u.material_receiving_id] || []).map((d) => ({
-        id: d.id, file_name: d.file_name, file_path: d.file_path,
-        document_type: d.document_type, lot_number: u.lot_number,
-      }))
-    )
+    // Material certs are keyed by DISTINCT material_receiving lot, not per usage
+    // event: a job has one material_usage row per issue/send, so the same
+    // receiving's documents would otherwise repeat once per usage event (J-000043:
+    // Lot 2610's cert rendered 9x). Reduce usages to a distinct receiving-id set
+    // first, keeping the receiving lot label; dedupe by document id as a safety net.
+    const receivingLotById = {}
+    for (const u of usages) {
+      if (u.material_receiving_id && !(u.material_receiving_id in receivingLotById)) {
+        receivingLotById[u.material_receiving_id] = u.lot_number
+      }
+    }
+    const seenMatDocId = new Set()
+    const materialCertDocs = []
+    for (const rid of uniq(usages.map((u) => u.material_receiving_id))) {
+      for (const d of matDocsByReceiving[rid] || []) {
+        if (seenMatDocId.has(d.id)) continue
+        seenMatDocId.add(d.id)
+        materialCertDocs.push({
+          id: d.id, file_name: d.file_name, file_path: d.file_path,
+          document_type: d.document_type, lot_number: receivingLotById[rid],
+        })
+      }
+    }
     const plnSet = uniq([job.production_lot_number, ...sends.map((s) => s.production_lot_number)])
     const flnSet = uniq([job.finishing_lot_number, ...sends.map((s) => s.finishing_lot_number)])
     const vendorProcessLots = outbounds

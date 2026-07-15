@@ -1928,3 +1928,5 @@ row and its expanded line panel, not in the edit modal. Filters are reset becaus
 a stale status/salesperson filter would otherwise hide the CO the rep just asked
 for. loadMyOrderLines() now also returns coId (expanded is keyed by co.id);
 no other change to the loader.
+
+### D-CERT-12 — Material cert docs keyed by distinct material_receiving lots per job, not per usage event; duplicate join rows deduped by document id.

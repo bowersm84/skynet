@@ -1918,3 +1918,13 @@ consume-once and a stale deep link can't re-fire on a later remount. Schedule
 keeps the raw setter — it only ever navigates with a single argument. Rule
 going forward: any onNavigate that carries a payload must be a real function,
 never a bare setState.
+
+### D-MYORD-05 — My Orders CO number deep-links to the Orders tab, not the edit modal
+Clicking a CO number in My Orders switches to the Orders tab, sets the search to
+that CO number, resets the status and salesperson filters to 'all', and expands
+the CO row. It deliberately does NOT open EditCustomerOrderModal: the actions CS
+needs from this link — Cancel CO and mark-line-complete — live on the Orders tab
+row and its expanded line panel, not in the edit modal. Filters are reset because
+a stale status/salesperson filter would otherwise hide the CO the rep just asked
+for. loadMyOrderLines() now also returns coId (expanded is keyed by co.id);
+no other change to the loader.

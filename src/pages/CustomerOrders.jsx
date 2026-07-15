@@ -73,6 +73,23 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
     }
   }, [onNavigateToWO, onNavigate])
 
+  // Deep link from My Orders → the original CO on the Orders tab, expanded.
+  // Filters are reset to 'all' deliberately: a CO the rep is trying to reach
+  // must not be hidden by a status or salesperson filter left set from earlier.
+  const handleNavigateToCO = useCallback((coId, coNumber) => {
+    setCoTab('orders')
+    setSearchQuery(coNumber || '')
+    setStatusFilter('all')
+    setSalespersonFilter('all')
+    if (coId) {
+      setExpanded(prev => {
+        const next = new Set(prev)
+        next.add(coId)
+        return next
+      })
+    }
+  }, [])
+
   const toggleLineAllocations = useCallback(async (line) => {
     if (expandedAllocLineId === line.id) {
       setExpandedAllocLineId(null)
@@ -394,7 +411,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
       {coTab === 'demand' ? (
         <DemandView profile={profile} setActionStatus={setActionStatus} />
       ) : coTab === 'my_orders' ? (
-        <MyOrdersTab profile={profile} onNavigateToWO={handleNavigateToWO} />
+        <MyOrdersTab profile={profile} onNavigateToWO={handleNavigateToWO} onNavigateToCO={handleNavigateToCO} />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-3 mb-4">

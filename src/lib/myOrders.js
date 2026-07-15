@@ -110,6 +110,7 @@ export async function loadMyOrderLines(supabase, userId) {
 
     return {
       lineId: line.id,
+      coId: line.customer_order_id,
       coNumber: co.co_number || null,
       poNumber: co.po_number || null,
       customer: co.customers?.name || null,

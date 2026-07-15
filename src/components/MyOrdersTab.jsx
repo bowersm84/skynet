@@ -25,7 +25,7 @@ const PRIORITY_DOT = {
   low: 'bg-gray-500',
 }
 
-export default function MyOrdersTab({ profile, onNavigateToWO }) {
+export default function MyOrdersTab({ profile, onNavigateToWO, onNavigateToCO = null }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -160,7 +160,18 @@ export default function MyOrdersTab({ profile, onNavigateToWO }) {
                         {r.priority !== 'normal' && (
                           <span className={`inline-block w-2 h-2 rounded-full mr-2 ${PRIORITY_DOT[r.priority] || 'bg-gray-500'}`} />
                         )}
-                        {r.coNumber || '—'}
+                        {onNavigateToCO && r.coId ? (
+                          <button
+                            type="button"
+                            onClick={() => onNavigateToCO(r.coId, r.coNumber)}
+                            title={`Open ${r.coNumber} on the Orders tab`}
+                            className="font-mono whitespace-nowrap truncate text-blue-400 hover:underline cursor-pointer bg-transparent border-none p-0 text-left"
+                          >
+                            {r.coNumber || '—'}
+                          </button>
+                        ) : (
+                          r.coNumber || '—'
+                        )}
                       </div>
                       <div className="text-gray-500 text-xs whitespace-nowrap truncate">{r.poNumber || '—'}</div>
                     </td>

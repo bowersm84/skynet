@@ -991,3 +991,61 @@ CREATE TABLE public.blank_types (
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT blank_types_pkey PRIMARY KEY (id)
 );
+CREATE TABLE public.component_lots (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  part_id uuid NOT NULL,
+  lot_number text NOT NULL UNIQUE,
+  parent_lot_id uuid,
+  vendor text,
+  po_number text,
+  quantity integer,
+  received_at date,
+  received_by uuid,
+  process_description text,
+  notes text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  created_by uuid,
+  CONSTRAINT component_lots_pkey PRIMARY KEY (id),
+  CONSTRAINT component_lots_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
+  CONSTRAINT component_lots_parent_lot_id_fkey FOREIGN KEY (parent_lot_id) REFERENCES public.component_lots(id),
+  CONSTRAINT component_lots_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id),
+  CONSTRAINT component_lots_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.component_lot_documents (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  component_lot_id uuid NOT NULL,
+  document_type text NOT NULL DEFAULT 'coc'::text CHECK (document_type = ANY (ARRAY['packing_slip'::text, 'coc'::text, 'material_cert'::text, 'test_report'::text, 'invoice'::text, 'other'::text])),
+  file_name text NOT NULL,
+  file_path text NOT NULL,
+  file_size bigint,
+  mime_type text,
+  uploaded_by uuid,
+  uploaded_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT component_lot_documents_pkey PRIMARY KEY (id),
+  CONSTRAINT component_lot_documents_lot_fkey FOREIGN KEY (component_lot_id) REFERENCES public.component_lots(id),
+  CONSTRAINT component_lot_documents_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.work_order_component_lots (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  work_order_id uuid NOT NULL,
+  component_lot_id uuid NOT NULL,
+  linked_by uuid,
+  linked_at timestamp with time zone NOT NULL DEFAULT now(),
+  notes text,
+  CONSTRAINT work_order_component_lots_pkey PRIMARY KEY (id),
+  CONSTRAINT wocl_wo_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
+  CONSTRAINT wocl_lot_fkey FOREIGN KEY (component_lot_id) REFERENCES public.component_lots(id),
+  CONSTRAINT wocl_linked_by_fkey FOREIGN KEY (linked_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.work_order_component_jobs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  work_order_id uuid NOT NULL,
+  job_id uuid NOT NULL,
+  linked_by uuid,
+  linked_at timestamp with time zone NOT NULL DEFAULT now(),
+  notes text,
+  CONSTRAINT work_order_component_jobs_pkey PRIMARY KEY (id),
+  CONSTRAINT wocj_wo_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
+  CONSTRAINT wocj_job_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT wocj_linked_by_fkey FOREIGN KEY (linked_by) REFERENCES public.profiles(id)
+);

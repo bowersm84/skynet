@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, ChevronDown, Search, Loader2, AlertTriangle } from 'lucide-react'
 import { loadActiveSalespeople } from '../lib/salespeople'
+import { resyncWODueDates } from '../lib/woDueDate'
 
 // Local copies of the Customer/Part comboboxes used in CreateCustomerOrderModal.
 // Duplicated rather than extracted per the brief — keep the create modal untouched.
@@ -507,6 +508,9 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
       }
 
       // 2. Existing lines — diff each, UPDATE only the changed ones.
+      // Track lines whose due_date changed so we can one-way resync their
+      // linked WOs afterward (D-DATE-02).
+      const changedDueDateLineIds = []
       for (const l of lines) {
         if (l._isNew || isRowReadOnly(l)) continue
         const orig = originalLinesById.get(l.id)
@@ -515,7 +519,10 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
         const patch = {}
         if (l.part_id !== orig.part_id) patch.part_id = l.part_id
         if (qty !== orig.quantity_ordered) patch.quantity_ordered = qty
-        if ((l.due_date || null) !== (orig.due_date || null)) patch.due_date = l.due_date || null
+        if ((l.due_date || null) !== (orig.due_date || null)) {
+          patch.due_date = l.due_date || null
+          changedDueDateLineIds.push(l.id)
+        }
         if (l.priority !== orig.priority) patch.priority = l.priority
         if ((l.notes || '') !== (orig.notes || '')) patch.notes = l.notes?.trim() || null
         if ((l.components_needed || '') !== (orig.components_needed || '')) patch.components_needed = (l.components_needed || '').trim() || null
@@ -547,6 +554,30 @@ export default function EditCustomerOrderModal({ isOpen, coId, profile, onClose,
           .from('customer_order_lines')
           .insert(newRows)
         if (iErr) throw iErr
+      }
+
+      // 4. One-way CO→WO due-date resync (D-DATE-02). Find the WOs linked via
+      // active allocations to any line whose due date changed, and recompute
+      // their derived due_date. Errors here are logged, not surfaced — the CO
+      // edit itself already succeeded.
+      if (changedDueDateLineIds.length > 0) {
+        try {
+          const { data: linkedAllocs, error: laErr } = await supabase
+            .from('customer_order_allocations')
+            .select('work_order_id')
+            .in('customer_order_line_id', changedDueDateLineIds)
+            .eq('is_active', true)
+          if (laErr) throw laErr
+          const woIds = [...new Set((linkedAllocs || []).map(a => a.work_order_id).filter(Boolean))]
+          if (woIds.length > 0) {
+            const { errors: resyncErrors } = await resyncWODueDates(supabase, woIds)
+            if (resyncErrors.length) {
+              console.error('CO→WO due date resync had errors:', resyncErrors)
+            }
+          }
+        } catch (resyncErr) {
+          console.error('CO→WO due date resync failed:', resyncErr)
+        }
       }
 
       setSaving(false)

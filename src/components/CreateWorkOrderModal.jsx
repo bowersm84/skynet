@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { getOpenCOLinesForPart } from '../lib/customerOrders'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
@@ -520,6 +520,34 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     setSelectedAssemblies(updated)
   }
 
+  // D-DATE-01: when any CO line is allocated, wo.due_date is DERIVED from the
+  // earliest due_date across the allocated lines — the manual date input is
+  // suppressed. hasCoAllocations flips the Due Date field to a read-only display
+  // and makes the user-typed dueDate ignored at submit.
+  const { hasCoAllocations, earliestCoDue } = useMemo(() => {
+    const dueDates = []
+    let anyAlloc = false
+    Object.values(coLinesByAssembly).forEach(row => {
+      if (!row) return
+      const lines = row.lines || []
+      const allocations = row.allocations || {}
+      for (const [lineId, qty] of Object.entries(allocations)) {
+        if ((qty || 0) <= 0) continue
+        anyAlloc = true
+        const line = lines.find(l => l.line_id === lineId)
+        if (line?.due_date) dueDates.push(line.due_date)
+      }
+    })
+    // ISO yyyy-mm-dd strings — plain string min is the earliest date.
+    const earliest = dueDates.length ? dueDates.slice().sort()[0] : null
+    return { hasCoAllocations: anyAlloc, earliestCoDue: earliest }
+  }, [coLinesByAssembly])
+
+  // Format an ISO date at local noon to dodge the midnight-UTC off-by-one-day
+  // bug (see Decisions.md "Date/timezone — local-noon UTC").
+  const fmtCoDue = (d) =>
+    d ? new Date(d + 'T12:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+
   const handleSubmit = async (e) => {
     e.preventDefault()
 
@@ -583,7 +611,9 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         wo_number: woNumber,
         // order_type, customer, po_number, is_combined set after CO allocation
         priority: priority,
-        due_date: dueDate || null,
+        // D-DATE-01: derive from allocated CO lines when present; the
+        // user-typed dueDate is ignored whenever allocations exist.
+        due_date: hasCoAllocations ? (earliestCoDue || null) : (dueDate || null),
         notes: notes || null,
         order_quantity: totalOrderQty || null,
         stock_quantity: totalStockQty || null,
@@ -1212,13 +1242,25 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                   </select>
                 </div>
                 <div>
-                  <label className="block text-gray-400 text-sm mb-1">Due Date</label>
-                  <input
-                    type="date"
-                    value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
-                  />
+                  {hasCoAllocations ? (
+                    <>
+                      <label className="block text-gray-400 text-sm mb-1">Due Date (from customer orders)</label>
+                      <div className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700 rounded text-gray-300">
+                        {fmtCoDue(earliestCoDue)}
+                      </div>
+                      <p className="text-gray-500 text-xs mt-1">Earliest customer due date on allocated lines</p>
+                    </>
+                  ) : (
+                    <>
+                      <label className="block text-gray-400 text-sm mb-1">Due Date (stock order)</label>
+                      <input
+                        type="date"
+                        value={dueDate}
+                        onChange={(e) => setDueDate(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
+                      />
+                    </>
+                  )}
                 </div>
                 <div>
                   <label className="block text-gray-400 text-sm mb-1">Notes</label>

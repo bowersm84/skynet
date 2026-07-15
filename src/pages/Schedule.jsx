@@ -909,6 +909,16 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       return
     }
 
+    // D-DATE-03: warn (never block) when the adjusted end lands after the
+    // customer due date. due_date is a DATE column — compare end-of-day.
+    if (job.work_order?.due_date && newEnd > new Date(job.work_order.due_date + 'T23:59:59')) {
+      const dueShort = new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      const ok = window.confirm(
+        `This job is scheduled to finish after the customer due date (${dueShort}). Schedule anyway?`
+      )
+      if (!ok) return
+    }
+
     setEndDateSaving(true)
     setEndDateError(null)
     try {
@@ -3401,6 +3411,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         const cascade = validEnd ? computeEndChangeCascade(queue, job.id, newEnd) : { changes: [] }
         const newMinutes = (validEnd && start) ? Math.max(1, Math.round((newEnd - start) / 60000)) : null
         const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'
+        // D-DATE-03: late-vs-customer-due warning (due_date is a DATE — end of day).
+        const isLate = validEnd && !!job.work_order?.due_date && newEnd > new Date(job.work_order.due_date + 'T23:59:59')
+        const dueShort = job.work_order?.due_date
+          ? new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          : '—'
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEndDateEditJob(null)}>
             <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -3440,6 +3455,15 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   </div>
                 )}
               </div>
+
+              {isLate && (
+                <div className="mb-4 bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm flex items-start gap-2">
+                  <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    Scheduled finish {fmt(newEnd)} is after the customer due date {dueShort}.
+                  </div>
+                </div>
+              )}
 
               {cascade.changes.length > 0 && (
                 <div className="mb-4">

@@ -15,6 +15,7 @@ import {
 import CreateCustomerOrderModal from '../components/CreateCustomerOrderModal'
 import EditCustomerOrderModal from '../components/EditCustomerOrderModal'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
+import MyOrdersTab from '../components/MyOrdersTab'
 import {
   CO_STATUS_LABELS,
   CO_STATUS_COLORS,
@@ -37,7 +38,7 @@ const CAN_EDIT_ROLES = ['admin', 'scheduler', 'customer_service']
 export default function CustomerOrders({ profile, onNavigate, embedded = false, onNavigateToWO = null }) {
   const canEdit = CAN_EDIT_ROLES.includes(profile?.role) && !isReadOnlyRole(profile?.role)
 
-  const [coTab, setCoTab] = useState('orders') // 'orders' | 'demand'
+  const [coTab, setCoTab] = useState('orders') // 'orders' | 'demand' | 'my_orders'
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('all')
@@ -325,7 +326,7 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
   }
 
   return (
-    <div className="max-w-7xl mx-auto p-6">
+    <div className={`${coTab === 'my_orders' ? 'max-w-[1800px]' : 'max-w-7xl'} mx-auto p-6`}>
       <div className="flex justify-between items-center mb-6">
         <div>
           <h2 className="text-2xl font-bold text-white">Customer Orders</h2>
@@ -376,10 +377,24 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
         >
           Demand
         </button>
+        {profile?.is_salesperson === true && (
+          <button
+            onClick={() => setCoTab('my_orders')}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              coTab === 'my_orders'
+                ? 'border-purple-400 text-purple-300'
+                : 'border-transparent text-gray-400 hover:text-white'
+            }`}
+          >
+            My Orders
+          </button>
+        )}
       </div>
 
       {coTab === 'demand' ? (
         <DemandView profile={profile} setActionStatus={setActionStatus} />
+      ) : coTab === 'my_orders' ? (
+        <MyOrdersTab profile={profile} onNavigateToWO={handleNavigateToWO} />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-3 mb-4">

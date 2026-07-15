@@ -1845,3 +1845,76 @@ No text labels on the Documents job source lot numbers — color alone distingui
 production (cyan) vs finishing (emerald) lots. A missing value renders nothing (no
 bare em dash). Multi-pair comma separation retained. Supersedes the D-CERT-10
 labeling.
+
+---
+
+## 2026-07-15 — CS/Scheduling date unification + Salesperson "My Orders"
+
+### D-DATE-01 — WO due date is derived, not entered, when CO allocations exist
+work_orders.due_date remains the single field downstream consumers read, but
+it is now populated as the earliest due_date across active allocated CO lines
+at WO create/edit time. The manual date input appears only for stock-only WOs
+(zero allocations). Rationale: eliminates the WO date as a second,
+disagreeing source of truth while requiring zero changes to the ~15 downstream
+readers (Schedule sort/overdue, kiosks, dashboards, traveler).
+
+### D-DATE-02 — CO→WO due date sync is one-way, via resyncWODueDates()
+Editing a CO line due date resyncs due_date on all linked WOs (active
+allocations only). WOs never write back to CO lines. Stock-only WOs are
+skipped by the resync so manual dates are never clobbered. Helper lives in
+lib/woDueDate.js and is shared by EditCustomerOrderModal and
+EditWorkOrderModal.
+
+### D-DATE-03 — Late scheduling warns, never blocks
+ScheduleJobModal (step 3) and the SKY55 Adjust End Date modal show an amber
+warning and require a confirm when the scheduled/adjusted end falls after the
+customer due date (compared against end-of-day, since due_date is a DATE).
+Scheduling proceeds on confirm — the schedule is reality; the flag surfaces
+the miss to CS via the My Orders Late badge rather than preventing the plan.
+
+### D-MYORD-01 — My Orders tab: salesperson-scoped CO line view
+New tab on Customer Orders, visible when profile.is_salesperson. One flat row
+per open CO line where customer_orders.salesperson_id = logged-in user:
+part number, qty fulfilled/ordered, customer due, linked WOs, job status
+rollup, scheduled finish (MAX jobs.scheduled_end across linked WOs), and a
+LATE badge when scheduled finish exceeds customer due. Ownership is
+salesperson_id, not created_by. Client-side join in lib/myOrders.js; no
+schema or RLS changes.
+
+### D-MYORD-02 — My Orders uses a wider container than the rest of the page
+The Customer Orders page container is max-w-7xl (1280px). My Orders carries
+materially more columns than Orders or Demand, so the wrapper width is now
+conditional on coTab: max-w-[1800px] for 'my_orders', max-w-7xl elsewhere.
+Scoped deliberately rather than widening the page — Orders and Demand are
+legible at 1280px and were not in scope. If a third wide tab ever appears,
+promote this to a per-tab width map rather than extending the ternary.
+
+### D-MYORD-03 — My Orders is 7 columns, nothing wraps
+Cut from 11 columns: Priority became a colored dot on the CO# shown only when
+priority != 'normal'; Status merged into the WO cell (status is derived from
+those WOs' jobs — one fact, one cell); the Flag column was removed in favor of
+a red left border on the row. Every cell is whitespace-nowrap; customer and
+CO/PO truncate with a title tooltip. Part description is not rendered (part
+number is what CS triages on). Scheduled finish is date-only — day granularity
+is what matters against a date-only customer due date. Rows collapse from ~5
+lines to 2, and the reclaimed vertical space goes to row padding.
+
+### D-MYORD-04 — Late is quantified, not just flagged
+The LATE badge reads "{N}d late" rather than a bare flag. The due-vs-finish
+delta is already computed for isLate, so surfacing the magnitude is free and
+lets a rep triage a 2-day miss differently from a 60-day one. Computed in the
+component from dueDate/scheduledFinish; the loader's isLate contract is
+unchanged.
+
+### D-NAV-01 — Cross-page navigation carries a payload; state setters can't
+App.jsx passed onNavigate={setCurrentPage} to CustomerOrders. A React state
+setter accepts one argument, so the second argument in
+onNavigate('mainframe', { woLookupSearch, orderLookupTab }) was silently
+discarded — WO deep links landed on Mainframe with no context and threw no
+error. Navigation now goes through handleNavigate(page, payload) in App.jsx,
+which sets currentPage and navPayload together. Mainframe accepts navPayload
+and calls onNavPayloadConsumed after acting on it, so the payload is
+consume-once and a stale deep link can't re-fire on a later remount. Schedule
+keeps the raw setter — it only ever navigates with a single argument. Rule
+going forward: any onNavigate that carries a payload must be a real function,
+never a bare setState.

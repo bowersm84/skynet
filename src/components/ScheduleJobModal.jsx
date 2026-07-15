@@ -139,12 +139,28 @@ export default function ScheduleJobModal({
     job?.assigned_machine_id &&
     job.assigned_machine_id !== selectedMachineId
 
+  // D-DATE-03: warn (never block) when the scheduled finish lands after the
+  // customer due date. due_date is a DATE column, so compare against end of day.
+  const isLateSchedule =
+    !!job?.work_order?.due_date &&
+    !!propagation?.targetSlot &&
+    new Date(propagation.targetSlot.scheduled_end) > new Date(job.work_order.due_date + 'T23:59:59')
+
+  const fmtDueShort = (d) =>
+    d ? new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
+
   const handleSchedule = async () => {
     if (!canSubmit) return
     if (isMachineSwapRevert) {
       const ok = window.confirm(
         'Changing machines will return this job to Compliance for re-review of machine-specific documents. ' +
         'All document approvals on this job will be reset to pending. Continue?'
+      )
+      if (!ok) return
+    }
+    if (isLateSchedule) {
+      const ok = window.confirm(
+        `This job is scheduled to finish after the customer due date (${fmtDueShort(job.work_order.due_date)}). Schedule anyway?`
       )
       if (!ok) return
     }
@@ -244,6 +260,8 @@ export default function ScheduleJobModal({
               fmtDateTime={fmtDateTime}
               job={job}
               isMachineSwapRevert={isMachineSwapRevert}
+              isLateSchedule={isLateSchedule}
+              dueDateDisplay={fmtDueShort(job.work_order?.due_date)}
             />
           )}
         </div>
@@ -531,7 +549,8 @@ function InsertionSlot({ label, active, onClick }) {
 function Step3Duration({
   machine, queue, insertionIndex,
   durationDays, setDurationDays, durationHours, setDurationHours,
-  totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert
+  totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert,
+  isLateSchedule, dueDateDisplay
 }) {
   const beforeJob = queue[insertionIndex - 1]
   const afterJob = queue[insertionIndex]
@@ -602,6 +621,14 @@ function Step3Duration({
             <p className="text-xs text-amber-300/80 mt-1">
               Changing machines on an approved job resets compliance approval and all document approvals to pending. Roger will re-review against the new machine's doc set.
             </p>
+          </div>
+        </div>
+      )}
+      {isLateSchedule && (
+        <div className="bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm flex items-start gap-2">
+          <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+          <div>
+            Scheduled finish {fmtDateTime(targetSlot?.scheduled_end)} is after the customer due date {dueDateDisplay}.
           </div>
         </div>
       )}

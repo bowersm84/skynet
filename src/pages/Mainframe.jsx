@@ -28,7 +28,7 @@ import WOLookupShortfalls from '../components/WOLookupShortfalls'
 import { isReadOnlyRole } from '../lib/roles'
 import { getEffectiveQty } from '../lib/effectiveQty'
 
-export default function Mainframe({ user, profile, canCreateWorkOrders = false }) {
+export default function Mainframe({ user, profile, canCreateWorkOrders = false, navPayload = null, onNavPayloadConsumed = null }) {
   const canWrite = !isReadOnlyRole(profile?.role)
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
@@ -801,6 +801,21 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false }
     setExpandedWOs({})
     fetchWOLookup()
   }
+
+  // Deep link from Customer Orders (My Orders tab + Orders tab WO links):
+  // open WO Lookup pre-filtered to a specific WO number. Deliberately does not
+  // call handleOpenWOLookup, which blanks the search term we need to keep.
+  // Consume-once: clears the payload in App so a later remount of Mainframe
+  // (e.g. via the top nav) doesn't reopen the modal.
+  useEffect(() => {
+    if (!navPayload?.woLookupSearch) return
+    setShowWOLookup(true)
+    setOrderLookupTab(navPayload.orderLookupTab || 'work_orders')
+    setWOLookupSearch(navPayload.woLookupSearch)
+    setExpandedWOs({})
+    fetchWOLookup()
+    if (onNavPayloadConsumed) onNavPayloadConsumed()
+  }, [navPayload])
 
   // Get status badge for a job
   const getStatusBadge = (status) => {

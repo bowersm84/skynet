@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck } from 'lucide-react'
@@ -38,6 +38,14 @@ function MainApp() {
   const [loading, setLoading] = useState(true)
   const [showLoadingScreen, setShowLoadingScreen] = useState(false)
   const [currentPage, setCurrentPage] = useState('mainframe')
+  // Cross-page navigation payload (e.g. deep-link into Mainframe's WO Lookup).
+  // The destination page consumes it once, then clears it via
+  // onNavPayloadConsumed so a later remount can't re-fire a stale deep link.
+  const [navPayload, setNavPayload] = useState(null)
+  const handleNavigate = useCallback((page, payload = null) => {
+    setCurrentPage(page)
+    setNavPayload(payload)
+  }, [])
   const [showDashboardsMenu, setShowDashboardsMenu] = useState(false)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showChangePinModal, setShowChangePinModal] = useState(false)
@@ -415,7 +423,13 @@ function MainApp() {
 
       <main className={currentPage === 'armory' ? '' : 'p-6'}>
         {currentPage === 'mainframe' && (
-          <Mainframe user={user} profile={profile} canCreateWorkOrders={canEditSchedule} />
+          <Mainframe
+            user={user}
+            profile={profile}
+            canCreateWorkOrders={canEditSchedule}
+            navPayload={navPayload}
+            onNavPayloadConsumed={() => setNavPayload(null)}
+          />
         )}
         {currentPage === 'schedule' && canAccessSchedule && (
           <Schedule user={user} profile={profile} onNavigate={setCurrentPage} canEdit={canEditSchedule} />
@@ -424,7 +438,7 @@ function MainApp() {
           <Armory profile={profile} />
         )}
         {currentPage === 'customer_orders' && canAccessCustomerOrders && (
-          <CustomerOrders profile={profile} onNavigate={setCurrentPage} />
+          <CustomerOrders profile={profile} onNavigate={handleNavigate} />
         )}
         {currentPage === 'certs' && canAccessCerts && (
           <CertRepository profile={profile} />

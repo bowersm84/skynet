@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Package, Wrench, AlertTriangle, ShoppingCart, Save } from 'lucide-react'
-import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
+import { summarizeWOAllocations } from '../lib/workOrderDisplay'
+import { resyncWODueDates } from '../lib/woDueDate'
 import CustomerDisplay from './CustomerDisplay'
 
 const ALLOC_GATE_ROLES = ['admin', 'scheduler']
@@ -438,6 +439,20 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     return summarizeWOAllocations([...existingShape, ...stagedShape])
   }, [allocations, newAllocations])
 
+  // D-DATE-01: does this WO have any active CO allocation after the pending
+  // edits? (existing rows not queued for deactivation, plus staged adds).
+  // When true, wo.due_date is DERIVED — the manual date input is suppressed
+  // and the dueDate state is ignored on save.
+  const hasActiveAllocations = useMemo(() => {
+    const remainingExisting = (allocations || []).filter(a => !allocationsToDeactivate.includes(a.id))
+    return remainingExisting.length + (newAllocations?.length || 0) > 0
+  }, [allocations, allocationsToDeactivate, newAllocations])
+
+  // Format an ISO date at local noon to dodge the midnight-UTC off-by-one-day
+  // bug (see Decisions.md "Date/timezone — local-noon UTC").
+  const fmtCoDue = (d) =>
+    d ? new Date(d + 'T12:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+
   // Check if a part is already on this WO
   const isPartAlreadyOnWO = (partId) => {
     if (existingAssemblies.some(a => a.assemblyId === partId)) return true
@@ -500,7 +515,9 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
   // Check if any changes were made
   const hasChanges = () => {
     if (customer !== (workOrder.customer || '')) return true
-    if (dueDate !== (workOrder.due_date || '')) return true
+    // Manual due-date edits only count for stock-only WOs; when allocations
+    // exist the date is derived and the input is hidden (D-DATE-01).
+    if (!hasActiveAllocations && dueDate !== (workOrder.due_date || '')) return true
     if (priority !== (workOrder.priority || 'normal')) return true
     if (newAssemblies.length > 0) return true
     if (newAllocations.length > 0) return true
@@ -524,7 +541,9 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       // 1. Update WO-level fields
       const woUpdates = {}
       if (customer !== workOrder.customer) woUpdates.customer = customer
-      if (dueDate !== workOrder.due_date) woUpdates.due_date = dueDate || null
+      // D-DATE-01: only write a manual due date for stock-only WOs. Allocated
+      // WOs get their date from resyncWODueDates() after allocations settle.
+      if (!hasActiveAllocations && dueDate !== workOrder.due_date) woUpdates.due_date = dueDate || null
       if (priority !== workOrder.priority) woUpdates.priority = priority
       const totalAdditionalForStock = [...existingAssemblies, ...newAssemblies].reduce(
         (sum, a) => sum + (parseInt(a.additionalForStock) || 0), 0
@@ -681,6 +700,15 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         if (deactErr) throw deactErr
       }
 
+      // 5b. D-DATE-02: recompute wo.due_date from the post-edit active
+      // allocation set. Runs after inserts/deactivations are committed so it
+      // sees the final allocations. No-op (skips) for stock-only WOs, so the
+      // manual date written in step 1 is never clobbered.
+      const { errors: resyncErrors } = await resyncWODueDates(supabase, [workOrder.id])
+      if (resyncErrors.length) {
+        console.error('WO due date resync had errors:', resyncErrors)
+      }
+
       // 6. Insert new components into existing assemblies (Batch B).
       // Mirrors CreateWorkOrderModal: INSERT into jobs in pending_compliance,
       // then copy part_routing_steps → job_routing_steps for each new job.
@@ -827,21 +855,27 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
               )}
             </div>
             <div>
-              <label className="block text-gray-400 text-sm mb-1">Due Date</label>
-              {liveAllocationSummary.hasAllocations ? (
-                <div className="w-full px-3 py-2 bg-gray-800/60 border border-gray-700 rounded text-gray-300 flex items-center gap-2">
-                  <span>{formatWODueDate(liveAllocationSummary, workOrder.due_date) || '—'}</span>
-                  {liveAllocationSummary.hasMultipleDueDates && (
-                    <span className="text-xs text-gray-500">(earliest)</span>
-                  )}
-                </div>
+              {hasActiveAllocations ? (
+                <>
+                  <label className="block text-gray-400 text-sm mb-1">Due Date (from customer orders)</label>
+                  <div className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700 rounded text-gray-300 flex items-center gap-2">
+                    <span>{fmtCoDue(liveAllocationSummary.earliestDueDate)}</span>
+                    {liveAllocationSummary.hasMultipleDueDates && (
+                      <span className="text-xs text-gray-500">(earliest)</span>
+                    )}
+                  </div>
+                  <p className="text-gray-500 text-xs mt-1">Earliest customer due date on allocated lines</p>
+                </>
               ) : (
-                <input
-                  type="date"
-                  value={dueDate}
-                  onChange={e => setDueDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
-                />
+                <>
+                  <label className="block text-gray-400 text-sm mb-1">Due Date (stock order)</label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={e => setDueDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-skynet-accent focus:outline-none"
+                  />
+                </>
               )}
             </div>
             <div>

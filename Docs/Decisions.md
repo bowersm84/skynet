@@ -1930,3 +1930,102 @@ for. loadMyOrderLines() now also returns coId (expanded is keyed by co.id);
 no other change to the loader.
 
 ### D-CERT-12 — Material cert docs keyed by distinct material_receiving lots per job, not per usage event; duplicate join rows deduped by document id.
+
+---
+
+## 2026-07-15 — Cert Repository Phase 2 (Build Cert Package)
+
+New `src/lib/certPackage.js` (data + generation) and `src/lib/certPackagePdf.js`
+(pdf-lib cover + document merge), plus Build/Sign/log UI in `CertRepository.jsx`.
+Additive; new schema (`part_cert_profiles`, `cert_signatures`, `cert_packages`)
+deployed ahead of the code. Added `pdf-lib` and `xlsx` (SheetJS) dependencies —
+SheetJS was not previously present and is required for spreadsheet re-rendering.
+
+### D-CERTPKG-01 — Cert packages are per JOB (one FLN per job)
+A cert package certifies one job's output. Package number = `${FLN}-CP${n}` where
+n = (# existing packages for that job) + 1. The Build modal's "All Jobs" option
+fans out one draft package per job on the WO (native + linked). The job picker
+warns — never blocks — when the selected job's component isn't fully documented.
+
+### D-CERTPKG-02 — Cover-page data is a three-way split
+Cover fields come from three sources: **auto** (live from
+`getWorkOrderTraceability` — customer/PO/part/lots/qty), **part_cert_profiles**
+(static per-part data reused across every package for that part — TSO/RoHS/
+conflict-minerals/NADCAP/primer/country/component_origins), and **form_data**
+(per-package entry — Lot Assembly Test block, QC Release block, qty shipped,
+emailed-to, material-lot overrides). Editing the Part Profile in the draft form
+saves to `part_cert_profiles` and applies to all future packages for that part.
+
+### D-CERTPKG-03 — The PDF bears only the APPROVER'S own stored signature
+`cert_signatures` is per-user (RLS: write own row only). At Approve & Sign the
+current user's stored signature + stamp + title are applied — builders and signers
+may differ. Approval is blocked with a clear message (prompt-link to My Signature)
+when the approver has no stored signature. The signature is applied under the
+approver's login, not copied from the builder.
+
+### D-CERTPKG-04 — Approved packages are immutable; regeneration = new row
+A DB trigger makes approved `cert_packages` rows immutable; the app never updates
+or deletes them (soft-guarded to `status='draft'` on updates, and any trigger
+error is surfaced gracefully). Approve & Sign generates the PDF and uploads it to
+S3 **before** flipping the row to approved (the row is approved only once the file
+exists). "Regenerate" on an approved package starts a NEW draft prefilled from the
+old snapshot/form_data — it never mutates the approved row. `cert_packages` is the
+permanent package log, shown newest-first below Documents.
+
+### D-CERTPKG-05 — Non-PDF handling in the merged package
+Merge order follows traceability (cover, then per component in BOM order: job docs
+→ material certs → outbound certs → lot docs). PDFs are page-copied; JPG/PNG are
+embedded one image per page (scaled to fit letter with margin); XLS/XLSX are parsed
+with SheetJS and re-rendered as text tables (data fidelity, not visual fidelity);
+anything else is skipped, recorded in `conversion_manifest`, and listed on a final
+"Separate Attachments" page. Source files are fetched via the existing s3.js
+signed-URL helper.
+
+### D-CERTPKG-06 — QMS-10.4 cover text is controlled text (RESOLVED)
+The four Certificate of Conformance paragraphs and the DFARs line in
+`certPackagePdf.js` (CERT_PARAGRAPHS) were transcribed from the controlled
+QMS-10.4 Rev 003 form, superseding the placeholder language this entry
+originally flagged. Treat them as controlled text: re-verify on any revision
+bump, and change them only to match the form.
+
+Profile column types settled with the deployed schema (`PROFILE_BOOLEAN_FIELDS`
+/ `PROFILE_TEXT_FIELDS` in `certPackage.js` are the single source of truth — the
+draft form, the save path, and the cover renderer all read from them):
+- **TEXT:** `tso_c148` (holds 'NA' or a TSO designation — a text input, not a
+  toggle), `camloc_equivalent`, `monadnock_equivalent`, `primer`,
+  `assy_country_of_origin`, `notes`
+- **BOOLEAN:** `conflict_minerals`, `rohs_compliant`, `dfars_compliant`,
+  `nadcap_plating`, `nadcap_heat_treat`
+
+Booleans render Yes/No on the cover (DFARs renders YES/NO). `nadcap_plating` /
+`nadcap_heat_treat` moved TEXT → BOOLEAN with the deployed schema; the cover
+renderer was still printing them via the free-text path (literal "true"/"false")
+and was corrected on 2026-07-16.
+
+---
+
+## 2026-07-16 — Working repo migrated from Google Drive to local SSD
+
+### D-ENV-01 — The working repo lives on a local SSD, not Google Drive
+- **Decision:** The working clone moved off the Google Drive-backed folder to a
+  local SSD path. This closes the long-standing Drive instability risk tracked
+  since Sprint 4 (see "Phantom git diff state on Google Drive folders" and the
+  Sprint 8 note "The Google Drive repo location remains a latent risk").
+- **What it fixes:** Drive's sync layer was corrupting git lock files and
+  producing phantom "modified" files with no content drift. Worse, `npm install`
+  never survived a session — Drive's file watcher churned `node_modules` (tens of
+  thousands of small files) so builds could not be verified locally at all. The
+  Cert Package Phase 2 work was written entirely without a single successful
+  build as a result.
+- **Confirmed by this session:** on local SSD, a clean `npm install` finished in
+  ~1 minute and `vite build` in ~14s — the first green build of the Phase 2 code.
+- **Unaffected:** GitHub remains the source of truth; Amplify CI/CD builds from
+  GitHub and never saw the Drive path, so deployment is unchanged. The migration
+  is local-workstation-only — no schema, code, or pipeline impact.
+
+**Lesson:** an environment that can't run a build isn't a slow environment, it's
+an unverified one. Code written against it should be treated as unreviewed until
+it compiles somewhere real. The Phase 2 work proved the point: it imported
+`pdf-lib` and `xlsx`, but neither was ever added to `package.json` — the code
+could not have built for anyone. Both were added here (`pdf-lib` ^1.17.1,
+`xlsx` ^0.18.5) and the build went green.

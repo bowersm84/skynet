@@ -14,9 +14,11 @@
     "@aws-sdk/s3-request-presigner": "^3.966.0",
     "@supabase/supabase-js": "^2.90.1",
     "lucide-react": "^0.562.0",
+    "pdf-lib": "^1.17.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.12.0"
+    "react-router-dom": "^7.12.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

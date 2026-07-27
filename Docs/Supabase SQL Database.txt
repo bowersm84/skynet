@@ -1049,3 +1049,60 @@ CREATE TABLE public.work_order_component_jobs (
   CONSTRAINT wocj_job_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT wocj_linked_by_fkey FOREIGN KEY (linked_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.part_cert_profiles (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  part_id uuid NOT NULL UNIQUE,
+  tso_c148 text,
+  camloc_equivalent text,
+  monadnock_equivalent text,
+  conflict_minerals boolean,
+  rohs_compliant boolean,
+  dfars_compliant boolean,
+  nadcap_plating boolean,
+  nadcap_heat_treat boolean,
+  primer text,
+  assy_country_of_origin text DEFAULT 'USA'::text,
+  component_origins jsonb DEFAULT '{}'::jsonb,
+  notes text,
+  updated_by uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT part_cert_profiles_pkey PRIMARY KEY (id),
+  CONSTRAINT pcp_part_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
+  CONSTRAINT pcp_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.cert_signatures (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL UNIQUE,
+  signature_image_path text NOT NULL,
+  stamp_image_path text,
+  title text,
+  is_active boolean NOT NULL DEFAULT true,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT cert_signatures_pkey PRIMARY KEY (id),
+  CONSTRAINT cs_user_fkey FOREIGN KEY (user_id) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.cert_packages (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  work_order_id uuid NOT NULL,
+  job_id uuid NOT NULL,
+  part_id uuid NOT NULL,
+  finishing_lot_number text,
+  package_number text NOT NULL UNIQUE,
+  status text NOT NULL DEFAULT 'draft'::text CHECK (status = ANY (ARRAY['draft'::text, 'approved'::text])),
+  form_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  snapshot jsonb,
+  file_path text,
+  conversion_manifest jsonb,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  approved_by uuid,
+  approved_at timestamp with time zone,
+  CONSTRAINT cert_packages_pkey PRIMARY KEY (id),
+  CONSTRAINT cp_wo_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
+  CONSTRAINT cp_job_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT cp_part_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
+  CONSTRAINT cp_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
+  CONSTRAINT cp_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES public.profiles(id)
+);

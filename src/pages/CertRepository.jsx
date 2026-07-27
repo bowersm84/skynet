@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Search, FileText, Link2, Upload, Trash2, Check, ChevronRight, ChevronDown,
   Package, Cpu, Loader2, Plus, X, ArrowRight, GitBranch, ShieldCheck, ExternalLink,
-  ClipboardList,
+  ClipboardList, FilePlus, FileSignature, Download, RefreshCw, AlertTriangle, Save, Pencil,
 } from 'lucide-react'
 import { hasRole } from '../lib/roles'
 import { getDocumentUrl } from '../lib/s3'
@@ -21,6 +21,19 @@ import {
   linkJobToWorkOrder,
   unlinkJobFromWorkOrder,
 } from '../lib/certRepository'
+import {
+  buildPackageDataset,
+  createDraftPackage,
+  updateDraftPackage,
+  deleteDraftPackage,
+  listPackages,
+  approveAndGenerate,
+  getMySignature,
+  saveMySignature,
+  savePartCertProfile,
+  PROFILE_BOOLEAN_FIELDS,
+  PROFILE_TEXT_FIELDS,
+} from '../lib/certPackage'
 
 // component_lot_documents.document_type CHECK values + labels
 const DOC_TYPES = [
@@ -50,6 +63,7 @@ async function openDoc(filePath) {
 export default function CertRepository({ profile }) {
   const canWrite = hasRole(profile, 'admin', 'compliance')
   const [view, setView] = useState('wo') // 'wo' | 'lot'
+  const [showSignature, setShowSignature] = useState(false)
 
   return (
     <div className="max-w-7xl mx-auto pb-24">
@@ -64,21 +78,34 @@ export default function CertRepository({ profile }) {
             {!canWrite && <span className="ml-1 text-gray-600">(read-only)</span>}
           </p>
         </div>
-        <div className="flex rounded-lg overflow-hidden border border-gray-700">
-          <button
-            onClick={() => setView('wo')}
-            className={`px-4 py-2 text-sm font-medium transition-colors ${view === 'wo' ? 'bg-skynet-accent text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
-          >
-            Work Order
-          </button>
-          <button
-            onClick={() => setView('lot')}
-            className={`px-4 py-2 text-sm font-medium transition-colors ${view === 'lot' ? 'bg-skynet-accent text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
-          >
-            Lot Search
-          </button>
+        <div className="flex items-center gap-2">
+          {canWrite && (
+            <button
+              onClick={() => setShowSignature(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm text-gray-200"
+              title="Upload or replace your certification signature & stamp"
+            >
+              <FileSignature size={16} /> My Signature
+            </button>
+          )}
+          <div className="flex rounded-lg overflow-hidden border border-gray-700">
+            <button
+              onClick={() => setView('wo')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${view === 'wo' ? 'bg-skynet-accent text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
+            >
+              Work Order
+            </button>
+            <button
+              onClick={() => setView('lot')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${view === 'lot' ? 'bg-skynet-accent text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
+            >
+              Lot Search
+            </button>
+          </div>
         </div>
       </div>
+
+      {showSignature && <SignatureModal profile={profile} onClose={() => setShowSignature(false)} />}
 
       {view === 'wo'
         ? <WorkOrderView canWrite={canWrite} profile={profile} />
@@ -205,6 +232,11 @@ function TraceabilityReport({ trace, canWrite, profile, onChanged }) {
   const statusByPart = {}
   certStatus.components.forEach((r) => { statusByPart[r.part_id] = r.status })
 
+  const [showBuild, setShowBuild] = useState(false)
+  const [draftPkg, setDraftPkg] = useState(null) // package row being edited/created
+  const [pkgRefresh, setPkgRefresh] = useState(0)
+  const bumpPkgs = () => setPkgRefresh((n) => n + 1)
+
   return (
     <div className="space-y-6">
       {/* Header block */}
@@ -215,6 +247,14 @@ function TraceabilityReport({ trace, canWrite, profile, onChanged }) {
               <span className="text-xl font-bold text-white font-mono">{header.wo_number}</span>
               <StatusPill status={header.status} />
               <CertPackagePill certStatus={certStatus} />
+              {canWrite && (
+                <button
+                  onClick={() => setShowBuild(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 bg-skynet-accent hover:bg-skynet-accent/80 rounded text-xs font-medium text-white"
+                >
+                  <FilePlus size={13} /> Build Cert Package
+                </button>
+              )}
             </div>
             {header.part && (
               <div className="mt-1 text-gray-300">
@@ -302,6 +342,35 @@ function TraceabilityReport({ trace, canWrite, profile, onChanged }) {
           ))}
         </div>
       </div>
+
+      {/* Cert Packages — permanent per-job package log */}
+      <CertPackagesSection
+        workOrderId={header.id}
+        canWrite={canWrite}
+        profile={profile}
+        refreshKey={pkgRefresh}
+        onEditDraft={setDraftPkg}
+        onRegenerate={setDraftPkg}
+      />
+
+      {showBuild && (
+        <BuildPackageModal
+          trace={trace}
+          statusByPart={statusByPart}
+          profile={profile}
+          onClose={() => setShowBuild(false)}
+          onBuilt={(pkg) => { setShowBuild(false); bumpPkgs(); if (pkg) setDraftPkg(pkg) }}
+        />
+      )}
+      {draftPkg && (
+        <DraftFormModal
+          pkg={draftPkg}
+          profile={profile}
+          onClose={() => setDraftPkg(null)}
+          onSaved={() => { bumpPkgs() }}
+          onApproved={() => { setDraftPkg(null); bumpPkgs() }}
+        />
+      )}
     </div>
   )
 }
@@ -1212,6 +1281,602 @@ function LotHitCard({ hit, onJumpWO }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===========================================================================
+// CERT PACKAGE — Phase 2 (build / sign / log)
+// ===========================================================================
+
+// Collect the distinct jobs (native + linked) across the traceability payload,
+// each tagged with its component's docs-ready status.
+function jobsFromTrace(trace, statusByPart) {
+  const seen = new Set()
+  const jobs = []
+  for (const c of trace.components || []) {
+    for (const s of c.sources || []) {
+      if (s.kind !== 'job' || seen.has(s.job_id)) continue
+      seen.add(s.job_id)
+      jobs.push({
+        job_id: s.job_id,
+        job_number: s.job_number,
+        fln: (s.fln || []).join(', '),
+        pln: (s.pln || []).join(', '),
+        machine_code: s.machine_code,
+        qty: s.qty,
+        native: s.native,
+        linked_from_wo: s.linked_from_wo,
+        component_part_number: c.part_number,
+        status: statusByPart[c.part_id],
+      })
+    }
+  }
+  return jobs
+}
+
+const modalShell = 'fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4'
+const modalCard = 'bg-gray-900 rounded-xl border border-gray-700 w-full max-w-3xl max-h-[88vh] overflow-hidden flex flex-col'
+
+// ---------------------------------------------------------------------------
+// My Signature settings
+// ---------------------------------------------------------------------------
+function SignatureModal({ profile, onClose }) {
+  const [sig, setSig] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [title, setTitle] = useState('')
+  const [sigFile, setSigFile] = useState(null)
+  const [stampFile, setStampFile] = useState(null)
+  const [sigPreview, setSigPreview] = useState(null)
+  const [stampPreview, setStampPreview] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    (async () => {
+      const s = await getMySignature(profile?.id)
+      setSig(s)
+      setTitle(s?.title || '')
+      if (s?.signature_image_path) setSigPreview(await getDocumentUrl(s.signature_image_path))
+      if (s?.stamp_image_path) setStampPreview(await getDocumentUrl(s.stamp_image_path))
+      setLoading(false)
+    })()
+  }, [profile?.id])
+
+  const save = async () => {
+    setSaving(true); setError('')
+    try {
+      const { error } = await saveMySignature(profile?.id, { signatureFile: sigFile, stampFile, title })
+      if (error) throw error
+      onClose()
+    } catch (err) {
+      setError('Save failed: ' + (err.message || err))
+      setSaving(false)
+    }
+  }
+
+  const input = 'w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-skynet-accent'
+
+  return (
+    <div className={modalShell} onClick={onClose}>
+      <div className={modalCard + ' max-w-lg'} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2"><FileSignature size={18} /> My Signature</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
+        </div>
+        <div className="p-5 overflow-y-auto space-y-4">
+          {loading ? (
+            <div className="flex items-center justify-center py-8 text-gray-500"><Loader2 size={20} className="animate-spin" /></div>
+          ) : (
+            <>
+              <p className="text-xs text-gray-500">Your signature and stamp are applied to cert packages you approve under your own login. Only you can edit your signature.</p>
+              {error && <div className="text-xs text-red-300 bg-red-900/20 border border-red-800/50 rounded p-2">{error}</div>}
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-gray-500">Title (rendered under signature)</label>
+                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Quality Manager" className={input} />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-gray-500">Signature PNG</label>
+                  {sigPreview && <img src={sigPreview} alt="signature" className="mt-1 mb-1 h-12 bg-white rounded p-1 object-contain" />}
+                  <input type="file" accept="image/png,image/jpeg" onChange={(e) => setSigFile(e.target.files?.[0] || null)} className="text-xs text-gray-400 file:mr-2 file:px-2 file:py-1 file:bg-gray-700 file:text-white file:border-0 file:rounded file:cursor-pointer" />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-gray-500">Stamp PNG (optional)</label>
+                  {stampPreview && <img src={stampPreview} alt="stamp" className="mt-1 mb-1 h-12 bg-white rounded p-1 object-contain" />}
+                  <input type="file" accept="image/png,image/jpeg" onChange={(e) => setStampFile(e.target.files?.[0] || null)} className="text-xs text-gray-400 file:mr-2 file:px-2 file:py-1 file:bg-gray-700 file:text-white file:border-0 file:rounded file:cursor-pointer" />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-gray-700">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Cancel</button>
+          <button onClick={save} disabled={saving || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white text-sm rounded">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Build Cert Package — job picker → draft(s)
+// ---------------------------------------------------------------------------
+function BuildPackageModal({ trace, statusByPart, profile, onClose, onBuilt }) {
+  const jobs = jobsFromTrace(trace, statusByPart)
+  const [sel, setSel] = useState(jobs[0]?.job_id || 'all')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const workOrderId = trace.header.id
+  const selectedJob = jobs.find((j) => j.job_id === sel)
+  const notReady = selectedJob && selectedJob.status !== 'ready'
+
+  const createOne = async (jobId) => {
+    const ds = await buildPackageDataset(workOrderId, jobId)
+    if (!ds) throw new Error('Could not assemble package data for a job.')
+    const { data, error } = await createDraftPackage({
+      workOrderId,
+      jobId,
+      partId: ds.partId,
+      finishingLotNumber: ds.finishingLotNumber,
+      formData: ds.entryDefaults,
+    }, profile?.id)
+    if (error) throw error
+    return data
+  }
+
+  const build = async () => {
+    setBusy(true); setError('')
+    try {
+      if (sel === 'all') {
+        for (const j of jobs) await createOne(j.job_id)
+        onBuilt(null)
+      } else {
+        const pkg = await createOne(sel)
+        onBuilt(pkg)
+      }
+    } catch (err) {
+      setError('Build failed: ' + (err.message || err))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={modalShell} onClick={onClose}>
+      <div className={modalCard} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2"><FilePlus size={18} /> Build Cert Package — {trace.header.wo_number}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
+        </div>
+        <div className="p-5 overflow-y-auto space-y-3">
+          {error && <div className="text-xs text-red-300 bg-red-900/20 border border-red-800/50 rounded p-2">{error}</div>}
+          {jobs.length === 0 ? (
+            <div className="text-sm text-gray-500">No jobs found on this work order.</div>
+          ) : (
+            <>
+              <p className="text-xs text-gray-500">Cert packages are built per job (one FLN per job). Pick a job, or build one package for every job on this WO.</p>
+              <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${sel === 'all' ? 'border-skynet-accent bg-skynet-accent/10' : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'}`}>
+                <input type="radio" name="jobsel" checked={sel === 'all'} onChange={() => setSel('all')} />
+                <span className="text-white text-sm font-medium">All Jobs</span>
+                <span className="text-gray-500 text-xs">creates one draft per job ({jobs.length})</span>
+              </label>
+              {jobs.map((j) => (
+                <label key={j.job_id} className={`flex items-center justify-between gap-3 p-3 rounded-lg border cursor-pointer ${sel === j.job_id ? 'border-skynet-accent bg-skynet-accent/10' : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'}`}>
+                  <div className="flex items-center gap-3">
+                    <input type="radio" name="jobsel" checked={sel === j.job_id} onChange={() => setSel(j.job_id)} />
+                    <div>
+                      <div className="text-sm text-white font-mono flex items-center gap-2">
+                        {j.job_number}
+                        {!j.native && j.linked_from_wo && <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px]">from {j.linked_from_wo}</span>}
+                      </div>
+                      <div className="text-xs text-gray-500 flex flex-wrap gap-x-3">
+                        <span>{j.component_part_number}</span>
+                        {j.fln && <span className="text-emerald-300">FLN {j.fln}</span>}
+                        {j.pln && <span className="text-cyan-300">PLN {j.pln}</span>}
+                        {j.machine_code && <span>{j.machine_code}</span>}
+                        <span>good {j.qty ?? '—'}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <StatusDot status={j.status} />
+                </label>
+              ))}
+              {notReady && (
+                <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-900/20 border border-amber-800/40 rounded p-2">
+                  <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                  This job's component isn't fully documented yet. You can still build the package, but review the traceability gaps first.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-gray-700">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Cancel</button>
+          <button onClick={build} disabled={busy || jobs.length === 0} className="inline-flex items-center gap-1.5 px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white text-sm rounded">
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <FilePlus size={14} />} {sel === 'all' ? 'Create Drafts' : 'Create Draft'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Draft form — three groups (From SkyNet / Part Profile / This Package)
+// ---------------------------------------------------------------------------
+const PROFILE_LABELS = {
+  tso_c148: 'TSO-C148',
+  conflict_minerals: 'Conflict Minerals',
+  rohs_compliant: 'RoHS Compliant',
+  dfars_compliant: 'DFARS Compliant',
+  camloc_equivalent: 'Camloc Equivalent',
+  monadnock_equivalent: 'Monadnock Equivalent',
+  nadcap_plating: 'NADCAP Plating',
+  nadcap_heat_treat: 'NADCAP Heat Treat',
+  primer: 'Primer',
+  assy_country_of_origin: 'Assy Country of Origin',
+  notes: 'Notes',
+}
+
+function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
+  const [ds, setDs] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [form, setForm] = useState({})
+  const [prof, setProf] = useState({})
+  const [origins, setOrigins] = useState({})
+  const [savingDraft, setSavingDraft] = useState(false)
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [approving, setApproving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [showSig, setShowSig] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    const dataset = await buildPackageDataset(pkg.work_order_id, pkg.job_id)
+    setDs(dataset)
+    setForm({ ...(dataset?.entryDefaults || {}), ...(pkg.form_data || {}) })
+    const p = dataset?.profileFields || {}
+    setProf(p)
+    setOrigins(p.component_origins || {})
+    setLoading(false)
+  }, [pkg])
+
+  useEffect(() => { load() }, [load])
+
+  const setF = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+  const setP = (k, v) => setProf((p) => ({ ...p, [k]: v }))
+  const setMatOverride = (partNo, v) => setForm((f) => ({ ...f, material_lot_overrides: { ...(f.material_lot_overrides || {}), [partNo]: v } }))
+
+  const saveProfileNow = async () => {
+    setSavingProfile(true); setError(''); setNotice('')
+    try {
+      const { error } = await savePartCertProfile(ds.partId, { ...prof, component_origins: origins }, profile?.id)
+      if (error) throw error
+      setNotice('Part profile saved — applies to all future packages for this part.')
+    } catch (err) {
+      setError('Profile save failed: ' + (err.message || err))
+    } finally {
+      setSavingProfile(false)
+    }
+  }
+
+  const saveDraftNow = async (silent = false) => {
+    if (!silent) setSavingDraft(true)
+    setError('')
+    const { error } = await updateDraftPackage(pkg.id, form)
+    if (!silent) setSavingDraft(false)
+    if (error) { setError('Draft save failed: ' + error.message); return false }
+    if (!silent) { setNotice('Draft saved.'); onSaved?.() }
+    return true
+  }
+
+  const approve = async () => {
+    setApproving(true); setError(''); setNotice('')
+    try {
+      // Persist the current profile + form so the frozen snapshot reflects them.
+      await savePartCertProfile(ds.partId, { ...prof, component_origins: origins }, profile?.id)
+      const ok = await saveDraftNow(true)
+      if (!ok) { setApproving(false); return }
+      const { data, error } = await approveAndGenerate(pkg.id, profile)
+      if (error) throw error
+      onApproved?.(data)
+    } catch (err) {
+      setError(err.message || String(err))
+      setApproving(false)
+    }
+  }
+
+  const a = ds?.autoFields || {}
+  const input = 'w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-skynet-accent'
+  const roLabel = 'text-[10px] uppercase tracking-wide text-gray-500'
+  const RO = ({ label, value }) => (
+    <div><div className={roLabel}>{label}</div><div className="text-sm text-gray-200">{value ?? '—'}</div></div>
+  )
+
+  const missingSig = error && /signature/i.test(error)
+
+  return (
+    <div className={modalShell} onClick={onClose}>
+      <div className={modalCard + ' max-w-4xl'} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <FileText size={18} /> Cert Package Draft
+            <span className="text-skynet-accent font-mono text-sm">{pkg.package_number}</span>
+          </h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
+        </div>
+
+        <div className="p-5 overflow-y-auto space-y-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-gray-500"><Loader2 size={22} className="animate-spin" /></div>
+          ) : (
+            <>
+              {error && (
+                <div className="text-xs text-red-300 bg-red-900/20 border border-red-800/50 rounded p-2 flex items-center justify-between gap-2">
+                  <span>{error}</span>
+                  {missingSig && <button onClick={() => setShowSig(true)} className="shrink-0 px-2 py-1 bg-gray-800 rounded text-white hover:bg-gray-700">Set up signature</button>}
+                </div>
+              )}
+              {notice && <div className="text-xs text-skynet-green bg-skynet-green/10 border border-skynet-green/30 rounded p-2">{notice}</div>}
+
+              {/* GROUP 1 — From SkyNet (read-only) */}
+              <section className="border border-gray-800 rounded-lg">
+                <div className="px-4 py-2 bg-gray-800/60 text-xs uppercase tracking-wide text-gray-400 font-semibold">From SkyNet (read-only)</div>
+                <div className="p-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <RO label="Customer" value={a.customer} />
+                  <RO label="PO Number" value={a.po_number} />
+                  <RO label="Part #" value={a.part_number} />
+                  <RO label="Drawing Rev" value={a.drawing_revision} />
+                  <RO label="Job #" value={a.job_number} />
+                  <RO label="Machine" value={a.machine_code} />
+                  <RO label="FLN" value={a.finishing_lot_number} />
+                  <RO label="PLN" value={a.production_lot_number} />
+                  <RO label="Good Qty" value={a.good_qty} />
+                </div>
+                {a.components?.length > 0 && (
+                  <div className="px-4 pb-4">
+                    <div className={roLabel + ' mb-1'}>Components</div>
+                    <div className="overflow-x-auto border border-gray-800 rounded">
+                      <table className="w-full text-xs min-w-[560px]">
+                        <thead><tr className="bg-gray-800/60 text-gray-400">
+                          <th className="text-left px-2 py-1">Part</th>
+                          <th className="text-left px-2 py-1">Final Lot</th>
+                          <th className="text-left px-2 py-1">Prod Lot</th>
+                          <th className="text-left px-2 py-1">Material Lot</th>
+                        </tr></thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {a.components.map((c) => (
+                            <tr key={c.part_id} className="text-gray-300">
+                              <td className="px-2 py-1 font-mono">{c.part_number}</td>
+                              <td className="px-2 py-1">{(c.final_lots || []).join(', ') || '—'}</td>
+                              <td className="px-2 py-1">{(c.production_lots || []).join(', ') || '—'}</td>
+                              <td className="px-2 py-1">{(c.material_lots || []).join(', ') || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* GROUP 2 — Part Profile (editable, reused) */}
+              <section className="border border-sky-900/50 rounded-lg">
+                <div className="px-4 py-2 bg-sky-900/20 text-xs uppercase tracking-wide text-sky-300 font-semibold flex items-center justify-between">
+                  <span>Part Profile — applies to all future packages for this part</span>
+                  <button onClick={saveProfileNow} disabled={savingProfile} className="inline-flex items-center gap-1 px-2 py-1 bg-sky-800/50 hover:bg-sky-700/50 rounded text-sky-100 normal-case">
+                    {savingProfile ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save Profile
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <div className="flex flex-wrap gap-4">
+                    {PROFILE_BOOLEAN_FIELDS.map((f) => (
+                      <label key={f} className="flex items-center gap-2 text-sm text-gray-200">
+                        <input type="checkbox" checked={!!prof[f]} onChange={(e) => setP(f, e.target.checked)} />
+                        {PROFILE_LABELS[f]}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {PROFILE_TEXT_FIELDS.filter((f) => f !== 'notes').map((f) => (
+                      <div key={f}>
+                        <label className={roLabel}>{PROFILE_LABELS[f]}</label>
+                        <input value={prof[f] || ''} onChange={(e) => setP(f, e.target.value)} className={input} />
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <label className={roLabel}>Notes</label>
+                    <input value={prof.notes || ''} onChange={(e) => setP('notes', e.target.value)} className={input} />
+                  </div>
+                  {a.components?.length > 0 && (
+                    <div>
+                      <label className={roLabel + ' block mb-1'}>Component Country of Origin</label>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {a.components.map((c) => (
+                          <div key={c.part_id} className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400 font-mono w-24 truncate" title={c.part_number}>{c.part_number}</span>
+                            <input value={origins[c.part_number] || ''} onChange={(e) => setOrigins((o) => ({ ...o, [c.part_number]: e.target.value }))} placeholder="country" className={input + ' py-1'} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* GROUP 3 — This Package (editable, per package) */}
+              <section className="border border-amber-900/40 rounded-lg">
+                <div className="px-4 py-2 bg-amber-900/20 text-xs uppercase tracking-wide text-amber-300 font-semibold">This Package</div>
+                <div className="p-4 space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div><label className={roLabel}>Qty Shipped</label><input value={form.quantity_shipped ?? ''} onChange={(e) => setF('quantity_shipped', e.target.value)} className={input} /></div>
+                    <div><label className={roLabel}>Lot Number</label><input value={form.lot_number ?? ''} onChange={(e) => setF('lot_number', e.target.value)} className={input} /></div>
+                    <div className="col-span-2"><label className={roLabel}>Cert Package Emailed To</label><input value={form.emailed_to ?? ''} onChange={(e) => setF('emailed_to', e.target.value)} className={input} /></div>
+                  </div>
+                  <div>
+                    <div className={roLabel + ' mb-1'}>Lot Assembly Test</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div><label className={roLabel}>Date</label><input type="date" value={form.test_date ?? ''} onChange={(e) => setF('test_date', e.target.value)} className={input} /></div>
+                      <div><label className={roLabel}>Performance</label><input value={form.test_performance ?? ''} onChange={(e) => setF('test_performance', e.target.value)} className={input} /></div>
+                      <div><label className={roLabel}>Inspector</label><input value={form.test_inspector ?? ''} onChange={(e) => setF('test_inspector', e.target.value)} className={input} /></div>
+                      <div><label className={roLabel}>Calibration Due</label><input type="date" value={form.test_calibration_due ?? ''} onChange={(e) => setF('test_calibration_due', e.target.value)} className={input} /></div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className={roLabel + ' mb-1'}>Quality Control Release</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div><label className={roLabel}>Date</label><input type="date" value={form.qc_date ?? ''} onChange={(e) => setF('qc_date', e.target.value)} className={input} /></div>
+                      <div><label className={roLabel}>Quantity</label><input value={form.qc_quantity ?? ''} onChange={(e) => setF('qc_quantity', e.target.value)} className={input} /></div>
+                      <div><label className={roLabel}>Inspector</label><input value={form.qc_inspector ?? ''} onChange={(e) => setF('qc_inspector', e.target.value)} className={input} /></div>
+                    </div>
+                  </div>
+                  {a.components?.length > 0 && (
+                    <div>
+                      <div className={roLabel + ' mb-1'}>Material Lot Overrides</div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {a.components.map((c) => (
+                          <div key={c.part_id} className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400 font-mono w-24 truncate" title={c.part_number}>{c.part_number}</span>
+                            <input
+                              value={form.material_lot_overrides?.[c.part_number] ?? ''}
+                              onChange={(e) => setMatOverride(c.part_number, e.target.value)}
+                              className={input + ' py-1'}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-gray-700">
+          <span className="text-xs text-gray-500">Approve & Sign applies your stored signature and locks this package.</span>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Close</button>
+            <button onClick={() => saveDraftNow(false)} disabled={savingDraft || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm rounded">
+              {savingDraft ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save Draft
+            </button>
+            <button onClick={approve} disabled={approving || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-skynet-green hover:bg-skynet-green/80 disabled:opacity-50 text-white text-sm rounded">
+              {approving ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />} Approve & Sign
+            </button>
+          </div>
+        </div>
+      </div>
+      {showSig && <SignatureModal profile={profile} onClose={() => setShowSig(false)} />}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Cert Packages log (below Documents)
+// ---------------------------------------------------------------------------
+function CertPackagesSection({ workOrderId, canWrite, profile, refreshKey, onEditDraft, onRegenerate }) {
+  const [pkgs, setPkgs] = useState(null)
+  const [busyId, setBusyId] = useState(null)
+
+  const load = useCallback(async () => {
+    setPkgs(await listPackages(workOrderId))
+  }, [workOrderId])
+
+  useEffect(() => { load() }, [load, refreshKey])
+
+  const download = async (pkg) => {
+    if (!pkg.file_path) { alert('No file on this package.'); return }
+    await openDoc(pkg.file_path)
+  }
+
+  const remove = async (pkg) => {
+    if (!confirm(`Delete draft ${pkg.package_number}?`)) return
+    setBusyId(pkg.id)
+    const { error } = await deleteDraftPackage(pkg.id)
+    setBusyId(null)
+    if (error) { alert('Delete failed: ' + error.message); return }
+    load()
+  }
+
+  const regenerate = async (pkg) => {
+    setBusyId(pkg.id)
+    try {
+      const { data, error } = await createDraftPackage({
+        workOrderId: pkg.work_order_id,
+        jobId: pkg.job_id,
+        partId: pkg.part_id,
+        finishingLotNumber: pkg.finishing_lot_number,
+        formData: pkg.snapshot?.formData || pkg.form_data || {},
+      }, profile?.id)
+      if (error) throw error
+      onRegenerate(data)
+    } catch (err) {
+      alert('Regenerate failed: ' + (err.message || err))
+    } finally {
+      setBusyId(null)
+      load()
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide mb-2">Cert Packages</h2>
+      {pkgs === null ? (
+        <div className="flex items-center gap-2 text-gray-500 text-sm py-4"><Loader2 size={16} className="animate-spin" /> Loading packages…</div>
+      ) : pkgs.length === 0 ? (
+        <div className="text-sm text-gray-600 border border-gray-800 rounded-lg p-4">No cert packages built for this work order yet.</div>
+      ) : (
+        <div className="border border-gray-800 rounded-lg divide-y divide-gray-800 overflow-hidden">
+          {pkgs.map((pkg) => {
+            const approved = pkg.status === 'approved'
+            return (
+              <div key={pkg.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-white text-sm font-semibold">{pkg.package_number}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${approved ? 'bg-skynet-green/20 text-skynet-green' : 'bg-amber-500/20 text-amber-300'}`}>{approved ? 'Approved' : 'Draft'}</span>
+                    {pkg.finishing_lot_number && <span className="text-xs text-emerald-300">FLN {pkg.finishing_lot_number}</span>}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5 flex flex-wrap gap-x-3">
+                    <span>Created {fmtDate(pkg.created_at)}{pkg.created_by_name ? ` · ${pkg.created_by_name}` : ''}</span>
+                    {approved && <span>Approved {fmtDate(pkg.approved_at)}{pkg.approved_by_name ? ` · ${pkg.approved_by_name}` : ''}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {approved ? (
+                    <>
+                      <button onClick={() => download(pkg)} className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-200">
+                        <Download size={13} /> Download
+                      </button>
+                      {canWrite && (
+                        <button onClick={() => regenerate(pkg)} disabled={busyId === pkg.id} className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-200">
+                          {busyId === pkg.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Regenerate
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    canWrite && (
+                      <>
+                        <button onClick={() => onEditDraft(pkg)} className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-200">
+                          <Pencil size={13} /> Edit
+                        </button>
+                        <button onClick={() => remove(pkg)} disabled={busyId === pkg.id} className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-400 hover:text-red-400">
+                          {busyId === pkg.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
+                        </button>
+                      </>
+                    )
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

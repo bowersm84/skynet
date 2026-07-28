@@ -2071,3 +2071,23 @@ part_machine_durations backfill [pending / applied].
 - **Groups that run short open expanded**; the rest start collapsed. Expansion state lives in the table component so a refresh doesn't collapse what the user opened.
 - **Blank net indicator is series+dash only.** Material (Steel vs Stainless) is not inferable from the part suffix/description, so demand is summed per (series, dash) via the prefix map {SK26:2600, SK27:2700, SK4C:4000, SK40:4000, ZG40:4000} and rendered as a "Needed N" chip on every on-hand row whose `stud_length` matches the dash — i.e. on both material rows of that length, with a footnote saying so. The chip tints red when that single row's `pieces_on_hand` is below the combined need. Demand with a NULL `blank_dash` or no prefix match drops to an "Unmapped demand" table at the bottom of the section with the reason stated per row.
 - **Untouched:** the RPCs, the reconciliation UI, and all receiving flows. `npm run build` green.
+
+### D-RMF-03 — Machine assignments on forecast drill-downs (2026-07-28)
+**What:** forecast_rm_bar_parts and forecast_blank_demand return a machines
+column (STRING_AGG DISTINCT of assigned machine names per part/week bucket,
+"Unassigned" for pre-schedule jobs; functions dropped/recreated since return
+signatures changed, grants re-applied). Rendered as a Machines column in both
+drill-down tables.
+**Why:** Purchasing/scheduling wanted to see where forecast demand lands on
+the floor; parts can split across machines within a week.
+**Files:** src/components/rmforecast/*.
+
+**Implementation notes (UI side):** One shared `MachinesCell` component backs both
+tables so the token treatment can't drift. It splits the string on commas and mutes
+any `Unassigned` token (gray-500) against normal machine names (gray-300), so a row
+that is partly unplanned reads at a glance without a second column. The cell is a
+`block truncate max-w-[14rem]` with `title` carrying the full list, keeping both
+drill-downs at their existing width when a bucket spans several machines. An empty
+or null `machines` value renders an em dash rather than an empty cell. The unmapped-
+demand table is deliberately left alone — it exists to explain a mapping failure, not
+to plan floor work.

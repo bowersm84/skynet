@@ -1,4 +1,5 @@
 import { Info } from 'lucide-react'
+import MachinesCell from './MachinesCell'
 import {
   buildBlankNeed,
   neededFor,
@@ -46,6 +47,7 @@ export default function BlanksSection({ demand, onhand }) {
                   <tr>
                     <th className="px-3 py-2 text-left">Part Number</th>
                     <th className="px-3 py-2 text-left">Dash</th>
+                    <th className="px-3 py-2 text-left">Machines</th>
                     <th className="px-3 py-2 text-left">Week</th>
                     <th className="px-3 py-2 text-right">Jobs</th>
                     <th className="px-3 py-2 text-right">Pieces</th>
@@ -56,6 +58,7 @@ export default function BlanksSection({ demand, onhand }) {
                     <tr key={`${r.part_number}-${r.blank_dash ?? 'na'}-${weekKey(r)}-${i}`} className="hover:bg-gray-800/40">
                       <td className="px-3 py-2 font-mono text-white">{r.part_number}</td>
                       <td className="px-3 py-2 text-gray-300">{r.blank_dash ?? '—'}</td>
+                      <td className="px-3 py-2"><MachinesCell machines={r.machines} /></td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <span className={r.is_unscheduled ? 'text-gray-400 italic' : 'text-gray-300'}>{formatWeek(r)}</span>
                       </td>

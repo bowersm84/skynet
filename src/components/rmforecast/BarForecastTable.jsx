@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, AlertTriangle, Package } from 'lucide-react'
+import MachinesCell from './MachinesCell'
 import {
   buildBarGroups,
   indexBarParts,
@@ -173,6 +174,7 @@ export default function BarForecastTable({ bars, barParts }) {
                                   <thead className="bg-gray-900 text-gray-500 uppercase">
                                     <tr>
                                       <th className="px-3 py-2 text-left">Part Number</th>
+                                      <th className="px-3 py-2 text-left">Machines</th>
                                       <th className="px-3 py-2 text-right">Pieces</th>
                                       <th className="px-3 py-2 text-right">Bars Needed</th>
                                       <th className="px-3 py-2 text-left">Basis</th>
@@ -182,6 +184,7 @@ export default function BarForecastTable({ bars, barParts }) {
                                     {parts.map((p, i) => (
                                       <tr key={`${p.part_number}-${i}`} className="hover:bg-gray-800/40">
                                         <td className="px-3 py-2 font-mono text-white">{p.part_number}</td>
+                                        <td className="px-3 py-2"><MachinesCell machines={p.machines} /></td>
                                         <td className="px-3 py-2 text-right text-gray-300">{fmtInt(p.pieces)}</td>
                                         <td className="px-3 py-2 text-right">
                                           {isFullyStaged(p)

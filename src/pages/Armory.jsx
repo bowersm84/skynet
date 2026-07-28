@@ -30,9 +30,11 @@ import {
   Power,
   PowerOff,
   Paperclip,
-  ExternalLink
+  ExternalLink,
+  TrendingUp
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
+import RMForecastSection from '../components/rmforecast/RMForecastSection'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
@@ -45,15 +47,16 @@ export default function Armory({ profile }) {
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment', 'customers', 'users'],
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users'],
     compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
     finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
     machinist:        ['inventory', 'adjustments', 'reconciliation'],
-    scheduler:        ['customers'],
+    // 'customers' stays first so the scheduler's default Armory tab is unchanged.
+    scheduler:        ['customers', 'rmforecast'],
     customer_service: ['customers'],
     president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
     viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
-    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
+    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment'],
   }
   const visibleTabIds = [...new Set(userRoles(profile).flatMap(r => TAB_ACCESS_BY_ROLE[r] || []))]
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -2177,7 +2180,7 @@ export default function Armory({ profile }) {
           <div className="flex gap-1">
             {(() => {
               // Round B will add 'replenishment' to this group — single-line change.
-              const RAW_MATERIALS_TAB_IDS = ['materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment']
+              const RAW_MATERIALS_TAB_IDS = ['materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment']
               const allTabs = [
                 { id: 'assemblies', label: 'Products', icon: Package, count: parts.filter(p => (p.part_type === 'assembly' || p.part_type === 'finished_good') && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
                 { id: 'components', label: 'Parts', icon: Wrench, count: parts.filter(p => p.part_type !== 'assembly' && p.part_type !== 'finished_good' && (activeFilter === 'all' || (activeFilter === 'active' ? p.is_active : !p.is_active))).length },
@@ -2188,6 +2191,7 @@ export default function Armory({ profile }) {
                 { id: 'inventory', label: 'Inventory', icon: BarChart2, count: inventoryRows.filter(r => !r.rack).length || null },
                 { id: 'adjustments', label: 'Adjustments', icon: ClipboardCheck, count: pendingAdjCount || null },
                 { id: 'reconciliation', label: 'Reconciliation', icon: AlertTriangle, count: openFlagCount || null },
+                { id: 'rmforecast', label: 'RM Forecast', icon: TrendingUp, count: null },
                 { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
                 { id: 'replenishment', label: 'Replenishment Rules', icon: Bell, count: belowMinCount || null },
                 { id: 'customers', label: 'Customers', icon: Users, count: null },
@@ -3554,6 +3558,17 @@ export default function Armory({ profile }) {
               )
             })()}
           </div>
+        )}
+
+        {/* RM Forecast Tab (D-RMF-01) — sits beside Reconciliation in the Raw
+            Materials group. Role-gated to admin/scheduler/purchaser, matching the
+            forecast RPCs; the section hides itself for anyone else. */}
+        {activeTab === 'rmforecast' && (
+          <RMForecastSection
+            profile={profile}
+            materialTypes={materialTypes}
+            barSizes={barSizes}
+          />
         )}
 
         {/* Receiving Tab */}

@@ -33,6 +33,9 @@ export async function getWOFulfillmentSummary(workOrderId) {
     const remaining = (col.quantity_ordered || 0) - (col.quantity_fulfilled || 0)
     return {
       allocation_id: a.id,
+      // The CO line behind this allocation — needed by the fulfillment-adjust
+      // control, which acts on the line, not the allocation.
+      line_id: col.id,
       customer_name: col.customer_order?.customer?.name,
       po_number: col.customer_order?.po_number,
       line_number: col.line_number,

@@ -23,7 +23,8 @@ import {
   getAllocationsForLine,
 } from '../lib/customerOrders'
 import { loadActiveSalespeople } from '../lib/salespeople'
-import { isReadOnlyRole } from '../lib/roles'
+import { isReadOnlyRole, hasRole } from '../lib/roles'
+import FulfillmentAdjustModal from '../components/FulfillmentAdjustModal'
 
 const STATUS_FILTERS = [
   { value: 'all', label: 'All' },
@@ -35,10 +36,22 @@ const STATUS_FILTERS = [
 
 const CAN_EDIT_ROLES = ['admin', 'scheduler', 'customer_service']
 
-export default function CustomerOrders({ profile, onNavigate, embedded = false, onNavigateToWO = null }) {
+export default function CustomerOrders({
+  profile,
+  onNavigate,
+  embedded = false,
+  onNavigateToWO = null,
+  navPayload = null,
+  onNavPayloadConsumed = null,
+}) {
   const canEdit = CAN_EDIT_ROLES.includes(profile?.role) && !isReadOnlyRole(profile?.role)
+  // Manual fulfillment adjustment is a narrower grant than canEdit — it rewrites
+  // a recorded fulfillment number, so customer_service is excluded (D-COFUL-01).
+  const canAdjustFulfillment = hasRole(profile, 'admin', 'scheduler') && !isReadOnlyRole(profile?.role)
 
   const [coTab, setCoTab] = useState('orders') // 'orders' | 'demand' | 'my_orders'
+  const [adjustLine, setAdjustLine] = useState(null)
+  const [myOrdersSearch, setMyOrdersSearch] = useState('')
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('all')
@@ -89,6 +102,17 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
       })
     }
   }, [])
+
+  // Deep link in from the notifications bell: land on My Orders with the CO
+  // number pre-searched. Consume-once, same contract Mainframe uses (D-NAV-01).
+  useEffect(() => {
+    if (!navPayload?.myOrdersCO) return
+    if (profile?.is_salesperson === true) {
+      setCoTab('my_orders')
+      setMyOrdersSearch(navPayload.myOrdersCO)
+    }
+    onNavPayloadConsumed?.()
+  }, [navPayload, profile?.is_salesperson, onNavPayloadConsumed])
 
   const toggleLineAllocations = useCallback(async (line) => {
     if (expandedAllocLineId === line.id) {
@@ -411,7 +435,12 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
       {coTab === 'demand' ? (
         <DemandView profile={profile} setActionStatus={setActionStatus} />
       ) : coTab === 'my_orders' ? (
-        <MyOrdersTab profile={profile} onNavigateToWO={handleNavigateToWO} onNavigateToCO={handleNavigateToCO} />
+        <MyOrdersTab
+          profile={profile}
+          onNavigateToWO={handleNavigateToWO}
+          onNavigateToCO={handleNavigateToCO}
+          initialSearch={myOrdersSearch}
+        />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-3 mb-4">
@@ -508,6 +537,18 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
                     expanded={isExpanded}
                     onToggle={() => toggleExpand(co.id)}
                     canEdit={canEdit}
+                    canAdjustFulfillment={canAdjustFulfillment}
+                    onAdjustLineClick={(line) =>
+                      setAdjustLine({
+                        id: line.id,
+                        line_number: line.line_number,
+                        part_number: line.parts?.part_number || null,
+                        customer: co.customers?.name || null,
+                        quantity_ordered: line.quantity_ordered,
+                        quantity_fulfilled: line.quantity_fulfilled,
+                        status: line.status,
+                      })
+                    }
                     canCancelCO={canCancelCO}
                     onEditCOClick={() => setEditCoId(co.id)}
                     onCancelCOClick={() =>
@@ -646,6 +687,20 @@ export default function CustomerOrders({ profile, onNavigate, embedded = false, 
           }}
         />
       )}
+
+      <FulfillmentAdjustModal
+        isOpen={!!adjustLine}
+        line={adjustLine}
+        onClose={() => setAdjustLine(null)}
+        onSuccess={async (result) => {
+          setAdjustLine(null)
+          setActionStatus({
+            type: 'success',
+            message: `Fulfilled quantity adjusted ${result?.old ?? '?'} → ${result?.new ?? '?'}.`,
+          })
+          await loadOrders()
+        }}
+      />
     </div>
   )
 }
@@ -657,6 +712,8 @@ function CORow({
   expanded,
   onToggle,
   canEdit,
+  canAdjustFulfillment,
+  onAdjustLineClick,
   canCancelCO,
   onEditCOClick,
   onCancelCOClick,
@@ -822,8 +879,20 @@ function CORow({
                               </span>
                             </td>
                             <td className="px-2 py-2 text-right whitespace-nowrap">
+                              <div className="flex justify-end gap-1">
+                                {/* Adjust is deliberately NOT gated on canAct:
+                                    reopening a complete line is the whole point. */}
+                                {canAdjustFulfillment && l.status !== 'cancelled' && (
+                                  <button
+                                    onClick={() => onAdjustLineClick(l)}
+                                    className="p-1 text-skynet-accent hover:bg-blue-900/30 rounded"
+                                    title="Adjust fulfilled quantity"
+                                  >
+                                    <Pencil size={14} />
+                                  </button>
+                                )}
                               {canAct && (
-                                <div className="flex justify-end gap-1">
+                                <>
                                   <button
                                     onClick={() => onMarkLineCompleteClick(l)}
                                     className="p-1 text-green-400 hover:bg-green-900/30 rounded"
@@ -838,8 +907,9 @@ function CORow({
                                   >
                                     <Ban size={14} />
                                   </button>
-                                </div>
+                                </>
                               )}
+                              </div>
                             </td>
                           </tr>
                           {isAllocExpanded && (

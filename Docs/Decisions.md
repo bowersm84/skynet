@@ -2029,3 +2029,29 @@ it compiles somewhere real. The Phase 2 work proved the point: it imported
 `pdf-lib` and `xlsx`, but neither was ever added to `package.json` — the code
 could not have built for anyone. Both were added here (`pdf-lib` ^1.17.1,
 `xlsx` ^0.18.5) and the build went green.
+
+D-MACH-01 (2026-07-27) — Bolt Master 6 commissioned. machines.is_commissioned and
+kiosk_enabled flipped to true on PROD; row matches BM-1..5 on machine_type,
+location, and code/name conventions (code prefix BM drives Kiosk.jsx isBoltMaster;
+name prefix "Bolt Master" drives Schedule brand grouping and MaterialKiosk
+exclusion). No code change or deploy required — §5.3 lifecycle flag flip.
+part_machine_durations backfill [pending / applied].
+
+---
+
+### D-SHORT-06 — Plan-only shortfall cards get Resolve; MTO never plan-only (2026-07-28)
+**What:** Added Resolve (AllocationResolutionModal) to Stock Build Variance cards; isDemandRow now treats order_type='make_to_order' WOs as demand regardless of CO remaining; accordion auto-expands when non-empty; modal requeue path guarded for zero-allocation WOs.
+**Why:** WO-2605-0014 (MTO, assembly rejections) had its QL8C62-1 shortfall classified plan-only because all CO lines read fulfilled, hiding it in a collapsed section with Acknowledge as the only action — Re-queue was unreachable and had to be done in SQL.
+**Files:** src/components/WOLookupShortfalls.jsx, src/components/AllocationResolutionModal.jsx (if guards needed).
+
+### D-COFUL-01 — Manual CO line fulfillment adjustment (2026-07-28)
+**What:** adjust_co_line_fulfillment RPC + co_fulfillment_adjustments append-only event table; pencil control on WO Lookup CO Fulfillment and Customer Orders lines (admin/scheduler, reason required, bounds 0..ordered); line and parent CO status flip both directions; auto-fulfill unaffected (computes from live counters; idempotency via co_fulfillment_applied_at).
+**Why:** Assembly rejections on WO-2605-0014 occurred after fulfillment was recorded; every line read Satisfied with no UI path to reopen demand until the Shipping module exists. Adjustments are audited events, not silent edits, so Shipping can reconcile later.
+
+### D-NOTIF-01 — Generic user_notifications primitive + header bell (2026-07-28)
+**What:** user_notifications table (recipient-scoped RLS) + NotificationsBell in the app header with realtime unread badge; first producer is the fulfillment-adjust RPC notifying the CO salesperson; payload deep-links My Orders.
+**Why:** No general notification mechanism existed (Messages bell is schedule_change_requests, scheduler-scoped). Built as the durable primitive future modules (Shipping) will reuse.
+
+### D-JOB-14 — Editable quantity on unscheduled jobs (2026-07-28)
+**What:** Quantity pencil on WO Lookup job rows for pre-schedule, unassigned, non-maintenance jobs (admin/scheduler); audit-logged 'job_quantity_edited'.
+**Why:** RQ-53613719 was created with the recorded shortfall (630) but post-rejection demand was higher; only path to correct was SQL.

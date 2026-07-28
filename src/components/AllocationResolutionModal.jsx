@@ -247,6 +247,10 @@ export default function AllocationResolutionModal({
         }
 
         // WOA is still the structural anchor for work_order_assembly_id.
+        // Nothing in this path reads CO allocations, so re-queue works on a
+        // WO with zero allocation rows (plan-only / stock builds). The one
+        // hard dependency is the WOA row; fall back to the shorting job's own
+        // anchor before failing.
         const { data: woaRows, error: woaErr } = await supabase
           .from('work_order_assemblies')
           .select('id')
@@ -254,8 +258,8 @@ export default function AllocationResolutionModal({
           .order('created_at', { ascending: true })
           .limit(1)
         if (woaErr) throw woaErr
-        const woa = woaRows?.[0]
-        if (!woa) throw new Error('No work_order_assembly found for this WO.')
+        const workOrderAssemblyId = woaRows?.[0]?.id ?? job?.work_order_assembly_id ?? null
+        if (!workOrderAssemblyId) throw new Error('No work_order_assembly found for this WO.')
 
         const { data: woRow, error: woRowErr } = await supabase
           .from('work_orders')
@@ -271,7 +275,7 @@ export default function AllocationResolutionModal({
           .insert({
             job_number: newJobNumber,
             work_order_id: shortfall.work_order_id,
-            work_order_assembly_id: woa.id,
+            work_order_assembly_id: workOrderAssemblyId,
             component_id: componentId,
             quantity: qty,
             status: 'pending_compliance',

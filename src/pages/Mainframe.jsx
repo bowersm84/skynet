@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split, Archive } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split, Archive, Pencil } from 'lucide-react'
 import { getDocumentUrl, deleteDocument } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
@@ -25,11 +25,23 @@ import { isSplittable, canSplitJobs } from '../lib/jobs'
 import DocsDeferredBadge from '../components/DocsDeferredBadge'
 import CustomerDisplay from '../components/CustomerDisplay'
 import WOLookupShortfalls from '../components/WOLookupShortfalls'
-import { isReadOnlyRole } from '../lib/roles'
+import { isReadOnlyRole, hasRole } from '../lib/roles'
+import FulfillmentAdjustModal from '../components/FulfillmentAdjustModal'
 import { getEffectiveQty } from '../lib/effectiveQty'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false, navPayload = null, onNavPayloadConsumed = null }) {
   const canWrite = !isReadOnlyRole(profile?.role)
+  // Scheduler-grade edits in WO Lookup: manual CO fulfillment adjustment
+  // (D-COFUL-01) and unscheduled job quantity (D-JOB-14).
+  const canAdjustFulfillment = hasRole(profile, 'admin', 'scheduler') && canWrite
+  // CO line being adjusted, plus the WO it was opened from (so we can refresh
+  // just that WO's fulfillment cache on success).
+  const [adjustLineCtx, setAdjustLineCtx] = useState(null) // { line, woId }
+  // Unscheduled-job quantity edit (micro-modal).
+  const [qtyEditJob, setQtyEditJob] = useState(null)
+  const [qtyEditValue, setQtyEditValue] = useState('')
+  const [qtyEditSaving, setQtyEditSaving] = useState(false)
+  const [qtyEditError, setQtyEditError] = useState(null)
   const [machines, setMachines] = useState([])
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -528,6 +540,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
             job_number,
             status,
             quantity,
+            is_maintenance,
             production_lot_number,
             good_pieces,
             bad_pieces,
@@ -1182,6 +1195,72 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
     setWOFulfillmentCache(prev => ({ ...prev, [woId]: 'loading' }))
     const rows = await getWOFulfillmentSummary(woId)
     setWOFulfillmentCache(prev => ({ ...prev, [woId]: rows }))
+  }
+
+  // Force a re-read of one WO's fulfillment summary (ensureWOFulfillment
+  // short-circuits on anything already cached).
+  const refreshWOFulfillment = async (woId) => {
+    if (!woId) return
+    setWOFulfillmentCache(prev => ({ ...prev, [woId]: 'loading' }))
+    const rows = await getWOFulfillmentSummary(woId)
+    setWOFulfillmentCache(prev => ({ ...prev, [woId]: rows }))
+  }
+
+  // D-JOB-14 — quantity edit for a pre-schedule, unassigned, non-maintenance job.
+  const canEditJobQuantity = (job, wo) => {
+    if (!canAdjustFulfillment) return false
+    if (!['pending_compliance', 'ready'].includes(job?.status)) return false
+    if (job?.assigned_machine_id) return false
+    if (job?.is_maintenance || wo?.order_type === 'maintenance') return false
+    return true
+  }
+
+  const openQtyEdit = (job) => {
+    setQtyEditJob(job)
+    setQtyEditValue(String(job?.quantity ?? ''))
+    setQtyEditError(null)
+  }
+
+  const submitQtyEdit = async () => {
+    const job = qtyEditJob
+    if (!job) return
+    const next = Number(qtyEditValue)
+    if (!Number.isInteger(next) || next <= 0) {
+      setQtyEditError('Quantity must be a whole number greater than 0.')
+      return
+    }
+    if (next === job.quantity) {
+      setQtyEditError('Quantity is unchanged.')
+      return
+    }
+    setQtyEditSaving(true)
+    setQtyEditError(null)
+    try {
+      const { error: updErr } = await supabase
+        .from('jobs')
+        .update({ quantity: next, updated_at: new Date().toISOString() })
+        .eq('id', job.id)
+      if (updErr) throw updErr
+
+      try {
+        await supabase.from('audit_logs').insert({
+          event_type: 'job_quantity_edited',
+          job_id: job.id,
+          operator_id: profile?.id ?? null,
+          details: { job_id: job.id, old: job.quantity, new: next },
+        })
+      } catch (auditErr) {
+        console.error('Audit log write failed (non-blocking):', auditErr)
+      }
+
+      setQtyEditJob(null)
+      await fetchWOLookup()
+    } catch (err) {
+      console.error('Job quantity edit failed:', err)
+      setQtyEditError(err.message || 'Update failed')
+    } finally {
+      setQtyEditSaving(false)
+    }
   }
 
   const handleToggleWOExpand = (woId) => {
@@ -2756,6 +2835,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                           <th className="text-right font-medium py-1 pr-3">Fulfilled</th>
                                           <th className="text-right font-medium py-1 pr-3">Remaining</th>
                                           <th className="text-left font-medium py-1">Status</th>
+                                          {canAdjustFulfillment && <th className="w-8 py-1"></th>}
                                         </tr>
                                       </thead>
                                       <tbody>
@@ -2779,6 +2859,30 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                               <td className="py-1 pr-3 text-right text-gray-300">{row.fulfilled}</td>
                                               <td className={`py-1 pr-3 text-right ${row.remaining > 0 ? 'text-amber-300' : 'text-gray-500'}`}>{row.remaining}</td>
                                               <td className="py-1">{pill}</td>
+                                              {canAdjustFulfillment && (
+                                                <td className="py-1 text-right">
+                                                  {row.status !== 'cancelled' && row.line_id && (
+                                                    <button
+                                                      onClick={() => setAdjustLineCtx({
+                                                        woId: wo.id,
+                                                        line: {
+                                                          id: row.line_id,
+                                                          line_number: row.line_number,
+                                                          part_number: row.part_number,
+                                                          customer: row.customer_name,
+                                                          quantity_ordered: row.ordered,
+                                                          quantity_fulfilled: row.fulfilled,
+                                                          status: row.status,
+                                                        },
+                                                      })}
+                                                      className="p-1 text-skynet-accent hover:bg-blue-900/30 rounded"
+                                                      title="Adjust fulfilled quantity"
+                                                    >
+                                                      <Pencil size={12} />
+                                                    </button>
+                                                  )}
+                                                </td>
+                                              )}
                                             </tr>
                                           )
                                         })}
@@ -3034,7 +3138,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                   {(() => {
                                                     const eq = getEffectiveQty(job)
                                                     return (
-                                                      <div className="flex flex-col items-center gap-0.5">
+                                                      <div className="flex items-center justify-center gap-1">
                                                         {eq.verified && eq.qty !== job.quantity ? (
                                                           <span className="text-sm">
                                                             <span className="text-white font-medium">{eq.qty}</span>
@@ -3043,6 +3147,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                           </span>
                                                         ) : (
                                                           <span className="text-white text-sm">{job.quantity}</span>
+                                                        )}
+                                                        {canEditJobQuantity(job, wo) && (
+                                                          <button
+                                                            onClick={() => openQtyEdit(job)}
+                                                            className="p-0.5 text-skynet-accent hover:bg-blue-900/30 rounded"
+                                                            title="Edit quantity (unscheduled job)"
+                                                          >
+                                                            <Pencil size={11} />
+                                                          </button>
                                                         )}
                                                       </div>
                                                     )
@@ -3375,7 +3488,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                           {(() => {
                                             const eq = getEffectiveQty(job)
                                             return (
-                                              <div className="flex flex-col items-center gap-0.5">
+                                              <div className="flex items-center justify-center gap-1">
                                                 {eq.verified && eq.qty !== job.quantity ? (
                                                   <span className="text-sm">
                                                     <span className="text-white font-medium">{eq.qty}</span>
@@ -3384,6 +3497,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                   </span>
                                                 ) : (
                                                   <span className="text-white text-sm">{job.quantity}</span>
+                                                )}
+                                                {canEditJobQuantity(job, wo) && (
+                                                  <button
+                                                    onClick={() => openQtyEdit(job)}
+                                                    className="p-0.5 text-skynet-accent hover:bg-blue-900/30 rounded"
+                                                    title="Edit quantity (unscheduled job)"
+                                                  >
+                                                    <Pencil size={11} />
+                                                  </button>
                                                 )}
                                               </div>
                                             )
@@ -3888,6 +4010,82 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
           await fetchData()
         }}
       />
+
+      {/* CO line fulfillment adjustment (WO Lookup CO Fulfillment table) — D-COFUL-01 */}
+      <FulfillmentAdjustModal
+        isOpen={!!adjustLineCtx}
+        line={adjustLineCtx?.line || null}
+        onClose={() => setAdjustLineCtx(null)}
+        onSuccess={async () => {
+          const woId = adjustLineCtx?.woId
+          setAdjustLineCtx(null)
+          await refreshWOFulfillment(woId)
+          await fetchWOLookup()
+        }}
+      />
+
+      {/* Unscheduled job quantity edit — D-JOB-14 */}
+      {qtyEditJob && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-sm">
+            <div className="px-5 py-3 border-b border-gray-800 flex items-start justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-white">Edit Quantity</h3>
+                <p className="text-xs text-gray-500 mt-0.5 font-mono">{qtyEditJob.job_number}</p>
+              </div>
+              <button
+                onClick={() => setQtyEditJob(null)}
+                className="text-gray-400 hover:text-white p-1"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="text-xs text-gray-400">
+                Current: <span className="text-gray-200">{qtyEditJob.quantity}</span>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">New quantity</label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={qtyEditValue}
+                  onChange={(e) => setQtyEditValue(e.target.value)}
+                  disabled={qtyEditSaving}
+                  className="w-32 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:border-skynet-accent focus:outline-none disabled:opacity-50"
+                />
+              </div>
+              <p className="text-[11px] text-gray-500">
+                Available while the job is unscheduled and unassigned. Scheduling or
+                starting the job closes this off.
+              </p>
+              {qtyEditError && (
+                <div className="bg-red-950/40 border border-red-800 text-red-300 text-xs rounded p-2">
+                  {qtyEditError}
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-gray-800 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setQtyEditJob(null)}
+                disabled={qtyEditSaving}
+                className="px-3 py-1.5 text-sm text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitQtyEdit}
+                disabled={qtyEditSaving}
+                className="px-4 py-1.5 text-sm bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded flex items-center gap-2"
+              >
+                {qtyEditSaving && <Loader2 size={12} className="animate-spin" />}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showPinPrompt && (
         <CreatePinPromptModal

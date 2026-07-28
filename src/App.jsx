@@ -22,6 +22,7 @@ import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole } from './
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
+import NotificationsBell from './components/NotificationsBell'
 import ForceChangePassword from './components/ForceChangePassword'
 
 const DASHBOARDS = [
@@ -382,6 +383,9 @@ function MainApp() {
               </div>
             )}
             
+            {/* Notifications bell — all roles (D-NOTIF-01) */}
+            <NotificationsBell profile={profile} onNavigate={handleNavigate} />
+
             <div className="relative ml-2" ref={userMenuRef}>
               <button
                 onClick={() => setShowUserMenu(prev => !prev)}
@@ -438,7 +442,12 @@ function MainApp() {
           <Armory profile={profile} />
         )}
         {currentPage === 'customer_orders' && canAccessCustomerOrders && (
-          <CustomerOrders profile={profile} onNavigate={handleNavigate} />
+          <CustomerOrders
+            profile={profile}
+            onNavigate={handleNavigate}
+            navPayload={navPayload}
+            onNavPayloadConsumed={() => setNavPayload(null)}
+          />
         )}
         {currentPage === 'certs' && canAccessCerts && (
           <CertRepository profile={profile} />

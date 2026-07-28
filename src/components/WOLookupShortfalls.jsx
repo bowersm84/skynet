@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   AlertTriangle, Loader2, CheckCircle, Package,
-  ChevronDown, ChevronUp, Check, Cpu
+  ChevronDown, ChevronUp, Check, Cpu, RotateCcw
 } from 'lucide-react'
 import { getWOFulfillmentSummary } from '../lib/woFulfillment'
 import AllocationResolutionModal from './AllocationResolutionModal'
@@ -52,6 +52,7 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
   const [rows, setRows] = useState([])
   const [fulfillmentCache, setFulfillmentCache] = useState({}) // woId -> rows
   const [stockVariancesOpen, setStockVariancesOpen] = useState(false)
+  const autoExpandedRef = useRef(false) // one-shot guard for the auto-expand below
   const [expandedRows, setExpandedRows] = useState({}) // shortfall row id -> bool
 
   // Resolution modal state.
@@ -67,11 +68,11 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
           id, job_id, work_order_id, job_quantity,
           produced_quantity, shortfall_quantity, status, created_at,
           job:jobs!job_id (
-            id, job_number, quantity,
+            id, job_number, quantity, work_order_assembly_id,
             assigned_machine:machines!assigned_machine_id ( id, name ),
             component:parts!component_id ( id, part_number )
           ),
-          work_order:work_orders ( id, wo_number )
+          work_order:work_orders ( id, wo_number, order_type )
         `)
         .eq('status', 'open')
         .order('created_at', { ascending: false })
@@ -147,6 +148,33 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
     }
   }
 
+  // Each job-row card is "demand" if its parent WO is make-to-order, or if any
+  // CO line on that WO still has remaining > 0; otherwise "plan_only". Compute
+  // at render time from already-loaded fulfillment data.
+  //
+  // The MTO check is not redundant with the remaining > 0 check: an MTO WO
+  // whose CO lines all read fulfilled (e.g. assembly rejections after the CO
+  // lines were satisfied) would otherwise file a customer-order shortfall under
+  // Stock Build Variances. An MTO WO exists because a customer ordered it, so
+  // its shortfalls are always customer impact.
+  const isDemandRow = (row) => {
+    if (row.work_order?.order_type === 'make_to_order') return true
+    const ful = fulfillmentCache[row.work_order_id]
+    return (ful || []).some(r => r.remaining > 0)
+  }
+  const demandRows = rows.filter(isDemandRow)
+  const planRows = rows.filter(r => !isDemandRow(r))
+
+  // Open the Stock Build Variances accordion the first time it has content, so
+  // plan-only shortfalls aren't hidden behind a collapsed header. Fires once —
+  // the user can collapse it again and it stays collapsed.
+  useEffect(() => {
+    if (autoExpandedRef.current) return
+    if (loading || planRows.length === 0) return
+    autoExpandedRef.current = true
+    setStockVariancesOpen(true)
+  }, [loading, planRows.length])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -154,16 +182,6 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
       </div>
     )
   }
-
-  // Each job-row card is "demand" if any CO line on its parent WO still has
-  // remaining > 0; otherwise "plan_only". Compute at render time from
-  // already-loaded fulfillment data.
-  const isDemandRow = (row) => {
-    const ful = fulfillmentCache[row.work_order_id]
-    return (ful || []).some(r => r.remaining > 0)
-  }
-  const demandRows = rows.filter(isDemandRow)
-  const planRows = rows.filter(r => !isDemandRow(r))
 
   const partForRow = (row) => row.job?.component || null
 
@@ -412,14 +430,23 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
                               <span className="text-amber-300">Short by {row.shortfall_quantity}</span>
                             </div>
                           </div>
-                          <button
-                            onClick={() => submitAcknowledgePlan(row)}
-                            disabled={submitting}
-                            className="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-white rounded flex items-center gap-1 disabled:opacity-50"
-                          >
-                            {submitting && <Loader2 size={12} className="animate-spin" />}
-                            Acknowledge
-                          </button>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => submitAcknowledgePlan(row)}
+                              disabled={submitting}
+                              className="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-white rounded flex items-center gap-1 disabled:opacity-50"
+                            >
+                              {submitting && <Loader2 size={12} className="animate-spin" />}
+                              Acknowledge
+                            </button>
+                            <button
+                              onClick={() => openResolutionModal(row, 'requeue')}
+                              disabled={submitting}
+                              className="px-3 py-1 text-xs bg-skynet-accent hover:bg-blue-600 text-white rounded flex items-center gap-1 disabled:opacity-50"
+                            >
+                              <RotateCcw size={12} /> Resolve
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )

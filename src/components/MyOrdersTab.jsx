@@ -25,12 +25,18 @@ const PRIORITY_DOT = {
   low: 'bg-gray-500',
 }
 
-export default function MyOrdersTab({ profile, onNavigateToWO, onNavigateToCO = null }) {
+export default function MyOrdersTab({ profile, onNavigateToWO, onNavigateToCO = null, initialSearch = '' }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('open') // 'open' | 'all'
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(initialSearch || '')
+
+  // A deep link (notifications bell) arrives as a changed initialSearch. Only
+  // a non-empty value overwrites what the user has typed.
+  useEffect(() => {
+    if (initialSearch) setSearch(initialSearch)
+  }, [initialSearch])
 
   const load = useCallback(async () => {
     if (!profile?.id) return

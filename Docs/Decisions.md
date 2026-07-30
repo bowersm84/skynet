@@ -2091,3 +2091,146 @@ drill-downs at their existing width when a bucket spans several machines. An emp
 or null `machines` value renders an em dash rather than an empty cell. The unmapped-
 demand table is deliberately left alone — it exists to explain a mapping failure, not
 to plan floor work.
+
+### D-BLANK-07 — Finishing sends inherit blank lot as material lot (2026-07-29)
+**What:** Kiosk finishing-send creation (partial and final-batch paths) falls
+back to jobs.blank_lot_number when no job_materials row exists, so Bolt Master
+sends carry a material_lot_number. Historical NULL sends on blank jobs
+backfilled from their jobs' blank_lot_number via SQL on 2026-07-29.
+**Why:** Blanks jobs write no job_materials row; compliance post-mfg and Cert
+Repository read finishing_sends.material_lot_number and showed "—" for every
+BM job since the blank subsystem went live (Jun 26).
+**Files:** src/pages/Kiosk.jsx.
+
+### D-RMF-04 — Human material/size correction on RM Forecast (2026-07-30)
+**What:** part_dimensions gains material_locked / correction_note / corrected_by
+/ corrected_at (extraction_meta / confirmed_by / confirmed_at staged alongside
+for D-RMF-05). Shared PartDimensionEditor serves the Needs-data panel and a new
+"Correct material" action on forecast part drill-down rows; a locked correction
+outranks any inferred or AI value in bucketing. Saves audit-log
+'rm_material_corrected' with from/to. Lock badge with corrector/when/note
+tooltip. Admin/scheduler write, purchaser read-only.
+**Why:** Drawings carry wrong material callouts and ambiguous bar diameters
+only the machinist can settle — SK247P forecast against 0.125 dia bar (a
+phantom shortage group telling purchasing to buy 1/8" 303) when it is turned
+from 0.375 dia. Corrections belong where the error is seen.
+**Files:** src/components/rmforecast/PartDimensionEditor.jsx,
+src/components/rmforecast/usePartDimensionEditor.js,
+src/components/rmforecast/* (RMForecastSection, ExceptionsPanel,
+BarForecastTable), part_dimensions migration,
+Docs/migrations/2026-07-30_rmf_material_lock_precedence.sql (forecast RPCs —
+precedence WAS amended; see below).
+
+**Implementation notes:**
+- **The RPCs did not source material/bar_size from part_dimensions, so Task 2
+  was required.** Discovery of the deployed `forecast_rm_bars()` /
+  `forecast_rm_bar_parts()` bodies showed a two-branch waterfall, not a
+  part_dimensions read: `emp_profile` takes material_type/bar_size from the most
+  recent `job_materials` row (`DISTINCT ON (component_id) ORDER BY last_run
+  DESC`) and wins outright; `geo_profile` reads part_dimensions **only** where
+  `NOT EXISTS` an emp_profile row. A correction written to part_dimensions was
+  therefore invisible to bucketing for any part that had ever run. The migration
+  amends `emp_profile` in both functions to
+  `COALESCE(lk.material_type, h.mt)` / `COALESCE(lk.bar_size, h.bs)` against a
+  `LEFT JOIN part_dimensions lk ON lk.part_number = p.part_number AND
+  lk.material_locked = true`. Everything else is byte-identical, return
+  signatures unchanged, so `CREATE OR REPLACE` carried the D-RMF-01 grants
+  forward untouched (verified: `{postgres,authenticated,service_role}` before
+  and after, no PUBLIC/anon). With zero locked rows the five-RPC output diffed
+  identical before/after — the amendment is inert until someone corrects a part.
+- **The lock settles the bar, not the yield.** COALESCE overrides only
+  material/bar_size; the empirical pieces-per-bar and the `'empirical'` basis
+  survive, because a lock is a statement about which bar the part is turned
+  from, not about how many pieces come off one. Confirmed on TEST: SK203C22B
+  (7 jobs of 0.875 dia history, no part_dimensions row) corrected to 0.375 dia
+  moved buckets with `bars_needed` unchanged at 6 and basis still Actuals. The
+  0.875 dia card disappeared entirely (it held only that part); the 0.375 group
+  went cum 191 -> 197, on hand 126 unchanged, worst remaining -65 -> -71.
+- **Phase 1's Needs-data save was broken and is fixed here.** `ExceptionsPanel`
+  and `RMForecastSection` both used a column named `material`; the actual column
+  is `material_type`. The `part_dimensions` SELECT therefore always errored and
+  fell to its documented `setDimRows([])` degradation (so store-what-exists
+  silently ran on catalog strings and prefill never populated), and the upsert
+  payload would have been rejected by PostgREST as an unknown column. Both are
+  corrected to `material_type`; the select also now pulls source_file and the
+  four lock columns.
+- **Store-what-exists is now enforced on the way in, not just in the option
+  list.** `matchMaterialOption` / `matchBarSizeOption` snap any incoming value —
+  an RPC prefill, a job-history string, an AI suggestion — onto the string
+  part_dimensions already uses (case-insensitive for material, numeric for size)
+  before it can reach a save. The selects additionally inject the current value
+  as an option when it came from job history and has never been stored, so a
+  correction modal can render `0.875 dia` even though no part_dimensions row
+  uses that string.
+- **One hook, two layouts.** The exceptions panel needs its fields as cells of
+  an existing table; the correction path needs a stacked modal. Rather than fork
+  the logic, `usePartDimensionEditor.js` owns all state, validation, the upsert
+  shape and the audit write, and `PartDimensionEditor.jsx` exports the controls
+  individually plus the stacked form. Splitting the hook out of the `.jsx` is
+  what keeps `react-refresh/only-export-components` clean.
+- **The upsert still writes only what it knows** (D-RMF-01): fields with no
+  value are omitted so PostgREST cannot null a column it wasn't given. Correction
+  mode sets `source_file = 'manual'` **only** when the row has none, so a catalog
+  provenance is never overwritten by a size correction.
+- **Lock-badge context is fetched only for locked parts**, as three flat queries
+  joined in JS (parts -> jobs -> job_materials) rather than a nested select, per
+  the two-level PostgREST nesting limit. The modal bar_size from history is
+  compared to the locked value and shown as informational
+  "history: 0.875 dia (7 jobs)" when they disagree. A failure here is swallowed —
+  a badge detail must never fail the whole forecast load.
+
+### D-RMF-05 — AI dimension extraction from job drawings (suggest-only) (2026-07-30)
+**What:** Edge Function extract-part-dimensions (JWT + admin/scheduler gated,
+Anthropic API, strict-JSON envelope with dim_reference/confidence/ambiguities)
+fed by client-side S3 signed-URL fetch of the drawing Roger uploads to the
+part's job (jobs.component_id -> job_documents drawing type, resolution order
+per discovery). Pre-fills the Needs-data editors; human confirm required;
+saves carry source_file 'drawing_ai', extraction_meta (suggested vs saved),
+confirmed_by/at, audit 'dimension_ai_confirmed'. Function writes nothing;
+no AWS credentials in Supabase — the browser resolves the signed URL.
+**Why:** The drawing already exists on the job at WO creation; deriving bar
+size and material from it removes the data-entry step while keeping a named
+human on every committed value (AS9100). Golden case: SK26CP5.
+**Files:** supabase/functions/extract-part-dimensions/index.ts,
+src/lib/dimensionExtraction.js, src/components/rmforecast/*.
+
+**Implementation notes:**
+- **Drawings live on `job_documents`, not `part_documents` or snapshots.** TEST
+  holds 85 approved drawing-type `job_documents` rows and **zero**
+  `job_document_snapshots` of any type; every part currently in the Needs-data
+  list has at least two job drawings reachable via `jobs.component_id`.
+  Resolution order shipped: drawing-type `job_documents` for any job on the
+  part, approved beating non-approved and newest beating older, then
+  `job_document_snapshots` as a fallback that is checked rather than assumed
+  empty. `document_types` is looked up by `name ILIKE '%drawing%'` and cached
+  per session — the drawing type id differs between TEST and PROD.
+- **`file_url` is a bare S3 key** (`jobs/<job_id>/<epoch>_<name>.pdf`), resolved
+  through the existing `lib/s3.getDocumentUrl` presigner. The browser already
+  holds the bucket credentials, so it fetches the bytes and base64s them; the
+  function accepts `document_base64` and never touches S3 or Supabase Storage.
+  That is the whole reason no AWS credentials had to be added to Supabase.
+- **The lookup is batched at the panel, not per row.** One pass resolves every
+  exception part (four queries total) so each row knows up front whether to
+  enable Extract or show the disabled "No drawing found on this part's jobs."
+  tooltip — a per-row lookup would have been four queries times sixteen rows.
+- **The catalogs are the model's vocabulary.** The function fetches
+  `material_types.name[]` and `bar_sizes.size[]` service-side and interpolates
+  them into the §4 prompt; a returned value outside either list is moved to
+  `material_unlisted` / `bar_size_unlisted` and nulled, and the client renders it
+  as an amber warning without pre-selecting it. Combined with the
+  store-what-exists snapping above, an extraction cannot mint a phantom group.
+- **Rejects before it spends.** Non-PDF magic bytes (base64 `JVBERi0`) and
+  payloads over 10 MB decoded are refused before the Anthropic call; the caller's
+  JWT is verified via service-role `auth.getUser` and `profiles.role` must be
+  admin or scheduler, mirroring the part_dimensions write RLS. `usage` is logged
+  to the function console; nothing is written to the database.
+- **`source_file = 'drawing_ai'` only when an AI value actually survived.** The
+  save compares each saved value against its suggestion; if the human cleared all
+  three and typed their own, it saves as plain `'manual'` with no
+  extraction_meta and no audit row, exactly as a hand-entered row would.
+  `edited` in the audit details is true whenever fewer than three of the
+  suggested values came through unchanged.
+- **Model is `claude-sonnet-4-6`** with `max_tokens` 1500 and the PDF as a
+  base64 `document` content block (no beta header needed). Structured outputs
+  are not offered on Sonnet 4.6, hence the strict-JSON-by-prompt approach plus
+  defensive fence-stripping on parse.

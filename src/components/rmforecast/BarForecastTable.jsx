@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, AlertTriangle, Package } from 'lucide-react'
+import { ChevronDown, ChevronRight, AlertTriangle, Package, Lock, Pencil } from 'lucide-react'
 import MachinesCell from './MachinesCell'
+import { usePartDimensionEditor } from './usePartDimensionEditor'
+import { PartDimensionEditorModal } from './PartDimensionEditor'
 import {
   buildBarGroups,
   indexBarParts,
@@ -47,7 +49,121 @@ function RemainingCell({ value }) {
   )
 }
 
-export default function BarForecastTable({ bars, barParts }) {
+function lockTooltip(lock) {
+  if (!lock) return 'Human-verified material and bar size.'
+  const bits = ['Human-verified material and bar size.']
+  const when = lock.corrected_at
+    ? new Date(lock.corrected_at).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    })
+    : null
+  if (lock.corrected_by_name || when) {
+    bits.push(`Corrected by ${lock.corrected_by_name || 'unknown'}${when ? ` on ${when}` : ''}.`)
+  }
+  if (lock.correction_note) bits.push(`Note: ${lock.correction_note}`)
+  if (lock.history) {
+    bits.push(`history: ${lock.history.bar_size} (${lock.history.jobs} job${lock.history.jobs === 1 ? '' : 's'})`)
+  }
+  return bits.join('\n')
+}
+
+// A part inside a week's drill-down. Owns its own correction modal so the
+// editor is scoped to exactly the part whose row was clicked.
+function PartRow({
+  part, dims, lock, materialOptions, barSizeOptions, canCorrect, profile, onCorrected,
+}) {
+  const [open, setOpen] = useState(false)
+
+  // Prefilled with what the forecast is bucketing on RIGHT NOW — which for an
+  // empirical part comes from job history, not part_dimensions.
+  const current = {
+    length_in: dims?.length_in,
+    material_type: part.material_type,
+    bar_size: part.bar_size,
+  }
+
+  const editor = usePartDimensionEditor({
+    partNumber: part.part_number,
+    mode: 'correction',
+    current,
+    existingRow: dims,
+    materialOptions,
+    barSizeOptions,
+    profile,
+    onSaved: async () => {
+      const { material_type: material, bar_size: barSize } = editor.form
+      await onCorrected(`${part.part_number} moved to ${barSize} ${material}`)
+    },
+  })
+
+  return (
+    <>
+      <tr className="hover:bg-gray-800/40">
+        <td className="px-3 py-2 font-mono text-white whitespace-nowrap">
+          <span className="inline-flex items-center gap-1.5">
+            {part.part_number}
+            {lock && (
+              <span
+                title={lockTooltip(lock)}
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-sky-900/50 text-sky-300 cursor-help"
+              >
+                <Lock size={10} />
+                Verified
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-3 py-2"><MachinesCell machines={part.machines} /></td>
+        <td className="px-3 py-2 text-right text-gray-300">{fmtInt(part.pieces)}</td>
+        <td className="px-3 py-2 text-right">
+          {isFullyStaged(part)
+            ? <span className="text-xs px-2 py-0.5 rounded bg-cyan-900/50 text-cyan-300 whitespace-nowrap">Fully staged</span>
+            : <span className="text-gray-300">{fmtBars(part.bars_needed)}</span>}
+        </td>
+        <td className="px-3 py-2"><BasisBadge basis={part.basis} /></td>
+        <td className="px-3 py-2 text-center">
+          {canCorrect ? (
+            <button
+              type="button"
+              onClick={() => setOpen(true)}
+              title={`Correct the material or bar size for ${part.part_number}`}
+              aria-label={`Correct material for ${part.part_number}`}
+              className="inline-flex items-center justify-center p-1 rounded text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+            >
+              <Pencil size={13} />
+            </button>
+          ) : (
+            <span className="text-gray-700">—</span>
+          )}
+        </td>
+      </tr>
+
+      {open && (
+        <tr>
+          <td colSpan={6} className="p-0">
+            <PartDimensionEditorModal
+              partNumber={part.part_number}
+              editor={editor}
+              onClose={() => setOpen(false)}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+export default function BarForecastTable({
+  bars,
+  barParts,
+  dimsByPart = {},
+  lockContext = {},
+  materialOptions = [],
+  barSizeOptions = [],
+  canCorrect = false,
+  profile = null,
+  onCorrected,
+}) {
   const groups = buildBarGroups(bars)
   const partIndex = indexBarParts(barParts)
 
@@ -178,21 +294,22 @@ export default function BarForecastTable({ bars, barParts }) {
                                       <th className="px-3 py-2 text-right">Pieces</th>
                                       <th className="px-3 py-2 text-right">Bars Needed</th>
                                       <th className="px-3 py-2 text-left">Basis</th>
+                                      <th className="px-3 py-2 text-center">Action</th>
                                     </tr>
                                   </thead>
                                   <tbody className="divide-y divide-gray-800">
                                     {parts.map((p, i) => (
-                                      <tr key={`${p.part_number}-${i}`} className="hover:bg-gray-800/40">
-                                        <td className="px-3 py-2 font-mono text-white">{p.part_number}</td>
-                                        <td className="px-3 py-2"><MachinesCell machines={p.machines} /></td>
-                                        <td className="px-3 py-2 text-right text-gray-300">{fmtInt(p.pieces)}</td>
-                                        <td className="px-3 py-2 text-right">
-                                          {isFullyStaged(p)
-                                            ? <span className="text-xs px-2 py-0.5 rounded bg-cyan-900/50 text-cyan-300 whitespace-nowrap">Fully staged</span>
-                                            : <span className="text-gray-300">{fmtBars(p.bars_needed)}</span>}
-                                        </td>
-                                        <td className="px-3 py-2"><BasisBadge basis={p.basis} /></td>
-                                      </tr>
+                                      <PartRow
+                                        key={`${p.part_number}-${i}`}
+                                        part={p}
+                                        dims={dimsByPart[p.part_number]}
+                                        lock={lockContext[p.part_number] || null}
+                                        materialOptions={materialOptions}
+                                        barSizeOptions={barSizeOptions}
+                                        canCorrect={canCorrect}
+                                        profile={profile}
+                                        onCorrected={onCorrected}
+                                      />
                                     ))}
                                   </tbody>
                                 </table>

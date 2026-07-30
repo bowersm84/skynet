@@ -1,165 +1,178 @@
-import { useState } from 'react'
-import { ChevronDown, ChevronRight, AlertTriangle, Check, Loader2 } from 'lucide-react'
-import { supabase } from '../../lib/supabase'
+import { useEffect, useState } from 'react'
+import { ChevronDown, ChevronRight, AlertTriangle, Loader2, Sparkles } from 'lucide-react'
 import { formatDay, fmtInt } from './forecastUtils'
+import { usePartDimensionEditor } from './usePartDimensionEditor'
+import {
+  LengthField,
+  MaterialField,
+  BarSizeField,
+  SaveButton,
+  EditorError,
+  ReadOnlyValue,
+} from './PartDimensionEditor'
+import {
+  findDrawingsForParts,
+  fetchDrawingBase64,
+  invokeExtraction,
+  confidenceStyle,
+  needsCarefulReview,
+  provenanceLine,
+  NO_DRAWING_MESSAGE,
+} from '../../lib/dimensionExtraction'
 
 // One row of the Needs-Data panel. Only the missing_* fields are editable;
 // anything the part already has is shown read-only as context.
-function ExceptionRow({ row, existing, materialOptions, barSizeOptions, canSave, onSaved }) {
-  const [form, setForm] = useState({
-    length_in: existing?.length_in != null ? String(existing.length_in) : '',
-    material: existing?.material || '',
-    bar_size: existing?.bar_size || '',
+function ExceptionRow({
+  row, existing, materialOptions, barSizeOptions, canSave, profile, drawing, onSaved,
+}) {
+  const editor = usePartDimensionEditor({
+    partNumber: row.part_number,
+    mode: 'needs_data',
+    current: {
+      length_in: existing?.length_in,
+      material_type: existing?.material_type,
+      bar_size: existing?.bar_size,
+    },
+    existingRow: existing,
+    required: {
+      length: row.missing_length,
+      material: row.missing_material,
+      bar_size: row.missing_bar_size,
+    },
+    materialOptions,
+    barSizeOptions,
+    profile,
+    onSaved,
   })
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [savedOk, setSavedOk] = useState(false)
 
-  const set = (field, value) => {
-    setForm(f => ({ ...f, [field]: value }))
-    setError('')
-    setSavedOk(false)
-  }
+  const [extracting, setExtracting] = useState(false)
+  const [extractError, setExtractError] = useState('')
 
-  const handleSave = async () => {
-    setError('')
-
-    const payload = {
-      part_number: row.part_number,
-      source_file: 'manual',
-      family: 'component',
-      updated_at: new Date().toISOString(),
-    }
-
-    if (row.missing_length) {
-      const len = parseFloat(form.length_in)
-      if (!Number.isFinite(len) || len <= 0) {
-        setError('Length must be a number greater than 0.')
-        return
-      }
-      payload.length_in = len
-    } else if (existing?.length_in != null) {
-      payload.length_in = existing.length_in
-    }
-
-    if (row.missing_material) {
-      if (!form.material) {
-        setError('Pick a material.')
-        return
-      }
-      payload.material = form.material
-    } else if (existing?.material) {
-      payload.material = existing.material
-    }
-
-    if (row.missing_bar_size) {
-      if (!form.bar_size) {
-        setError('Pick a bar size.')
-        return
-      }
-      payload.bar_size = form.bar_size
-    } else if (existing?.bar_size) {
-      payload.bar_size = existing.bar_size
-    }
-
-    setSaving(true)
+  const handleExtract = async () => {
+    setExtractError('')
+    setExtracting(true)
     try {
-      const { error: upsertError } = await supabase
-        .from('part_dimensions')
-        .upsert(payload, { onConflict: 'part_number' })
-      if (upsertError) throw upsertError
-      setSavedOk(true)
-      // Refresh every forecast dataset so the part leaves this panel and lands in
-      // the bar table in one visible motion.
-      await onSaved()
+      const documentBase64 = await fetchDrawingBase64(drawing.file_url)
+      const envelope = await invokeExtraction({
+        partNumber: row.part_number,
+        description: row.description,
+        documentBase64,
+        fileName: drawing.file_name,
+      })
+      editor.applySuggestion(envelope)
     } catch (err) {
-      setError(err.message || 'Save failed.')
+      // The row stays fully editable — a failed read must never block the human.
+      setExtractError(err.message || 'The drawing could not be read.')
     } finally {
-      setSaving(false)
+      setExtracting(false)
     }
   }
 
-  // Existing values render as plain text. A field that is still missing renders
-  // as an amber marker — that is what a read-only viewer (purchaser) sees in
-  // place of the editor, since there is no value to show yet.
-  const readOnlyCell = (value, isMissing = false) => {
-    if (value) return <span className="text-gray-400 text-xs">{value}</span>
-    if (isMissing) return <span className="text-xs px-2 py-0.5 rounded bg-amber-900/40 text-amber-300 whitespace-nowrap">Missing</span>
-    return <span className="text-gray-600 text-xs">—</span>
-  }
+  const suggestion = editor.extraction?.suggestion
+  const careful = editor.extraction ? needsCarefulReview(editor.extraction) : false
+  const chip = suggestion ? confidenceStyle(suggestion.confidence) : null
 
   return (
-    <tr className="hover:bg-amber-900/10 align-top">
-      <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{row.part_number}</td>
-      <td className="px-3 py-2 text-gray-400 text-xs max-w-[16rem] truncate" title={row.description || ''}>
-        {row.description || '—'}
-      </td>
-      <td className="px-3 py-2 text-right text-gray-300">{fmtInt(row.pieces)}</td>
-      <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatDay(row.first_scheduled)}</td>
+    <>
+      <tr className="hover:bg-amber-900/10 align-top">
+        <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{row.part_number}</td>
+        <td className="px-3 py-2 text-gray-400 text-xs max-w-[16rem] truncate" title={row.description || ''}>
+          {row.description || '—'}
+        </td>
+        <td className="px-3 py-2 text-right text-gray-300">{fmtInt(row.pieces)}</td>
+        <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatDay(row.first_scheduled)}</td>
 
-      {/* Length */}
-      <td className="px-3 py-2">
-        {row.missing_length && canSave ? (
-          <input
-            type="number"
-            step="0.001"
-            min="0"
-            value={form.length_in}
-            disabled={saving}
-            onChange={e => set('length_in', e.target.value)}
-            placeholder="in."
-            className="w-24 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent disabled:opacity-50"
-          />
-        ) : readOnlyCell(existing?.length_in != null ? `${existing.length_in}"` : null, row.missing_length)}
-      </td>
+        {/* Length */}
+        <td className="px-3 py-2">
+          {row.missing_length && canSave
+            ? <LengthField editor={editor} />
+            : <ReadOnlyValue value={existing?.length_in != null ? `${existing.length_in}"` : null} isMissing={row.missing_length} />}
+        </td>
 
-      {/* Material */}
-      <td className="px-3 py-2">
-        {row.missing_material && canSave ? (
-          <select
-            value={form.material}
-            disabled={saving}
-            onChange={e => set('material', e.target.value)}
-            className="w-40 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent disabled:opacity-50"
-          >
-            <option value="">Select…</option>
-            {materialOptions.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        ) : readOnlyCell(existing?.material, row.missing_material)}
-      </td>
+        {/* Material */}
+        <td className="px-3 py-2">
+          {row.missing_material && canSave
+            ? <MaterialField editor={editor} />
+            : <ReadOnlyValue value={existing?.material_type} isMissing={row.missing_material} />}
+        </td>
 
-      {/* Bar size */}
-      <td className="px-3 py-2">
-        {row.missing_bar_size && canSave ? (
-          <select
-            value={form.bar_size}
-            disabled={saving}
-            onChange={e => set('bar_size', e.target.value)}
-            className="w-36 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs focus:outline-none focus:border-skynet-accent disabled:opacity-50"
-          >
-            <option value="">Select…</option>
-            {barSizeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        ) : readOnlyCell(existing?.bar_size, row.missing_bar_size)}
-      </td>
+        {/* Bar size */}
+        <td className="px-3 py-2">
+          {row.missing_bar_size && canSave
+            ? <BarSizeField editor={editor} />
+            : <ReadOnlyValue value={existing?.bar_size} isMissing={row.missing_bar_size} />}
+        </td>
 
-      <td className="px-3 py-2 text-center whitespace-nowrap">
-        {canSave ? (
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving}
-            className="inline-flex items-center gap-1 text-xs px-3 py-1 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white rounded transition-colors"
-          >
-            {saving ? <Loader2 size={12} className="animate-spin" /> : savedOk ? <Check size={12} /> : null}
-            {saving ? 'Saving' : 'Save'}
-          </button>
-        ) : (
-          <span className="text-xs text-gray-600">Read-only</span>
-        )}
-        {error && <div className="text-xs text-red-400 mt-1 max-w-[14rem] whitespace-normal">{error}</div>}
-      </td>
-    </tr>
+        <td className="px-3 py-2 text-center whitespace-nowrap">
+          {canSave ? (
+            <div className="flex flex-col items-stretch gap-1">
+              <button
+                type="button"
+                onClick={handleExtract}
+                disabled={!drawing || extracting || editor.saving}
+                title={drawing
+                  ? `Read ${drawing.file_name || 'the drawing'}${drawing.job_number ? ` from job ${drawing.job_number}` : ''}`
+                  : NO_DRAWING_MESSAGE}
+                className="inline-flex items-center justify-center gap-1 text-xs px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed border border-gray-600 text-gray-200 rounded transition-colors"
+              >
+                {extracting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {extracting ? 'Reading' : 'Extract from drawing'}
+              </button>
+              <SaveButton editor={editor} className="justify-center" />
+            </div>
+          ) : (
+            <span className="text-xs text-gray-600">Read-only</span>
+          )}
+          <EditorError editor={editor} />
+          {extractError && (
+            <div className="text-xs text-red-400 mt-1 max-w-[14rem] whitespace-normal">{extractError}</div>
+          )}
+        </td>
+      </tr>
+
+      {suggestion && (
+        <tr className={careful ? 'bg-amber-900/15' : 'bg-gray-900/40'}>
+          <td colSpan={8} className="px-3 pb-3 pt-0">
+            <div className={`rounded border px-3 py-2 text-xs ${careful ? 'border-amber-700/50' : 'border-gray-700'}`}>
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                {chip && (
+                  <span className={`px-2 py-0.5 rounded whitespace-nowrap ${chip.className}`}>{chip.label}</span>
+                )}
+                {careful && (
+                  <span className="px-2 py-0.5 rounded bg-amber-900/50 text-amber-300 whitespace-nowrap">
+                    Review carefully
+                  </span>
+                )}
+                <span className="text-gray-500">Suggested — nothing is saved until you click Save.</span>
+              </div>
+
+              {provenanceLine(editor.extraction, drawing) && (
+                <p className="text-gray-400">{provenanceLine(editor.extraction, drawing)}</p>
+              )}
+
+              {Array.isArray(suggestion.ambiguities) && suggestion.ambiguities.length > 0 && (
+                <ul className="list-disc list-inside mt-1 space-y-0.5 text-amber-300">
+                  {suggestion.ambiguities.map((a, i) => <li key={i}>{a}</li>)}
+                </ul>
+              )}
+
+              {suggestion.material_unlisted && (
+                <p className="text-amber-300 mt-1">
+                  The drawing calls out &ldquo;{suggestion.material_unlisted}&rdquo;, which is not in the
+                  material catalog — pick the right one yourself.
+                </p>
+              )}
+              {suggestion.bar_size_unlisted && (
+                <p className="text-amber-300 mt-1">
+                  The reading suggests bar size &ldquo;{suggestion.bar_size_unlisted}&rdquo;, which is not a
+                  stocked size — pick the right one yourself.
+                </p>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
 
@@ -169,12 +182,29 @@ export default function ExceptionsPanel({
   materialOptions,
   barSizeOptions,
   canSave,
+  profile,
   onSaved,
 }) {
   const rows = exceptions || []
   const n = rows.length
   // Collapsed when there is nothing to fix; open when there is.
   const [open, setOpen] = useState(n > 0)
+  const [drawings, setDrawings] = useState({})
+
+  // One batched lookup for the whole panel decides which rows can offer Extract.
+  const partKey = rows.map(r => r.part_number).join('|')
+  useEffect(() => {
+    if (!canSave || !rows.length) {
+      setDrawings({})
+      return undefined
+    }
+    let cancelled = false
+    findDrawingsForParts(rows.map(r => r.part_number))
+      .then(map => { if (!cancelled) setDrawings(map) })
+      .catch(() => { if (!cancelled) setDrawings({}) })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canSave, partKey])
 
   return (
     <div className="rounded-lg border border-amber-800/40 bg-amber-900/10">
@@ -221,6 +251,8 @@ export default function ExceptionsPanel({
                     materialOptions={materialOptions}
                     barSizeOptions={barSizeOptions}
                     canSave={canSave}
+                    profile={profile}
+                    drawing={drawings[row.part_number] || null}
                     onSaved={onSaved}
                   />
                 ))}

@@ -2320,7 +2320,10 @@ export default function Kiosk() {
         .not('lot_number', 'is', null)
         .limit(1)
 
-      const materialLot = materials?.[0]?.lot_number || null
+      // Blank-fed (Bolt Master) jobs write no job_materials row — their lot lives on
+      // jobs.blank_lot_number, so fall back to it (D-BLANK-07). Without this the send
+      // carries a null material_lot_number and compliance/Cert Repository show "—".
+      const materialLot = materials?.[0]?.lot_number || activeJob.blank_lot_number || null
 
       // Get existing send count to compute batch label
       const { count: existingCount } = await supabase
@@ -3416,7 +3419,11 @@ export default function Kiosk() {
             .not('lot_number', 'is', null)
             .limit(1)
 
-          const finalBatchMaterialLot = jobMaterialsData?.[0]?.lot_number || null
+          // Blank-fed (Bolt Master) jobs have no job_materials row — fall back to the
+          // job's blank lot (D-BLANK-07). activeJob comes from loadJobs' select('*'),
+          // so blank_lot_number is already hydrated here.
+          const finalBatchMaterialLot =
+            jobMaterialsData?.[0]?.lot_number || activeJob.blank_lot_number || null
 
           const { error: finalSendErr } = await supabase.from('finishing_sends').insert({
             job_id: activeJob.id,

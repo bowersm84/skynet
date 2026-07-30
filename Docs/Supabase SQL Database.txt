@@ -1106,3 +1106,43 @@ CREATE TABLE public.cert_packages (
   CONSTRAINT cp_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
   CONSTRAINT cp_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.co_fulfillment_adjustments (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  customer_order_line_id uuid NOT NULL,
+  old_fulfilled integer NOT NULL,
+  new_fulfilled integer NOT NULL,
+  delta integer NOT NULL,
+  reason text NOT NULL CHECK (length(TRIM(BOTH FROM reason)) > 0),
+  adjusted_by uuid NOT NULL,
+  adjusted_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT co_fulfillment_adjustments_pkey PRIMARY KEY (id),
+  CONSTRAINT co_fulfillment_adjustments_customer_order_line_id_fkey FOREIGN KEY (customer_order_line_id) REFERENCES public.customer_order_lines(id),
+  CONSTRAINT co_fulfillment_adjustments_adjusted_by_fkey FOREIGN KEY (adjusted_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.user_notifications (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  recipient_id uuid NOT NULL,
+  type text NOT NULL,
+  title text NOT NULL,
+  body text,
+  payload jsonb,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  read_at timestamp with time zone,
+  CONSTRAINT user_notifications_pkey PRIMARY KEY (id),
+  CONSTRAINT user_notifications_recipient_id_fkey FOREIGN KEY (recipient_id) REFERENCES public.profiles(id),
+  CONSTRAINT user_notifications_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.part_dimensions (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  part_number text NOT NULL UNIQUE,
+  length_in numeric,
+  family text,
+  series text,
+  source_file text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  material_type text,
+  bar_size text,
+  CONSTRAINT part_dimensions_pkey PRIMARY KEY (id)
+);

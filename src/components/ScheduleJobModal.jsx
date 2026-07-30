@@ -189,7 +189,7 @@ export default function ScheduleJobModal({
   if (!isOpen || !job) return null
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div
         className="bg-gray-900 rounded-lg border border-gray-700 max-w-2xl w-full mx-4 shadow-xl max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}

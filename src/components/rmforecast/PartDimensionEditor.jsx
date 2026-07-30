@@ -191,7 +191,6 @@ export function PartDimensionEditorModal({ partNumber, editor, onClose }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      onClick={onClose}
     >
       <div
         className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-lg shadow-xl"

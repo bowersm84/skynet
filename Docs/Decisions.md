@@ -2234,3 +2234,137 @@ src/lib/dimensionExtraction.js, src/components/rmforecast/*.
   base64 `document` content block (no beta header needed). Structured outputs
   are not offered on Sonnet 4.6, hence the strict-JSON-by-prompt approach plus
   defensive fence-stripping on parse.
+
+### D-CERTPKG-07 — Assembly lot is a package entry until the assembly module lands (2026-07-30)
+**What:** "Assembly Lot Number" is a field in the draft package's *This Package*
+group, stored in `form_data.assembly_lot_number`, and the cover page's
+"Assembly Lot Number (s)" block reads it (falling back to the live
+`work_order_assemblies.assembly_lot_number` values). The field is prefilled from
+`work_order_assemblies` for the package's `work_order_id` when a lot is already
+stamped there.
+**Why:** The assembly module is not live, so nothing writes the ALN today and
+compliance has to type it. Wiring the prefill now means the takeover is
+automatic — when the module starts stamping `assembly_lot_number`, the field
+populates on its own and manual entry becomes the override. No code change is
+scheduled for that cutover; a comment at the field records the intent.
+**Files:** src/lib/certPackage.js, src/pages/CertRepository.jsx,
+src/lib/certPackagePdf.js.
+
+### D-CERTPKG-08 — Package form errors live below the action buttons (2026-07-30)
+**What:** Every error on the draft form — signature-missing, validation, S3
+upload, DB trigger — renders in one block directly beneath Save Draft /
+Approve & Sign, with `scrollIntoView({ block: 'nearest' })` when it is set. The
+top-of-form error banner is gone (the success notice stays at the top).
+**Why:** The form is long enough that a failure at the bottom scrolled its own
+explanation off screen — beta users pressed Approve, saw nothing happen, and
+pressed again. The error belongs where the user's eyes already are.
+
+### D-CERTPKG-09 — Heat numbers pair with material lots; write-back only fills NULLs (2026-07-30)
+**What:** MATERIAL LOT OVERRIDES is now paired **Lot #** / **Heat #** inputs per
+manufactured component (purchased components keep the single lot field — they
+have no raw-material receipt). Both persist in `form_data`
+(`material_lot_overrides`, `heat_number_overrides`). Heat # prefills from
+`material_receiving.heat_number`. On Save Draft and on Approve, an entered heat
+number is written back to `material_receiving` **only** when the component
+resolves to exactly one receiving row *and* that row's `heat_number` is NULL;
+the UPDATE additionally carries `.is('heat_number', null)` as a race guard. An
+existing value is never overwritten, and an ambiguous/absent receiving row or an
+RLS refusal is skipped silently (logged, never surfaced, never blocks the save).
+The cover component table prints `lot / heat` when a heat is present and the lot
+alone otherwise, matching the paper QMS-10.4 format.
+**Why:** `material_receiving.heat_number` (deployed ahead of this work) is empty
+for historical receipts, and the person who knows the heat number is the one
+building the cert package. Capturing it there backfills the receiving record as
+a side effect of work that was happening anyway. Resolution is by receiving ID
+walked through the traceability chain (component → job sources → material_usage
+→ material_receiving), never by matching lot-number strings, so a shared lot
+label cannot write a heat onto the wrong receipt.
+**Files:** src/lib/certPackage.js, src/pages/CertRepository.jsx,
+src/lib/certPackagePdf.js.
+
+### D-CERTPKG-10 — Blank production logs are excluded by default, not banned (2026-07-30)
+**What:** `EXCLUDED_DOC_TYPE_CODES = ['production_log_blank']` in
+`certPackage.js`. Documents of an excluded type default to UNCHECKED in the
+Arrange Documents step but stay visible and re-checkable, and the choice
+persists per package in `form_data`. Type resolution is by
+`document_types.code` with a name match as a second net, so an environment whose
+code drifted still excludes the right type.
+**Why:** The blank log is a shop-floor artifact; the filled copy is what belongs
+in a customer package. But "never" is too strong — some packages have
+historically included it, so compliance keeps the per-package override rather
+than having to work around a document the system refuses to merge.
+
+### D-CERTPKG-11 — Package document order is compliance-arranged and persisted (2026-07-30)
+**What:** The draft form gains an **Arrange Documents** section: an ordered list
+of groups — Cover Page (fixed first, not movable, not excludable), Job Traveler
+(always included, position movable, defaults to 2nd), then one group per
+component in BOM order — with an include/exclude checkbox per document and
+up/down move controls at both the group and document level. Order + inclusion
+live in `form_data.doc_arrangement` (`{ groupOrder, itemOrder, inclusion }`,
+keyed by a stable per-document `item_id`); `approveAndGenerate` flattens exactly
+that arrangement into the merge list `certPackagePdf` consumes, and Regenerate
+prefills the prior arrangement from the old snapshot. Groups rebuild from the
+LIVE merge list on every load, so a document uploaded since the draft was saved
+appears automatically (appended in traceability order, taking its type default).
+**Why:** Traceability order is a sensible default but not a rule — customers and
+auditors expect specific packet layouts, and compliance was previously stuck
+with whatever order the walk produced. No drag-and-drop dependency was added;
+move buttons cover the need at a fraction of the weight.
+
+### D-CERTPKG-12 — The traveler in the package is generated, not captured (2026-07-30)
+**What:** `certPackagePdf.renderTravelerPages()` draws Form 10-100 traveler
+page(s) straight into the package PDF from live SkyNet data — Skybolt header,
+part number/name, final process, manufacturing # (PLN), heat/lot #, material,
+drawing rev, TSO rev, the process/operations table (step, station/vendor, new
+lot, qty, date, operator initials) built from job routing steps +
+`finishing_sends` + `outbound_sends`, a notes box, and a `Form 10-100` +
+generation-date footer. It is always in the package and cannot be excluded. The
+dataset is frozen into the approval snapshot alongside everything else, so an
+approved PDF and its snapshot still agree years later even as the job's live
+data moves on.
+**Why:** Screenshotting or rasterizing the React print page would put an
+un-searchable, resolution-bound image into a controlled quality record. Drawing
+from the data keeps the traveler as real PDF text and lets the snapshot carry
+the exact values that were printed.
+**Implementation note — one derivation, two renderers.** The lot / qty / date /
+operator precedence in the traveler (machine step carries the PLN, every
+internal step after it carries the FLN, per-batch vendor lot beats
+`step.lot_number`, and so on) is compliance-critical and was previously welded
+into `buildTravelerHTML`'s string emission. It is now
+`buildTravelerModel(travelerData)` in `src/lib/traveler.js`, returning plain row
+objects; `buildTravelerHTML` renders that model to HTML for the four popup
+surfaces and `renderTravelerPages` renders the same model to PDF. Duplicating
+the precedence into the cert-package layer was the alternative and was rejected
+— two copies of that logic drift, and a drifted traveler is a mis-stated lot
+number on a shipped certificate. `fetchTravelerData(supabase, jobId)` was added
+alongside it so a non-interactive consumer can assemble the dataset; the four
+existing call sites still inline their own identical query block and were left
+untouched. `buildPackageDataset` takes `{ includeTraveler }` — off for the draft
+form and the "All Jobs" fan-out (four extra queries per job, nothing displays
+it), on at approval, the only moment the dataset must be complete enough to
+freeze.
+
+### D-UI-MODAL01 — Backdrop click never closes a modal (2026-07-30)
+**What:** Click-to-close was removed from every modal backdrop in the app:
+Schedule (job detail, end-date edit, unschedule confirm, close-maintenance),
+Mainframe (edit job, manual batch, WO-lookup cancel), Finishing (new job),
+Assembly (send batch), CertRepository (My Signature, Build Package, Draft Form),
+CreateMaintenanceModal (main + crash), CreateWorkOrderModal, EditWorkOrderModal,
+PrintPackageModal, RoutingTemplatesTab, ScheduleJobModal, and
+rmforecast/PartDimensionEditor. X / Cancel / Close controls and existing
+Escape-key handlers are untouched; no other modal behavior changed. The
+dropdown-menu scrim in `Armory.jsx` (`fixed inset-0 z-40` closing an open menu)
+is deliberately kept — it is a menu click-away, not a modal backdrop.
+**Why:** Beta users lost long forms to a stray click outside — the cert package
+draft form and Create WO in particular. A modal that holds typed work should
+only close on an explicit gesture; the cost of one extra click is far below the
+cost of silently discarded entry.
+
+### D-CERTPKG-13 — Save Draft and Approve persist the Part Profile too (2026-07-30)
+Save Draft and Approve & Sign persist the Part Profile section along with
+`form_data` in a single action (the separate Save Profile button stays for
+profile-only saves); the profile upsert is keyed on `part_id`
+(`onConflict: 'part_id'`, stamping `updated_by`/`updated_at`) and any error is
+surfaced in the error block below the buttons instead of being swallowed — a
+profile write failure now aborts approval rather than certifying stale cover
+data.

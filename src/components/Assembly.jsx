@@ -1474,7 +1474,6 @@ export default function Assembly({ profile, onUpdate }) {
       {showSendBatchModal && sendBatchItem && sendBatchExternalStep && (
         <div
           className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowSendBatchModal(false)}
         >
           <div
             className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-md flex flex-col"

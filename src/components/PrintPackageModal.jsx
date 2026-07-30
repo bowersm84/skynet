@@ -454,7 +454,6 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
   return (
     <div
       className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-      onClick={onClose}
     >
       <div
         className="bg-gray-900 rounded-lg border border-gray-600 w-full max-w-md max-h-[80vh] overflow-hidden"

@@ -331,7 +331,6 @@ export default function RoutingTemplatesTab({ onDataChange }) {
       {showModal && (
         <div
           className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowModal(false)}
         >
           <div
             className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-xl max-h-[85vh] flex flex-col"

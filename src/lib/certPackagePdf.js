@@ -240,9 +240,12 @@ async function drawCover(pdf, font, bold, snapshot, fetchBytes) {
   flow.gap(6)
 
   // --- Assembly Lot / Plating / NADCAP / Primer block ---
+  // Assembly Lot Number(s) is a form_data entry (manually entered until the
+  // assembly module writes work_order_assemblies.assembly_lot_number, which is
+  // what prefills it). The live assembly lots remain the fallback.
   const assemblyLots = (a.assemblies || []).map((x) => x.assembly_lot_number).filter(Boolean).join(', ')
   flow.fieldGrid([
-    ['Assembly Lot', val(assemblyLots), 'Primer', val(p.primer)],
+    ['Assembly Lot Number (s)', val(fd.assembly_lot_number || assemblyLots), 'Primer', val(p.primer)],
     ['NADCAP Plating', yesNo(p.nadcap_plating), 'NADCAP Heat Treat', yesNo(p.nadcap_heat_treat)],
   ])
   flow.gap(8)
@@ -257,12 +260,21 @@ async function drawCover(pdf, font, bold, snapshot, fetchBytes) {
     { title: 'Material Lot # / Heat', w: 0.18 },
   ]
   const overrides = fd.material_lot_overrides || {}
+  const heats = fd.heat_number_overrides || {}
+  // Paper QMS-10.4 prints the material lot alone ('79015990') when no heat is
+  // recorded, and 'lot / heat' when there is one.
+  const lotHeat = (c) => {
+    const lot = String(overrides[c.part_number] ?? (c.material_lots || []).join(', ') ?? '').trim()
+    const heat = String(heats[c.part_number] ?? '').trim()
+    if (lot && heat) return `${lot} / ${heat}`
+    return lot || heat
+  }
   const compRows = (a.components || []).map((c) => [
     `${c.part_number}${c.description ? ' — ' + c.description : ''}`,
     val(c.component_origin),
     (c.final_lots || []).join(', ') || '—',
     (c.production_lots || []).join(', ') || '—',
-    val(overrides[c.part_number] ?? (c.material_lots || []).join(', ')),
+    val(lotHeat(c)),
   ])
   if (compRows.length === 0) compRows.push(['—', '—', '—', '—', '—'])
   flow.table(compCols, compRows)
@@ -342,6 +354,79 @@ async function drawCover(pdf, font, bold, snapshot, fetchBytes) {
 }
 
 // ---------------------------------------------------------------------------
+// Job Traveler pages (Skybolt Form 10-100 equivalent)
+// ---------------------------------------------------------------------------
+// Generated directly into the package PDF from the frozen traveler dataset
+// (src/lib/traveler.js buildTravelerModel) — never a screenshot or a raster of
+// the React print page. The dataset is captured in the snapshot at approval, so
+// these pages stay identical forever even as the live job data moves on.
+// `extra` carries the package's own header values (heat/lot #, TSO rev).
+export function renderTravelerPages(pdf, font, bold, traveler, extra = {}) {
+  if (!traveler) return
+  const flow = newFlow(pdf, font, bold)
+  const dateOnly = (d) => (d ? new Date(d).toLocaleDateString() : '')
+
+  // --- Skybolt header ---
+  flow.text('SKYBOLT AEROMOTIVE CORPORATION', { size: 14, f: bold, align: 'center', gapAfter: 2 })
+  flow.text('JOB TRAVELER', { size: 12, f: bold, align: 'center', gapAfter: 3 })
+  flow.text('9000 Airport Blvd  Leesburg, Florida 34788  352-326-0001', { size: 8, color: GRAY, align: 'center', gapAfter: 6 })
+  flow.hline(BLACK, 1.5)
+  flow.gap(8)
+
+  // --- Header fields (Form 10-100) ---
+  flow.fieldGrid([
+    ['Part Number', val(traveler.part_number), 'Job Number', val(traveler.job_number)],
+    ['Part Name', val(traveler.description), 'Order / WO #', val(traveler.wo_number)],
+    ['Final Process', val(traveler.final_process), 'PO Number', val(traveler.po_number)],
+    ['Manufacturing # (PLN)', val(traveler.production_lot_number), 'Customer', val(traveler.customer)],
+    ['Heat / Lot #', val(extra.heat_lot ?? traveler.finishing_lot_number), 'Quantity', val(traveler.quantity_display)],
+    ['Material', val(traveler.material), 'Due Date', val(dateOnly(traveler.due_date))],
+    ['Drawing Rev', val(traveler.drawing_revision), 'TSO Rev', val(extra.tso_rev ?? traveler.tso_rev)],
+  ])
+  flow.gap(8)
+
+  // --- Process / operations table ---
+  flow.text('Process', { size: 9, f: bold, gapAfter: 3 })
+  const cols = [
+    { title: 'Step', w: 0.05 },
+    { title: 'Process', w: 0.24 },
+    { title: 'Station / Vendor', w: 0.17 },
+    { title: 'Type', w: 0.05 },
+    { title: 'New Lot #', w: 0.23 },
+    { title: 'Qty', w: 0.06 },
+    { title: 'Date', w: 0.10 },
+    { title: 'Oper.', w: 0.10 },
+  ]
+  const rows = (traveler.rows || []).map((r) => [
+    String(r.step_order ?? ''),
+    `${r.step_name || ''}${r.is_added_step ? ' *' : ''}${r.batch_label ? ' ' + r.batch_label : ''}`,
+    r.station || '',
+    r.type || '',
+    r.lot || '',
+    r.qty || '',
+    r.date || '',
+    r.operator || '',
+  ])
+  if (rows.length === 0) rows.push(['', 'No routing steps recorded.', '', '', '', '', '', ''])
+  flow.table(cols, rows)
+  flow.gap(10)
+
+  // --- Notes ---
+  flow.text('Notes', { size: 9, f: bold, gapAfter: 3 })
+  flow.ensure(46)
+  flow.page.drawRectangle({
+    x: flow.left, y: flow.y - 44, width: flow.width, height: 44,
+    borderColor: BLACK, borderWidth: 0.5,
+  })
+  flow.gap(48)
+
+  // --- Footer: form reference + generation date ---
+  flow.page.drawText('Form 10-100  Job Traveler', { x: flow.left, y: MARGIN - 6, size: 7, font, color: GRAY })
+  const genTxt = safe(`Generated from SkyNet MES  ${extra.generated_at ? new Date(extra.generated_at).toLocaleString() : ''}`)
+  flow.page.drawText(genTxt, { x: flow.right - font.widthOfTextAtSize(genTxt, 7), y: MARGIN - 6, size: 7, font, color: GRAY })
+}
+
+// ---------------------------------------------------------------------------
 // Merge helpers
 // ---------------------------------------------------------------------------
 async function mergePdf(pdf, bytes) {
@@ -413,11 +498,38 @@ export async function generateCertPackagePdf(snapshot, { fetchBytes } = {}) {
   const merged = []
   const skipped = []
 
-  // 1. cover
+  // 1. cover (always first — not part of the arrangement)
   await drawCover(pdf, font, bold, snapshot, fetchBytes)
 
-  // 2. merge in traceability order
+  // Heat / Lot # for the traveler header: the certified part's own entry.
+  const fd = snapshot.formData || {}
+  const certPart = snapshot.autoFields?.part_number
+  const travelerExtra = {
+    heat_lot: (() => {
+      const lot = String(fd.material_lot_overrides?.[certPart] ?? '').trim()
+      const heat = String(fd.heat_number_overrides?.[certPart] ?? '').trim()
+      if (lot && heat) return `${lot} / ${heat}`
+      return lot || heat || null
+    })(),
+    tso_rev: snapshot.profileFields?.tso_c148 || null,
+    generated_at: snapshot.signing?.approved_date || snapshot.frozen_at || null,
+  }
+
+  // 2. merge in the compliance-arranged order (traveler + included documents)
   for (const doc of snapshot.mergeList || []) {
+    if (doc.kind === 'traveler') {
+      if (!snapshot.traveler) {
+        skipped.push({ file_name: 'Job Traveler (generated)', reason: 'traveler data unavailable' })
+        continue
+      }
+      try {
+        renderTravelerPages(pdf, font, bold, snapshot.traveler, travelerExtra)
+        merged.push({ file_name: 'Job Traveler (generated)', component_part_number: null, as: 'traveler' })
+      } catch (err) {
+        skipped.push({ file_name: 'Job Traveler (generated)', reason: 'traveler render failed: ' + (err.message || 'error') })
+      }
+      continue
+    }
     const ext = extOf(doc.file_name || doc.file_path)
     let bytes = null
     try {

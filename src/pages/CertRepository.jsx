@@ -3,6 +3,7 @@ import {
   Search, FileText, Link2, Upload, Trash2, Check, ChevronRight, ChevronDown,
   Package, Cpu, Loader2, Plus, X, ArrowRight, GitBranch, ShieldCheck, ExternalLink,
   ClipboardList, FilePlus, FileSignature, Download, RefreshCw, AlertTriangle, Save, Pencil,
+  ChevronUp, Lock, ListOrdered,
 } from 'lucide-react'
 import { hasRole } from '../lib/roles'
 import { getDocumentUrl } from '../lib/s3'
@@ -31,6 +32,11 @@ import {
   getMySignature,
   saveMySignature,
   savePartCertProfile,
+  buildDocumentGroups,
+  arrangementFromGroups,
+  writeBackHeatNumbers,
+  COVER_GROUP_ID,
+  TRAVELER_GROUP_ID,
   PROFILE_BOOLEAN_FIELDS,
   PROFILE_TEXT_FIELDS,
 } from '../lib/certPackage'
@@ -1317,6 +1323,9 @@ function jobsFromTrace(trace, statusByPart) {
   return jobs
 }
 
+// Modal backdrops never close the modal — an accidental click outside must not
+// discard in-progress entry. Every modal closes via its X / Cancel / Close
+// control only.
 const modalShell = 'fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4'
 const modalCard = 'bg-gray-900 rounded-xl border border-gray-700 w-full max-w-3xl max-h-[88vh] overflow-hidden flex flex-col'
 
@@ -1360,8 +1369,8 @@ function SignatureModal({ profile, onClose }) {
   const input = 'w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-skynet-accent'
 
   return (
-    <div className={modalShell} onClick={onClose}>
-      <div className={modalCard + ' max-w-lg'} onClick={(e) => e.stopPropagation()}>
+    <div className={modalShell}>
+      <div className={modalCard + ' max-w-lg'}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h2 className="text-lg font-semibold text-white flex items-center gap-2"><FileSignature size={18} /> My Signature</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
@@ -1447,8 +1456,8 @@ function BuildPackageModal({ trace, statusByPart, profile, onClose, onBuilt }) {
   }
 
   return (
-    <div className={modalShell} onClick={onClose}>
-      <div className={modalCard} onClick={(e) => e.stopPropagation()}>
+    <div className={modalShell}>
+      <div className={modalCard}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h2 className="text-lg font-semibold text-white flex items-center gap-2"><FilePlus size={18} /> Build Cert Package — {trace.header.wo_number}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
@@ -1535,10 +1544,24 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [showSig, setShowSig] = useState(false)
+  const errorRef = useRef(null)
 
+  // Every error on this form renders in one block directly below the action
+  // buttons — bring it into view whenever it changes.
+  useEffect(() => {
+    if (error && errorRef.current) errorRef.current.scrollIntoView({ block: 'nearest' })
+  }, [error])
+
+  // Opening a draft always reads the part profile fresh (buildPackageDataset →
+  // getOrCreatePartCertProfile) and rehydrates prof/origins only after that
+  // resolves. The token guard means a late-resolving load can never clobber
+  // state a newer load — or the user — has already written.
+  const loadToken = useRef(0)
   const load = useCallback(async () => {
+    const token = ++loadToken.current
     setLoading(true)
     const dataset = await buildPackageDataset(pkg.work_order_id, pkg.job_id)
+    if (token !== loadToken.current) return
     setDs(dataset)
     setForm({ ...(dataset?.entryDefaults || {}), ...(pkg.form_data || {}) })
     const p = dataset?.profileFields || {}
@@ -1552,35 +1575,91 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
   const setF = (k, v) => setForm((f) => ({ ...f, [k]: v }))
   const setP = (k, v) => setProf((p) => ({ ...p, [k]: v }))
   const setMatOverride = (partNo, v) => setForm((f) => ({ ...f, material_lot_overrides: { ...(f.material_lot_overrides || {}), [partNo]: v } }))
+  const setHeatOverride = (partNo, v) => setForm((f) => ({ ...f, heat_number_overrides: { ...(f.heat_number_overrides || {}), [partNo]: v } }))
+
+  // --- Arrange Documents ------------------------------------------------
+  // Groups are derived from the live merge list + the saved arrangement, so a
+  // document uploaded since the draft was saved shows up automatically. Every
+  // move / toggle writes the arrangement straight back into form_data.
+  const groups = ds ? buildDocumentGroups(ds, form) : []
+  const cloneGroups = () => groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i })) }))
+  const applyGroups = (next) => setF('doc_arrangement', arrangementFromGroups(next))
+
+  const moveGroup = (idx, dir) => {
+    const j = idx + dir
+    // index 0 is the cover page — fixed first, and nothing may move above it.
+    if (idx < 1 || j < 1 || j >= groups.length) return
+    const next = cloneGroups()
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    applyGroups(next)
+  }
+
+  const moveItem = (gIdx, iIdx, dir) => {
+    const j = iIdx + dir
+    const next = cloneGroups()
+    const items = next[gIdx].items
+    if (j < 0 || j >= items.length) return
+    ;[items[iIdx], items[j]] = [items[j], items[iIdx]]
+    applyGroups(next)
+  }
+
+  const toggleItem = (gIdx, iIdx) => {
+    const next = cloneGroups()
+    const item = next[gIdx].items[iIdx]
+    item.included = !item.included
+    applyGroups(next)
+  }
+
+  // The single write path for the Part Profile group. Save Profile, Save Draft
+  // and Approve & Sign all go through it, so profile edits can never be
+  // discarded by saving through one of the other two. Always returns the error
+  // rather than swallowing it — every caller surfaces it in the error block.
+  const persistProfile = async () => {
+    if (!ds?.partId) {
+      return { error: new Error('This package has no part associated with it, so the Part Profile cannot be saved.') }
+    }
+    const { data, error } = await savePartCertProfile(ds.partId, { ...prof, component_origins: origins }, profile?.id)
+    // Keep the dataset's copy in step with what was just written.
+    if (!error && data) setDs((d) => (d ? { ...d, profileFields: data } : d))
+    return { error }
+  }
 
   const saveProfileNow = async () => {
     setSavingProfile(true); setError(''); setNotice('')
-    try {
-      const { error } = await savePartCertProfile(ds.partId, { ...prof, component_origins: origins }, profile?.id)
-      if (error) throw error
-      setNotice('Part profile saved — applies to all future packages for this part.')
-    } catch (err) {
-      setError('Profile save failed: ' + (err.message || err))
-    } finally {
-      setSavingProfile(false)
-    }
+    const { error } = await persistProfile()
+    setSavingProfile(false)
+    if (error) { setError('Profile save failed: ' + error.message); return }
+    setNotice('Part profile saved — applies to all future packages for this part.')
   }
 
+  // Save Draft is one action that persists everything on the form: the
+  // per-package entries into cert_packages.form_data AND the Part Profile group
+  // into part_cert_profiles. (The separate Save Profile button remains, for
+  // saving the profile without touching the draft.)
   const saveDraftNow = async (silent = false) => {
     if (!silent) setSavingDraft(true)
     setError('')
-    const { error } = await updateDraftPackage(pkg.id, form)
+    const { error: draftError } = await updateDraftPackage(pkg.id, form)
+    const { error: profileError } = await persistProfile()
+    // Heat numbers typed here fill material_receiving.heat_number where it is
+    // still NULL. Never blocks the save — see writeBackHeatNumbers.
+    if (!draftError && ds) { try { await writeBackHeatNumbers(ds, form) } catch { /* non-blocking */ } }
     if (!silent) setSavingDraft(false)
-    if (error) { setError('Draft save failed: ' + error.message); return false }
-    if (!silent) { setNotice('Draft saved.'); onSaved?.() }
+    if (draftError) { setError('Draft save failed: ' + draftError.message); return false }
+    // The draft itself is saved at this point — say so, so the user knows what
+    // did and did not land.
+    if (profileError) { setError('Draft saved, but the Part Profile did not: ' + profileError.message); return false }
+    if (!silent) { setNotice('Draft and part profile saved.'); onSaved?.() }
     return true
   }
 
   const approve = async () => {
     setApproving(true); setError(''); setNotice('')
     try {
-      // Persist the current profile + form so the frozen snapshot reflects them.
-      await savePartCertProfile(ds.partId, { ...prof, component_origins: origins }, profile?.id)
+      // Persist the form AND the profile before freezing. approveAndGenerate
+      // re-reads part_cert_profiles when it builds the snapshot, so the cover
+      // can only render what is on screen if this write landed first — a
+      // failure here aborts the approval instead of certifying stale data.
       const ok = await saveDraftNow(true)
       if (!ok) { setApproving(false); return }
       const { data, error } = await approveAndGenerate(pkg.id, profile)
@@ -1602,8 +1681,8 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
   const missingSig = error && /signature/i.test(error)
 
   return (
-    <div className={modalShell} onClick={onClose}>
-      <div className={modalCard + ' max-w-4xl'} onClick={(e) => e.stopPropagation()}>
+    <div className={modalShell}>
+      <div className={modalCard + ' max-w-4xl'}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h2 className="text-lg font-semibold text-white flex items-center gap-2">
             <FileText size={18} /> Cert Package Draft
@@ -1617,12 +1696,6 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
             <div className="flex items-center justify-center py-10 text-gray-500"><Loader2 size={22} className="animate-spin" /></div>
           ) : (
             <>
-              {error && (
-                <div className="text-xs text-red-300 bg-red-900/20 border border-red-800/50 rounded p-2 flex items-center justify-between gap-2">
-                  <span>{error}</span>
-                  {missingSig && <button onClick={() => setShowSig(true)} className="shrink-0 px-2 py-1 bg-gray-800 rounded text-white hover:bg-gray-700">Set up signature</button>}
-                </div>
-              )}
               {notice && <div className="text-xs text-skynet-green bg-skynet-green/10 border border-skynet-green/30 rounded p-2">{notice}</div>}
 
               {/* GROUP 1 — From SkyNet (read-only) */}
@@ -1718,7 +1791,15 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div><label className={roLabel}>Qty Shipped</label><input value={form.quantity_shipped ?? ''} onChange={(e) => setF('quantity_shipped', e.target.value)} className={input} /></div>
                     <div><label className={roLabel}>Lot Number</label><input value={form.lot_number ?? ''} onChange={(e) => setF('lot_number', e.target.value)} className={input} /></div>
-                    <div className="col-span-2"><label className={roLabel}>Cert Package Emailed To</label><input value={form.emailed_to ?? ''} onChange={(e) => setF('emailed_to', e.target.value)} className={input} /></div>
+                    <div>
+                      {/* Prefilled from work_order_assemblies.assembly_lot_number when the
+                          assembly module has stamped one for this WO; manual entry until
+                          then. No code change is needed when the module comes online — the
+                          prefill starts populating on its own. */}
+                      <label className={roLabel}>Assembly Lot Number</label>
+                      <input value={form.assembly_lot_number ?? ''} onChange={(e) => setF('assembly_lot_number', e.target.value)} className={input} />
+                    </div>
+                    <div><label className={roLabel}>Cert Package Emailed To</label><input value={form.emailed_to ?? ''} onChange={(e) => setF('emailed_to', e.target.value)} className={input} /></div>
                   </div>
                   <div>
                     <div className={roLabel + ' mb-1'}>Lot Assembly Test</div>
@@ -1740,41 +1821,167 @@ function DraftFormModal({ pkg, profile, onClose, onSaved, onApproved }) {
                   {a.components?.length > 0 && (
                     <div>
                       <div className={roLabel + ' mb-1'}>Material Lot Overrides</div>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        {a.components.map((c) => (
-                          <div key={c.part_id} className="flex items-center gap-2">
-                            <span className="text-xs text-gray-400 font-mono w-24 truncate" title={c.part_number}>{c.part_number}</span>
-                            <input
-                              value={form.material_lot_overrides?.[c.part_number] ?? ''}
-                              onChange={(e) => setMatOverride(c.part_number, e.target.value)}
-                              className={input + ' py-1'}
-                            />
-                          </div>
-                        ))}
+                      <p className="text-[11px] text-gray-500 mb-2">
+                        Heat # is prefilled from the material receipt when it is already recorded.
+                        A heat number entered here is written back to the receiving record only when
+                        that record has none — an existing heat number is never overwritten.
+                      </p>
+                      <div className="space-y-2">
+                        {a.components.map((c) => {
+                          const purchased = c.part_type === 'purchased'
+                          return (
+                            <div key={c.part_id} className="flex items-start gap-2">
+                              <span className="text-xs text-gray-400 font-mono w-28 shrink-0 truncate pt-2" title={c.part_number}>{c.part_number}</span>
+                              <div className={`flex-1 grid gap-2 ${purchased ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                                <div>
+                                  <label className={roLabel}>Lot #</label>
+                                  <input
+                                    value={form.material_lot_overrides?.[c.part_number] ?? ''}
+                                    onChange={(e) => setMatOverride(c.part_number, e.target.value)}
+                                    className={input + ' py-1'}
+                                  />
+                                </div>
+                                {/* Purchased components have no raw-material receipt to carry a
+                                    heat number — they keep the single lot field. */}
+                                {!purchased && (
+                                  <div>
+                                    <label className={roLabel}>Heat #</label>
+                                    <input
+                                      value={form.heat_number_overrides?.[c.part_number] ?? ''}
+                                      onChange={(e) => setHeatOverride(c.part_number, e.target.value)}
+                                      className={input + ' py-1'}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
                       </div>
                     </div>
                   )}
                 </div>
               </section>
+
+              {/* GROUP 4 — Arrange Documents (order + inclusion, per package) */}
+              <ArrangeDocumentsSection
+                groups={groups}
+                onMoveGroup={moveGroup}
+                onMoveItem={moveItem}
+                onToggleItem={toggleItem}
+              />
             </>
           )}
         </div>
 
-        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-gray-700">
-          <span className="text-xs text-gray-500">Approve & Sign applies your stored signature and locks this package.</span>
-          <div className="flex items-center gap-2">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Close</button>
-            <button onClick={() => saveDraftNow(false)} disabled={savingDraft || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm rounded">
-              {savingDraft ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save Draft
-            </button>
-            <button onClick={approve} disabled={approving || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-skynet-green hover:bg-skynet-green/80 disabled:opacity-50 text-white text-sm rounded">
-              {approving ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />} Approve & Sign
-            </button>
+        {/* Errors (validation, missing signature, S3, DB trigger) render here —
+            directly below the action buttons, where the user is looking when the
+            action fails. There is deliberately no banner at the top of the form. */}
+        <div className="px-5 py-4 border-t border-gray-700 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-500">Approve &amp; Sign applies your stored signature and locks this package.</span>
+            <div className="flex items-center gap-2">
+              <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Close</button>
+              <button onClick={() => saveDraftNow(false)} disabled={savingDraft || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm rounded">
+                {savingDraft ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save Draft
+              </button>
+              <button onClick={approve} disabled={approving || loading} className="inline-flex items-center gap-1.5 px-4 py-2 bg-skynet-green hover:bg-skynet-green/80 disabled:opacity-50 text-white text-sm rounded">
+                {approving ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />} Approve &amp; Sign
+              </button>
+            </div>
           </div>
+          {error && (
+            <div ref={errorRef} className="text-xs text-red-300 bg-red-900/20 border border-red-800/50 rounded p-2 flex items-center justify-between gap-2">
+              <span>{error}</span>
+              {missingSig && <button onClick={() => setShowSig(true)} className="shrink-0 px-2 py-1 bg-gray-800 rounded text-white hover:bg-gray-700">Set up signature</button>}
+            </div>
+          )}
         </div>
       </div>
       {showSig && <SignatureModal profile={profile} onClose={() => setShowSig(false)} />}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Arrange Documents — group + document order and inclusion for THIS package
+// ---------------------------------------------------------------------------
+// The cover page is fixed first and cannot be moved or excluded. The generated
+// Job Traveler is always included but its position is movable (defaults to 2nd).
+// Everything else is grouped by component in BOM order. Order and inclusion are
+// persisted in form_data and the merged PDF follows them exactly.
+function ArrangeDocumentsSection({ groups, onMoveGroup, onMoveItem, onToggleItem }) {
+  const moveBtn = 'p-1 rounded text-gray-500 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gray-500'
+  const includedCount = groups.reduce((n, g) => n + g.items.filter((i) => i.included).length, 0)
+  const totalCount = groups.reduce((n, g) => n + g.items.length, 0)
+
+  return (
+    <section className="border border-indigo-900/50 rounded-lg">
+      <div className="px-4 py-2 bg-indigo-900/20 text-xs uppercase tracking-wide text-indigo-300 font-semibold flex items-center justify-between">
+        <span className="flex items-center gap-1.5"><ListOrdered size={13} /> Arrange Documents</span>
+        <span className="normal-case text-indigo-200/70">{includedCount} of {totalCount} documents included</span>
+      </div>
+      <div className="p-4 space-y-2">
+        <p className="text-[11px] text-gray-500">
+          The package is assembled in this order. Move groups and documents with the arrows;
+          uncheck anything that should not ship. Blank production logs are unchecked by default —
+          re-check one to include it in this package.
+        </p>
+        {groups.map((g, gIdx) => {
+          const pinned = g.id === COVER_GROUP_ID
+          const isTraveler = g.id === TRAVELER_GROUP_ID
+          return (
+            <div key={g.id} className="border border-gray-800 rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-800/50">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] text-gray-500 font-mono w-5 shrink-0">{gIdx + 1}</span>
+                  <span className="text-sm text-white font-medium truncate">{g.label}</span>
+                  {(pinned || isTraveler) && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-700/70 text-[10px] text-gray-300 shrink-0">
+                      <Lock size={9} /> always included
+                    </span>
+                  )}
+                  {g.note && <span className="text-[11px] text-gray-500 truncate hidden sm:inline">— {g.note}</span>}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {pinned
+                    ? <span className="text-[10px] text-gray-500 pr-1">fixed first</span>
+                    : (
+                      <>
+                        <button type="button" onClick={() => onMoveGroup(gIdx, -1)} disabled={gIdx <= 1} className={moveBtn} title="Move group up"><ChevronUp size={14} /></button>
+                        <button type="button" onClick={() => onMoveGroup(gIdx, 1)} disabled={gIdx >= groups.length - 1} className={moveBtn} title="Move group down"><ChevronDown size={14} /></button>
+                      </>
+                    )}
+                </div>
+              </div>
+              {g.items.length > 0 && (
+                <div className="divide-y divide-gray-800">
+                  {g.items.map((item, iIdx) => (
+                    <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-1.5">
+                      <label className="flex items-center gap-2 min-w-0 cursor-pointer">
+                        <input type="checkbox" checked={!!item.included} onChange={() => onToggleItem(gIdx, iIdx)} />
+                        <FileText size={12} className="text-gray-500 shrink-0" />
+                        <span className={`text-xs truncate ${item.included ? 'text-gray-200' : 'text-gray-600 line-through'}`} title={item.file_name}>
+                          {item.file_name || 'Document'}
+                        </span>
+                        <span className="text-[10px] text-gray-500 shrink-0">{item.group}</span>
+                        {item.default_excluded && (
+                          <span className="text-[10px] text-amber-400/80 shrink-0">excluded by default</span>
+                        )}
+                      </label>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button type="button" onClick={() => onMoveItem(gIdx, iIdx, -1)} disabled={iIdx === 0} className={moveBtn} title="Move document up"><ChevronUp size={13} /></button>
+                        <button type="button" onClick={() => onMoveItem(gIdx, iIdx, 1)} disabled={iIdx === g.items.length - 1} className={moveBtn} title="Move document down"><ChevronDown size={13} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 

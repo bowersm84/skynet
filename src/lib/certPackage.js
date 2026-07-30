@@ -22,8 +22,39 @@ import { supabase } from './supabase'
 import { uploadDocument, getDocumentUrl } from './s3'
 import { getWorkOrderTraceability } from './certRepository'
 import { generateCertPackagePdf } from './certPackagePdf'
+import { fetchTravelerData, buildTravelerModel } from './traveler'
 
 const uniq = (arr) => [...new Set((arr || []).filter((v) => v != null && v !== ''))]
+
+// ---------------------------------------------------------------------------
+// Document types excluded from cert packages BY DEFAULT
+// ---------------------------------------------------------------------------
+// The blank production log is an internal shop-floor artifact — the filled copy
+// is what belongs in a customer package. Documents of these types are unchecked
+// by default in the Arrange Documents step, but they stay visible so compliance
+// can force-include one per package. This is a default, not a ban: the choice is
+// stored per package in form_data.doc_arrangement.inclusion.
+//
+// 'production_log_blank' is document_types.code for the "Production Log (Blank)"
+// type (same code BOMUpload.jsx / Armory.jsx seed into part_document_requirements).
+// getExcludedDocumentTypeIds() resolves it by code and also name-matches, so an
+// environment whose code drifted still excludes the right type.
+export const EXCLUDED_DOC_TYPE_CODES = ['production_log_blank']
+const EXCLUDED_DOC_TYPE_NAME_RE = /production\s*log\s*\(?\s*blank/i
+
+let _excludedDocTypeIds = null
+async function getExcludedDocumentTypeIds() {
+  if (_excludedDocTypeIds) return _excludedDocTypeIds
+  const { data, error } = await supabase.from('document_types').select('id, code, name')
+  if (error) return new Set()
+  const ids = new Set(
+    (data || [])
+      .filter((t) => EXCLUDED_DOC_TYPE_CODES.includes(t.code) || EXCLUDED_DOC_TYPE_NAME_RE.test(t.name || ''))
+      .map((t) => t.id)
+  )
+  _excludedDocTypeIds = ids
+  return ids
+}
 
 // Column types on part_cert_profiles (deployed schema, verified). Kept in one
 // place so the form, save path, and cover renderer agree. tso_c148 is TEXT
@@ -168,10 +199,69 @@ function componentRows(trace, componentOrigins) {
   })
 }
 
+// Resolve, per component part number, the DISTINCT material_receiving rows its
+// jobs consumed — { part_number: [{ receiving_id, lot_number, heat_number }] }.
+// Walks the traceability chain (component → job sources → material_usage →
+// material_receiving), so the heat number is keyed by receiving ID, never by a
+// lot-number string match. A component with exactly one receiving row is the
+// only case the write-back will act on.
+async function receivingRowsByComponent(trace) {
+  const jobIdsByPart = {}
+  const allJobIds = []
+  for (const c of trace?.components || []) {
+    const list = []
+    for (const s of c.sources || []) {
+      if (s.kind === 'job' && s.job_id) { list.push(s.job_id); allJobIds.push(s.job_id) }
+    }
+    jobIdsByPart[c.part_number] = list
+  }
+  if (allJobIds.length === 0) return {}
+
+  const { data: usage } = await supabase
+    .from('material_usage')
+    .select('job_id, material_receiving_id')
+    .in('job_id', uniq(allJobIds))
+  const receivingIds = uniq((usage || []).map((u) => u.material_receiving_id))
+  if (receivingIds.length === 0) return {}
+
+  // material_receiving.heat_number is the newly deployed column. If a stale
+  // environment is missing it the select errors — degrade to no prefill and no
+  // write-back rather than failing the whole package build.
+  const { data: recs, error } = await supabase
+    .from('material_receiving')
+    .select('id, lot_number, heat_number')
+    .in('id', receivingIds)
+  if (error) return {}
+  const recById = {}
+  ;(recs || []).forEach((r) => { recById[r.id] = r })
+
+  const receivingIdsByJob = {}
+  for (const u of usage || []) {
+    if (!u.material_receiving_id) continue
+    if (!receivingIdsByJob[u.job_id]) receivingIdsByJob[u.job_id] = []
+    if (!receivingIdsByJob[u.job_id].includes(u.material_receiving_id)) {
+      receivingIdsByJob[u.job_id].push(u.material_receiving_id)
+    }
+  }
+
+  const out = {}
+  for (const [partNumber, jobIds] of Object.entries(jobIdsByPart)) {
+    const ids = uniq(jobIds.flatMap((jid) => receivingIdsByJob[jid] || []))
+    out[partNumber] = ids
+      .map((id) => recById[id])
+      .filter(Boolean)
+      .map((r) => ({ receiving_id: r.id, lot_number: r.lot_number, heat_number: r.heat_number ?? null }))
+  }
+  return out
+}
+
 // Build the { autoFields, profileFields, entryDefaults } dataset for one job on a
 // WO. Reuses getWorkOrderTraceability; narrows to the selected job for the
 // per-package entry defaults while keeping every component in the cover table.
-export async function buildPackageDataset(workOrderId, jobId) {
+// `includeTraveler` is off for the draft form / build fan-out (the traveler is
+// four extra queries and nothing on the form displays it) and on at approval,
+// which is the only moment the dataset has to be complete enough to freeze.
+export async function buildPackageDataset(workOrderId, jobId, { includeTraveler = false } = {}) {
   const trace = await getWorkOrderTraceability(workOrderId)
   if (!trace) return null
 
@@ -204,6 +294,21 @@ export async function buildPackageDataset(workOrderId, jobId) {
   const materialLotOverrides = {}
   rows.forEach((r) => { materialLotOverrides[r.part_number] = (r.material_lots || []).join(', ') })
 
+  // Heat numbers, prefilled from material_receiving.heat_number when the
+  // component resolves to receiving rows that already carry one (D-CERTPKG-09).
+  const receivingByComponent = await receivingRowsByComponent(trace)
+  const heatNumberOverrides = {}
+  rows.forEach((r) => {
+    const heats = uniq((receivingByComponent[r.part_number] || []).map((x) => x.heat_number))
+    heatNumberOverrides[r.part_number] = heats.join(', ')
+  })
+
+  // Assembly Lot Number — prefilled from work_order_assemblies for this WO when
+  // the assembly module has stamped one, manually entered otherwise. When the
+  // assembly module comes online and starts writing assembly_lot_number, this
+  // prefill populates automatically and the manual entry becomes the override.
+  const assemblyLotNumber = uniq((trace.header?.assemblies || []).map((x) => x.assembly_lot_number)).join(', ')
+
   const autoFields = {
     wo_number: trace.header?.wo_number || null,
     customer: trace.header?.customer || null,
@@ -227,11 +332,27 @@ export async function buildPackageDataset(workOrderId, jobId) {
     components: rows,
   }
 
+  const mergeList = await buildMergeList(trace)
+
+  // The SkyNet-generated traveler for this job, frozen alongside everything else
+  // at approval so the approved PDF and the snapshot agree forever (D-CERTPKG-11).
+  const travelerRaw = includeTraveler ? await fetchTravelerData(supabase, jobId) : null
+  const traveler = travelerRaw
+    ? {
+        ...buildTravelerModel(travelerRaw),
+        // Header extras the traveler model can't know about — they come from the
+        // package's own data (heat/lot entry + the part's cert profile).
+        tso_rev: profile?.tso_c148 || null,
+      }
+    : null
+
   const entryDefaults = {
     quantity_shipped: goodQty ?? '',
     lot_number: finishingLotNumber || '',
+    assembly_lot_number: assemblyLotNumber,
     emailed_to: '',
     material_lot_overrides: materialLotOverrides,
+    heat_number_overrides: heatNumberOverrides,
     // Lot Assembly Test block
     test_date: '',
     test_performance: '',
@@ -241,6 +362,8 @@ export async function buildPackageDataset(workOrderId, jobId) {
     qc_date: '',
     qc_quantity: goodQty ?? '',
     qc_inspector: '',
+    // Document arrangement (order + inclusion) — see buildDocumentGroups.
+    doc_arrangement: defaultArrangement(mergeList),
   }
 
   return {
@@ -252,29 +375,200 @@ export async function buildPackageDataset(workOrderId, jobId) {
     autoFields,
     profileFields: profile,
     entryDefaults,
+    receivingByComponent,
+    traveler,
     // Ordered document merge list (traceability order: per component in BOM order,
-    // job docs → material certs → outbound certs → lot docs). Consumed by the PDF
-    // generator; frozen into the snapshot at approval.
-    mergeList: buildMergeList(trace),
+    // job docs → material certs → outbound certs → lot docs). The compliance
+    // arrangement (order + inclusion) is applied on top of it at approval.
+    mergeList,
   }
 }
 
 // Flatten the traceability doc chain into an ordered merge list for the PDF.
-function buildMergeList(trace) {
+// Every entry carries a stable `item_id` so the per-package arrangement (order +
+// inclusion) can reference it across reloads, and `default_excluded` for the
+// document types that are unchecked by default (EXCLUDED_DOC_TYPE_CODES).
+async function buildMergeList(trace) {
   const out = []
   for (const c of trace?.components || []) {
     const cp = c.part_number
     for (const s of c.sources || []) {
       if (s.kind === 'job') {
-        for (const d of s.docs?.jobDocs || []) out.push({ component_part_number: cp, group: 'Job Document', file_name: d.file_name, file_path: d.file_path })
-        for (const d of s.docs?.materialCertDocs || []) out.push({ component_part_number: cp, group: 'Material Cert', file_name: d.file_name, file_path: d.file_path })
+        for (const d of s.docs?.jobDocs || []) out.push({ component_part_number: cp, group: 'Job Document', file_name: d.file_name, file_path: d.file_path, doc_id: d.id })
+        for (const d of s.docs?.materialCertDocs || []) out.push({ component_part_number: cp, group: 'Material Cert', file_name: d.file_name, file_path: d.file_path, doc_id: d.id })
         for (const d of s.docs?.outboundCerts || []) out.push({ component_part_number: cp, group: 'Outbound Cert', file_name: d.file_name, file_path: d.file_path })
       } else if (s.kind === 'lot') {
-        for (const d of s.documents || []) out.push({ component_part_number: cp, group: 'Lot Document', file_name: d.file_name, file_path: d.file_path })
+        for (const d of s.documents || []) out.push({ component_part_number: cp, group: 'Lot Document', file_name: d.file_name, file_path: d.file_path, doc_id: d.id })
       }
     }
   }
-  return out.filter((d) => d.file_path)
+  const list = out.filter((d) => d.file_path)
+
+  // Which of the job documents are of a default-excluded type?
+  const excludedTypeIds = await getExcludedDocumentTypeIds()
+  let defaultExcludedDocIds = new Set()
+  const jobDocIds = uniq(list.filter((d) => d.group === 'Job Document').map((d) => d.doc_id))
+  if (excludedTypeIds.size && jobDocIds.length) {
+    const { data } = await supabase
+      .from('job_documents')
+      .select('id, document_type_id')
+      .in('id', jobDocIds)
+    defaultExcludedDocIds = new Set(
+      (data || []).filter((d) => excludedTypeIds.has(d.document_type_id)).map((d) => d.id)
+    )
+  }
+
+  return list.map((d) => ({
+    ...d,
+    item_id: `${d.group}|${d.file_path}`,
+    default_excluded: !!(d.doc_id && defaultExcludedDocIds.has(d.doc_id)),
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Document arrangement (order + inclusion), persisted in form_data
+// ---------------------------------------------------------------------------
+// The package's documents are shown as ordered GROUPS: the cover page (fixed
+// first, never movable, never excludable), the generated Job Traveler (always
+// included, position movable), then one group per component in BOM order. Both
+// group order and within-group order are drag/move-able, and every document has
+// an include/exclude checkbox. The result lives in
+// form_data.doc_arrangement = { groupOrder, itemOrder, inclusion } and drives the
+// merge order in approveAndGenerate → certPackagePdf exactly as shown.
+export const COVER_GROUP_ID = '__cover__'
+export const TRAVELER_GROUP_ID = '__traveler__'
+
+const componentGroupId = (partNumber) => `comp:${partNumber || '—'}`
+
+// The arrangement a brand-new draft starts from: natural traceability order,
+// traveler in position 2, default-excluded types unchecked.
+function defaultArrangement(mergeList) {
+  const groupOrder = [COVER_GROUP_ID, TRAVELER_GROUP_ID]
+  const itemOrder = {}
+  const inclusion = {}
+  for (const d of mergeList || []) {
+    const gid = componentGroupId(d.component_part_number)
+    if (!groupOrder.includes(gid)) groupOrder.push(gid)
+    if (!itemOrder[gid]) itemOrder[gid] = []
+    itemOrder[gid].push(d.item_id)
+    inclusion[d.item_id] = !d.default_excluded
+  }
+  return { groupOrder, itemOrder, inclusion }
+}
+
+// Rebuild the arrangement view from the LIVE merge list + whatever the package
+// has saved. Saved order/inclusion wins for items it knows; anything new (a
+// document uploaded since the draft was saved) is appended in traceability order
+// and takes its type default. Cover is always first; traveler is always present
+// and always included.
+export function buildDocumentGroups(dataset, formData) {
+  const saved = formData?.doc_arrangement || {}
+  const savedGroupOrder = saved.groupOrder || []
+  const savedItemOrder = saved.itemOrder || {}
+  const inclusion = saved.inclusion || {}
+
+  const groups = []
+  const byId = new Map()
+  const ensure = (id, label, extra = {}) => {
+    if (byId.has(id)) return byId.get(id)
+    const g = { id, label, items: [], ...extra }
+    groups.push(g)
+    byId.set(id, g)
+    return g
+  }
+
+  ensure(COVER_GROUP_ID, 'Cover Page', { pinned: true, always: true, note: 'QMS-10.4 Certificate of Conformance' })
+  ensure(TRAVELER_GROUP_ID, 'Job Traveler', { always: true, note: 'Generated from SkyNet at approval' })
+
+  for (const d of dataset?.mergeList || []) {
+    const g = ensure(componentGroupId(d.component_part_number), d.component_part_number || 'Unassigned')
+    g.items.push({
+      ...d,
+      id: d.item_id,
+      included: typeof inclusion[d.item_id] === 'boolean' ? inclusion[d.item_id] : !d.default_excluded,
+    })
+  }
+
+  const rank = (list, id) => {
+    const i = list.indexOf(id)
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i
+  }
+  const movable = groups.filter((g) => !g.pinned)
+  movable.sort((a, b) => rank(savedGroupOrder, a.id) - rank(savedGroupOrder, b.id))
+  for (const g of movable) {
+    const order = savedItemOrder[g.id] || []
+    g.items.sort((a, b) => rank(order, a.id) - rank(order, b.id))
+  }
+  return [groups.find((g) => g.pinned), ...movable].filter(Boolean)
+}
+
+// Serialize the groups back into the form_data shape.
+export function arrangementFromGroups(groups) {
+  const groupOrder = groups.map((g) => g.id)
+  const itemOrder = {}
+  const inclusion = {}
+  for (const g of groups) {
+    if (g.id === COVER_GROUP_ID || g.id === TRAVELER_GROUP_ID) continue
+    itemOrder[g.id] = g.items.map((i) => i.id)
+    g.items.forEach((i) => { inclusion[i.id] = !!i.included })
+  }
+  return { groupOrder, itemOrder, inclusion }
+}
+
+// The final ordered merge list handed to the PDF generator: the arrangement,
+// flattened, excluded documents dropped, with the traveler as its own entry.
+// The cover is not in this list — the generator always draws it first.
+export function buildArrangedMergeList(dataset, formData) {
+  const out = []
+  for (const g of buildDocumentGroups(dataset, formData)) {
+    if (g.id === COVER_GROUP_ID) continue
+    if (g.id === TRAVELER_GROUP_ID) { out.push({ kind: 'traveler' }); continue }
+    for (const item of g.items) {
+      if (!item.included) continue
+      out.push({
+        kind: 'document',
+        component_part_number: item.component_part_number,
+        group: item.group,
+        file_name: item.file_name,
+        file_path: item.file_path,
+      })
+    }
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Heat-number write-back
+// ---------------------------------------------------------------------------
+// Fires on Save Draft and on Approve. A heat number typed against a component
+// fills material_receiving.heat_number ONLY when that component resolves to
+// exactly one receiving row AND that row's heat_number is still NULL. It never
+// overwrites a value someone already recorded, and it skips silently (no error
+// surfaced, package save unaffected) when the receiving row is ambiguous,
+// absent, or the update is refused by RLS.
+export async function writeBackHeatNumbers(dataset, formData) {
+  const entered = formData?.heat_number_overrides || {}
+  const written = []
+  for (const [partNumber, raw] of Object.entries(entered)) {
+    const heat = String(raw ?? '').trim()
+    if (!heat) continue
+    const candidates = dataset?.receivingByComponent?.[partNumber] || []
+    if (candidates.length !== 1) continue          // ambiguous or unknown → skip
+    const row = candidates[0]
+    if (row.heat_number) continue                  // never overwrite
+    const { error } = await supabase
+      .from('material_receiving')
+      .update({ heat_number: heat })
+      .eq('id', row.receiving_id)
+      .is('heat_number', null)                     // DB-level guard against a race
+    if (error) {
+      console.warn('Heat number write-back skipped for', partNumber, error.message)
+      continue
+    }
+    row.heat_number = heat
+    written.push({ part_number: partNumber, receiving_id: row.receiving_id, heat_number: heat })
+  }
+  return written
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +675,7 @@ export async function approveAndGenerate(packageId, profile) {
   if (pkg.status === 'approved') return { error: new Error('This package is already approved and cannot be regenerated. Use Regenerate to start a new package.') }
 
   // (ii) freeze snapshot — live dataset + the form values at approval
-  const dataset = await buildPackageDataset(pkg.work_order_id, pkg.job_id)
+  const dataset = await buildPackageDataset(pkg.work_order_id, pkg.job_id, { includeTraveler: true })
   if (!dataset) return { error: new Error('Could not assemble package data.') }
 
   const approvedAt = new Date().toISOString()
@@ -393,11 +687,22 @@ export async function approveAndGenerate(packageId, profile) {
     stamp_image_path: sig.stamp_image_path || null,
   }
 
+  const formData = pkg.form_data || {}
+
+  // Heat numbers entered on this package fill material_receiving where it is
+  // still NULL. Failures never block approval (see writeBackHeatNumbers).
+  await writeBackHeatNumbers(dataset, formData)
+
   const snapshot = {
     autoFields: dataset.autoFields,
     profileFields: dataset.profileFields,
-    formData: pkg.form_data || {},
-    mergeList: dataset.mergeList,
+    formData,
+    // The compliance-arranged order + inclusion, resolved to a flat list. The
+    // traveler dataset is frozen here too, so the approved PDF and the snapshot
+    // still agree years later even as the live job data moves on.
+    mergeList: buildArrangedMergeList(dataset, formData),
+    traveler: dataset.traveler,
+    arrangement: formData.doc_arrangement || null,
     signing,
     package_number: pkg.package_number,
     frozen_at: approvedAt,

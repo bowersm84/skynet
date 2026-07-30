@@ -76,15 +76,82 @@ export async function fetchAssemblyChainForTraveler(supabase, jobId) {
   return chain
 }
 
-export function buildTravelerHTML(travelerData) {
-  const { job, steps, finishingBatches = [], outboundSends = [], coAllocations, assemblyChain } = travelerData
+// Fetch everything buildTravelerHTML / buildTravelerModel need for one job.
+// The four interactive surfaces (Kiosk, Finishing, ComplianceReview, Mainframe)
+// each inline this same query block; this export exists so non-interactive
+// consumers (the cert package PDF generator) can assemble the identical dataset
+// without duplicating the shape.
+export async function fetchTravelerData(supabase, jobId) {
+  if (!jobId) return null
+  const { data: job, error: jobError } = await supabase
+    .from('jobs')
+    .select(`
+      id, job_number, quantity, status,
+      production_lot_number, good_pieces, actual_end,
+      work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
+      component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
+      assigned_machine:machines!assigned_machine_id ( name ),
+      assigned_user:profiles!assigned_user_id ( full_name )
+    `)
+    .eq('id', jobId)
+    .single()
+  if (jobError || !job) return null
+
+  const { data: steps } = await supabase
+    .from('job_routing_steps')
+    .select(`*, completed_by_profile:profiles!completed_by(full_name)`)
+    .eq('job_id', jobId)
+    .neq('status', 'removed')
+    .order('step_order')
+
+  const { data: finishingBatches } = await supabase
+    .from('finishing_sends')
+    .select(`
+      id, finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
+      material_lot_number, quantity, verified_count, compliance_good_qty, compliance_bad_qty,
+      finishing_completed_at, compliance_approved_at,
+      finishing_operator:profiles!finishing_operator_id(full_name)
+    `)
+    .eq('job_id', jobId)
+    .not('finishing_completed_at', 'is', null)
+    .neq('compliance_status', 'rejected')
+    .order('finishing_completed_at', { ascending: false })
+
+  const { data: outboundSends } = await supabase
+    .from('outbound_sends')
+    .select(`
+      id, operation_type, vendor_name, vendor_lot_number,
+      quantity, quantity_returned, sent_at, returned_at,
+      job_routing_step_id, finishing_send_id,
+      finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
+    `)
+    .eq('job_id', jobId)
+    .order('sent_at', { ascending: true })
+
+  const woId = job.work_order?.id || job.work_order_id
+  const coAllocations = woId ? await fetchCOAllocationsForTraveler(supabase, woId) : []
+  const assemblyChain = await fetchAssemblyChainForTraveler(supabase, job.id)
+
+  return {
+    job,
+    steps: steps || [],
+    finishingBatches: finishingBatches || [],
+    outboundSends: outboundSends || [],
+    coAllocations,
+    assemblyChain,
+  }
+}
+
+// The traveler's derived dataset — header values and one object per routing row,
+// with all of the lot / qty / date / operator precedence resolved. This is the
+// single source of truth for that precedence: buildTravelerHTML renders it to
+// HTML for the popup, and certPackagePdf renders the same model to PDF pages for
+// the cert package (Form 10-100 equivalent). Plain data only, so the cert
+// package can freeze it into its approval snapshot.
+export function buildTravelerModel(travelerData) {
+  const { job, steps = [], finishingBatches = [], outboundSends = [], coAllocations } = travelerData
   const wo = job.work_order
   const comp = job.component
-
-  const headerLabelCSS = 'padding:4px 8px; font-weight:bold; background-color:#f0f0f0; border:1px solid #ccc; width:15%; white-space:nowrap;'
-  const headerValueCSS = 'padding:4px 8px; border:1px solid #ccc; width:35%;'
-  const routingHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
-  const routingCellCSS = 'padding:8px; border:1px solid #000; height:28px; vertical-align:middle;'
 
   let qtyDisplay = String(job.quantity)
   if (wo?.order_type === 'make_to_order' && wo?.order_quantity && wo?.stock_quantity) {
@@ -100,23 +167,23 @@ export function buildTravelerHTML(travelerData) {
         .map(a => a.customer_order_line?.customer_order?.customer?.name)
         .filter(Boolean)
     )).sort()
-    if (names.length === 0) return _esc(wo?.customer) || '&mdash;'
-    if (names.length === 1) return _esc(names[0])
+    if (names.length === 0) return wo?.customer || ''
+    if (names.length === 1) return names[0]
     // Multi-customer: list all, comma-separated. The traveler is a
     // physical paper artifact — full disclosure is preferred over
     // a "+N more" abbreviation.
-    return names.map(_esc).join(', ')
+    return names.join(', ')
   })()
 
   // Earliest CO due date as a fallback when wo.due_date is null
   // (multi-CO WOs leave wo.due_date null at create time).
-  const dueDateDisplay = (() => {
-    if (wo?.due_date) return _formatDate(wo.due_date)
+  const dueDate = (() => {
+    if (wo?.due_date) return wo.due_date
     const dates = (coAllocations || [])
       .map(a => a.customer_order_line?.due_date)
       .filter(Boolean)
       .sort()
-    return dates.length > 0 ? _formatDate(dates[0]) : '&mdash;'
+    return dates.length > 0 ? dates[0] : null
   })()
 
   const initials = (name) => {
@@ -175,7 +242,7 @@ export function buildTravelerHTML(travelerData) {
   ) || null
   const machineStepOrder = machineStep ? machineStep.step_order : -Infinity
 
-  const stepsHTML = steps.flatMap(step => {
+  const rows = steps.flatMap(step => {
     const isExternalStep = step.step_type === 'external'
     const isMachineStep = !isExternalStep && machineStep != null && step.id === machineStep.id
     // Any internal step after the machining step is a finishing step (carries the FLN),
@@ -220,23 +287,23 @@ export function buildTravelerHTML(travelerData) {
       if (!rowOp && isFinishingStep) rowOp = finishingOp
       if (!rowOp && isMachineStep && job.assigned_user?.full_name) rowOp = initials(job.assigned_user.full_name)
 
-      const station = _esc(step.station)
-        || (isMachineStep ? _esc(job.assigned_machine?.name) : '')
-        || (isExternalStep ? _esc(linkedSend?.vendor_name) : '')
+      const station = step.station
+        || (isMachineStep ? job.assigned_machine?.name : '')
+        || (isExternalStep ? linkedSend?.vendor_name : '')
         || ''
 
-      return `
-    <tr>
-      <td style="${routingCellCSS} text-align:center; width:40px;">${step.step_order}</td>
-      <td style="${routingCellCSS}">${_esc(step.step_name)}${step.is_added_step ? ' *' : ''}${batchSuffix ? ' ' + batchSuffix : ''}</td>
-      <td style="${routingCellCSS} width:90px;">${station}</td>
-      <td style="${routingCellCSS} text-align:center; width:45px;">${step.step_type === 'external' ? 'EXT' : 'INT'}</td>
-      <td style="${routingCellCSS} width:240px;">${_esc(rowLot)}</td>
-      <td style="${routingCellCSS} width:55px; text-align:center;">${_esc(rowQty)}</td>
-      <td style="${routingCellCSS} width:80px;">${_esc(rowDate)}</td>
-      <td style="${routingCellCSS} width:90px; text-align:center;">${_esc(rowOp)}</td>
-    </tr>
-  `
+      return {
+        step_order: step.step_order,
+        step_name: step.step_name || '',
+        is_added_step: !!step.is_added_step,
+        batch_label: batchSuffix || '',
+        station,
+        type: step.step_type === 'external' ? 'EXT' : 'INT',
+        lot: rowLot || '',
+        qty: rowQty || '',
+        date: rowDate || '',
+        operator: rowOp || '',
+      }
     }
 
     // External step with multiple sends → one row per send, labeled (Batch A), (Batch B)
@@ -271,7 +338,58 @@ export function buildTravelerHTML(travelerData) {
 
     // Non-external step → single row
     return [renderRow(null, null)]
-  }).join('')
+  })
+
+  // "Final process" = the last routing step on the job (what the part came off
+  // of before it shipped). Form 10-100 carries this on the header.
+  const lastStep = steps.length ? steps[steps.length - 1] : null
+
+  return {
+    job_id: job.id,
+    job_number: job.job_number,
+    part_number: comp?.part_number || null,
+    description: comp?.description || null,
+    material: comp?.material_type?.name || null,
+    drawing_revision: comp?.drawing_revision || null,
+    wo_number: wo?.wo_number || null,
+    po_number: wo?.po_number || null,
+    customer: customerDisplay || null,
+    due_date: dueDate,
+    quantity_display: qtyDisplay,
+    production_lot_number: job.production_lot_number || null,
+    finishing_lot_number: fb?.finishing_lot_number || null,
+    final_process: lastStep?.step_name || null,
+    rows,
+  }
+}
+
+export function buildTravelerHTML(travelerData) {
+  const { job, coAllocations, assemblyChain } = travelerData
+  const wo = job.work_order
+  const comp = job.component
+  const model = buildTravelerModel(travelerData)
+
+  const headerLabelCSS = 'padding:4px 8px; font-weight:bold; background-color:#f0f0f0; border:1px solid #ccc; width:15%; white-space:nowrap;'
+  const headerValueCSS = 'padding:4px 8px; border:1px solid #ccc; width:35%;'
+  const routingHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
+  const routingCellCSS = 'padding:8px; border:1px solid #000; height:28px; vertical-align:middle;'
+
+  const customerDisplay = _esc(model.customer) || '&mdash;'
+  const dueDateDisplay = model.due_date ? _formatDate(model.due_date) : '&mdash;'
+  const qtyDisplay = model.quantity_display
+
+  const stepsHTML = model.rows.map(r => `
+    <tr>
+      <td style="${routingCellCSS} text-align:center; width:40px;">${r.step_order}</td>
+      <td style="${routingCellCSS}">${_esc(r.step_name)}${r.is_added_step ? ' *' : ''}${r.batch_label ? ' ' + r.batch_label : ''}</td>
+      <td style="${routingCellCSS} width:90px;">${_esc(r.station)}</td>
+      <td style="${routingCellCSS} text-align:center; width:45px;">${r.type}</td>
+      <td style="${routingCellCSS} width:240px;">${_esc(r.lot)}</td>
+      <td style="${routingCellCSS} width:55px; text-align:center;">${_esc(r.qty)}</td>
+      <td style="${routingCellCSS} width:80px;">${_esc(r.date)}</td>
+      <td style="${routingCellCSS} width:90px; text-align:center;">${_esc(r.operator)}</td>
+    </tr>
+  `).join('')
 
   // Customer Orders Fulfilled by this Job — only renders when the call site
   // has fetched coAllocations. Treat coAllocations === undefined as "caller

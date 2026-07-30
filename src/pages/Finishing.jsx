@@ -2902,7 +2902,6 @@ export default function Finishing() {
       {showNewJobModal && (
         <div
           className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4"
-          onClick={handleCloseNewJob}
         >
           <div
             className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl"

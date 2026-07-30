@@ -2096,9 +2096,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
 
       {/* Edit Job Modal */}
       {editingJob && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setEditingJob(null)}
         >
           <div 
             className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
@@ -3804,8 +3803,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
 
       {/* Add Pre-System / Missed Production Modal */}
       {missedEntryJob && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]"
-             onClick={() => !missedEntrySaving && handleMissedEntryCancel()}>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]">
           <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl"
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between mb-4">
@@ -3883,7 +3881,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
 
       {/* Cancel Job Confirmation Modal (Two-Step) */}
       {cancellingJobId && cancelStep > 0 && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]" onClick={handleWOLookupCancelDismiss}>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]">
           <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl" onClick={e => e.stopPropagation()}>
             {cancelStep === 1 ? (
               <>

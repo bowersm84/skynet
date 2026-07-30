@@ -813,7 +813,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
   const addableParts = availableParts.filter(p => !isPartAlreadyOnWO(p.id))
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[70] p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[70] p-4">
       <div
         className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-3xl max-h-[90vh] flex flex-col"
         onClick={e => e.stopPropagation()}

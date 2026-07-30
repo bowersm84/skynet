@@ -3162,9 +3162,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
       {/* Job Detail Popup */}
       {selectedJob && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setSelectedJob(null)}
         >
           <div 
             className={`bg-gray-900 rounded-lg border p-6 max-w-md w-full mx-4 shadow-xl ${
@@ -3417,7 +3416,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           ? new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
           : '—'
         return (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEndDateEditJob(null)}>
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-full bg-skynet-accent/20 flex items-center justify-center">
@@ -3513,7 +3512,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         return (
           <div
             className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-            onClick={() => { setUnscheduleConfirm(null); setCloseGap(true) }}
           >
             <div
               className="bg-gray-900 rounded-lg border border-gray-700 p-6 max-w-sm w-full mx-4 shadow-xl"
@@ -3580,12 +3578,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
       {/* Close Maintenance Modal */}
       {cancelMaintenanceConfirm && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => {
-            setCancelMaintenanceConfirm(null)
-            setSaveError(null)
-          }}
         >
           <div 
             className={`bg-gray-900 rounded-lg border p-6 max-w-md w-full mx-4 shadow-xl ${

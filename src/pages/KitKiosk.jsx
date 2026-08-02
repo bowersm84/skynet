@@ -2,6 +2,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { FEATURES } from '../config'
 import PinPad from '../components/PinPad'
+import KitSearch from '../components/kitregistry/KitSearch'
+// Pure helpers live in the query layer so the Search tab and the Entry tab
+// can't drift apart on formatting or filter escaping.
+import {
+  BOOK_ORDER, SOURCE_LABEL, todayLocal, formatLogDate, sanitizeTerm,
+} from '../lib/kitRegistry'
 import {
   Loader2, LogOut, BookOpen, Search, FileCheck, CheckCircle,
   AlertTriangle, X, ClipboardList, Plus,
@@ -9,10 +15,6 @@ import {
 
 // Shared with the machine kiosk / rack kiosk — this is the same physical device.
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
-
-// Fixed presentation order for the four seeded books. Anything not listed
-// (a future book) falls in after these, alphabetically.
-const BOOK_ORDER = ['SK203', 'BEECH', 'TRIM', 'RV']
 
 // Books whose paper rows have no stud / rec-platemount columns.
 const BOOKS_WITHOUT_STUD = ['RV']
@@ -38,33 +40,6 @@ function getKioskDeviceId() {
     // which is the SAFE failure mode.
     return `ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`
   }
-}
-
-// Local date parts, never toISOString — the local-noon-UTC rule (Decisions.md).
-function todayLocal() {
-  const d = new Date()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${mm}-${dd}`
-}
-
-function formatLogDate(value) {
-  if (!value) return '—'
-  const [y, m, d] = String(value).split('-').map(Number)
-  if (!y || !m || !d) return String(value)
-  return new Date(y, m - 1, d).toLocaleDateString()
-}
-
-// PostgREST `or=(a.ilike.*,b.ilike.*)` is comma/paren delimited — a term
-// carrying either breaks the filter parse. Strip them before interpolating.
-function sanitizeTerm(term) {
-  return (term || '').replace(/[,()%*\\]/g, ' ').trim()
-}
-
-const SOURCE_LABEL = {
-  paper_transcription: 'Paper transcription',
-  skynet: 'SkyNet',
-  fishbowl: 'Fishbowl',
 }
 
 export default function KitKiosk() {
@@ -992,13 +967,9 @@ export default function KitKiosk() {
         </div>
       )}
 
-      {nav === 'search' && (
-        <Placeholder
-          icon={<Search size={40} className="mx-auto mb-4 text-gray-600" />}
-          title="Search arrives in the next round"
-          body="Lot, SKU, component, aircraft, customer, invoice and sales-order search land here."
-        />
-      )}
+      {/* Read-only in both modes — RLS already gates writes, and the Search tab
+          issues none. Kiosk mode gets the same view as the office. */}
+      {nav === 'search' && <KitSearch />}
 
       {nav === 'stc' && mode === 'office' && (
         <Placeholder

@@ -145,8 +145,10 @@ export default function MaterialKiosk() {
       // machine kiosk uses. It needs an active machine to mint the JWT but binds
       // no session to it, so any active machine works as an anchor. machines
       // allows anon reads of active machines, so this fetch works pre-login.
+      // is_commissioned matters: kiosk-authenticate rejects an uncommissioned
+      // machine, so anchoring on one would 401 the rack (D-KSTC-09).
       const { data: anchor } = await supabase
-        .from('machines').select('id').eq('is_active', true)
+        .from('machines').select('id').eq('is_active', true).eq('is_commissioned', true)
         .order('display_order').limit(1)
       const anchorId = anchor?.[0]?.id
       if (!anchorId) { setAuthError('No active machine available'); setPin(''); return }

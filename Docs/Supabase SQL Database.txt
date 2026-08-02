@@ -639,6 +639,7 @@ CREATE TABLE public.material_receiving (
   price_per_bar numeric,
   category text NOT NULL DEFAULT 'bar'::text CHECK (category = ANY (ARRAY['bar'::text, 'blank'::text])),
   blank_type_id uuid,
+  heat_number text,
   CONSTRAINT material_receiving_pkey PRIMARY KEY (id),
   CONSTRAINT material_receiving_material_id_fkey FOREIGN KEY (material_id) REFERENCES public.materials(id),
   CONSTRAINT material_receiving_received_by_fkey FOREIGN KEY (received_by) REFERENCES public.profiles(id),
@@ -1144,5 +1145,14 @@ CREATE TABLE public.part_dimensions (
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   material_type text,
   bar_size text,
-  CONSTRAINT part_dimensions_pkey PRIMARY KEY (id)
+  material_locked boolean NOT NULL DEFAULT false,
+  correction_note text,
+  corrected_by uuid,
+  corrected_at timestamp with time zone,
+  extraction_meta jsonb,
+  confirmed_by uuid,
+  confirmed_at timestamp with time zone,
+  CONSTRAINT part_dimensions_pkey PRIMARY KEY (id),
+  CONSTRAINT part_dimensions_corrected_by_fkey FOREIGN KEY (corrected_by) REFERENCES public.profiles(id),
+  CONSTRAINT part_dimensions_confirmed_by_fkey FOREIGN KEY (confirmed_by) REFERENCES public.profiles(id)
 );

@@ -2368,3 +2368,24 @@ profile-only saves); the profile upsert is keyed on `part_id`
 surfaced in the error block below the buttons instead of being swallowed — a
 profile write failure now aborts approval rather than certifying stale cover
 data.
+
+### D-KSTC-01 — Kit & STC Registry: installation-centric binding (2026-08-02)
+New module tracking serialized kit lots, aircraft, and STC paperwork. The binding lot↔aircraft is its own record (kit_installations) with a NULLABLE lot reference — installs can be evidenced (e.g., Form 337) without a recoverable lot, and recall/fleet queries resolve through installations so those cases are never silently dropped. "STC issued" is derived from stc_issuances via installations, never a maintained column. Schema in Docs/migrations/2026-08-01_kit_stc_registry_schema.sql; applied to TEST 2026-08-01, loaded from workbook v5_3 on 2026-08-02 (648 lots, 4,420 BOM lines, 477 SKUs, 71 requests, 70 aircraft, 2 verified installations).
+
+### D-KSTC-02 — Lot identity and numbering source of truth (2026-08-02)
+kit_lots unique on (book_id, lot_number); four books seeded with observed ranges. Ranges are disjoint today so bare-number search is unambiguous; the composite key protects against a future book restarting a sequence. Paper books remain the numbering source of truth during dual-run; kit_lots.source distinguishes paper_transcription from skynet rows; entry pre-fill is GREATEST(known max, book.last_lot)+1 and explicitly subordinate to the paper book. SkyNet-assigned numbering is a later mode flip, not a schema change.
+
+### D-KSTC-03 — Registry masters kept separate from MES masters (2026-08-02)
+kit_parties is separate from customers (numeric Fishbowl-ID check would reject installers/foreign distributors; avoids entangling CO-module data; fishbowl_customer_number optional). kit_skus/kit_components are separate from parts; kit_components.part_id optionally links to public.parts (163 matched at load) so component recalls can walk into MES lot traceability. Fishbowl stays export-based (kit_sales/kit_sale_lines/fishbowl_invoices mirrors) consistent with deferred import #31 and the QBO cutover freeze.
+
+### D-KSTC-04 — STC applicability at SKU level, undetermined until ruled (2026-08-02)
+stc_applicability lives on kit_skus (default 'undetermined'), not on books — options-book rows containing conversion parts (and vice versa) prove book-level classification leaks. SA3285SO/SA3287SO seeded as observed-unconfirmed; kit_sku_stc_map stays empty until Roger rules, with ruled_by/ruled_at captured per mapping.
+
+### D-KSTC-05 — stc_issuances append-only; historical sends pending backfill (2026-08-02)
+DB trigger blocks DELETE always and freezes every column except notes/void fields (void-with-reason, never edit). The six pre-system doc-sends from the intake workbook load as request status 'issued' + a note, with zero issuance rows — the workbook never recorded which certificate/version was sent; manual backfill by April/Christy once the UI exists. Loader contract: reference data upserts on natural keys; stc_requests/kit_installations are insert-only; notes are first-write-wins; the loader only touches lots with source='paper_transcription'.
+
+### D-KSTC-06 — Kiosk-style module at /kits, not Mainframe (2026-08-02)
+The registry lives at /kits outside MainApp with its own header nav (Kit Entry / Search / Log STC), following the kiosk precedent (machine kiosk, rack kiosk, Finishing) — entry volume drives the design and the warehouse bench is where the paper book lived. Dual-mode auth on one URL: no session → kiosk-authenticate JWT with PIN-per-entry confirmation stamping created_by with the PIN operator (auth.uid() never equals created_by, per D-RLS-DOWNTIME01 reality); signed-in session → office mode, no PIN. Log STC is office-only: issuances are immutable compliance records and must trace to a real authenticated user. Gated by FEATURES.KIT_STC_REGISTRY.
+
+### D-KSTC-07 — Entry never blocks; verification echoes; kiosk RLS posture (2026-08-02)
+Warehouse entry saves with as-written text and null FKs when kit part or customer matches nothing (office resolves via exception queues) — the same as-written/normalized discipline as the transcription data. Invoice entry echoes the Fishbowl match ("{customer} — SO {n}") for bench-time mis-key catching and stages the sale-line link automatically when the SKU resolves. kit_lots INSERT opened to authenticated WITH CHECK (source='skynet') per Docs/migrations/2026-08-02_kit_lots_kiosk_insert.sql (applied to TEST 2026-08-02); UPDATE stays role-gated so corrections remain office work.

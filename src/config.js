@@ -48,4 +48,21 @@ export const FEATURES = {
    * Keep false in PROD; flip true on TEST for nested-assembly testing.
    */
   NESTED_ASSEMBLY: true,
+
+  /**
+   * Kit & STC Registry — the serialized kit-lot / aircraft / STC paperwork
+   * module at /kits (kiosk-style, outside MainApp; NOT a Mainframe tab).
+   *
+   * When false:
+   *  - the /kits route renders a "not enabled" card and nothing else;
+   *    no kit entry, no search, no STC surface is reachable
+   *  - Mainframe is unaffected either way — this module adds nothing to it
+   *
+   * When true: Kit Entry (warehouse bench, dual-mode auth — office session or
+   * kiosk JWT + per-save PIN), plus the Search / Log STC areas as they land.
+   *
+   * TEST: true. The PROD merge decision is made at promotion time, once the
+   * paper-book dual-run has been walked at the bench.
+   */
+  KIT_STC_REGISTRY: true,
 }

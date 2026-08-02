@@ -11,6 +11,7 @@ import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import MaterialKiosk from './pages/MaterialKiosk'
 import Finishing from './pages/Finishing'
+import KitKiosk from './pages/KitKiosk'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
 import CertRepository from './pages/CertRepository'
@@ -514,6 +515,11 @@ function App() {
 
         {/* Finishing station route */}
         <Route path="/finishing" element={<Finishing />} />
+
+        {/* Kit & STC Registry — warehouse bench + office, one URL. Dual-mode auth
+            (office session, or kiosk JWT + PIN per entry). Self-gated by
+            FEATURES.KIT_STC_REGISTRY inside the page. Deliberately NOT a Mainframe tab. */}
+        <Route path="/kits" element={<KitKiosk />} />
 
         {/* Assembly display - TV dashboard, no login required */}
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />

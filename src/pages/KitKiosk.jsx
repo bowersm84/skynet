@@ -111,9 +111,22 @@ export default function KitKiosk() {
   // --- Entry state ---------------------------------------------------------
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
-  const [success, setSuccess] = useState(null)  // { lotNumber, bookCode, who }
+  const [fieldErrors, setFieldErrors] = useState({})
+  const [success, setSuccess] = useState(null)  // { lotNumber, bookName, who }
+
+  // Focus targets for the first invalid field, in visual order.
+  const kitPartRef = useRef(null)
+  const logDateRef = useRef(null)
+  const customerRef = useRef(null)
+  const soRef = useRef(null)
+  const studRef = useRef(null)
 
   const showStudFields = !!book && !BOOKS_WITHOUT_STUD.includes(book.code)
+
+  // Clears one field's error as soon as the operator starts fixing it.
+  const clearFieldError = useCallback((key) => {
+    setFieldErrors(prev => (prev[key] ? { ...prev, [key]: undefined } : prev))
+  }, [])
 
   useEffect(() => {
     document.title = 'Skybolt Kit Registry'
@@ -432,8 +445,36 @@ export default function KitKiosk() {
 
   // ---------- Save ----------------------------------------------------------
   const blockingReason = () => {
-    if (!book) return 'Pick a book first.'
+    if (!book) return 'Pick a kit type first.'
     return null
+  }
+
+  // Mirrors kit_assign_and_log's own checks. The RPC is the integrity boundary;
+  // this exists so the operator learns about a blank field here rather than
+  // after a round trip — and, in kiosk mode, before entering a PIN.
+  // Stud is required only where the field is rendered (never on RV).
+  const validateEntry = () => {
+    const errors = {}
+    if (!kitPartText.trim()) errors.kitPart = 'Required'
+    if (!logDate) errors.logDate = 'Required'
+    if (!customerText.trim()) errors.customer = 'Required'
+    if (!soText.trim()) errors.so = 'Required'
+    if (showStudFields && !studNumber.trim()) errors.stud = 'Required'
+    return errors
+  }
+
+  const focusFirstInvalid = (errors) => {
+    const sequence = [
+      ['kitPart', kitPartRef], ['logDate', logDateRef], ['customer', customerRef],
+      ['so', soRef], ['stud', studRef],
+    ]
+    for (const [key, ref] of sequence) {
+      if (errors[key] && ref.current) {
+        ref.current.focus({ preventScroll: true })
+        ref.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        return
+      }
+    }
   }
 
   // The number is assigned server-side under a kit_books row lock, so two
@@ -486,6 +527,17 @@ export default function KitKiosk() {
   const handleSave = async () => {
     const reason = blockingReason()
     if (reason) { setSaveError(reason); return }
+
+    // Validate FIRST — before the RPC in office mode, and before the PIN pad in
+    // kiosk mode. An operator must never enter a PIN for a doomed save.
+    const errors = validateEntry()
+    setFieldErrors(errors)
+    if (Object.keys(errors).length > 0) {
+      setSaveError(null)
+      focusFirstInvalid(errors)
+      return
+    }
+
     setSaveError(null)
     if (mode === 'office') {
       await doSave(profile?.id || null, profile?.full_name || '')
@@ -535,6 +587,7 @@ export default function KitKiosk() {
     setPlatemount('')
     setNotes('')
     setSaveError(null)
+    setFieldErrors({})
     await refreshAdvisory(book)
   }
 
@@ -550,7 +603,7 @@ export default function KitKiosk() {
     setCustomerText(''); setPartyId(null); setPartySuggestions([]); setPartyOpen(false)
     setSoText(''); setSoInfo(null); setSaleLineId(null)
     setStudNumber(''); setPlatemount(''); setNotes('')
-    setSaveError(null); setSuccess(null)
+    setSaveError(null); setSuccess(null); setFieldErrors({})
   }
 
   // ---------- Feature gate --------------------------------------------------
@@ -718,18 +771,21 @@ export default function KitKiosk() {
           {book && (
             <>
               {/* ---- Kit name ---- */}
-              <Field label="Kit Name">
+              <Field label="Kit Name" required error={fieldErrors.kitPart}>
                 <div className="relative">
                   <input
+                    ref={kitPartRef}
+                    aria-required="true"
                     value={kitPartText}
                     onChange={e => {
                       setKitPartText(e.target.value)
                       setKitSkuId(null)
                       setKitSkuDesc(null)
+                      clearFieldError('kitPart')
                     }}
                     onFocus={() => { if (skuSuggestions.length) setSkuOpen(true) }}
                     placeholder="What kit is this?"
-                    className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                    className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${fieldErrors.kitPart ? INVALID_BORDER : VALID_BORDER}`}
                   />
                   {skuOpen && skuSuggestions.length > 0 && (
                     <Suggestions onDismiss={() => setSkuOpen(false)}>
@@ -768,25 +824,29 @@ export default function KitKiosk() {
               </Field>
 
               {/* ---- Log date ---- */}
-              <Field label="Log date">
+              <Field label="Log date" required error={fieldErrors.logDate}>
                 <input
+                  ref={logDateRef}
+                  aria-required="true"
                   type="date"
                   value={logDate}
-                  onChange={e => setLogDate(e.target.value)}
+                  onChange={e => { setLogDate(e.target.value); clearFieldError('logDate') }}
                   style={{ colorScheme: 'dark' }}
-                  className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none"
+                  className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none ${fieldErrors.logDate ? INVALID_BORDER : VALID_BORDER}`}
                 />
               </Field>
 
               {/* ---- Customer ---- */}
-              <Field label="Customer">
+              <Field label="Customer" required error={fieldErrors.customer}>
                 <div className="relative">
                   <input
+                    ref={customerRef}
+                    aria-required="true"
                     value={customerText}
-                    onChange={e => { setCustomerText(e.target.value); setPartyId(null) }}
+                    onChange={e => { setCustomerText(e.target.value); setPartyId(null); clearFieldError('customer') }}
                     onFocus={() => { if (partySuggestions.length) setPartyOpen(true) }}
                     placeholder="Customer Name"
-                    className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                    className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${fieldErrors.customer ? INVALID_BORDER : VALID_BORDER}`}
                   />
                   {partyOpen && partySuggestions.length > 0 && (
                     <Suggestions onDismiss={() => setPartyOpen(false)}>
@@ -806,12 +866,14 @@ export default function KitKiosk() {
               </Field>
 
               {/* ---- Sales order ---- */}
-              <Field label="Sales Order #">
+              <Field label="Sales Order #" required error={fieldErrors.so}>
                 <input
+                  ref={soRef}
+                  aria-required="true"
                   value={soText}
-                  onChange={e => setSoText(e.target.value)}
-                  placeholder="Optional"
-                  className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                  onChange={e => { setSoText(e.target.value); clearFieldError('so') }}
+                  placeholder="e.g. 11356"
+                  className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${fieldErrors.so ? INVALID_BORDER : VALID_BORDER}`}
                 />
                 {soChecking && (
                   <p className="text-gray-500 text-sm mt-2 flex items-center gap-2">
@@ -836,14 +898,18 @@ export default function KitKiosk() {
               {/* ---- Stud / receptacle lot numbers ---- */}
               {showStudFields && (
                 <div className="grid sm:grid-cols-2 gap-4">
-                  <Field label="Stud Lot #">
+                  {/* Required only where rendered — RV has no stud field at all,
+                      and the RPC exempts RV for the same reason. */}
+                  <Field label="Stud Lot #" required error={fieldErrors.stud}>
                     <input
+                      ref={studRef}
+                      aria-required="true"
                       value={studNumber}
-                      onChange={e => setStudNumber(e.target.value)}
-                      className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none"
+                      onChange={e => { setStudNumber(e.target.value); clearFieldError('stud') }}
+                      className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none ${fieldErrors.stud ? INVALID_BORDER : VALID_BORDER}`}
                     />
                   </Field>
-                  <Field label="Receptacle / Platemount Lot #">
+                  <Field label="Receptacle / Platemount Lot #" optional>
                     <input
                       value={platemount}
                       onChange={e => setPlatemount(e.target.value)}
@@ -854,16 +920,23 @@ export default function KitKiosk() {
               )}
 
               {/* ---- Notes ---- */}
-              <Field label="Notes">
+              <Field label="Notes" optional>
                 <textarea
                   value={notes}
                   onChange={e => setNotes(e.target.value)}
                   rows={2}
-                  placeholder="Optional"
+                  placeholder="Anything worth remembering about this kit"
                   className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none resize-none"
                 />
               </Field>
 
+              <p className="text-gray-500 text-xs mb-3">
+                <span className="text-red-400">*</span> required
+              </p>
+
+              {/* Belt and suspenders: the RPC enforces the same rules, so if one
+                  ever reaches here (stale tab, direct edit) show its own message
+                  rather than a raw error dump. */}
               {saveError && (
                 <p className="text-red-400 text-sm mb-3">{saveError}</p>
               )}
@@ -933,14 +1006,26 @@ export default function KitKiosk() {
 
 // ---------- Small presentational helpers ------------------------------------
 
-function Field({ label, children }) {
+// One marking convention for the whole form: a red asterisk means the save will
+// be refused without it (the RPC enforces the same rules), "(optional)" means it
+// genuinely can be left blank. A required field never says "Optional" anywhere.
+function Field({ label, required, optional, error, children }) {
   return (
     <div className="mb-5">
-      <label className="block text-gray-400 text-sm font-medium mb-2">{label}</label>
+      <label className="block text-gray-400 text-sm font-medium mb-2">
+        {label}
+        {required && <span className="text-red-400 ml-1" aria-hidden="true">*</span>}
+        {optional && <span className="text-gray-500 font-normal ml-1">(optional)</span>}
+      </label>
       {children}
+      {error && <p className="text-red-400 text-sm mt-1.5">{error}</p>}
     </div>
   )
 }
+
+// Border treatment for an input that failed validation.
+const INVALID_BORDER = 'border-red-500'
+const VALID_BORDER = 'border-gray-700'
 
 function Suggestions({ children, onDismiss }) {
   return (

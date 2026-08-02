@@ -2407,3 +2407,6 @@ KIT_EXCEPTIONS_SINCE in config.js (default 2026-08-04) scopes the global dashboa
 
 ### D-KSTC-13 — RPC grants: revoke anon explicitly (amends RPC convention) (2026-08-02)
 Supabase default privileges grant EXECUTE to anon on function creation, so REVOKE FROM PUBLIC leaves an explicit anon grant in place — and SECURITY DEFINER bypasses RLS, so anon could call kit_assign_and_log with the public key. REVOKE FROM anon applied to TEST 2026-08-02 and appended to the RPC migration. Standing convention for every future RPC: REVOKE ALL FROM PUBLIC; REVOKE EXECUTE FROM anon; GRANT to authenticated + service_role. Found by Claude Code during A.1 review.
+
+### D-KSTC-14 — Paper kit books retired at PROD go-live (2026-08-02)
+With the registry live on PROD (schema, kiosk policy, RPC with anon revoke, and the full v5_3 load all applied 2026-08-02), SkyNet is the kit log of record and the paper books stop receiving new rows — supersedes the dual-run stance of D-KSTC-02 and the "paper mirrors the screen" framing of D-KSTC-10: the screen is the log. Historical book pages continue entering via the transcription loader as source='paper_transcription' until the remaining ~82% is digitized. Entry UI copy updated to registry-native wording (Customer placeholder is now "Customer Name").

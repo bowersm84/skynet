@@ -774,7 +774,7 @@ export default function KitKiosk() {
                     value={customerText}
                     onChange={e => { setCustomerText(e.target.value); setPartyId(null) }}
                     onFocus={() => { if (partySuggestions.length) setPartyOpen(true) }}
-                    placeholder="As written on the book row"
+                    placeholder="Customer Name"
                     className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
                   />
                   {partyOpen && partySuggestions.length > 0 && (

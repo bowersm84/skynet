@@ -749,7 +749,8 @@ export async function loadGlobalDashboard() {
     .map(r => ({ ...r, aircraft: acById.get(r.aircraft_id) || null }))
 
   // (2) claimed a kit # but no lot resolved — split on whether the claimed
-  //     number falls inside a seeded book's range (client-side, 4 book rows).
+  //     number falls inside a seeded book's range (client-side, against the
+  //     four kit_books rows).
   const inSomeBookRange = (n) => books.some(b =>
     b.first_lot != null && b.last_lot != null && n >= b.first_lot && n <= b.last_lot)
   const q2 = requests

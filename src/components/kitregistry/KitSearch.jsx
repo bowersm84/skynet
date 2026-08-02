@@ -4,7 +4,7 @@ import {
   searchParties, searchSkus, searchComponents, searchAircraft,
   previewLotByNumber, lookupInvoice, componentRecall, skusByIds,
   loadLots, filteredLotStats, partyLens, skuLens, invoiceLens,
-  loadGlobalDashboard, formatLogDate, lotLabel, uniq,
+  loadGlobalDashboard, formatLogDate, formatSince, lotLabel, uniq,
   FIELD_DEBOUNCE, PAGE_SIZE,
 } from '../../lib/kitRegistry'
 import { supabase } from '../../lib/supabase'
@@ -751,6 +751,15 @@ function GlobalDashboard({ onOpenLot, onOpenSku }) {
 
   const toggle = (key) => setOpen(o => (o === key ? null : key))
 
+  // When the queues are scoped to a baseline, every card says so — the screen
+  // must never read as more complete than it is (D-KSTC-12).
+  const sinceLabel = formatSince(data.exceptionsSince)
+  const sinceSuffix = sinceLabel ? `since ${sinceLabel}` : null
+  const withSince = (base) => {
+    if (!sinceSuffix) return base || undefined
+    return base ? `${base} · ${sinceSuffix}` : sinceSuffix
+  }
+
   return (
     <>
       <Section title="Entry pulse">
@@ -781,6 +790,7 @@ function GlobalDashboard({ onOpenLot, onOpenSku }) {
                 <p className="text-amber-300/70 text-xs mt-0.5">
                   active conversion-book lots with no STC request and no installation
                   {' '}· of {queues.conversionTotal} conversion lots
+                  {sinceSuffix ? ` · ${sinceSuffix}` : ''}
                 </p>
               </div>
               <span className="font-mono font-bold text-amber-300 text-4xl">{queues.conversionNoStc.length}</span>
@@ -796,13 +806,16 @@ function GlobalDashboard({ onOpenLot, onOpenSku }) {
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <QueueCard label="Requests with no aircraft serial" count={queues.noAircraftSerial.length}
+            sub={withSince(null)}
             active={open === 'q1'} onClick={() => toggle('q1')} />
           <QueueCard label="Claimed kit # unresolved" count={queues.claimedUnresolved.length}
-            sub={`${q2Awaiting.length} awaiting transcription · ${q2Unmatched.length} unmatched`}
+            sub={withSince(`${q2Awaiting.length} awaiting transcription · ${q2Unmatched.length} unmatched`)}
             active={open === 'q2'} onClick={() => toggle('q2')} />
           <QueueCard label="Active lots with no SKU" count={queues.lotsWithoutSku.length}
+            sub={withSince(null)}
             active={open === 'q3'} onClick={() => toggle('q3')} />
           <QueueCard label="Referenced SKUs with no BOM" count={queues.skusWithoutBom.length}
+            sub={withSince(null)}
             active={open === 'q4'} onClick={() => toggle('q4')} />
         </div>
 

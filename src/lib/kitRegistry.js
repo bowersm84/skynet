@@ -7,6 +7,7 @@
 // (D-KSTC-08) — revisit if row volumes make the id-set pattern slow.
 
 import { supabase } from './supabase'
+import { FEATURES } from '../config'
 
 export const PAGE_SIZE = 50
 
@@ -56,6 +57,16 @@ export function formatLogDate(value) {
   const [y, m, d] = String(value).split('-').map(Number)
   if (!y || !m || !d) return String(value)
   return new Date(y, m - 1, d).toLocaleDateString()
+}
+
+// "2026-08-04" -> "Aug 4, 2026". Local date parts, never new Date(iso).
+export function formatSince(iso) {
+  if (!iso) return null
+  const [y, m, d] = String(iso).split('-').map(Number)
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+  })
 }
 
 // PostgREST `or=(a.ilike.*,b.ilike.*)` is comma/paren delimited — a term
@@ -716,10 +727,18 @@ export async function loadGlobalDashboard() {
     return { book: b, all, paper, native }
   }))
 
+  // --- Exception baseline (D-KSTC-12) ---------------------------------------
+  // A display lens only: it scopes the five queues below and nothing else.
+  // With `since` null every query below is byte-identical to the unscoped
+  // original. Rows with a null anchor date fall outside a set baseline —
+  // we can't place them on the timeline, so they aren't claimed as recent.
+  const since = FEATURES.KIT_EXCEPTIONS_SINCE || null
+
   // --- Queues 1 + 2 both read the same small stc_requests set ---------------
   const requests = await fetchAll('stc_requests',
     'id, intake_number, received_date, requester_name, requester_company, status, ' +
-    'claimed_kit_number, claimed_registration, claimed_aircraft_serial, aircraft_id, kit_lot_id')
+    'claimed_kit_number, claimed_registration, claimed_aircraft_serial, aircraft_id, kit_lot_id',
+    since ? (q => q.gte('received_date', since)) : undefined)
   const reqAircraftIds = uniq(requests.map(r => r.aircraft_id))
   const reqAircraft = await selectIn('aircraft', 'id, serial_number, registration', 'id', reqAircraftIds)
   const acById = new Map(reqAircraft.map(a => [a.id, a]))
@@ -742,13 +761,22 @@ export async function loadGlobalDashboard() {
     })
 
   // (3) active lots with no SKU resolved.
-  const q3 = await fetchAll('kit_lots', LOT_ROW_COLS,
-    q => q.eq('record_status', 'active').is('kit_sku_id', null).order('lot_number'))
+  const q3 = await fetchAll('kit_lots', LOT_ROW_COLS, q => {
+    let out = q.eq('record_status', 'active').is('kit_sku_id', null)
+    if (since) out = out.gte('log_date', since)
+    return out.order('lot_number')
+  })
 
-  // (4) SKUs referenced by a lot or a sale line but carrying no BOM.
+  // (4) SKUs referenced by a lot or a sale line but carrying no BOM. Under a
+  //     baseline only post-baseline LOT references qualify — a sale line alone
+  //     says nothing about when the kit was actually logged.
   const [lotSkuRows, lineSkuRows, bomSkuRows] = await Promise.all([
-    fetchAll('kit_lots', 'kit_sku_id', q => q.not('kit_sku_id', 'is', null)),
-    fetchAll('kit_sale_lines', 'kit_sku_id'),
+    fetchAll('kit_lots', 'kit_sku_id', q => {
+      let out = q.not('kit_sku_id', 'is', null)
+      if (since) out = out.gte('log_date', since)
+      return out
+    }),
+    since ? Promise.resolve([]) : fetchAll('kit_sale_lines', 'kit_sku_id'),
     fetchAll('kit_bom_lines', 'kit_sku_id'),
   ])
   const referenced = uniq([...lotSkuRows, ...lineSkuRows].map(r => r.kit_sku_id))
@@ -761,8 +789,11 @@ export async function loadGlobalDashboard() {
   //     anti-join is a client-side Set difference (D-KSTC-08).
   const conversionBookIds = books.filter(b => b.category === 'conversion').map(b => b.id)
   const conversionLots = conversionBookIds.length
-    ? await fetchAll('kit_lots', LOT_ROW_COLS,
-        q => q.eq('record_status', 'active').in('book_id', conversionBookIds).order('lot_number'))
+    ? await fetchAll('kit_lots', LOT_ROW_COLS, q => {
+        let out = q.eq('record_status', 'active').in('book_id', conversionBookIds)
+        if (since) out = out.gte('log_date', since)
+        return out.order('lot_number')
+      })
     : []
   const [reqLotRows, instLotRows] = await Promise.all([
     fetchAll('stc_requests', 'kit_lot_id', q => q.not('kit_lot_id', 'is', null)),
@@ -778,6 +809,8 @@ export async function loadGlobalDashboard() {
       byBook: books.map((b, i) => ({ book: b, count: pulseByBook[i] })).filter(r => r.count > 0),
     },
     totals,
+    // Echoed back so the dashboard can label every scoped card.
+    exceptionsSince: since,
     queues: {
       noAircraftSerial: q1,
       claimedUnresolved: q2,

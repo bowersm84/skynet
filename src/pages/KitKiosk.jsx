@@ -20,6 +20,20 @@ const BOOKS_WITHOUT_STUD = ['RV']
 const TYPEAHEAD_DEBOUNCE = 250
 const SO_DEBOUNCE = 400
 
+// A kit_skus row whose description is missing, or just repeats the part number,
+// has no second line worth showing — never render the same string twice.
+// (Real kit names land via a kit_skus.description refresh from the Fishbowl
+// product export; this is display courtesy until then.)
+function skuDisplay(sku) {
+  const partNumber = (sku?.part_number || '').trim()
+  const description = (sku?.description || '').trim()
+  const hasName = !!description && description.toLowerCase() !== partNumber.toLowerCase()
+  return {
+    primary: hasName ? description : partNumber,
+    secondary: hasName ? partNumber : null,
+  }
+}
+
 function getKioskDeviceId() {
   try {
     let id = localStorage.getItem(KIOSK_DEVICE_ID_KEY)
@@ -294,7 +308,10 @@ export default function KitKiosk() {
     skuSuppressRef.current = true
     setKitPartText(sku.part_number)
     setKitSkuId(sku.id)
-    setKitSkuDesc(sku.description || null)
+    // Same rule as the suggestion row: a description that only repeats the part
+    // number would echo the field back at the user, so fall through to the
+    // generic confirmation line instead.
+    setKitSkuDesc(skuDisplay(sku).secondary ? sku.description : null)
     setSkuSuggestions([])
     setSkuOpen(false)
   }
@@ -663,43 +680,6 @@ export default function KitKiosk() {
             </div>
           )}
 
-          {/* ---- Kit name — the first thing the bench types ---- */}
-          <Field label="Kit Name">
-            <div className="relative">
-              <input
-                value={kitPartText}
-                onChange={e => {
-                  setKitPartText(e.target.value)
-                  setKitSkuId(null)
-                  setKitSkuDesc(null)
-                }}
-                onFocus={() => { if (skuSuggestions.length) setSkuOpen(true) }}
-                placeholder="What kit is this?"
-                className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
-              />
-              {skuOpen && skuSuggestions.length > 0 && (
-                <Suggestions onDismiss={() => setSkuOpen(false)}>
-                  {skuSuggestions.map(s => (
-                    <button
-                      key={s.id}
-                      onClick={() => pickSku(s)}
-                      className="w-full text-left px-4 py-3 hover:bg-gray-700 border-b border-gray-700 last:border-0"
-                    >
-                      {/* Description leads — the warehouse thinks in names. */}
-                      <span className="block text-white">{s.description || s.part_number}</span>
-                      <span className="block text-gray-400 text-xs font-mono truncate">{s.part_number}</span>
-                    </button>
-                  ))}
-                </Suggestions>
-              )}
-            </div>
-            {kitSkuId
-              ? <p className="text-gray-400 text-sm mt-2">{kitSkuDesc || 'Matched to the SKU catalog.'}</p>
-              : kitPartText.trim()
-                ? <UnmatchedTag />
-                : null}
-          </Field>
-
           {/* ---- Book ---- */}
           <Field label="Book">
             {booksLoading ? (
@@ -726,6 +706,49 @@ export default function KitKiosk() {
 
           {book && (
             <>
+              {/* ---- Kit name ---- */}
+              <Field label="Kit Name">
+                <div className="relative">
+                  <input
+                    value={kitPartText}
+                    onChange={e => {
+                      setKitPartText(e.target.value)
+                      setKitSkuId(null)
+                      setKitSkuDesc(null)
+                    }}
+                    onFocus={() => { if (skuSuggestions.length) setSkuOpen(true) }}
+                    placeholder="What kit is this?"
+                    className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+                  />
+                  {skuOpen && skuSuggestions.length > 0 && (
+                    <Suggestions onDismiss={() => setSkuOpen(false)}>
+                      {skuSuggestions.map(s => {
+                        // Description leads — the warehouse thinks in names —
+                        // but a SKU with no real name renders on one line only.
+                        const { primary, secondary } = skuDisplay(s)
+                        return (
+                          <button
+                            key={s.id}
+                            onClick={() => pickSku(s)}
+                            className="w-full text-left px-4 py-3 hover:bg-gray-700 border-b border-gray-700 last:border-0"
+                          >
+                            <span className="block text-white">{primary}</span>
+                            {secondary && (
+                              <span className="block text-gray-400 text-xs font-mono truncate">{secondary}</span>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </Suggestions>
+                  )}
+                </div>
+                {kitSkuId
+                  ? <p className="text-gray-400 text-sm mt-2">{kitSkuDesc || 'Matched to the SKU catalog.'}</p>
+                  : kitPartText.trim()
+                    ? <UnmatchedTag />
+                    : null}
+              </Field>
+
               {/* ---- Kit # — display only; SkyNet assigns it (D-KSTC-10) ---- */}
               <Field label="Kit #">
                 <p className="font-mono font-bold text-white text-5xl leading-none tracking-tight">

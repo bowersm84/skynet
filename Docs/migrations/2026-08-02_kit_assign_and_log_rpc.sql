@@ -12,13 +12,6 @@
 --      serialise: atomic, gapless, race-free. source is hard-coded
 --      'skynet' — the transcription loader remains the only writer of
 --      source = 'paper_transcription'.
---
--- SECURITY NOTE — read before promoting to PROD. The GRANT below reproduces
--- what is live on TEST, which includes `anon`. Because the function is
--- SECURITY DEFINER it bypasses RLS, so an anon caller could create kit lots
--- even though the kit_lots INSERT policy is `TO authenticated`. The bench
--- runs authenticated (kiosk-authenticate device JWT), so anon is not needed.
--- Recommend dropping anon from the GRANT at promotion time.
 -- =====================================================================
 
 BEGIN;
@@ -95,5 +88,14 @@ REVOKE ALL ON FUNCTION public.kit_assign_and_log(
 GRANT EXECUTE ON FUNCTION public.kit_assign_and_log(
   uuid, date, text, uuid, text, uuid, text, uuid, text, text, text, uuid)
   TO anon, authenticated, service_role;
+
+-- Supabase default privileges grant anon EXECUTE on function creation, and
+-- REVOKE FROM PUBLIC does not remove that explicit grant. kit_assign_and_log is
+-- SECURITY DEFINER, so it bypasses RLS — an anon caller holding only the public
+-- key could otherwise create kit lots. The bench always runs authenticated
+-- (kiosk-authenticate device JWT), so anon is never needed. Applied to TEST
+-- 2026-08-02. See D-KSTC-13 for the standing convention.
+REVOKE EXECUTE ON FUNCTION public.kit_assign_and_log(
+  uuid, date, text, uuid, text, uuid, text, uuid, text, text, text, uuid) FROM anon;
 
 COMMIT;

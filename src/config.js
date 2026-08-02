@@ -65,4 +65,24 @@ export const FEATURES = {
    * paper-book dual-run has been walked at the bench.
    */
   KIT_STC_REGISTRY: true,
+
+  /**
+   * Kit & STC Registry — exception-queue baseline. ISO date string
+   * ('YYYY-MM-DD') or null.
+   *
+   * The global dashboard's five exception queues only count items whose
+   * anchor date falls on or after this date — request received_date for the
+   * intake queues, lot log_date for the lot queues, and (for the no-BOM
+   * queue) a SKU referenced by at least one post-baseline lot. null shows
+   * all history.
+   *
+   * This is a DISPLAY LENS over live-derived queues. No data is written,
+   * altered, or hidden: Search, the entity lenses, and every detail drawer
+   * always show full truth regardless of this setting. Cards carry a
+   * "since {date}" suffix whenever it is set, so the dashboard never reads
+   * as more complete than it is.
+   *
+   * To change it: edit here, commit, deploy.
+   */
+  KIT_EXCEPTIONS_SINCE: '2026-08-04',
 }

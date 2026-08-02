@@ -226,6 +226,10 @@ export default function KitKiosk() {
   // ---------- Reference loads ----------------------------------------------
   const authReady = mode === 'office' ? !!profile : deviceReady
 
+  // is_active gates ENTRY ONLY (D-KSTC-15). This is the single place in the app
+  // that filters it — every history surface (search, lenses, drawers, registry
+  // totals) reads all books so retired ones like BEECH stay fully visible.
+  // Order follows BOOK_ORDER; retired books simply drop out of the list.
   const loadBooks = useCallback(async () => {
     setBooksLoading(true)
     try {
@@ -463,7 +467,9 @@ export default function KitKiosk() {
       // without comment.
       setSuccess({
         lotNumber: assigned.lot_number,
-        bookCode: assigned.book_code || book.code,
+        // The RPC returns the code; the friendly name is what the bench reads.
+        // Both name the same book — the RPC assigned into the one we selected.
+        bookName: book.name || assigned.book_code || book.code,
         who: createdByName || '',
       })
       await applyLogAnother()
@@ -592,10 +598,11 @@ export default function KitKiosk() {
 
   const NAV_ITEMS = [
     { key: 'entry', label: 'Kit Entry', icon: ClipboardList },
-    { key: 'search', label: 'Search', icon: Search },
     // Office-only: an issuance is an immutable compliance record and must
-    // trace to a real authenticated user, not a shared bench device.
+    // trace to a real authenticated user, not a shared bench device. It sits
+    // between Entry and Search because logging is the office's daily work.
     ...(mode === 'office' ? [{ key: 'stc', label: 'Log STC', icon: FileCheck }] : []),
+    { key: 'search', label: 'Search', icon: Search },
   ]
 
   return (
@@ -656,7 +663,7 @@ export default function KitKiosk() {
                     {success.lotNumber}
                   </p>
                   <p className="text-green-300/80 text-sm mt-2">
-                    {success.bookCode}{success.who ? ` · logged by ${success.who}` : ''}
+                    {success.bookName}{success.who ? ` · logged by ${success.who}` : ''}
                   </p>
                   <div className="flex flex-wrap gap-2 mt-4">
                     <button
@@ -685,7 +692,9 @@ export default function KitKiosk() {
             {booksLoading ? (
               <div className="flex items-center gap-2 text-gray-400 text-sm"><Loader2 size={16} className="animate-spin" /> Loading books…</div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className={`grid grid-cols-1 gap-3 ${books.length <= 3 ? 'sm:grid-cols-3' : 'sm:grid-cols-4'}`}>
+                {/* Column count follows the number of active books rather than
+                    assuming four — retiring one must not leave a hole. */}
                 {books.map(b => (
                   <button
                     key={b.id}
@@ -696,8 +705,10 @@ export default function KitKiosk() {
                         : 'bg-gray-800 border-gray-700 hover:bg-gray-700 hover:border-gray-600'
                     }`}
                   >
-                    <span className="block font-mono font-bold text-lg text-white">{b.code}</span>
-                    <span className="block text-gray-400 text-[11px] leading-tight mt-0.5 capitalize">{b.category}</span>
+                    {/* Friendly category name leads; the code stays visible so the
+                        button connects to the "SK203 100075" lot convention. */}
+                    <span className="block font-semibold text-base text-white leading-tight">{b.name}</span>
+                    <span className="block text-gray-400 text-[11px] font-mono leading-tight mt-0.5">{b.code}</span>
                   </button>
                 ))}
               </div>

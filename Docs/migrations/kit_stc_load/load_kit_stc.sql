@@ -186,7 +186,7 @@ FROM stage_aircraft_registrations r
 JOIN map_aircraft m ON m.aircraft_key = r.aircraft_key
 WHERE NOT EXISTS (SELECT 1 FROM public.aircraft_registrations x
                   WHERE x.aircraft_id = m.aircraft_id AND x.registration = r.registration)
-ORDER BY m.aircraft_id, r.registration, NULLIF(r.observed_date,'')::date NULLS LAST;
+ORDER BY m.aircraft_id, r.registration, NULLIF(r.observed_date,'')::date NULLS LAST, r.source;
 
 -- ---------- 9. STC requests (insert-only) ----------
 INSERT INTO public.stc_requests (intake_number, received_date, channel, requester_name,

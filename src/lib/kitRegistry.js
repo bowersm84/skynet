@@ -156,6 +156,9 @@ const LOT_ROW_COLS =
 // Reference data
 // ---------------------------------------------------------------------------
 
+// Deliberately UNFILTERED on is_active: every history surface (registry totals,
+// filtered/party/SKU lenses, the claimed-kit-number range check) must keep
+// showing retired books. Only the entry selector filters (D-KSTC-15).
 export async function loadBooks() {
   const { data, error } = await supabase
     .from('kit_books')
@@ -750,7 +753,7 @@ export async function loadGlobalDashboard() {
 
   // (2) claimed a kit # but no lot resolved — split on whether the claimed
   //     number falls inside a seeded book's range (client-side, against the
-  //     four kit_books rows).
+  //     kit_books rows — every book, retired ones included).
   const inSomeBookRange = (n) => books.some(b =>
     b.first_lot != null && b.last_lot != null && n >= b.first_lot && n <= b.last_lot)
   const q2 = requests

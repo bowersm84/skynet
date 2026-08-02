@@ -223,6 +223,18 @@ WHERE l.kit_sale_line_id IS NULL
   AND l.invoice_as_written = fi.invoice_number
   AND sl.kit_sku_id = l.kit_sku_id;
 
+-- Lots -> sale lines, via so-as-written -> SO -> matching SKU line. Bench-entered
+-- rows carry the SO (no invoice exists yet), so they link on the first loader run
+-- after the Fishbowl export catches up.
+UPDATE public.kit_lots l
+SET kit_sale_line_id = sl.id
+FROM public.kit_sales s
+JOIN public.kit_sale_lines sl ON sl.kit_sale_id = s.id
+WHERE l.kit_sale_line_id IS NULL
+  AND l.kit_sku_id IS NOT NULL
+  AND l.so_as_written = s.so_number
+  AND sl.kit_sku_id = l.kit_sku_id;
+
 -- ---------- 11. installations (insert-only) from fully resolved requests ----------
 INSERT INTO public.kit_installations (kit_lot_id, kit_sku_id, aircraft_id, installer_party_id,
        status, evidence)

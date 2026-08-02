@@ -33,3 +33,5 @@ Idempotency rules:
   * notes columns: first write wins; manual notes are never overwritten.
   * kit_lots upsert only touches rows whose source = 'paper_transcription';
     SkyNet-native lots are never modified by the loader.
+  * bench-entered lots carrying so_as_written auto-link to sale lines on the
+    next loader run after a Fishbowl export refresh.

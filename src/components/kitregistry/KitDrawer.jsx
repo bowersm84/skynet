@@ -113,6 +113,7 @@ function LotBody({ id, onPush }) {
             )}
           </Row>
           <Row label="Invoice">{lot.invoice_as_written}</Row>
+          <Row label="Sales order">{lot.so_as_written}</Row>
           <Row label="Log date">{formatLogDate(lot.log_date)}</Row>
           <Row label="Stud #">{lot.stud_number}</Row>
           <Row label="Rec / platemount #">{lot.rec_platemount_number}</Row>

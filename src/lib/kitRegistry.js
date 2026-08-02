@@ -600,7 +600,7 @@ export async function aircraftLens(aircraftId) {
 export async function lotDetail(lotId) {
   const { data: lot, error } = await supabase
     .from('kit_lots')
-    .select(`${LOT_ROW_COLS}, source_page, transcription_notes, notes, kit_sale_line_id, stud_number, rec_platemount_number, created_at`)
+    .select(`${LOT_ROW_COLS}, so_as_written, source_page, transcription_notes, notes, kit_sale_line_id, stud_number, rec_platemount_number, created_at`)
     .eq('id', lotId)
     .maybeSingle()
   if (error) throw error

@@ -5,27 +5,20 @@ import PinPad from '../components/PinPad'
 import KitSearch from '../components/kitregistry/KitSearch'
 // Pure helpers live in the query layer so the Search tab and the Entry tab
 // can't drift apart on formatting or filter escaping.
-import {
-  BOOK_ORDER, SOURCE_LABEL, todayLocal, formatLogDate, sanitizeTerm,
-} from '../lib/kitRegistry'
+import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
 import {
   Loader2, LogOut, BookOpen, Search, FileCheck, CheckCircle,
-  AlertTriangle, X, ClipboardList, Plus,
+  X, ClipboardList, Plus,
 } from 'lucide-react'
 
 // Shared with the machine kiosk / rack kiosk — this is the same physical device.
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
-// Books whose paper rows have no stud / rec-platemount columns.
+// Books whose paper rows have no stud / receptacle lot columns.
 const BOOKS_WITHOUT_STUD = ['RV']
 
-// Jumping more than this far past the known max asks for a one-tap confirm.
-// Books genuinely do skip numbers, so this warns — it never blocks.
-const SKIP_CONFIRM_THRESHOLD = 25
-
 const TYPEAHEAD_DEBOUNCE = 250
-const DUP_CHECK_DEBOUNCE = 350
-const INVOICE_DEBOUNCE = 400
+const SO_DEBOUNCE = 400
 
 function getKioskDeviceId() {
   try {
@@ -73,8 +66,9 @@ export default function KitKiosk() {
 
   // --- Entry form ----------------------------------------------------------
   const [book, setBook] = useState(null)
-  const [knownMax, setKnownMax] = useState(null)   // GREATEST(db max, book.last_lot)
-  const [lotNumber, setLotNumber] = useState('')
+  // Advisory only. The number that lands on the kit is whatever the RPC returns
+  // under its book lock (D-KSTC-10) — this is just what the bench expects next.
+  const [advisoryNumber, setAdvisoryNumber] = useState(null)
   const [logDate, setLogDate] = useState(todayLocal())
 
   const [kitPartText, setKitPartText] = useState('')
@@ -90,9 +84,10 @@ export default function KitKiosk() {
   const [partyOpen, setPartyOpen] = useState(false)
   const partySuppressRef = useRef(false)
 
-  const [invoiceText, setInvoiceText] = useState('')
-  const [invoiceInfo, setInvoiceInfo] = useState(null) // { found, so_number, partyName }
-  const [invoiceChecking, setInvoiceChecking] = useState(false)
+  // Sales Order — the bench has an SO in hand long before an invoice exists.
+  const [soText, setSoText] = useState('')
+  const [soInfo, setSoInfo] = useState(null) // { found, saleId, so_number, partyId, partyName }
+  const [soChecking, setSoChecking] = useState(false)
   const [saleLineId, setSaleLineId] = useState(null)
 
   const [studNumber, setStudNumber] = useState('')
@@ -100,20 +95,11 @@ export default function KitKiosk() {
   const [notes, setNotes] = useState('')
 
   // --- Entry state ---------------------------------------------------------
-  const [duplicate, setDuplicate] = useState(null)
-  const [dupChecking, setDupChecking] = useState(false)
-  const [skipConfirmed, setSkipConfirmed] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
-  const [success, setSuccess] = useState(null)  // { label, who }
+  const [success, setSuccess] = useState(null)  // { lotNumber, bookCode, who }
 
   const showStudFields = !!book && !BOOKS_WITHOUT_STUD.includes(book.code)
-  const lotIsInteger = /^\d+$/.test(lotNumber.trim())
-  const lotValue = lotIsInteger ? Number(lotNumber.trim()) : null
-  const belowFirstLot = !!(book && lotValue != null && book.first_lot != null && lotValue < book.first_lot)
-  const skipAhead = (knownMax != null && lotValue != null && lotValue - knownMax > SKIP_CONFIRM_THRESHOLD)
-    ? lotValue - knownMax - 1
-    : 0
 
   useEffect(() => {
     document.title = 'Skybolt Kit Registry'
@@ -252,15 +238,11 @@ export default function KitKiosk() {
   useEffect(() => { if (authReady) loadBooks() }, [authReady, loadBooks])
 
   // ---------- Book selection + number pre-fill ------------------------------
-  // The pre-fill is GREATEST(known max in kit_lots, book.last_lot) + 1. The DB
-  // lags the paper book (only part of the books are transcribed), so this is a
-  // convenience to verify against paper — paper remains the number of record.
-  const selectBook = async (b) => {
-    setBook(b)
-    setDuplicate(null)
-    setSkipConfirmed(false)
-    setSaveError(null)
-    if (BOOKS_WITHOUT_STUD.includes(b.code)) { setStudNumber(''); setPlatemount('') }
+  // Mirrors the RPC's own math — GREATEST(max lot in book, book.last_lot) + 1 —
+  // so the bench sees the number it is about to get. Advisory only: the RPC
+  // recomputes it under a row lock at insert time, and its answer wins.
+  const refreshAdvisory = useCallback(async (b) => {
+    if (!b) { setAdvisoryNumber(null); return }
     try {
       const { data } = await supabase
         .from('kit_lots')
@@ -270,41 +252,21 @@ export default function KitKiosk() {
         .limit(1)
       const dbMax = data?.[0]?.lot_number ?? null
       const max = Math.max(dbMax ?? 0, b.last_lot ?? 0)
-      setKnownMax(max || null)
-      setLotNumber(max ? String(max + 1) : (b.first_lot != null ? String(b.first_lot) : ''))
+      setAdvisoryNumber(max ? max + 1 : (b.first_lot ?? null))
     } catch (err) {
       console.error('Error resolving next lot number:', err)
-      setKnownMax(null)
-      setLotNumber('')
+      setAdvisoryNumber(null)
     }
+  }, [])
+
+  const selectBook = async (b) => {
+    setBook(b)
+    setSaveError(null)
+    if (BOOKS_WITHOUT_STUD.includes(b.code)) { setStudNumber(''); setPlatemount('') }
+    await refreshAdvisory(b)
   }
 
-  // ---------- Live duplicate check -----------------------------------------
-  useEffect(() => {
-    setDuplicate(null)
-    if (!book || !lotIsInteger) { setDupChecking(false); return }
-    let cancelled = false
-    setDupChecking(true)
-    const t = setTimeout(async () => {
-      try {
-        const { data } = await supabase
-          .from('kit_lots')
-          .select('id, lot_number, log_date, customer_as_written, kit_part_as_written, source, record_status')
-          .eq('book_id', book.id)
-          .eq('lot_number', lotValue)
-          .maybeSingle()
-        if (!cancelled) setDuplicate(data || null)
-      } catch (err) {
-        console.error('Duplicate check failed:', err)
-      } finally {
-        if (!cancelled) setDupChecking(false)
-      }
-    }, DUP_CHECK_DEBOUNCE)
-    return () => { cancelled = true; clearTimeout(t) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book?.id, lotNumber])
-
-  // ---------- Kit part typeahead (kit_skus) --------------------------------
+  // ---------- Kit name typeahead (kit_skus) --------------------------------
   useEffect(() => {
     if (skuSuppressRef.current) { skuSuppressRef.current = false; return }
     const term = sanitizeTerm(kitPartText)
@@ -368,58 +330,74 @@ export default function KitKiosk() {
     setPartyOpen(false)
   }
 
-  // ---------- Invoice verification -----------------------------------------
+  // ---------- Sales Order verification --------------------------------------
+  // The kit_sales mirror is export-refreshed, so a brand-new SO legitimately
+  // won't be there yet. A miss is informational and never blocks (D-KSTC-11).
   useEffect(() => {
-    setInvoiceInfo(null)
-    const raw = invoiceText.trim()
-    if (!raw) { setInvoiceChecking(false); return }
+    setSoInfo(null)
+    const raw = soText.trim()
+    if (!raw) { setSoChecking(false); return }
     let cancelled = false
-    setInvoiceChecking(true)
+    setSoChecking(true)
     const t = setTimeout(async () => {
       try {
-        const { data: inv } = await supabase
-          .from('fishbowl_invoices')
-          .select('id, invoice_number, so_number, party_id')
-          .eq('invoice_number', raw)
+        const { data: sale } = await supabase
+          .from('kit_sales')
+          .select('id, so_number, party_id')
+          .eq('so_number', raw)
           .maybeSingle()
         if (cancelled) return
-        if (!inv) { setInvoiceInfo({ found: false }); return }
+        if (!sale) { setSoInfo({ found: false }); return }
         // Party name is a separate small query — never a nested select.
         let partyName = null
-        if (inv.party_id) {
+        if (sale.party_id) {
           const { data: p } = await supabase
-            .from('kit_parties').select('name').eq('id', inv.party_id).maybeSingle()
+            .from('kit_parties').select('name').eq('id', sale.party_id).maybeSingle()
           partyName = p?.name || null
         }
-        if (!cancelled) setInvoiceInfo({ found: true, so_number: inv.so_number, partyName })
+        if (!cancelled) {
+          setSoInfo({
+            found: true, saleId: sale.id, so_number: sale.so_number,
+            partyId: sale.party_id, partyName,
+          })
+        }
       } catch (err) {
-        console.error('Invoice lookup failed:', err)
-        if (!cancelled) setInvoiceInfo(null)
+        console.error('Sales order lookup failed:', err)
+        if (!cancelled) setSoInfo(null)
       } finally {
-        if (!cancelled) setInvoiceChecking(false)
+        if (!cancelled) setSoChecking(false)
       }
-    }, INVOICE_DEBOUNCE)
+    }, SO_DEBOUNCE)
     return () => { cancelled = true; clearTimeout(t) }
-  }, [invoiceText])
+  }, [soText])
+
+  // ---------- Customer prefill from the resolved SO -------------------------
+  // Only fills an EMPTY customer field, and stays editable afterwards.
+  useEffect(() => {
+    if (!soInfo?.found || !soInfo.partyName) return
+    if (customerText.trim()) return
+    // Suppress the party typeahead so the prefill doesn't pop a suggestion list.
+    partySuppressRef.current = true
+    setCustomerText(soInfo.partyName)
+    setPartyId(soInfo.partyId || null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soInfo])
 
   // ---------- Sale-line staging --------------------------------------------
-  // Bench-time version of the loader's link pass: when the invoice resolves to
-  // an SO and the kit part resolves to a SKU, and that SO has a line for that
-  // SKU, stage the kit_sale_line_id onto the insert. Two flat queries.
+  // Bench-time version of the loader's SO link pass: when the SO resolves and
+  // the kit name resolves to a SKU, and that SO has a line for that SKU, stage
+  // the kit_sale_line_id onto the insert.
   useEffect(() => {
     setSaleLineId(null)
-    const so = invoiceInfo?.so_number
-    if (!so || !kitSkuId) return
+    const saleId = soInfo?.saleId
+    if (!saleId || !kitSkuId) return
     let cancelled = false
     const run = async () => {
       try {
-        const { data: sale } = await supabase
-          .from('kit_sales').select('id').eq('so_number', so).maybeSingle()
-        if (cancelled || !sale) return
         const { data: lines } = await supabase
           .from('kit_sale_lines')
           .select('id')
-          .eq('kit_sale_id', sale.id)
+          .eq('kit_sale_id', saleId)
           .eq('kit_sku_id', kitSkuId)
           .limit(1)
         if (!cancelled && lines?.[0]) setSaleLineId(lines[0].id)
@@ -429,66 +407,49 @@ export default function KitKiosk() {
     }
     run()
     return () => { cancelled = true }
-  }, [invoiceInfo?.so_number, kitSkuId])
+  }, [soInfo?.saleId, kitSkuId])
 
   // ---------- Save ----------------------------------------------------------
   const blockingReason = () => {
     if (!book) return 'Pick a book first.'
-    if (!lotIsInteger) return 'Kit # must be a whole number.'
-    if (belowFirstLot) return `Kit # is below this book's first lot (${book.first_lot}).`
-    if (duplicate) return `${book.code} ${duplicate.lot_number} already exists.`
-    if (skipAhead > 0 && !skipConfirmed) return 'Confirm the number skip before saving.'
     return null
   }
 
-  const loadDuplicateRow = async () => {
-    if (!book || lotValue == null) return
-    const { data } = await supabase
-      .from('kit_lots')
-      .select('id, lot_number, log_date, customer_as_written, kit_part_as_written, source, record_status')
-      .eq('book_id', book.id)
-      .eq('lot_number', lotValue)
-      .maybeSingle()
-    setDuplicate(data || null)
-  }
-
-  const doInsert = async (createdById, createdByName) => {
+  // The number is assigned server-side under a kit_books row lock, so two
+  // benches saving at once can never collide and never leave a gap
+  // (D-KSTC-10). Never insert into kit_lots directly from here.
+  const doSave = async (createdById, createdByName) => {
     setSaving(true)
     setSaveError(null)
     try {
-      const payload = {
-        book_id: book.id,
-        lot_number: lotValue,
-        log_date: logDate || null,
-        kit_part_as_written: kitPartText.trim() || null,
-        kit_sku_id: kitSkuId,
-        customer_as_written: customerText.trim() || null,
-        party_id: partyId,
-        invoice_as_written: invoiceText.trim() || null,
-        kit_sale_line_id: saleLineId,
-        stud_number: showStudFields ? (studNumber.trim() || null) : null,
-        rec_platemount_number: showStudFields ? (platemount.trim() || null) : null,
-        notes: notes.trim() || null,
-        record_status: 'active',
-        source: 'skynet',
-        created_by: createdById,
-      }
+      const { data, error } = await supabase.rpc('kit_assign_and_log', {
+        p_book_id: book.id,
+        p_log_date: logDate || null,
+        p_kit_part_as_written: kitPartText.trim(),
+        p_kit_sku_id: kitSkuId,
+        p_customer_as_written: customerText.trim(),
+        p_party_id: partyId,
+        p_so_as_written: soText.trim(),
+        p_kit_sale_line_id: saleLineId,
+        p_stud_number: showStudFields ? studNumber.trim() : '',
+        p_rec_platemount_number: showStudFields ? platemount.trim() : '',
+        p_notes: notes.trim(),
+        p_created_by: createdById,
+      })
+      if (error) throw error
 
-      const { error } = await supabase.from('kit_lots').insert(payload)
-      if (error) {
-        // A race against another bench/transcription pass lands here. Render it
-        // as the duplicate panel, not a raw Postgres error.
-        if (error.code === '23505') {
-          await loadDuplicateRow()
-          setSaveError(null)
-          return false
-        }
-        throw error
-      }
+      const assigned = Array.isArray(data) ? data[0] : data
+      if (!assigned?.lot_number) throw new Error('The registry did not return a kit number.')
 
-      const saved = lotValue
-      setSuccess({ label: `${book.code} ${saved}`, who: createdByName || '' })
-      applyLogAnother(saved)
+      // Whatever the RPC returned is the number on the kit. If it differs from
+      // the advisory (someone else logged first) it is simply correct — shown
+      // without comment.
+      setSuccess({
+        lotNumber: assigned.lot_number,
+        bookCode: assigned.book_code || book.code,
+        who: createdByName || '',
+      })
+      await applyLogAnother()
       return true
     } catch (err) {
       console.error('Error saving kit lot:', err)
@@ -504,7 +465,7 @@ export default function KitKiosk() {
     if (reason) { setSaveError(reason); return }
     setSaveError(null)
     if (mode === 'office') {
-      await doInsert(profile?.id || null, profile?.full_name || '')
+      await doSave(profile?.id || null, profile?.full_name || '')
     } else {
       setSavePin('')
       setSavePinError(null)
@@ -532,7 +493,7 @@ export default function KitKiosk() {
       }
       setPinPromptOpen(false)
       setSavePin('')
-      await doInsert(data.id, data.full_name || data.username || '')
+      await doSave(data.id, data.full_name || data.username || '')
     } catch (err) {
       console.error('PIN confirm failed:', err)
       setSavePinError('Could not verify PIN')
@@ -543,23 +504,20 @@ export default function KitKiosk() {
   }
 
   // ---------- Resets --------------------------------------------------------
-  // The batch-of-kits flow: same customer, same invoice, same part, next number.
-  const applyLogAnother = (savedNumber) => {
+  // The batch-of-kits flow: same kit name, book, date, customer and SO carry
+  // over; only the per-kit lot fields clear. The advisory number is refetched
+  // so it reflects the row we just wrote.
+  const applyLogAnother = async () => {
     setStudNumber('')
     setPlatemount('')
     setNotes('')
-    setSkipConfirmed(false)
-    setDuplicate(null)
     setSaveError(null)
-    const nextMax = Math.max(knownMax ?? 0, savedNumber)
-    setKnownMax(nextMax)
-    setLotNumber(String(savedNumber + 1))
+    await refreshAdvisory(book)
   }
 
   const resetAll = () => {
     setBook(null)
-    setKnownMax(null)
-    setLotNumber('')
+    setAdvisoryNumber(null)
     setLogDate(todayLocal())
     // Only arm the suppress flag when the text actually changes — otherwise it
     // survives into the next real keystroke and swallows that search.
@@ -567,9 +525,9 @@ export default function KitKiosk() {
     setKitPartText(''); setKitSkuId(null); setKitSkuDesc(null); setSkuSuggestions([]); setSkuOpen(false)
     if (customerText) partySuppressRef.current = true
     setCustomerText(''); setPartyId(null); setPartySuggestions([]); setPartyOpen(false)
-    setInvoiceText(''); setInvoiceInfo(null); setSaleLineId(null)
+    setSoText(''); setSoInfo(null); setSaleLineId(null)
     setStudNumber(''); setPlatemount(''); setNotes('')
-    setDuplicate(null); setSkipConfirmed(false); setSaveError(null); setSuccess(null)
+    setSaveError(null); setSuccess(null)
   }
 
   // ---------- Feature gate --------------------------------------------------
@@ -670,19 +628,20 @@ export default function KitKiosk() {
 
       {nav === 'entry' && (
         <div className="p-5 max-w-3xl mx-auto">
+          {/* The assigned number is the authoritative moment — rendered bare and
+              huge so it can be copied straight onto the kit label. */}
           {success && (
-            <div className="mb-5 bg-green-900/30 border border-green-700 rounded-xl p-4">
+            <div className="mb-5 bg-green-900/30 border border-green-700 rounded-xl p-5">
               <div className="flex items-start gap-3">
-                <CheckCircle size={22} className="text-green-400 shrink-0 mt-0.5" />
+                <CheckCircle size={22} className="text-green-400 shrink-0 mt-1" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-green-200 font-semibold">
-                    <span className="font-mono">{success.label}</span> logged
-                    {success.who ? ` — ${success.who}` : ''}
+                  <p className="font-mono font-bold text-green-200 text-6xl leading-none tracking-tight">
+                    {success.lotNumber}
                   </p>
-                  <p className="text-green-300/70 text-sm mt-0.5">
-                    Book, date, customer, invoice and kit part are kept for the next kit.
+                  <p className="text-green-300/80 text-sm mt-2">
+                    {success.bookCode}{success.who ? ` · logged by ${success.who}` : ''}
                   </p>
-                  <div className="flex flex-wrap gap-2 mt-3">
+                  <div className="flex flex-wrap gap-2 mt-4">
                     <button
                       onClick={() => setSuccess(null)}
                       className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-700 hover:bg-green-600 text-white text-sm font-medium"
@@ -703,6 +662,43 @@ export default function KitKiosk() {
               </div>
             </div>
           )}
+
+          {/* ---- Kit name — the first thing the bench types ---- */}
+          <Field label="Kit Name">
+            <div className="relative">
+              <input
+                value={kitPartText}
+                onChange={e => {
+                  setKitPartText(e.target.value)
+                  setKitSkuId(null)
+                  setKitSkuDesc(null)
+                }}
+                onFocus={() => { if (skuSuggestions.length) setSkuOpen(true) }}
+                placeholder="What kit is this?"
+                className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+              />
+              {skuOpen && skuSuggestions.length > 0 && (
+                <Suggestions onDismiss={() => setSkuOpen(false)}>
+                  {skuSuggestions.map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => pickSku(s)}
+                      className="w-full text-left px-4 py-3 hover:bg-gray-700 border-b border-gray-700 last:border-0"
+                    >
+                      {/* Description leads — the warehouse thinks in names. */}
+                      <span className="block text-white">{s.description || s.part_number}</span>
+                      <span className="block text-gray-400 text-xs font-mono truncate">{s.part_number}</span>
+                    </button>
+                  ))}
+                </Suggestions>
+              )}
+            </div>
+            {kitSkuId
+              ? <p className="text-gray-400 text-sm mt-2">{kitSkuDesc || 'Matched to the SKU catalog.'}</p>
+              : kitPartText.trim()
+                ? <UnmatchedTag />
+                : null}
+          </Field>
 
           {/* ---- Book ---- */}
           <Field label="Book">
@@ -730,83 +726,12 @@ export default function KitKiosk() {
 
           {book && (
             <>
-              {/* ---- Kit # ---- */}
+              {/* ---- Kit # — display only; SkyNet assigns it (D-KSTC-10) ---- */}
               <Field label="Kit #">
-                <div className="flex items-center gap-3">
-                  <span className="font-mono font-bold text-lg text-gray-400 shrink-0">{book.code}</span>
-                  <input
-                    value={lotNumber}
-                    onChange={e => { setLotNumber(e.target.value); setSkipConfirmed(false); setSaveError(null) }}
-                    inputMode="numeric"
-                    className="flex-1 min-w-0 px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-xl font-mono focus:border-skynet-accent focus:outline-none"
-                  />
-                  {dupChecking && <Loader2 size={18} className="animate-spin text-gray-500 shrink-0" />}
-                </div>
-                <p className="text-gray-500 text-xs mt-2">
-                  Verify against the paper book — paper remains the number of record.
-                  {knownMax != null && <> Highest known: <span className="font-mono text-gray-400">{knownMax}</span>.</>}
+                <p className="font-mono font-bold text-white text-5xl leading-none tracking-tight">
+                  {advisoryNumber ?? '—'}
                 </p>
-                {lotNumber.trim() && !lotIsInteger && (
-                  <p className="text-red-400 text-sm mt-2">Kit # must be a whole number.</p>
-                )}
-                {belowFirstLot && (
-                  <p className="text-red-400 text-sm mt-2">
-                    Below this book&apos;s first lot ({book.first_lot}).
-                  </p>
-                )}
               </Field>
-
-              {/* ---- Skip-ahead confirm ---- */}
-              {skipAhead > 0 && !duplicate && (
-                <div className="mb-5 bg-amber-900/25 border border-amber-700 rounded-xl p-4">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle size={20} className="text-amber-400 shrink-0 mt-0.5" />
-                    <div className="flex-1">
-                      <p className="text-amber-200 text-sm">
-                        Skips {skipAhead} number{skipAhead === 1 ? '' : 's'} — books do skip; confirm this matches the paper book.
-                      </p>
-                      <button
-                        onClick={() => setSkipConfirmed(true)}
-                        disabled={skipConfirmed}
-                        className={`mt-3 px-4 py-2.5 rounded-lg text-sm font-medium ${
-                          skipConfirmed
-                            ? 'bg-amber-800/50 text-amber-300 cursor-default'
-                            : 'bg-amber-600 hover:bg-amber-500 text-white'
-                        }`}
-                      >
-                        {skipConfirmed ? 'Confirmed' : 'Confirm — matches the paper book'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ---- Duplicate ---- */}
-              {duplicate && (
-                <div className="mb-5 bg-red-900/25 border border-red-700 rounded-xl p-4">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle size={20} className="text-red-400 shrink-0 mt-0.5" />
-                    <div className="min-w-0">
-                      <p className="text-red-200 font-semibold">
-                        <span className="font-mono">{book.code} {duplicate.lot_number}</span> already exists — save is blocked.
-                      </p>
-                      <dl className="mt-2 grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 text-sm">
-                        <dt className="text-red-300/60">Logged</dt>
-                        <dd className="text-red-100">{formatLogDate(duplicate.log_date)}</dd>
-                        <dt className="text-red-300/60">Kit part</dt>
-                        <dd className="text-red-100">{duplicate.kit_part_as_written || '—'}</dd>
-                        <dt className="text-red-300/60">Customer</dt>
-                        <dd className="text-red-100">{duplicate.customer_as_written || '—'}</dd>
-                        <dt className="text-red-300/60">Source</dt>
-                        <dd className="text-red-100">
-                          {SOURCE_LABEL[duplicate.source] || duplicate.source}
-                          {duplicate.record_status !== 'active' && ` · ${duplicate.record_status}`}
-                        </dd>
-                      </dl>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* ---- Log date ---- */}
               <Field label="Log date">
@@ -817,42 +742,6 @@ export default function KitKiosk() {
                   style={{ colorScheme: 'dark' }}
                   className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none"
                 />
-              </Field>
-
-              {/* ---- Kit part ---- */}
-              <Field label="Kit part #">
-                <div className="relative">
-                  <input
-                    value={kitPartText}
-                    onChange={e => {
-                      setKitPartText(e.target.value)
-                      setKitSkuId(null)
-                      setKitSkuDesc(null)
-                    }}
-                    onFocus={() => { if (skuSuggestions.length) setSkuOpen(true) }}
-                    placeholder="As written on the book row"
-                    className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
-                  />
-                  {skuOpen && skuSuggestions.length > 0 && (
-                    <Suggestions onDismiss={() => setSkuOpen(false)}>
-                      {skuSuggestions.map(s => (
-                        <button
-                          key={s.id}
-                          onClick={() => pickSku(s)}
-                          className="w-full text-left px-4 py-3 hover:bg-gray-700 border-b border-gray-700 last:border-0"
-                        >
-                          <span className="block font-mono text-white">{s.part_number}</span>
-                          {s.description && <span className="block text-gray-400 text-xs truncate">{s.description}</span>}
-                        </button>
-                      ))}
-                    </Suggestions>
-                  )}
-                </div>
-                {kitSkuId
-                  ? <p className="text-gray-400 text-sm mt-2">{kitSkuDesc || 'Matched to the SKU catalog.'}</p>
-                  : kitPartText.trim()
-                    ? <UnmatchedTag />
-                    : null}
               </Field>
 
               {/* ---- Customer ---- */}
@@ -882,28 +771,27 @@ export default function KitKiosk() {
                 {!partyId && customerText.trim() && <UnmatchedTag />}
               </Field>
 
-              {/* ---- Invoice ---- */}
-              <Field label="Invoice #">
+              {/* ---- Sales order ---- */}
+              <Field label="Sales Order #">
                 <input
-                  value={invoiceText}
-                  onChange={e => setInvoiceText(e.target.value)}
+                  value={soText}
+                  onChange={e => setSoText(e.target.value)}
                   placeholder="Optional"
                   className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
                 />
-                {invoiceChecking && (
+                {soChecking && (
                   <p className="text-gray-500 text-sm mt-2 flex items-center gap-2">
                     <Loader2 size={14} className="animate-spin" /> Checking Fishbowl…
                   </p>
                 )}
-                {!invoiceChecking && invoiceInfo?.found && (
+                {!soChecking && soInfo?.found && (
                   <p className="text-green-400 text-sm mt-2">
-                    ✓ {invoiceInfo.partyName || 'Unknown customer'}
-                    {invoiceInfo.so_number ? ` — SO ${invoiceInfo.so_number}` : ''}
+                    ✓ {soInfo.partyName || 'Unknown customer'} — SO {soInfo.so_number}
                   </p>
                 )}
-                {!invoiceChecking && invoiceInfo && !invoiceInfo.found && (
+                {!soChecking && soInfo && !soInfo.found && (
                   <p className="text-gray-500 text-sm mt-2">
-                    Not found in the Fishbowl window (pre-2025 invoices are normal).
+                    Not in the last Fishbowl sync — will auto-link on next refresh.
                   </p>
                 )}
                 {saleLineId && (
@@ -911,17 +799,17 @@ export default function KitKiosk() {
                 )}
               </Field>
 
-              {/* ---- Stud / platemount ---- */}
+              {/* ---- Stud / receptacle lot numbers ---- */}
               {showStudFields && (
                 <div className="grid sm:grid-cols-2 gap-4">
-                  <Field label="Stud #">
+                  <Field label="Stud Lot #">
                     <input
                       value={studNumber}
                       onChange={e => setStudNumber(e.target.value)}
                       className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none"
                     />
                   </Field>
-                  <Field label="Rec / Platemount #">
+                  <Field label="Receptacle / Platemount Lot #">
                     <input
                       value={platemount}
                       onChange={e => setPlatemount(e.target.value)}
@@ -985,7 +873,7 @@ export default function KitKiosk() {
           <div className="w-full max-w-sm">
             <PinPad
               icon={<ClipboardList size={40} className="mx-auto mb-3 text-skynet-accent" />}
-              title={`Log ${book?.code} ${lotValue ?? ''}`}
+              title={`Log ${book?.code || ''} kit`}
               subtitle="Enter your PIN to sign this entry"
               pin={savePin}
               error={savePinError}

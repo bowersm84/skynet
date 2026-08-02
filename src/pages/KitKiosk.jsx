@@ -119,7 +119,7 @@ export default function KitKiosk() {
   const logDateRef = useRef(null)
   const customerRef = useRef(null)
   const soRef = useRef(null)
-  const studRef = useRef(null)
+
 
   const showStudFields = !!book && !BOOKS_WITHOUT_STUD.includes(book.code)
 
@@ -459,14 +459,15 @@ export default function KitKiosk() {
     if (!logDate) errors.logDate = 'Required'
     if (!customerText.trim()) errors.customer = 'Required'
     if (!soText.trim()) errors.so = 'Required'
-    if (showStudFields && !studNumber.trim()) errors.stud = 'Required'
+    // Stud lot # is deliberately NOT required — it isn't always known at the
+    // bench when the kit is logged (D-KSTC-17).
     return errors
   }
 
   const focusFirstInvalid = (errors) => {
     const sequence = [
       ['kitPart', kitPartRef], ['logDate', logDateRef], ['customer', customerRef],
-      ['so', soRef], ['stud', studRef],
+      ['so', soRef],
     ]
     for (const [key, ref] of sequence) {
       if (errors[key] && ref.current) {
@@ -898,15 +899,13 @@ export default function KitKiosk() {
               {/* ---- Stud / receptacle lot numbers ---- */}
               {showStudFields && (
                 <div className="grid sm:grid-cols-2 gap-4">
-                  {/* Required only where rendered — RV has no stud field at all,
-                      and the RPC exempts RV for the same reason. */}
-                  <Field label="Stud Lot #" required error={fieldErrors.stud}>
+                  {/* Rendered for SK203/TRIM only, but never required — the stud
+                      lot isn't always known when the kit is logged (D-KSTC-17). */}
+                  <Field label="Stud Lot #" optional>
                     <input
-                      ref={studRef}
-                      aria-required="true"
                       value={studNumber}
-                      onChange={e => { setStudNumber(e.target.value); clearFieldError('stud') }}
-                      className={`w-full px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none ${fieldErrors.stud ? INVALID_BORDER : VALID_BORDER}`}
+                      onChange={e => setStudNumber(e.target.value)}
+                      className="w-full px-4 py-3.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-base focus:border-skynet-accent focus:outline-none"
                     />
                   </Field>
                   <Field label="Receptacle / Platemount Lot #" optional>

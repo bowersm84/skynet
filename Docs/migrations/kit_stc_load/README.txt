@@ -21,9 +21,16 @@ Expected verification counts (TEST, first run):
     reaches the 2025+ pages)
   aircraft 70 | aircraft_registrations 67 | stc_requests 71 (71 aircraft-linked, 2 lot-linked)
   kit_installations 2 (intake #34 -> SK203 99000, #66 -> BEECH 76958, both verified)
-  stc_issuances 0 by design - the six historical doc-sends are recorded in
-    request notes with status 'issued'; which certificate/version was sent
-    was never captured and needs manual backfill (April/Christy).
+  stc_issuances 0 by design - and it stays empty for the historical rows.
+    The six pre-system doc-sends (intakes 60, 61, 62, 65, 68, 70) are ACCEPTED
+    AS ISSUED on the workbook's word: status 'issued' plus the sent date in
+    notes IS the record for a send that predates the system (D-KSTC-22).
+    Which certificate and version went out was never captured, and inventing
+    those identities now would be fabrication, so nothing is reconstructed.
+    stc_issuances records go-forward sends only - issuances created through
+    the C2 workflow, where the document identity is known at send time.
+    Intakes 1-71 are the only rows where 'issued' may exist without an
+    stc_issuances row.
 
 Idempotency rules:
   * Reference data upserts on natural keys - re-run any time with a fresh

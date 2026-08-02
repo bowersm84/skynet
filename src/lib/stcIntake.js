@@ -449,6 +449,111 @@ export function validateIntakeFields(form) {
   return errors
 }
 
+// The blank form. Exported so the intake form and the drawer's edit mode agree
+// on the field set without either one listing it again.
+export const BLANK_INTAKE = {
+  receivedDate: '',
+  channel: 'email',
+  requesterName: '',
+  requesterCompany: '',
+  requesterEmail: '',
+  claimedKitNumber: '',
+  claimedKitPart: '',
+  claimedAircraftSerial: '',
+  claimedRegistration: '',
+  claimedOrderNumber: '',
+  purchasedFrom: '',
+  notes: '',
+}
+
+// A stc_requests row → the form shape. The inverse of what createStcRequest and
+// updateStcRequest send, so edit mode round-trips a request without inventing a
+// second column mapping.
+export function requestToFormFields(row) {
+  if (!row) return { ...BLANK_INTAKE }
+  return {
+    receivedDate: row.received_date || '',
+    channel: row.channel || 'email',
+    requesterName: row.requester_name || '',
+    requesterCompany: row.requester_company || '',
+    requesterEmail: row.requester_email || '',
+    claimedKitNumber: row.claimed_kit_number || '',
+    claimedKitPart: row.claimed_kit_part || '',
+    claimedAircraftSerial: row.claimed_aircraft_serial || '',
+    claimedRegistration: row.claimed_registration || '',
+    claimedOrderNumber: row.claimed_order_number || '',
+    purchasedFrom: row.purchased_from_text || '',
+    notes: row.notes || '',
+  }
+}
+
+// Route an RPC exception back to the field it is about, so a server-side refusal
+// lands under the same input the client-side rule would have marked. Returns the
+// form key, or null when the message belongs near the Save button (the issued
+// lock, authorisation, "not found").
+export function fieldForMessage(message) {
+  const text = String(message || '')
+  // Creation's "X is required" and editing's "X cannot be removed" both route
+  // to the field they name.
+  const required = REQUIRED_FIELDS.find(([, m]) => text.includes(m))
+  if (required) return required[0]
+  const guard = EDIT_GUARD_FIELDS.find(([, , m]) => text.includes(m))
+  return guard ? guard[0] : null
+}
+
+// ---------------------------------------------------------------------------
+// Editing is NO-REGRESSION, not full-set (D-KSTC-23)
+//
+// Creation demands the full D-KSTC-20 set. Editing does not, and mirroring it
+// here was a mistake C1.3 exposed: 70 of 71 historical requests would have had
+// to force-fill every blank the paper record never had, and all six issued rows
+// were locked out of even notes editing because those forced fills tripped the
+// issued lock. The rule that survives is the one that actually protects the
+// data: a field that HAS a value cannot be emptied. A field that was always
+// blank may stay blank until somebody genuinely learns the answer.
+//
+// Same field order and the same message text as stc_update_request.
+// ---------------------------------------------------------------------------
+
+// form key → the stc_requests column it maps to, for reading the original row.
+const EDIT_GUARD_FIELDS = [
+  ['receivedDate', 'received_date', 'Received date cannot be removed'],
+  ['requesterName', 'requester_name', 'Requester name cannot be removed'],
+  ['requesterCompany', 'requester_company', 'Company cannot be removed'],
+  ['claimedKitNumber', 'claimed_kit_number', 'Claimed kit # cannot be removed'],
+  ['claimedKitPart', 'claimed_kit_part', 'Kit part cannot be removed'],
+  ['claimedAircraftSerial', 'claimed_aircraft_serial', 'Aircraft serial cannot be removed'],
+  ['claimedRegistration', 'claimed_registration', 'Registration cannot be removed'],
+  ['claimedOrderNumber', 'claimed_order_number', 'Order # cannot be removed'],
+]
+
+function hasValue(v) {
+  return String(v ?? '').trim() !== ''
+}
+
+// Which fields the edit form marks with an asterisk. In edit mode the asterisk
+// means "can't be blanked", not "must be filled" — so it appears only on fields
+// that currently hold something. A blank historical field carries no marking at
+// all, because leaving it blank is a legitimate answer.
+export function editGuardedFields(originalRow) {
+  const guarded = new Set()
+  for (const [formKey, column] of EDIT_GUARD_FIELDS) {
+    if (hasValue(originalRow?.[column])) guarded.add(formKey)
+  }
+  return guarded
+}
+
+// Flags only fields that HAD a value and are now blank.
+export function validateEditFields(form, originalRow) {
+  const errors = {}
+  for (const [formKey, column, message] of EDIT_GUARD_FIELDS) {
+    if (hasValue(originalRow?.[column]) && !hasValue(form?.[formKey])) {
+      errors[formKey] = message
+    }
+  }
+  return errors
+}
+
 // A claimed number that disagrees with the linked log entry is REAL DATA, not a
 // mistake to block on: the customer wrote one thing, the book says another, and
 // the office needs to see both. Returns the warning text, or null.
@@ -496,6 +601,34 @@ export async function createStcRequest(fields) {
     throw new Error('The registry did not return an intake number.')
   }
   return { requestId: row.request_id, intakeNumber: row.intake_number }
+}
+
+// The ONLY way the frontend changes a request row (D-KSTC-21) — there is no
+// direct .update() on stc_requests anywhere in src/. The RPC re-validates the
+// required set, diffs server-side so a no-op writes nothing, refuses non-notes
+// edits once a request is issued, and records every change as a field-level
+// audit_logs entry under the editor's id. Returns { requestId, fieldsChanged }.
+export async function updateStcRequest(requestId, fields) {
+  const t = v => (v == null ? null : String(v).trim() || null)
+  const { data, error } = await supabase.rpc('stc_update_request', {
+    p_request_id: requestId,
+    p_received_date: fields.receivedDate || null,
+    p_channel: fields.channel || 'email',
+    p_requester_name: t(fields.requesterName),
+    p_requester_company: t(fields.requesterCompany),
+    p_requester_email: t(fields.requesterEmail),
+    p_claimed_kit_number: t(fields.claimedKitNumber),
+    p_claimed_kit_part: t(fields.claimedKitPart),
+    p_claimed_aircraft_serial: t(fields.claimedAircraftSerial),
+    p_claimed_registration: t(fields.claimedRegistration),
+    p_claimed_order_number: t(fields.claimedOrderNumber),
+    p_purchased_from_text: t(fields.purchasedFrom),
+    p_notes: t(fields.notes),
+  })
+  if (error) throw error
+
+  const row = Array.isArray(data) ? data[0] : data
+  return { requestId: row?.request_id || requestId, fieldsChanged: row?.fields_changed ?? 0 }
 }
 
 /**

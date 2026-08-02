@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { X, ChevronLeft, ExternalLink, Paperclip, Loader2 } from 'lucide-react'
+import { X, ChevronLeft, ExternalLink, Paperclip, Loader2, Pencil, CheckCircle } from 'lucide-react'
 import {
   lotDetail, skuDetail, partyDetail, componentDetail, aircraftLens, loadLots,
   formatLogDate, lotLabel,
 } from '../../lib/kitRegistry'
 import { stcRequestDetail, STATUS_LABEL, DOCUMENT_TYPES } from '../../lib/stcIntake'
 import { getDocumentUrl } from '../../lib/s3'
+import StcRequestEdit from './StcRequestEdit'
 import {
   StatusBadge, ConfidenceBadge, SourceBadge, Pill, Spinner, Empty, LinkText, LotsTable, Pager,
 } from './ui'
@@ -15,8 +16,16 @@ import { useAsyncData, usePageReset } from './hooks'
 // opening a reference from inside a drawer pushes; Back pops. Keeps deep
 // provenance walks (lot → aircraft → installation → lot) from losing the thread.
 
-export default function KitDrawer({ stack, onPush, onPop, onClose }) {
+export default function KitDrawer({ stack, onPush, onPop, onClose, onDataChanged }) {
+  // Which stack entry is being edited, rather than a bare boolean: navigating
+  // deeper or popping back changes the key, so edit mode ends by itself instead
+  // of leaking a half-typed form onto a different record.
+  const [editKey, setEditKey] = useState(null)
+
   const top = stack[stack.length - 1]
+  const topKey = top ? `${top.type}:${top.id}` : ''
+  const editing = !!editKey && editKey === topKey
+
   if (!top) return null
 
   return (
@@ -30,9 +39,21 @@ export default function KitDrawer({ stack, onPush, onPop, onClose }) {
             </button>
           )}
           <div className="flex-1 min-w-0">
-            <p className="text-gray-500 text-[11px] uppercase tracking-wide">{TITLES[top.type]}</p>
+            <p className="text-gray-500 text-[11px] uppercase tracking-wide">
+              {TITLES[top.type]}{editing ? ' — editing' : ''}
+            </p>
             <p className="text-white font-semibold truncate">{top.label || '…'}</p>
           </div>
+          {/* Offered to anyone who can open Log STC; stc_update_request is the
+              authorisation boundary and refuses what this button can't know. */}
+          {top.type === 'request' && !editing && (
+            <button
+              onClick={() => setEditKey(topKey)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-100 text-sm font-medium shrink-0"
+            >
+              <Pencil size={14} /> Edit
+            </button>
+          )}
           <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
         </div>
         <div className="p-5">
@@ -41,7 +62,15 @@ export default function KitDrawer({ stack, onPush, onPop, onClose }) {
           {top.type === 'party' && <PartyBody id={top.id} onPush={onPush} />}
           {top.type === 'component' && <ComponentBody id={top.id} onPush={onPush} />}
           {top.type === 'aircraft' && <AircraftBody id={top.id} onPush={onPush} />}
-          {top.type === 'request' && <RequestBody id={top.id} onPush={onPush} />}
+          {top.type === 'request' && (
+            <RequestBody
+              id={top.id}
+              onPush={onPush}
+              editing={editing}
+              onExitEdit={() => setEditKey(null)}
+              onDataChanged={onDataChanged}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -477,15 +506,50 @@ function ClaimRow({ label, claim, resolved }) {
   )
 }
 
-export function RequestBody({ id, onPush }) {
-  const { loading, data, error } = useAsyncData(() => stcRequestDetail(id), id)
+export function RequestBody({ id, onPush, editing, onExitEdit, onDataChanged }) {
+  // Bumped after a save so the drawer re-reads the row it just changed rather
+  // than echoing the form back at the user.
+  const [version, setVersion] = useState(0)
+  const [flash, setFlash] = useState(null)
+  const { loading, data, error } = useAsyncData(() => stcRequestDetail(id), `${id}::${version}`)
+
   if (loading) return <Spinner />
   if (error) return <Empty>{error}</Empty>
   if (!data) return <Empty>Request not found.</Empty>
+
+  if (editing) {
+    return (
+      <StcRequestEdit
+        detail={data}
+        onCancel={onExitEdit}
+        onSaved={({ fieldsChanged }) => {
+          onExitEdit()
+          if (fieldsChanged > 0) {
+            setVersion(v => v + 1)
+            setFlash(`${fieldsChanged} field${fieldsChanged === 1 ? '' : 's'} updated`)
+            // The worklist shows requester, company and claims — any of which
+            // may have just moved.
+            onDataChanged?.()
+          }
+        }}
+      />
+    )
+  }
+
   const { request: r, lot, aircraft, installation, requesterParty, purchasedFromParty, documents, author } = data
 
   return (
     <>
+      {flash && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-green-700 bg-green-900/25 px-3 py-2">
+          <CheckCircle size={16} className="text-green-400 shrink-0 mt-0.5" />
+          <p className="flex-1 text-green-200 text-sm">{flash}</p>
+          <button onClick={() => setFlash(null)} className="text-green-400/60 hover:text-green-200">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2 mb-4">
         <Pill tone={r.status === 'issued' ? 'green' : r.status === 'unidentifiable' ? 'amber' : 'blue'}>
           {STATUS_LABEL[r.status] || r.status}

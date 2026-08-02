@@ -1,16 +1,17 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import {
   Upload, Loader2, X, CheckCircle, AlertTriangle, Paperclip, Sparkles, RotateCcw,
 } from 'lucide-react'
-import { todayLocal, FIELD_DEBOUNCE, formatLogDate, lotLabel } from '../../lib/kitRegistry'
+import { todayLocal, formatLogDate, lotLabel } from '../../lib/kitRegistry'
 import {
-  CHANNELS, DOCUMENT_TYPES, createStcRequest, attachRequestDocuments, invokeStcExtract,
-  matchClaimedKit, matchAircraftClaim, matchCompany,
+  BLANK_INTAKE, DOCUMENT_TYPES, createStcRequest, attachRequestDocuments, invokeStcExtract,
   REQUIRED_FIELDS, validateIntakeFields, kitMismatchLabel,
 } from '../../lib/stcIntake'
 import { ACCEPT_ATTR, buildIntakePayload } from '../../lib/emailIntake'
 import { Pill, SourceBadge } from './ui'
 import StcFindKit from './StcFindKit'
+import StcRequestFields from './StcRequestFields'
+import { useStcMatchHints } from './hooks'
 
 // One form, two entrances (D-KSTC-18): drop the customer's email and the AI
 // pre-fills it, or type it straight in. The two are the SAME form — extraction
@@ -41,20 +42,7 @@ const FIELD_MAP = {
   purchased_from: 'purchasedFrom',
 }
 
-const BLANK = {
-  receivedDate: '',
-  channel: 'email',
-  requesterName: '',
-  requesterCompany: '',
-  requesterEmail: '',
-  claimedKitNumber: '',
-  claimedKitPart: '',
-  claimedAircraftSerial: '',
-  claimedRegistration: '',
-  claimedOrderNumber: '',
-  purchasedFrom: '',
-  notes: '',
-}
+// Field set and blank shape come from the lib so intake and edit cannot drift.
 
 const CONFIDENCE_TONE = { high: 'green', medium: 'amber', low: 'gray' }
 const CONFIDENCE_LABEL = { high: 'AI · high', medium: 'AI · med', low: 'AI · low' }
@@ -67,7 +55,7 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
   // read the CURRENT values (what has the user typed already? what files are
   // held?) from inside a promise. Every update goes through the two commit
   // helpers below, so the ref and the state can't drift.
-  const formRef = useRef({ ...BLANK, receivedDate: todayLocal() })
+  const formRef = useRef({ ...BLANK_INTAKE, receivedDate: todayLocal() })
   const [form, setForm] = useState(formRef.current)
   const [confidence, setConfidence] = useState({})   // form field → high/medium/low
   const [aiFilled, setAiFilled] = useState({})       // form field → true
@@ -81,7 +69,7 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
   const [dragging, setDragging] = useState(false)
   const fileInputRef = useRef(null)
 
-  const [hints, setHints] = useState({ kit: null, aircraft: null, company: null })
+  const hints = useStcMatchHints(form)
 
   // null until step 1 resolves; then { lot } or { unlinkedReason }.
   const [kitChoice, setKitChoice] = useState(null)
@@ -92,16 +80,10 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
 
   // Focus targets for the first invalid field, in visual order (the A.5 rule:
   // never just colour a field red somewhere off-screen).
-  const refs = {
-    receivedDate: useRef(null),
-    requesterName: useRef(null),
-    requesterCompany: useRef(null),
-    claimedKitNumber: useRef(null),
-    claimedKitPart: useRef(null),
-    claimedAircraftSerial: useRef(null),
-    claimedRegistration: useRef(null),
-    claimedOrderNumber: useRef(null),
-  }
+  // A single ref bag filled by StcRequestFields via a register callback: passing
+  // an object of refs across the component boundary trips react-hooks/refs.
+  const fieldRefs = useRef({})
+  const registerField = useCallback((key, el) => { fieldRefs.current[key] = el }, [])
   // Set once the request row exists. From here on the intake number is real and
   // cancelling would abandon files, so the screen switches to a repair view.
   const [created, setCreated] = useState(null)  // { requestId, intakeNumber, failures, linkLabel }
@@ -217,53 +199,6 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
     })
   }
 
-  // ---------- Live match hints ---------------------------------------------
-  // Informational only. Nothing here is written; resolution is Round C2.
-
-  useEffect(() => {
-    let cancelled = false
-    const t = setTimeout(async () => {
-      try {
-        const kit = await matchClaimedKit(form.claimedKitNumber)
-        if (!cancelled) setHints(prev => ({ ...prev, kit }))
-      } catch (err) {
-        console.error('Kit-number hint failed:', err)
-        if (!cancelled) setHints(prev => ({ ...prev, kit: null }))
-      }
-    }, FIELD_DEBOUNCE)
-    return () => { cancelled = true; clearTimeout(t) }
-  }, [form.claimedKitNumber])
-
-  useEffect(() => {
-    let cancelled = false
-    const t = setTimeout(async () => {
-      try {
-        const aircraft = await matchAircraftClaim({
-          serial: form.claimedAircraftSerial, registration: form.claimedRegistration,
-        })
-        if (!cancelled) setHints(prev => ({ ...prev, aircraft }))
-      } catch (err) {
-        console.error('Aircraft hint failed:', err)
-        if (!cancelled) setHints(prev => ({ ...prev, aircraft: null }))
-      }
-    }, FIELD_DEBOUNCE)
-    return () => { cancelled = true; clearTimeout(t) }
-  }, [form.claimedAircraftSerial, form.claimedRegistration])
-
-  useEffect(() => {
-    let cancelled = false
-    const t = setTimeout(async () => {
-      try {
-        const company = await matchCompany(form.requesterCompany)
-        if (!cancelled) setHints(prev => ({ ...prev, company }))
-      } catch (err) {
-        console.error('Company hint failed:', err)
-        if (!cancelled) setHints(prev => ({ ...prev, company: null }))
-      }
-    }, FIELD_DEBOUNCE)
-    return () => { cancelled = true; clearTimeout(t) }
-  }, [form.requesterCompany])
-
   // ---------- Save ----------------------------------------------------------
 
   const runAttachments = async (requestId, holdings) => {
@@ -275,9 +210,10 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
   // order — the operator is sent to the topmost blank field, not an arbitrary one.
   const focusFirstInvalid = (errors) => {
     for (const [key] of REQUIRED_FIELDS) {
-      if (errors[key] && refs[key]?.current) {
-        refs[key].current.focus({ preventScroll: true })
-        refs[key].current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      const el = fieldRefs.current[key]
+      if (errors[key] && el) {
+        el.focus({ preventScroll: true })
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
         return
       }
     }
@@ -590,154 +526,17 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
         </div>
       )}
 
-      {/* ---- Fields ---- */}
+      {/* ---- Fields: the shared set, identical to the drawer edit form ---- */}
       <div className="mt-6">
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Received date" required error={fieldErrors.receivedDate} chip={chipFor('receivedDate', aiFilled, confidence)}>
-            <input
-              ref={refs.receivedDate}
-              aria-required="true"
-              type="date"
-              value={form.receivedDate}
-              onChange={e => set('receivedDate', e.target.value)}
-              style={{ colorScheme: 'dark' }}
-              className={inputClass(fieldErrors.receivedDate)}
-            />
-          </Field>
-          <Field label="Channel" optional>
-            <select
-              value={form.channel}
-              onChange={e => set('channel', e.target.value)}
-              className={inputClass()}
-            >
-              {CHANNELS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
-            </select>
-          </Field>
-        </div>
-
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Requester name" required error={fieldErrors.requesterName} chip={chipFor('requesterName', aiFilled, confidence)}>
-            <input
-              ref={refs.requesterName}
-              aria-required="true"
-              value={form.requesterName}
-              onChange={e => set('requesterName', e.target.value)}
-              className={inputClass(fieldErrors.requesterName)}
-            />
-          </Field>
-          <Field label="Email" optional chip={chipFor('requesterEmail', aiFilled, confidence)}>
-            <input value={form.requesterEmail} onChange={e => set('requesterEmail', e.target.value)} className={inputClass()} />
-          </Field>
-        </div>
-
-        <Field label="Company" required error={fieldErrors.requesterCompany} chip={chipFor('requesterCompany', aiFilled, confidence)}>
-          <input
-            ref={refs.requesterCompany}
-            aria-required="true"
-            value={form.requesterCompany}
-            onChange={e => set('requesterCompany', e.target.value)}
-            className={inputClass(fieldErrors.requesterCompany)}
-          />
-          {hints.company && (
-            <Hint>
-              {hints.company.exact
-                ? `matches ${hints.company.name}`
-                : `closest customer on file: ${hints.company.name}`}
-            </Hint>
-          )}
-        </Field>
-
-        <div className="grid sm:grid-cols-2 gap-4">
-          {/* Required on every intake, linked or not (D-KSTC-20). Where the
-              email states no number, the bench enters the one from the located
-              log entry or the customer's paperwork; a claim that disagrees with
-              the linked log shows the mismatch chip and still saves. */}
-          <Field
-            label="Claimed kit #"
-            required
-            error={fieldErrors.claimedKitNumber}
-            chip={kitMismatch
-              ? <Pill tone="amber">{kitMismatch}</Pill>
-              : chipFor('claimedKitNumber', aiFilled, confidence)}
-          >
-            <input
-              ref={refs.claimedKitNumber}
-              aria-required="true"
-              value={form.claimedKitNumber}
-              onChange={e => set('claimedKitNumber', e.target.value)}
-              placeholder="e.g. 99804"
-              className={inputClass(fieldErrors.claimedKitNumber)}
-            />
-            {hints.kit && !kitMismatch && (
-              <Hint>
-                matches {hints.kit.label}{hints.kit.customer ? ` — ${hints.kit.customer}` : ''}
-              </Hint>
-            )}
-          </Field>
-          <Field label="Claimed kit part" required error={fieldErrors.claimedKitPart} chip={chipFor('claimedKitPart', aiFilled, confidence)}>
-            <input
-              ref={refs.claimedKitPart}
-              aria-required="true"
-              value={form.claimedKitPart}
-              onChange={e => set('claimedKitPart', e.target.value)}
-              className={inputClass(fieldErrors.claimedKitPart)}
-            />
-          </Field>
-        </div>
-
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Aircraft serial" required error={fieldErrors.claimedAircraftSerial} chip={chipFor('claimedAircraftSerial', aiFilled, confidence)}>
-            <input
-              ref={refs.claimedAircraftSerial}
-              aria-required="true"
-              value={form.claimedAircraftSerial}
-              onChange={e => set('claimedAircraftSerial', e.target.value)}
-              className={inputClass(fieldErrors.claimedAircraftSerial)}
-            />
-          </Field>
-          <Field label="Registration" required error={fieldErrors.claimedRegistration} chip={chipFor('claimedRegistration', aiFilled, confidence)}>
-            <input
-              ref={refs.claimedRegistration}
-              aria-required="true"
-              value={form.claimedRegistration}
-              onChange={e => set('claimedRegistration', e.target.value)}
-              className={inputClass(fieldErrors.claimedRegistration)}
-            />
-          </Field>
-        </div>
-
-        {hints.aircraft && (
-          <Hint className="-mt-2 mb-5">
-            matches {hints.aircraft.serial || '—'} / {hints.aircraft.registration || '—'}
-            {hints.aircraft.makeModel ? ` · ${hints.aircraft.makeModel}` : ''}
-            {hints.aircraft.viaHistory ? ' (former registration)' : ''}
-          </Hint>
-        )}
-
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Order #" required error={fieldErrors.claimedOrderNumber} chip={chipFor('claimedOrderNumber', aiFilled, confidence)}>
-            <input
-              ref={refs.claimedOrderNumber}
-              aria-required="true"
-              value={form.claimedOrderNumber}
-              onChange={e => set('claimedOrderNumber', e.target.value)}
-              placeholder="S-number, as the customer wrote it"
-              className={inputClass(fieldErrors.claimedOrderNumber)}
-            />
-          </Field>
-          <Field label="Purchased from" optional chip={chipFor('purchasedFrom', aiFilled, confidence)}>
-            <input value={form.purchasedFrom} onChange={e => set('purchasedFrom', e.target.value)} className={inputClass()} />
-          </Field>
-        </div>
-
-        <Field label="Notes" optional chip={aiFilled.notes ? <Pill tone="blue">AI summary</Pill> : null}>
-          <textarea
-            value={form.notes}
-            onChange={e => set('notes', e.target.value)}
-            rows={3}
-            className={`${inputClass()} resize-none`}
-          />
-        </Field>
+        <StcRequestFields
+          form={form}
+          onChange={set}
+          fieldErrors={fieldErrors}
+          registerField={registerField}
+          chipFor={key => chipFor(key, aiFilled, confidence)}
+          kitMismatch={kitMismatch}
+          hints={hints}
+        />
       </div>
 
       <p className="text-gray-500 text-xs mb-3">
@@ -771,42 +570,15 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
 
 // ---------- Presentational helpers -------------------------------------------
 
-function inputClass(error) {
-  return `w-full px-3 py-2.5 bg-gray-800 border rounded-lg text-white text-sm placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${
-    error ? 'border-red-500' : 'border-gray-700'
-  }`
-}
-
 // Subtle by design: the chip says where the value came from and how sure the
-// model was, and disappears the moment a human touches the field.
+// model was, and disappears the moment a human touches the field. Only the
+// intake form passes this to StcRequestFields — an edit is a human typing, so
+// there is nothing to attribute to the model.
 function chipFor(key, aiFilled, confidence) {
   if (!aiFilled[key]) return null
+  // Notes carries the extraction summary rather than a scored field value, so
+  // it gets a plain provenance chip instead of a confidence level.
+  if (key === 'notes') return <Pill tone="blue">AI summary</Pill>
   const level = confidence[key] || 'low'
   return <Pill tone={CONFIDENCE_TONE[level]}>{CONFIDENCE_LABEL[level]}</Pill>
-}
-
-// One marking convention across the module (D-KSTC-16): a red asterisk means the
-// save will be refused without it, "(optional)" means it genuinely can be left
-// blank. A field never carries both.
-function Field({ label, required, optional, error, chip, children }) {
-  return (
-    <div className="mb-5">
-      <label className="flex items-center gap-2 text-gray-400 text-sm font-medium mb-2">
-        <span>
-          {label}
-          {required && <span className="text-red-400 ml-1" aria-hidden="true">*</span>}
-          {optional && !required && <span className="text-gray-500 font-normal ml-1">(optional)</span>}
-        </span>
-        {chip}
-      </label>
-      {children}
-      {error && <p className="text-red-400 text-sm mt-1.5">{error}</p>}
-    </div>
-  )
-}
-
-// Match hints are informational only — they never gate the save and never write
-// a foreign key. Binding a request to a lot or an airframe is Round C2.
-function Hint({ children, className = '' }) {
-  return <p className={`text-green-400 text-xs mt-1.5 ${className}`}>✓ {children}</p>
 }

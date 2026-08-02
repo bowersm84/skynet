@@ -31,7 +31,9 @@ export default function StcTab({ profile }) {
   const push = (entry) => setStack(prev => [...prev, entry])
   const pop = () => setStack(prev => prev.slice(0, -1))
 
-  const [page, setPage] = usePageReset(`${status}::${refreshKey}`)
+  // Page resets when the FILTER changes, not when data is refetched — an edit
+  // saved from page 2 should leave you on page 2.
+  const [page, setPage] = usePageReset(status)
   const listKey = `${status}::${page}::${refreshKey}`
   const list = useAsyncData(() => loadStcRequests({ status, page }), listKey)
   const counts = useAsyncData(() => stcStatusCounts(), refreshKey)
@@ -43,8 +45,10 @@ export default function StcTab({ profile }) {
         onCancel={() => setView('worklist')}
         onCreated={({ intakeNumber, linkLabel }) => {
           setCreated({ intakeNumber, linkLabel })
-          // Clear any status filter so the brand-new row is definitely visible.
+          // Clear any status filter AND return to page 1, so the brand-new row
+          // (newest intake first) is definitely visible.
           setStatus(null)
+          setPage(0)
           setRefreshKey(k => k + 1)
           setView('worklist')
         }}
@@ -173,7 +177,14 @@ export default function StcTab({ profile }) {
             )}
 
       {stack.length > 0 && (
-        <KitDrawer stack={stack} onPush={push} onPop={pop} onClose={() => setStack([])} />
+        <KitDrawer
+          stack={stack}
+          onPush={push}
+          onPop={pop}
+          onClose={() => setStack([])}
+          // An edit can move requester, company or any claim — all worklist columns.
+          onDataChanged={() => setRefreshKey(k => k + 1)}
+        />
       )}
     </div>
   )

@@ -1,8 +1,11 @@
-import { X, ChevronLeft, ExternalLink } from 'lucide-react'
+import { useState } from 'react'
+import { X, ChevronLeft, ExternalLink, Paperclip, Loader2 } from 'lucide-react'
 import {
   lotDetail, skuDetail, partyDetail, componentDetail, aircraftLens, loadLots,
   formatLogDate, lotLabel,
 } from '../../lib/kitRegistry'
+import { stcRequestDetail, STATUS_LABEL, DOCUMENT_TYPES } from '../../lib/stcIntake'
+import { getDocumentUrl } from '../../lib/s3'
 import {
   StatusBadge, ConfidenceBadge, SourceBadge, Pill, Spinner, Empty, LinkText, LotsTable, Pager,
 } from './ui'
@@ -38,6 +41,7 @@ export default function KitDrawer({ stack, onPush, onPop, onClose }) {
           {top.type === 'party' && <PartyBody id={top.id} onPush={onPush} />}
           {top.type === 'component' && <ComponentBody id={top.id} onPush={onPush} />}
           {top.type === 'aircraft' && <AircraftBody id={top.id} onPush={onPush} />}
+          {top.type === 'request' && <RequestBody id={top.id} onPush={onPush} />}
         </div>
       </div>
     </div>
@@ -46,6 +50,7 @@ export default function KitDrawer({ stack, onPush, onPop, onClose }) {
 
 const TITLES = {
   lot: 'Kit lot', sku: 'Kit SKU', party: 'Customer', component: 'Component', aircraft: 'Aircraft',
+  request: 'STC request',
 }
 
 // Lots list inside a drawer body — server-paged, resets when the entity changes.
@@ -411,6 +416,178 @@ function ComponentBody({ id, onPush }) {
             </table>
           </div>
         )}
+      </Block>
+    </>
+  )
+}
+
+// --- STC request ------------------------------------------------------------
+
+const DOC_TYPE_LABEL = Object.fromEntries(DOCUMENT_TYPES.map(d => [d.value, d.label]))
+
+// Signed URLs expire (1h), so one is minted on click rather than at render —
+// a drawer left open all afternoon would otherwise hand out dead links.
+function DocumentLink({ doc }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  const open = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const url = await getDocumentUrl(doc.file_path)
+      if (!url) throw new Error('No file path recorded.')
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (err) {
+      console.error('Could not open kit-STC document:', err)
+      setError('Could not open this file.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-start gap-3 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+      <Paperclip size={14} className="text-gray-500 shrink-0 mt-1" />
+      <div className="min-w-0 flex-1">
+        <LinkText onClick={open}>
+          <span className="text-sm break-all">{doc.file_name}</span>
+        </LinkText>
+        <p className="text-gray-500 text-[11px]">
+          {DOC_TYPE_LABEL[doc.document_type] || doc.document_type}
+          {doc.file_size ? ` · ${(doc.file_size / 1024).toFixed(0)} KB` : ''}
+          {doc.uploaded_at ? ` · ${formatLogDate(String(doc.uploaded_at).slice(0, 10))}` : ''}
+        </p>
+        {error && <p className="text-red-400 text-[11px] mt-0.5">{error}</p>}
+      </div>
+      {busy && <Loader2 size={14} className="animate-spin text-gray-500 shrink-0 mt-1" />}
+    </div>
+  )
+}
+
+// Claims sit beside what they resolved to, never instead of them: the customer's
+// words are the audit record and stay visible even once the office has bound
+// the request to a real lot or airframe (D-KSTC-07).
+function ClaimRow({ label, claim, resolved }) {
+  return (
+    <Row label={label}>
+      <span>{claim || <span className="text-gray-600">—</span>}</span>
+      {resolved}
+    </Row>
+  )
+}
+
+export function RequestBody({ id, onPush }) {
+  const { loading, data, error } = useAsyncData(() => stcRequestDetail(id), id)
+  if (loading) return <Spinner />
+  if (error) return <Empty>{error}</Empty>
+  if (!data) return <Empty>Request not found.</Empty>
+  const { request: r, lot, aircraft, installation, requesterParty, purchasedFromParty, documents, author } = data
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <Pill tone={r.status === 'issued' ? 'green' : r.status === 'unidentifiable' ? 'amber' : 'blue'}>
+          {STATUS_LABEL[r.status] || r.status}
+        </Pill>
+        <Pill>{r.channel}</Pill>
+        <Pill>received {formatLogDate(r.received_date)}</Pill>
+      </div>
+
+      <Block title="Requester">
+        <dl>
+          <Row label="Name">{r.requester_name}</Row>
+          <Row label="Company">
+            <span>{r.requester_company || <span className="text-gray-600">—</span>}</span>
+            {requesterParty && (
+              <LinkText onClick={() => onPush({ type: 'party', id: requesterParty.id, label: requesterParty.name })}>
+                <span className="block text-xs mt-0.5">→ {requesterParty.name}</span>
+              </LinkText>
+            )}
+          </Row>
+          <Row label="Email">{r.requester_email}</Row>
+          <Row label="Purchased from">
+            <span>{r.purchased_from_text || <span className="text-gray-600">—</span>}</span>
+            {purchasedFromParty && (
+              <LinkText onClick={() => onPush({ type: 'party', id: purchasedFromParty.id, label: purchasedFromParty.name })}>
+                <span className="block text-xs mt-0.5">→ {purchasedFromParty.name}</span>
+              </LinkText>
+            )}
+          </Row>
+        </dl>
+      </Block>
+
+      <Block title="Claimed — as the customer wrote it">
+        <dl>
+          <ClaimRow
+            label="Kit #"
+            claim={<span className="font-mono">{r.claimed_kit_number}</span>}
+            resolved={lot && (
+              <LinkText onClick={() => onPush({ type: 'lot', id: lot.id, label: lotLabel(lot) })}>
+                <span className="block text-xs font-mono mt-0.5">
+                  → {lotLabel(lot)}{lot.customer_as_written ? ` — ${lot.customer_as_written}` : ''}
+                </span>
+              </LinkText>
+            )}
+          />
+          <ClaimRow label="Kit part" claim={r.claimed_kit_part} />
+          <ClaimRow
+            label="Aircraft serial"
+            claim={<span className="font-mono">{r.claimed_aircraft_serial}</span>}
+            resolved={aircraft && (
+              <LinkText onClick={() => onPush({ type: 'aircraft', id: aircraft.id, label: aircraft.registration || aircraft.serial_number })}>
+                <span className="block text-xs font-mono mt-0.5">→ {aircraft.serial_number || '—'}</span>
+              </LinkText>
+            )}
+          />
+          <ClaimRow
+            label="Registration"
+            claim={<span className="font-mono">{r.claimed_registration}</span>}
+            resolved={aircraft && (
+              <span className="block text-xs font-mono text-gray-400 mt-0.5">
+                → {aircraft.registration || '—'}{aircraft.make_model ? ` · ${aircraft.make_model}` : ''}
+              </span>
+            )}
+          />
+          <ClaimRow label="Order #" claim={<span className="font-mono">{r.claimed_order_number}</span>} />
+        </dl>
+        {!lot && !aircraft && (
+          <p className="text-gray-500 text-xs mt-2">
+            Nothing resolved yet — claims stay as written until the office binds them.
+          </p>
+        )}
+      </Block>
+
+      {installation && (
+        <Block title="Installation">
+          <dl>
+            <Row label="Status"><Pill tone={installation.status === 'verified' ? 'green' : 'amber'}>{installation.status}</Pill></Row>
+            <Row label="Install date">{formatLogDate(installation.install_date)}</Row>
+            <Row label="Evidence">{installation.evidence}</Row>
+          </dl>
+        </Block>
+      )}
+
+      <Block title="Notes">
+        {r.notes
+          ? <p className="text-gray-300 text-sm whitespace-pre-wrap">{r.notes}</p>
+          : <Empty>No notes.</Empty>}
+      </Block>
+
+      <Block title={`Documents (${documents.length})`}>
+        {!documents.length ? <Empty>No files attached to this intake.</Empty> : (
+          <div className="space-y-2">
+            {documents.map(d => <DocumentLink key={d.id} doc={d} />)}
+          </div>
+        )}
+      </Block>
+
+      <Block title="Record">
+        <dl>
+          <Row label="Intake #"><span className="font-mono">{r.intake_number}</span></Row>
+          <Row label="Logged by">{author?.full_name || author?.username}</Row>
+          <Row label="Logged at">{r.created_at ? new Date(r.created_at).toLocaleString() : null}</Row>
+        </dl>
       </Block>
     </>
   )

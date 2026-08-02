@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { FEATURES } from '../config'
 import PinPad from '../components/PinPad'
 import KitSearch from '../components/kitregistry/KitSearch'
+import StcTab from '../components/kitregistry/StcTab'
 // Pure helpers live in the query layer so the Search tab and the Entry tab
 // can't drift apart on formatting or filter escaping.
 import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
@@ -965,13 +966,9 @@ export default function KitKiosk() {
           issues none. Kiosk mode gets the same view as the office. */}
       {nav === 'search' && <KitSearch />}
 
-      {nav === 'stc' && mode === 'office' && (
-        <Placeholder
-          icon={<FileCheck size={40} className="mx-auto mb-4 text-gray-600" />}
-          title="Log STC arrives in the next round"
-          body="Issuances are immutable compliance records — this area stays office-only."
-        />
-      )}
+      {/* Office-only: the nav entry doesn't exist in kiosk mode, and this guard
+          means a stale `nav` value can't render it either. */}
+      {nav === 'stc' && mode === 'office' && <StcTab profile={profile} />}
 
       {/* ---- Kiosk PIN confirm ---- */}
       {pinPromptOpen && (
@@ -1044,17 +1041,5 @@ function UnmatchedTag() {
     <span className="inline-block mt-2 text-[11px] px-2 py-0.5 rounded bg-gray-700 text-gray-300">
       unmatched — office will resolve
     </span>
-  )
-}
-
-function Placeholder({ icon, title, body }) {
-  return (
-    <div className="p-8 max-w-2xl mx-auto">
-      <div className="bg-gray-800 border border-gray-700 rounded-2xl p-10 text-center">
-        {icon}
-        <p className="text-white text-lg font-medium">{title}</p>
-        <p className="text-gray-400 text-sm mt-2">{body}</p>
-      </div>
-    </div>
   )
 }

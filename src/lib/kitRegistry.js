@@ -147,7 +147,9 @@ async function headCount(table, decorate) {
 }
 
 // One-level embeds only. Enough to render a lot row without a second hop.
-const LOT_ROW_COLS =
+// Exported so the STC intake's kit search renders lot rows identically to every
+// other lot list in the module (D-KSTC-19) rather than growing its own column set.
+export const LOT_ROW_COLS =
   'id, lot_number, log_date, kit_part_as_written, customer_as_written, invoice_as_written, ' +
   'record_status, source, transcription_confidence, kit_sku_id, party_id, book_id, ' +
   'book:kit_books(code, category), sku:kit_skus(part_number, description), party:kit_parties(name)'

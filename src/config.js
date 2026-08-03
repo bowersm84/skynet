@@ -84,5 +84,5 @@ export const FEATURES = {
    *
    * To change it: edit here, commit, deploy.
    */
-  KIT_EXCEPTIONS_SINCE: '2024-01-01',
+  KIT_EXCEPTIONS_SINCE: '2026-08-03',
 }

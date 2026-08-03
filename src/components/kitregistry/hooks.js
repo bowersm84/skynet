@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { FIELD_DEBOUNCE } from '../../lib/kitRegistry'
 import { matchClaimedKit, matchAircraftClaim, matchCompany } from '../../lib/stcIntake'
+import { extractPackingSlip, seedLines } from '../../lib/packingSlip'
 
 // Hooks live outside the .jsx so `react-refresh/only-export-components` stays
 // clean — the same split D-RMF-04 settled on for usePartDimensionEditor.
@@ -82,6 +83,74 @@ export function useStcMatchHints({
   }, [requesterCompany])
 
   return hints
+}
+
+// The packing-slip read, owned in one place so the Packing Slip tab and the
+// Kit Entry form can't drift on what "the slip says" means (D-KSTC-29).
+//
+// This hook owns exactly the file → extraction → editable-lines cycle. What each
+// surface then DOES with a slip differs — the tab matches it against every kit
+// lot on the order, Kit Entry matches it against the one kit being logged — so
+// `ingest` hands the envelope back and lets the caller take it from there.
+export function useSlipExtraction() {
+  const [file, setFile] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [slip, setSlip] = useState(null)
+  const [lines, setLines] = useState({})   // group index → editable line rows
+
+  // Returns the envelope, or null when nothing was read. Never throws: a failed
+  // extraction costs typing, never the ability to save (D-KSTC-28).
+  const ingest = useCallback(async (files) => {
+    const picked = [...(files || [])][0]
+    if (!picked) return null
+
+    setFile(picked)
+    setError(null)
+    setSlip(null)
+    setLines({})
+    setBusy(true)
+    try {
+      const envelope = await extractPackingSlip(picked)
+      setSlip(envelope)
+      setLines(seedLines(envelope))
+      return envelope
+    } catch (err) {
+      console.error('Packing-slip extraction failed:', err)
+      setError(err.message || 'That slip could not be read.')
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const reset = useCallback(() => {
+    setFile(null); setBusy(false); setError(null); setSlip(null); setLines({})
+  }, [])
+
+  // `edited` retires the confidence chip: the value is the human's now.
+  const editLine = useCallback((groupIndex, key, field, value) => {
+    setLines(prev => ({
+      ...prev,
+      [groupIndex]: (prev[groupIndex] || []).map(
+        l => (l.key === key ? { ...l, [field]: value, edited: true } : l)),
+    }))
+  }, [])
+
+  const dropLine = useCallback((groupIndex, key) => {
+    setLines(prev => ({
+      ...prev,
+      [groupIndex]: (prev[groupIndex] || []).filter(l => l.key !== key),
+    }))
+  }, [])
+
+  const clearError = useCallback(() => setError(null), [])
+
+  return {
+    file, busy, error, slip, lines,
+    hasFile: !!file,
+    ingest, reset, editLine, dropLine, clearError,
+  }
 }
 
 // Page index that resets when `key` changes, using React's adjust-state-during-

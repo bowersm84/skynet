@@ -1,16 +1,16 @@
-import { useState, useRef, useCallback } from 'react'
-import {
-  Upload, Loader2, X, CheckCircle, AlertTriangle, PackageOpen, Sparkles,
-  RotateCcw, Trash2, ChevronDown, ChevronRight,
-} from 'lucide-react'
+import { useState, useCallback } from 'react'
+import { Loader2, CheckCircle, PackageOpen, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { formatLogDate, lotLabel } from '../../lib/kitRegistry'
 import {
-  extractPackingSlip, findLotsBySo, savePackingSlipGroup, attachSlipDocument,
-  normalizePart, lotPartNorm, SLIP_ACCEPT,
+  findLotsBySo, savePackingSlipGroup, attachSlipDocument,
+  normalizePart, lotPartNorm, savableLines, CONFIDENCE_TONE, CONFIDENCE_LABEL,
 } from '../../lib/packingSlip'
 import PinPad from '../PinPad'
-import { Pill, Spinner, Empty, LinkText, SourceBadge } from './ui'
+import { Pill, Spinner, LinkText, SourceBadge } from './ui'
+import { useSlipExtraction } from './hooks'
+import SlipDropzone from './SlipDropzone'
+import SlipReviewGrid from './SlipReviewGrid'
 import KitDrawer from './KitDrawer'
 
 // Packing Slip capture (D-KSTC-28). The warehouse uploads the slip Fishbowl
@@ -24,9 +24,11 @@ import KitDrawer from './KitDrawer'
 //
 // Three steps, because matching is the part that needs a human: upload, then
 // review-and-match, then save. Nothing is written until step 3.
-
-const CONFIDENCE_TONE = { high: 'green', medium: 'amber', low: 'gray' }
-const CONFIDENCE_LABEL = { high: 'AI · high', medium: 'AI · med', low: 'AI · low' }
+//
+// This screen is the CATCH-UP path — the slip that arrives after the kit was
+// logged, or one covering kits logged separately. The everyday path is Kit
+// Entry's own slip section (D-KSTC-29); both compose the same dropzone, grid and
+// extraction hook, so there is one derivation of what a slip means.
 
 // A group whose parent part matches no logged kit lot is normal — tool sets and
 // loose accessories ship on the same slip and were never kit-logged.
@@ -34,20 +36,16 @@ const NO_ASSIGNMENT = ''
 
 export default function PackingSlipTab({ mode, profile }) {
   const [step, setStep] = useState('upload')   // 'upload' | 'review' | 'done'
-
-  // --- upload ---------------------------------------------------------------
-  const [file, setFile] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [extractError, setExtractError] = useState(null)
   const [dragging, setDragging] = useState(false)
-  const fileInputRef = useRef(null)
 
-  // --- review ---------------------------------------------------------------
-  const [slip, setSlip] = useState(null)
+  // File → extraction → editable lines, owned by the shared hook.
+  const slipState = useSlipExtraction()
+  const { file, busy, error, slip, lines, ingest, reset, editLine, dropLine, clearError } = slipState
+
+  // --- matching (this screen's own concern) ---------------------------------
   const [candidates, setCandidates] = useState({ rows: [], matchedVia: {} })
   const [assignment, setAssignment] = useState({})   // groupIndex -> kit lot id
-  const [grid, setGrid] = useState({})               // groupIndex -> [lines]
-  const [expanded, setExpanded] = useState(false)    // the excluded-lines block
+  const [expanded, setExpanded] = useState(false)    // the ungrouped-lines block
 
   // --- save -----------------------------------------------------------------
   const [saving, setSaving] = useState(false)
@@ -63,74 +61,35 @@ export default function PackingSlipTab({ mode, profile }) {
 
   // ---------- Step 1: upload + extract --------------------------------------
 
-  const ingest = useCallback(async (files) => {
-    const picked = [...(files || [])][0]
-    if (!picked) return
+  const onFiles = useCallback(async (files) => {
+    const envelope = await ingest(files)
+    if (!envelope) return
 
-    setFile(picked)
-    setExtractError(null)
-    setBusy(true)
-    try {
-      const envelope = await extractPackingSlip(picked)
-      setSlip(envelope)
-
-      // Editable copies, one per group. From here the grid is the truth and the
-      // extraction is only provenance for the chips.
-      const g = {}
-      envelope.groups.forEach((group, i) => {
-        g[i] = group.lines.map((l, j) => ({ ...l, key: `${i}-${j}` }))
-      })
-      setGrid(g)
-
-      // Which kit lots did this order ship against?
-      let found = { rows: [], matchedVia: {} }
-      if (envelope.order_number) {
-        try {
-          found = await findLotsBySo(envelope.order_number)
-        } catch (err) {
-          console.error('SO lookup failed:', err)
-        }
+    // Which kit lots did this order ship against?
+    let found = { rows: [], matchedVia: {} }
+    if (envelope.order_number) {
+      try {
+        found = await findLotsBySo(envelope.order_number)
+      } catch (err) {
+        console.error('SO lookup failed:', err)
       }
-      setCandidates(found)
-      setAssignment(autoAssign(envelope, found.rows))
-      setStep('review')
-    } catch (err) {
-      console.error('Packing-slip extraction failed:', err)
-      setExtractError(err.message || 'That slip could not be read.')
-    } finally {
-      setBusy(false)
     }
-  }, [])
+    setCandidates(found)
+    setAssignment(autoAssign(envelope, found.rows))
+    setStep('review')
+  }, [ingest])
 
   const restart = () => {
     setStep('upload')
-    setFile(null); setSlip(null); setExtractError(null)
+    reset()
     setCandidates({ rows: [], matchedVia: {} })
-    setAssignment({}); setGrid({}); setExpanded(false)
+    setAssignment({}); setExpanded(false)
     setResults([]); setSaveError(null)
   }
 
-  // ---------- Step 2: grid edits --------------------------------------------
-
-  const editLine = (gi, key, field, value) => {
-    setGrid(prev => ({
-      ...prev,
-      [gi]: prev[gi].map(l => (l.key === key ? { ...l, [field]: value, edited: true } : l)),
-    }))
-  }
-
-  const dropLine = (gi, key) => {
-    setGrid(prev => ({ ...prev, [gi]: prev[gi].filter(l => l.key !== key) }))
-  }
-
-  // A line saves only when it carries both halves of the identity. The RPC
-  // skips blanks too — this is so the operator can see the count before saving.
-  const savable = (lines) => (lines || []).filter(
-    l => String(l.part_number || '').trim() && String(l.lot_number || '').trim())
-
   const assignedGroups = () => (slip?.groups || [])
     .map((group, i) => ({ group, i, lotId: assignment[i] }))
-    .filter(g => g.lotId && savable(grid[g.i]).length > 0)
+    .filter(g => g.lotId && savableLines(lines[g.i]).length > 0)
 
   // ---------- Step 3: save ---------------------------------------------------
 
@@ -145,7 +104,7 @@ export default function PackingSlipTab({ mode, profile }) {
           kitLotId: lotId,
           shipmentNumber: slip.order_number || null,
           shipDate: slip.ship_date || null,
-          lines: savable(grid[i]),
+          lines: savableLines(lines[i]),
           operatorId,
         })
 
@@ -195,12 +154,12 @@ export default function PackingSlipTab({ mode, profile }) {
     setSaving(true)
     setPinError(null)
     try {
-      const { data, error } = await supabase
+      const { data, error: pinLookupError } = await supabase
         .from('profiles').select('id, full_name, username')
         .eq('pin_code', pin).eq('is_active', true).single()
-      if (error) {
-        if (error.code === 'PGRST116') { setPinError('Invalid PIN'); setPin(''); return }
-        throw error
+      if (pinLookupError) {
+        if (pinLookupError.code === 'PGRST116') { setPinError('Invalid PIN'); setPin(''); return }
+        throw pinLookupError
       }
       setPinOpen(false)
       setPin('')
@@ -231,15 +190,14 @@ export default function PackingSlipTab({ mode, profile }) {
       <Steps step={step} />
 
       {step === 'upload' && (
-        <UploadStep
+        <SlipDropzone
           busy={busy}
+          fileName={busy ? file?.name : null}
+          error={error}
+          onFiles={onFiles}
+          onClearError={clearError}
           dragging={dragging}
           setDragging={setDragging}
-          fileInputRef={fileInputRef}
-          onFiles={ingest}
-          error={extractError}
-          onClearError={() => setExtractError(null)}
-          fileName={file?.name}
         />
       )}
 
@@ -259,7 +217,7 @@ export default function PackingSlipTab({ mode, profile }) {
             <GroupCard
               key={i}
               group={group}
-              lines={grid[i] || []}
+              lines={lines[i] || []}
               lotId={assignment[i] || NO_ASSIGNMENT}
               options={optionsFor(group, candidates.rows)}
               matchedVia={candidates.matchedVia}
@@ -430,66 +388,6 @@ function Steps({ step }) {
   )
 }
 
-function UploadStep({ busy, dragging, setDragging, fileInputRef, onFiles, error, onClearError, fileName }) {
-  return (
-    <>
-      <div
-        onDragOver={e => { e.preventDefault(); setDragging(true) }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={e => { e.preventDefault(); setDragging(false); onFiles(e.dataTransfer?.files) }}
-        className={`rounded-xl border-2 border-dashed p-8 text-center transition-colors ${
-          dragging ? 'border-skynet-accent bg-skynet-accent/10' : 'border-gray-700 bg-gray-800/50'
-        }`}
-      >
-        <Upload size={30} className="mx-auto mb-3 text-gray-500" />
-        <p className="text-gray-200 text-base font-medium">Drop the packing slip here</p>
-        <p className="text-gray-500 text-xs mt-1">
-          PDF from Fishbowl, or a photo of the printed slip (PNG, JPEG, WebP)
-        </p>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={busy}
-          className="mt-4 px-5 py-2.5 rounded-lg bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 text-sm font-medium"
-        >
-          Choose a file
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={SLIP_ACCEPT}
-          onChange={e => { onFiles(e.target.files); e.target.value = '' }}
-          className="hidden"
-        />
-        {busy && (
-          <p className="text-gray-400 text-sm mt-4 flex items-center justify-center gap-2">
-            <Loader2 size={14} className="animate-spin" />
-            Reading {fileName || 'the slip'}…
-          </p>
-        )}
-      </div>
-
-      {/* Extraction failing is never fatal — it costs typing, not the record. */}
-      {error && (
-        <div className="mt-4 flex items-start gap-2 bg-amber-900/25 border border-amber-600 rounded-lg px-3 py-2.5">
-          <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0">
-            <p className="text-amber-100 text-sm">{error}</p>
-            <button
-              onClick={() => { onClearError(); fileInputRef.current?.click() }}
-              className="mt-2 flex items-center gap-1.5 text-amber-300 hover:underline text-xs"
-            >
-              <RotateCcw size={13} /> Try another file
-            </button>
-          </div>
-          <button onClick={onClearError} className="text-amber-400/60 hover:text-amber-200">
-            <X size={14} />
-          </button>
-        </div>
-      )}
-    </>
-  )
-}
-
 function SlipHeader({ slip, fileName, onRestart }) {
   return (
     <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
@@ -524,9 +422,7 @@ function SlipHeader({ slip, fileName, onRestart }) {
 // ---------------------------------------------------------------------------
 
 function GroupCard({ group, lines, lotId, options, matchedVia, orderNumber, onAssign, onEdit, onDrop }) {
-  const [showExcluded, setShowExcluded] = useState(false)
-  const included = lines.filter(l => String(l.part_number || '').trim() && String(l.lot_number || '').trim())
-  const excluded = lines.filter(l => !String(l.lot_number || '').trim())
+  const included = savableLines(lines)
   const chosen = options.find(o => o.id === lotId) || null
 
   return (
@@ -594,111 +490,10 @@ function GroupCard({ group, lines, lotId, options, matchedVia, orderNumber, onAs
 
       {lotId && (
         <div className="p-4">
-          <div className="overflow-x-auto rounded-lg border border-gray-700">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-800 text-gray-400 text-xs uppercase">
-                <tr>
-                  <th className="text-left px-2 py-2 font-medium w-12">Line</th>
-                  <th className="text-left px-2 py-2 font-medium">Part #</th>
-                  <th className="text-left px-2 py-2 font-medium">Lot #</th>
-                  <th className="text-left px-2 py-2 font-medium w-20">Qty</th>
-                  <th className="text-left px-2 py-2 font-medium w-24"> </th>
-                </tr>
-              </thead>
-              <tbody>
-                {included.map(l => (
-                  <tr key={l.key} className="border-t border-gray-800">
-                    <td className="px-2 py-1.5 text-gray-500 font-mono text-xs">{l.line_no ?? '—'}</td>
-                    <td className="px-2 py-1.5">
-                      <GridInput value={l.part_number} onChange={v => onEdit(l.key, 'part_number', v)} />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <GridInput value={l.lot_number} onChange={v => onEdit(l.key, 'lot_number', v)} />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <GridInput
-                        value={l.qty_shipped ?? ''}
-                        onChange={v => onEdit(l.key, 'qty_shipped', v)}
-                        inputMode="decimal"
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {/* The chip retires the moment a human touches the row —
-                            the value is theirs now, not the model's. */}
-                        {!l.edited && (
-                          <Pill tone={CONFIDENCE_TONE[l.confidence]}>{CONFIDENCE_LABEL[l.confidence]}</Pill>
-                        )}
-                        <button
-                          onClick={() => onDrop(l.key)}
-                          className="text-gray-500 hover:text-red-400 shrink-0"
-                          title="Remove this line"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {!included.length && (
-                  <tr><td colSpan={5}><Empty>No component lines left to record for this kit.</Empty></td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {excluded.length > 0 && (
-            <div className="mt-2">
-              <button
-                onClick={() => setShowExcluded(e => !e)}
-                className="flex items-center gap-2 text-gray-400 hover:text-gray-200 text-xs"
-              >
-                {showExcluded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                {excluded.length} line{excluded.length === 1 ? '' : 's'} with no lot number — excluded
-              </button>
-              {showExcluded && (
-                <div className="mt-2 rounded-lg border border-gray-700 bg-gray-900/60 p-3 space-y-2">
-                  <p className="text-gray-500 text-[11px]">
-                    Nothing was read after &ldquo;Lot#:&rdquo; on these. Type the lot from the paper
-                    and the line joins the grid above; leave it blank and it is not recorded.
-                  </p>
-                  {excluded.map(l => (
-                    <div key={l.key} className="flex items-center gap-2">
-                      <span className="text-gray-400 text-xs font-mono w-8 shrink-0">{l.line_no ?? '—'}</span>
-                      <span className="text-gray-300 text-xs font-mono flex-1 min-w-0 truncate">{l.part_number}</span>
-                      <GridInput
-                        value={l.lot_number || ''}
-                        onChange={v => onEdit(l.key, 'lot_number', v)}
-                        placeholder="lot #"
-                      />
-                      <button
-                        onClick={() => onDrop(l.key)}
-                        className="text-gray-500 hover:text-red-400 shrink-0"
-                        title="Remove this line"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+          <SlipReviewGrid lines={lines} onEdit={onEdit} onDrop={onDrop} />
         </div>
       )}
     </div>
-  )
-}
-
-function GridInput({ value, onChange, inputMode, placeholder }) {
-  return (
-    <input
-      value={value ?? ''}
-      onChange={e => onChange(e.target.value)}
-      inputMode={inputMode}
-      placeholder={placeholder}
-      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm font-mono placeholder-gray-600 focus:border-skynet-accent focus:outline-none"
-    />
   )
 }
 

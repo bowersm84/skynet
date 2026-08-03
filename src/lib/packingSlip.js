@@ -53,6 +53,117 @@ export function lotPartNorm(lot) {
   return normalizePart(lot?.sku?.part_number || lot?.kit_part_as_written || '')
 }
 
+// Order numbers are compared on digits alone: the slip prints "S16373", the
+// bench types "16373", and Fishbowl treats them as the same order (D-KSTC-27).
+export function soDigits(value) {
+  return String(value || '').replace(/\D/g, '')
+}
+
+// ---------------------------------------------------------------------------
+// Line selection — one derivation, shared by the tab and Kit Entry
+// ---------------------------------------------------------------------------
+
+// A line records only when it carries both halves of the identity. The RPC
+// skips blanks too; this exists so a count can be shown BEFORE saving.
+export function savableLines(lines) {
+  return (lines || []).filter(
+    l => String(l.part_number || '').trim() && String(l.lot_number || '').trim())
+}
+
+// The extractor scores each line high/medium/low rather than a float, so the
+// "below 0.8" attention rule lands on the two lower bands: anything the model
+// was not plainly sure of gets read by a human instead of scrolling past.
+const CONFIDENCE_SCORE = { high: 1, medium: 0.6, low: 0.3 }
+export const ATTENTION_CONFIDENCE = 0.8
+
+// How a line's confidence renders, wherever it renders. Constants live here
+// rather than beside the grid so a .jsx module keeps exporting components only
+// (react-refresh/only-export-components — the same split hooks.js exists for).
+export const CONFIDENCE_TONE = { high: 'green', medium: 'amber', low: 'gray' }
+export const CONFIDENCE_LABEL = { high: 'AI · high', medium: 'AI · med', low: 'AI · low' }
+
+export function needsAttention(line) {
+  if (!String(line?.lot_number || '').trim()) return true
+  if (line?.edited) return false   // a human already owns this row
+  return (CONFIDENCE_SCORE[line?.confidence] ?? 0) < ATTENTION_CONFIDENCE
+}
+
+// Editable copies of every group's lines, keyed so edits survive re-render.
+// From here the returned state is the truth and the extraction is only
+// provenance for the confidence chips (suggest-never-commit).
+export function seedLines(slip) {
+  const out = {}
+  ;(slip?.groups || []).forEach((group, i) => {
+    out[i] = (group.lines || []).map((l, j) => ({ ...l, key: `${i}-${j}` }))
+  })
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Slip ↔ entry agreement (D-KSTC-29)
+// ---------------------------------------------------------------------------
+
+// Which extracted group is the kit being logged? -1 when none is.
+export function matchGroupIndex(slip, kitPartText) {
+  const want = normalizePart(kitPartText)
+  if (!want) return -1
+  return (slip?.groups || []).findIndex(
+    g => normalizePart(g.parent_part_number) === want)
+}
+
+export function soAgrees(slip, soText) {
+  const a = soDigits(slip?.order_number)
+  const b = soDigits(soText)
+  return !!a && !!b && a === b
+}
+
+/**
+ * Why this slip's component lots must NOT ride along with this entry, or null
+ * when they may. The kit entry itself is never held — the slip is the optional
+ * half, and recording lots against the wrong kit is the one outcome worse than
+ * not recording them at all.
+ */
+/**
+ * Everything Kit Entry needs to know about an attached slip, derived once and
+ * read by both the section that renders it and the save that acts on it — so
+ * what the operator was shown and what actually records cannot disagree.
+ *
+ * Recomputed every render, which is what makes the agreement chips live: edit
+ * the Sales Order # field and the verdict moves with it.
+ */
+export function slipPlan(slip, lines, { soText, kitPartText }) {
+  if (!slip) {
+    return { groupIndex: -1, soOk: false, hold: null, lines: [], recordable: [], willRecord: false }
+  }
+  const groupIndex = matchGroupIndex(slip, kitPartText)
+  const hold = slipHoldReason(slip, { soText, kitPartText })
+  const groupLines = groupIndex >= 0 ? (lines?.[groupIndex] || []) : []
+  const recordable = savableLines(groupLines)
+  return {
+    groupIndex,
+    soOk: soAgrees(slip, soText),
+    hold,
+    lines: groupLines,
+    recordable,
+    willRecord: !hold && recordable.length > 0,
+  }
+}
+
+export function slipHoldReason(slip, { soText, kitPartText }) {
+  if (!slip) return null
+  if (!soAgrees(slip, soText)) {
+    const on = soDigits(slip.order_number)
+    const typed = soDigits(soText)
+    if (!on) return 'the slip has no readable order number'
+    if (!typed) return `the slip is for SO ${on} and no Sales Order # is entered`
+    return `the slip is for SO ${on} but this entry says SO ${typed}`
+  }
+  if (matchGroupIndex(slip, kitPartText) < 0) {
+    return `no kit on the slip matches ${String(kitPartText || '').trim() || 'this kit name'}`
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Extraction (suggestions only)
 // ---------------------------------------------------------------------------

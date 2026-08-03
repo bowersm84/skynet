@@ -8,6 +8,9 @@ import PackingSlipTab from '../components/kitregistry/PackingSlipTab'
 // Pure helpers live in the query layer so the Search tab and the Entry tab
 // can't drift apart on formatting or filter escaping.
 import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
+import { slipPlan, savePackingSlipGroup, attachSlipDocument } from '../lib/packingSlip'
+import { useSlipExtraction } from '../components/kitregistry/hooks'
+import KitEntrySlipSection from '../components/kitregistry/KitEntrySlipSection'
 import {
   Loader2, LogOut, BookOpen, Search, FileCheck, CheckCircle,
   X, ClipboardList, Plus, PackageOpen,
@@ -110,6 +113,11 @@ export default function KitKiosk() {
   const [platemount, setPlatemount] = useState('')
   const [notes, setNotes] = useState('')
 
+  // --- Packing slip (optional, rides this entry) ---------------------------
+  // Same hook the Packing Slip tab composes, so both surfaces mean the same
+  // thing by "the slip says" (D-KSTC-29).
+  const slipState = useSlipExtraction()
+
   // --- Entry state ---------------------------------------------------------
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
@@ -124,6 +132,16 @@ export default function KitKiosk() {
 
 
   const showStudFields = !!book && !BOOKS_WITHOUT_STUD.includes(book.code)
+
+  // Derived every render, which is what makes the agreement chips live: editing
+  // the Sales Order # moves the verdict with it. The same object drives what the
+  // operator SEES and what the save DOES, so the two cannot disagree.
+  const plan = slipPlan(slipState.slip, slipState.lines, { soText, kitPartText })
+
+  // A slip still being read holds the save — but only while one is attached, and
+  // "Remove slip" releases it instantly. An extraction that never returns must
+  // never be able to strand a kit that is ready to log.
+  const slipBusy = slipState.hasFile && slipState.busy
 
   // Clears one field's error as soon as the operator starts fixing it.
   const clearFieldError = useCallback((key) => {
@@ -480,6 +498,44 @@ export default function KitKiosk() {
     }
   }
 
+  // kit_assign_and_log returns the new row's id; the lookup is a fallback for a
+  // deployment still on an older signature, because without an id the slip half
+  // has nothing to attach to.
+  const resolveLotId = async (assigned) => {
+    if (assigned?.lot_id) return assigned.lot_id
+    const { data } = await supabase
+      .from('kit_lots').select('id')
+      .eq('book_id', book.id).eq('lot_number', assigned.lot_number)
+      .maybeSingle()
+    return data?.id || null
+  }
+
+  // The slip half, run only after the kit itself is safely logged. Returns a
+  // verdict rather than throwing: the kit is already saved by this point and the
+  // operator must be told exactly which half succeeded (D-KSTC-29).
+  const recordSlip = async (lotId, operatorId) => {
+    try {
+      const { inserted, skipped } = await savePackingSlipGroup({
+        kitLotId: lotId,
+        shipmentNumber: slipState.slip.order_number || null,
+        shipDate: slipState.slip.ship_date || null,
+        lines: plan.recordable,
+        operatorId,
+      })
+      let docError = null
+      try {
+        await attachSlipDocument({ kitLotId: lotId, file: slipState.file, uploadedBy: operatorId })
+      } catch (err) {
+        console.error('Attaching the slip failed:', err)
+        docError = err.message || 'the slip file did not attach'
+      }
+      return { ok: true, inserted, skipped, docError }
+    } catch (err) {
+      console.error('Recording component lots failed:', err)
+      return { ok: false, reason: err.message || 'the component lots could not be recorded' }
+    }
+  }
+
   // The number is assigned server-side under a kit_books row lock, so two
   // benches saving at once can never collide and never leave a gap
   // (D-KSTC-10). Never insert into kit_lots directly from here.
@@ -506,6 +562,31 @@ export default function KitKiosk() {
       const assigned = Array.isArray(data) ? data[0] : data
       if (!assigned?.lot_number) throw new Error('The registry did not return a kit number.')
 
+      // The kit is logged. From here nothing may throw — a slip problem is
+      // reported beside the number, never instead of it, so the outer catch
+      // (which says "could not save this entry") can never claim a saved kit
+      // was lost.
+      let slip = null
+      if (slipState.hasFile) {
+        try {
+          if (!slipState.slip) {
+            slip = { ok: false, reason: 'the slip could not be read' }
+          } else if (plan.hold) {
+            slip = { ok: false, reason: plan.hold }
+          } else if (!plan.recordable.length) {
+            slip = { ok: false, reason: 'no component lines were left to record' }
+          } else {
+            const lotId = await resolveLotId(assigned)
+            slip = lotId
+              ? await recordSlip(lotId, createdById)
+              : { ok: false, reason: 'the new kit lot could not be resolved' }
+          }
+        } catch (err) {
+          console.error('Slip step failed after the kit was logged:', err)
+          slip = { ok: false, reason: err.message || 'the slip step failed' }
+        }
+      }
+
       // Whatever the RPC returned is the number on the kit. If it differs from
       // the advisory (someone else logged first) it is simply correct — shown
       // without comment.
@@ -515,6 +596,7 @@ export default function KitKiosk() {
         // Both name the same book — the RPC assigned into the one we selected.
         bookName: book.name || assigned.book_code || book.code,
         who: createdByName || '',
+        slip,
       })
       await applyLogAnother()
       return true
@@ -591,6 +673,10 @@ export default function KitKiosk() {
     setNotes('')
     setSaveError(null)
     setFieldErrors({})
+    // The slip belongs to the kit just logged, not the next one. A multi-kit
+    // slip is re-uploaded for its sibling — safe, because the unique key makes
+    // re-recording a no-op (D-KSTC-29).
+    slipState.reset()
     await refreshAdvisory(book)
   }
 
@@ -606,6 +692,7 @@ export default function KitKiosk() {
     setCustomerText(''); setPartyId(null); setPartySuggestions([]); setPartyOpen(false)
     setSoText(''); setSoInfo(null); setSaleLineId(null)
     setStudNumber(''); setPlatemount(''); setNotes('')
+    slipState.reset()
     setSaveError(null); setSuccess(null); setFieldErrors({})
   }
 
@@ -724,6 +811,27 @@ export default function KitKiosk() {
                   <p className="text-green-300/80 text-sm mt-2">
                     {success.bookName}{success.who ? ` · logged by ${success.who}` : ''}
                   </p>
+
+                  {/* The kit number is the headline whatever happened to the
+                      slip. The slip's fate is reported UNDER it, never in place
+                      of it — the operator must never be left unsure the kit
+                      saved (D-KSTC-29). */}
+                  {success.slip?.ok && (
+                    <p className="text-green-300/80 text-sm mt-1">
+                      {success.slip.inserted} component lot{success.slip.inserted === 1 ? '' : 's'} recorded
+                      {success.slip.skipped ? ` (${success.slip.skipped} already on file)` : ''}
+                      {success.slip.docError
+                        ? ` — but ${success.slip.docError}; re-attach it from the Packing Slip tab`
+                        : ''}
+                    </p>
+                  )}
+                  {success.slip && !success.slip.ok && (
+                    <p className="text-amber-300 text-sm mt-1">
+                      Kit saved. Slip not recorded ({success.slip.reason}) — use the Packing Slip
+                      tab to attach it.
+                    </p>
+                  )}
+
                   <div className="flex flex-wrap gap-2 mt-4">
                     <button
                       onClick={() => setSuccess(null)}
@@ -934,6 +1042,16 @@ export default function KitKiosk() {
                 />
               </Field>
 
+              {/* ---- Packing slip (optional) ---- */}
+              <Field label="Packing Slip" optional>
+                <KitEntrySlipSection
+                  slipState={slipState}
+                  plan={plan}
+                  soText={soText}
+                  kitPartText={kitPartText}
+                />
+              </Field>
+
               <p className="text-gray-500 text-xs mb-3">
                 <span className="text-red-400">*</span> required
               </p>
@@ -948,11 +1066,13 @@ export default function KitKiosk() {
               <div className="flex flex-wrap gap-3 pt-1">
                 <button
                   onClick={handleSave}
-                  disabled={saving || !!blockingReason()}
+                  disabled={saving || !!blockingReason() || slipBusy}
                   className="flex-1 min-w-[14rem] h-14 rounded-xl bg-skynet-accent hover:bg-blue-600 disabled:bg-gray-700 disabled:text-gray-500 text-white text-base font-semibold flex items-center justify-center gap-2 transition-colors"
                 >
-                  {saving ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
-                  {mode === 'kiosk' ? 'Save — confirm with PIN' : 'Save entry'}
+                  {saving || slipBusy ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
+                  {slipBusy
+                    ? 'Reading slip…'
+                    : mode === 'kiosk' ? 'Save — confirm with PIN' : 'Save entry'}
                 </button>
                 <button
                   onClick={resetAll}

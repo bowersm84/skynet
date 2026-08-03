@@ -1,5 +1,5 @@
 -- =============================================================================
--- Kit component-lot BACKFILL loader (D-KSTC-25) -- v2
+-- Kit component-lot BACKFILL loader (D-KSTC-25) -- v3
 --
 -- Usage (PowerShell, run FROM this folder so \copy finds the CSV):
 --   Dry run (report only, no writes):
@@ -51,9 +51,11 @@ SELECT NULLIF(regexp_replace(so_number, '\D', '', 'g'), '')        AS so_digits,
        NULLIF(regexp_replace(so_line_no, '\D', '', 'g'), '')::integer AS so_line_no
 FROM staging_klcl;
 
--- One row per (lot, resolvable SO). so_via: 'direct' = linked sale or
--- so_as_written (bench era); 'invoice' = paper-era bridge through
--- fishbowl_invoices; 'none' = no resolvable SO (kept for universe counts).
+-- One resolution per lot, by priority: linked sale / so_as_written ('direct'),
+-- fishbowl_invoices bridge ('invoice'), invoice digits treated as the SO
+-- ('invoice_direct' -- Fishbowl invoice numbers inherit the SO number; verified
+-- against the digitized books: 574/646 lots match with median 0-day
+-- log-to-ship delta). 'none' rows kept for universe counts.
 CREATE TEMP VIEW v_lots AS
 WITH base AS (
   SELECT kl.id AS kit_lot_id, kl.lot_number, kl.source, kb.code AS book_code,
@@ -67,30 +69,34 @@ WITH base AS (
   LEFT JOIN public.kit_sales ks       ON ks.id  = ksl.kit_sale_id
   WHERE kl.record_status = 'active'
 ),
-inv_bridge AS (
+candidates AS (
+  SELECT kit_lot_id, so_digits, 'direct'::text AS so_via, 1 AS prio
+  FROM base WHERE so_digits IS NOT NULL
+  UNION ALL
   SELECT DISTINCT b.kit_lot_id,
-         NULLIF(regexp_replace(fi.so_number, '\D', '', 'g'), '') AS so_digits
+         NULLIF(regexp_replace(fi.so_number, '\D', '', 'g'), ''), 'invoice', 2
   FROM base b
   CROSS JOIN LATERAL regexp_matches(b.invoice_as_written, '\d+', 'g') AS m(runs)
   JOIN public.fishbowl_invoices fi
     ON NULLIF(regexp_replace(fi.invoice_number, '\D', '', 'g'), '') = m.runs[1]
-  WHERE b.so_digits IS NULL
-    AND b.invoice_as_written IS NOT NULL
+  WHERE b.so_digits IS NULL AND b.invoice_as_written IS NOT NULL
     AND fi.so_number IS NOT NULL
+  UNION ALL
+  SELECT b.kit_lot_id,
+         NULLIF(regexp_replace(b.invoice_as_written, '\D', '', 'g'), ''), 'invoice_direct', 3
+  FROM base b
+  WHERE b.so_digits IS NULL AND b.invoice_as_written IS NOT NULL
+),
+picked AS (
+  SELECT DISTINCT ON (kit_lot_id) kit_lot_id, so_digits, so_via
+  FROM candidates
+  WHERE so_digits IS NOT NULL
+  ORDER BY kit_lot_id, prio, so_digits
 )
-SELECT b.kit_lot_id, b.lot_number, b.source, b.book_code, b.so_digits, b.sku_norm,
-       'direct'::text AS so_via
-FROM base b WHERE b.so_digits IS NOT NULL
-UNION ALL
-SELECT b.kit_lot_id, b.lot_number, b.source, b.book_code, i.so_digits, b.sku_norm, 'invoice'
-FROM inv_bridge i JOIN base b ON b.kit_lot_id = i.kit_lot_id
-WHERE i.so_digits IS NOT NULL
-UNION ALL
-SELECT b.kit_lot_id, b.lot_number, b.source, b.book_code, NULL, b.sku_norm, 'none'
+SELECT b.kit_lot_id, b.lot_number, b.source, b.book_code,
+       p.so_digits, b.sku_norm, COALESCE(p.so_via, 'none') AS so_via
 FROM base b
-WHERE b.so_digits IS NULL
-  AND NOT EXISTS (SELECT 1 FROM inv_bridge i
-                  WHERE i.kit_lot_id = b.kit_lot_id AND i.so_digits IS NOT NULL);
+LEFT JOIN picked p ON p.kit_lot_id = b.kit_lot_id;
 
 CREATE TEMP VIEW v_matched AS
 SELECT DISTINCT l.kit_lot_id, l.book_code, l.lot_number AS kit_lot_number,
@@ -113,9 +119,10 @@ FROM v_stage;
 \echo --- 2a. Registry universe: SO resolvability (active lots) ---
 SELECT count(DISTINCT kit_lot_id) AS active_lots,
        count(DISTINCT kit_lot_id) FILTER (WHERE so_digits IS NOT NULL) AS resolvable_so,
-       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'direct')     AS via_so_field,
-       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'invoice')    AS via_invoice_bridge,
-       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'none')       AS unresolvable
+       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'direct')         AS via_so_field,
+       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'invoice')        AS via_invoice_bridge,
+       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'invoice_direct') AS via_invoice_as_so,
+       count(DISTINCT kit_lot_id) FILTER (WHERE so_via = 'none')           AS unresolvable
 FROM v_lots;
 
 \echo --- 2b. Resolvable lots by source ---

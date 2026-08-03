@@ -165,6 +165,61 @@ function ComponentLotList({ rows }) {
   )
 }
 
+// The slips those component lots were read off (D-KSTC-28). Only rendered when
+// there are any — a lot whose rows came from the Fishbowl backfill has no slip
+// on file, and an empty "Packing Slips" heading would imply one is missing.
+function PackingSlipRow({ rows }) {
+  if (!rows.length) return null
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-800">
+      <p className="text-gray-500 text-[11px] uppercase tracking-wide mb-1.5">Packing slips</p>
+      <div className="flex flex-wrap gap-2">
+        {rows.map(d => <SlipChip key={d.id} doc={d} />)}
+      </div>
+    </div>
+  )
+}
+
+// Same mint-on-click rule as DocumentLink below: a signed URL expires in an
+// hour, so a drawer left open all afternoon must not hand out a dead link.
+function SlipChip({ doc }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  const open = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const url = await getDocumentUrl(doc.file_path)
+      if (!url) throw new Error('No file path recorded.')
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch (err) {
+      console.error('Could not open the packing slip:', err)
+      setError('Could not open this file.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col">
+      <button
+        onClick={open}
+        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-gray-800 border border-gray-700 hover:border-skynet-accent text-gray-200 text-xs max-w-full"
+      >
+        {busy
+          ? <Loader2 size={12} className="animate-spin text-gray-500 shrink-0" />
+          : <Paperclip size={12} className="text-gray-500 shrink-0" />}
+        <span className="truncate">{doc.file_name}</span>
+        <span className="text-gray-500 shrink-0">
+          {doc.uploaded_at ? formatLogDate(String(doc.uploaded_at).slice(0, 10)) : ''}
+        </span>
+      </button>
+      {error && <p className="text-red-400 text-[11px] mt-0.5">{error}</p>}
+    </div>
+  )
+}
+
 // --- Lot --------------------------------------------------------------------
 
 function LotBody({ id, onPush }) {
@@ -172,7 +227,7 @@ function LotBody({ id, onPush }) {
   if (loading) return <Spinner />
   if (error) return <Empty>{error}</Empty>
   if (!data) return <Empty>Lot not found.</Empty>
-  const { lot, saleLine, sale, invoices, componentLots, requests, installations, issuances } = data
+  const { lot, saleLine, sale, invoices, componentLots, packingSlips, requests, installations, issuances } = data
 
   return (
     <>
@@ -217,6 +272,7 @@ function LotBody({ id, onPush }) {
 
       <Block title="Component Lots">
         <ComponentLotList rows={componentLots || []} />
+        <PackingSlipRow rows={packingSlips || []} />
       </Block>
 
       <Block title="Sale line / order">

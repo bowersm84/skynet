@@ -4,12 +4,13 @@ import { FEATURES } from '../config'
 import PinPad from '../components/PinPad'
 import KitSearch from '../components/kitregistry/KitSearch'
 import StcTab from '../components/kitregistry/StcTab'
+import PackingSlipTab from '../components/kitregistry/PackingSlipTab'
 // Pure helpers live in the query layer so the Search tab and the Entry tab
 // can't drift apart on formatting or filter escaping.
 import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
 import {
   Loader2, LogOut, BookOpen, Search, FileCheck, CheckCircle,
-  X, ClipboardList, Plus,
+  X, ClipboardList, Plus, PackageOpen,
 } from 'lucide-react'
 
 // Shared with the machine kiosk / rack kiosk — this is the same physical device.
@@ -653,6 +654,9 @@ export default function KitKiosk() {
 
   const NAV_ITEMS = [
     { key: 'entry', label: 'Kit Entry', icon: ClipboardList },
+    // Both modes: the slip is captured where the kit ships from, and the bench
+    // signs each save with a PIN exactly as Kit Entry does (D-KSTC-28).
+    { key: 'packing', label: 'Packing Slip', icon: PackageOpen },
     // Office-only: an issuance is an immutable compliance record and must
     // trace to a real authenticated user, not a shared bench device. It sits
     // between Entry and Search because logging is the office's daily work.
@@ -961,6 +965,11 @@ export default function KitKiosk() {
           )}
         </div>
       )}
+
+      {/* Both modes. Writes go through kit_record_component_lots, which takes
+          the operator id the same way kit_assign_and_log does — PIN at the
+          bench, session user in the office. */}
+      {nav === 'packing' && <PackingSlipTab mode={mode} profile={profile} />}
 
       {/* Read-only in both modes — RLS already gates writes, and the Search tab
           issues none. Kiosk mode gets the same view as the office. */}

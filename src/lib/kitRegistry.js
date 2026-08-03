@@ -328,6 +328,13 @@ export async function skusByIds(ids) {
   return selectIn('kit_skus', 'id, part_number, description, kit_scope, stc_applicability', 'id', ids)
 }
 
+// Full lot rows for an id set, chunked. The counterpart to skusByIds, for
+// callers that resolved ids some other way (an RPC, a component-lot search)
+// and need rows the standard lot UI can render.
+export async function lotsByIds(ids) {
+  return selectIn('kit_lots', LOT_ROW_COLS, 'id', ids)
+}
+
 // ---------------------------------------------------------------------------
 // Lots listing — server-side pagination, with an id-set fallback
 // ---------------------------------------------------------------------------
@@ -762,7 +769,7 @@ export async function lotDetail(lotId) {
     }
   }
 
-  const [{ data: requests }, { data: installs }, componentLots] = await Promise.all([
+  const [{ data: requests }, { data: installs }, componentLots, { data: packingSlips }] = await Promise.all([
     supabase.from('stc_requests')
       .select('id, intake_number, received_date, requester_name, requester_company, status, claimed_kit_number, claimed_registration, claimed_aircraft_serial, aircraft_id, notes')
       .eq('kit_lot_id', lotId).order('intake_number'),
@@ -770,6 +777,12 @@ export async function lotDetail(lotId) {
       .select('id, aircraft_id, kit_sku_id, install_date, status, evidence, notes')
       .eq('kit_lot_id', lotId),
     lotComponentLots(lotId),
+    // The slips those component lots came off (D-KSTC-28) — filed against the
+    // lot, so they read back from the same place every other document does.
+    supabase.from('kit_stc_documents')
+      .select('id, document_type, file_name, file_path, file_size, mime_type, uploaded_at')
+      .eq('kit_lot_id', lotId).eq('document_type', 'packing_slip')
+      .order('uploaded_at'),
   ])
 
   const acIds = uniq([...(installs || []).map(i => i.aircraft_id), ...(requests || []).map(r => r.aircraft_id)])
@@ -788,6 +801,7 @@ export async function lotDetail(lotId) {
     lot,
     saleLine, sale, invoices,
     componentLots,
+    packingSlips: packingSlips || [],
     requests: (requests || []).map(r => ({ ...r, aircraft: acById.get(r.aircraft_id) || null })),
     installations: (installs || []).map(i => ({ ...i, aircraft: acById.get(i.aircraft_id) || null })),
     issuances: issuanceRows.map(r => ({ ...r, certificate: certById.get(r.stc_certificate_id) || null })),

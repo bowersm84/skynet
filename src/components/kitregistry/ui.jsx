@@ -130,7 +130,9 @@ export function Pager({ page, total, onPage }) {
 
 // void / no_entry rows are DIMMED, never dropped — they prove the book's
 // sequence is unbroken (D-KSTC-02 / the paper-ledger rule).
-export function LotsTable({ rows, onOpenLot, onOpenSku, onOpenParty, emptyText = 'No lots.' }) {
+// `lotSub` is an optional { lotId: text } map rendered under the lot number —
+// how a lens says WHY each row matched (the component lot's part + qty).
+export function LotsTable({ rows, onOpenLot, onOpenSku, onOpenParty, lotSub, emptyText = 'No lots.' }) {
   if (!rows?.length) return <Empty>{emptyText}</Empty>
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-700">
@@ -154,6 +156,9 @@ export function LotsTable({ rows, onOpenLot, onOpenSku, onOpenParty, emptyText =
                   <LinkText onClick={() => onOpenLot(l.id)}>
                     <span className="font-mono font-semibold">{lotLabel(l)}</span>
                   </LinkText>
+                  {lotSub?.[l.id] && (
+                    <span className="block text-[11px] font-mono text-gray-400">{lotSub[l.id]}</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 whitespace-nowrap text-gray-300">{formatLogDate(l.log_date)}</td>
                 <td className="px-3 py-2 min-w-[10rem]">

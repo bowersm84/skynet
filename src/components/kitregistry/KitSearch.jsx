@@ -4,6 +4,7 @@ import {
   searchParties, searchSkus, searchComponents, searchAircraft,
   previewLotByNumber, lookupInvoice, componentRecall, skusByIds,
   loadLots, filteredLotStats, partyLens, skuLens, invoiceLens,
+  componentLotLens, componentLotLotIds,
   loadGlobalDashboard, formatLogDate, formatSince, lotLabel, uniq,
   FIELD_DEBOUNCE, PAGE_SIZE,
 } from '../../lib/kitRegistry'
@@ -23,6 +24,7 @@ export default function KitSearch() {
   const [kitNumber, setKitNumber] = useState('')
   const [componentText, setComponentText] = useState('')
   const [componentPinned, setComponentPinned] = useState(null)
+  const [componentLotText, setComponentLotText] = useState('')
   const [invoiceText, setInvoiceText] = useState('')
   const [aircraftText, setAircraftText] = useState('')
   const [aircraftPinned, setAircraftPinned] = useState(null)
@@ -80,6 +82,7 @@ export default function KitSearch() {
     if (customerPinned) a.push('customer'); else if (customerText.trim()) a.push('customerText')
     if (kitPinned) a.push('kit'); else if (kitText.trim()) a.push('kitText')
     if (componentPinned) a.push('component'); else if (componentText.trim()) a.push('componentText')
+    if (componentLotText.trim()) a.push('componentLot')
     if (aircraftPinned) a.push('aircraft'); else if (aircraftText.trim()) a.push('aircraftText')
     if (invoiceText.trim()) a.push('invoice')
     if (kitNumber.trim()) a.push('kitNumber')
@@ -93,6 +96,7 @@ export default function KitSearch() {
     setKitText(''); setKitPinned(null)
     setKitNumber(''); setLotPreview(null)
     setComponentText(''); setComponentPinned(null)
+    setComponentLotText('')
     setInvoiceText(''); setInvoiceEcho(null)
     setAircraftText(''); setAircraftPinned(null)
     setDateFrom(''); setDateTo('')
@@ -137,6 +141,7 @@ export default function KitSearch() {
         if (only === 'component') { setActive({ kind: 'component', component: componentPinned }); return }
         if (only === 'aircraft') { setActive({ kind: 'aircraft', aircraft: aircraftPinned }); return }
         if (only === 'invoice') { setActive({ kind: 'invoice', invoiceNumber: invoiceText.trim() }); return }
+        if (only === 'componentLot') { setActive({ kind: 'componentLot', lotText: componentLotText.trim() }); return }
       }
 
       // 3) Everything else → filtered lots lens (AND across every field).
@@ -158,9 +163,20 @@ export default function KitSearch() {
       if (dateTo) filters.dateTo = dateTo
       if (kitNumber.trim() && /^\d+$/.test(kitNumber.trim())) filters.lotNumber = Number(kitNumber.trim())
 
-      // Id-set constraints: aircraft always, component when it must be chunked.
+      // Id-set constraints: aircraft always, component lot always, component
+      // when it must be chunked.
       const idSets = []
+      let note = null
       if (aircraftPinned || aircraftText.trim()) idSets.push(await lotIdsFromAircraft())
+
+      if (componentLotText.trim()) {
+        const cl = await componentLotLotIds(componentLotText.trim())
+        idSets.push(cl.lotIds)
+        // A prefix sweep must never read as an exact hit (D-KSTC-26).
+        if (cl.rowCount && !cl.exactMatch) {
+          note = `No exact component lot "${componentLotText.trim()}" — showing prefix matches.`
+        }
+      }
 
       let componentSkuIds = null
       if (componentPinned) componentSkuIds = (await componentRecall(componentPinned.id)).skuIds
@@ -186,7 +202,7 @@ export default function KitSearch() {
         filters.lotIds = idSets.reduce((acc, set) => acc.filter(id => set.includes(id)))
       }
 
-      setActive({ kind: 'filtered', filters })
+      setActive({ kind: 'filtered', filters, note })
     } catch (err) {
       console.error('Search failed:', err)
       setSearchError(err.message || 'Search failed.')
@@ -207,6 +223,7 @@ export default function KitSearch() {
           kitText, setKitText, kitPinned, setKitPinned,
           kitNumber, setKitNumber, lotPreview,
           componentText, setComponentText, componentPinned, setComponentPinned,
+          componentLotText, setComponentLotText,
           invoiceText, setInvoiceText, invoiceEcho,
           aircraftText, setAircraftText, aircraftPinned, setAircraftPinned,
           dateFrom, setDateFrom, dateTo, setDateTo,
@@ -224,7 +241,8 @@ export default function KitSearch() {
       {!running && !active && <GlobalDashboard onOpenLot={openLot} onOpenSku={openSku} />}
 
       {!running && active?.kind === 'filtered' && (
-        <FilteredLens filters={active.filters} onOpenLot={openLot} onOpenSku={openSku} onOpenParty={openParty} />
+        <FilteredLens filters={active.filters} note={active.note}
+          onOpenLot={openLot} onOpenSku={openSku} onOpenParty={openParty} />
       )}
       {!running && active?.kind === 'party' && (
         <PartyLens party={active.party} onOpenLot={openLot} onOpenSku={openSku} onPush={push} />
@@ -237,6 +255,9 @@ export default function KitSearch() {
       )}
       {!running && active?.kind === 'invoice' && (
         <InvoiceLens invoiceNumber={active.invoiceNumber} onOpenLot={openLot} onOpenSku={openSku} onOpenParty={openParty} />
+      )}
+      {!running && active?.kind === 'componentLot' && (
+        <ComponentLotLens lotText={active.lotText} onOpenLot={openLot} onOpenSku={openSku} onOpenParty={openParty} />
       )}
       {!running && active?.kind === 'aircraft' && (
         <div className="bg-gray-900">
@@ -341,6 +362,15 @@ function FieldGrid(p) {
         </div>
 
         <div>
+          <label className="block text-gray-400 text-xs font-medium mb-1.5">Component Lot #</label>
+          <input
+            value={p.componentLotText} onChange={e => p.setComponentLotText(e.target.value)}
+            placeholder="Shipped component lot #…"
+            className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm font-mono placeholder-gray-500 focus:border-skynet-accent focus:outline-none"
+          />
+        </div>
+
+        <div>
           <label className="block text-gray-400 text-xs font-medium mb-1.5">Invoice #</label>
           <input
             value={p.invoiceText} onChange={e => p.setInvoiceText(e.target.value)}
@@ -423,13 +453,14 @@ function usePagedLots(filters, key) {
   return { rows: data?.rows || [], total: data?.total || 0, loading, page, setPage }
 }
 
-function FilteredLens({ filters, onOpenLot, onOpenSku, onOpenParty }) {
+function FilteredLens({ filters, note, onOpenLot, onOpenSku, onOpenParty }) {
   const key = JSON.stringify(filters)
   const lots = usePagedLots(filters, key)
   const { data: stats } = useAsyncData(() => filteredLotStats(filters), key)
 
   return (
     <>
+      {note && <PrefixNote>{note}</PrefixNote>}
       <Section title="Matching lots">
         {!stats ? <Spinner /> : (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -728,6 +759,62 @@ function InvoiceLens({ invoiceNumber, onOpenLot, onOpenSku, onOpenParty }) {
         {lots.loading ? <Spinner /> : (
           <LotsTable rows={lots.rows} onOpenLot={onOpenLot} onOpenSku={onOpenSku} onOpenParty={onOpenParty}
             emptyText="No kit lot references this invoice yet — transcribed rows are 2023–24 and the invoice window starts 2025-07-30." />
+        )}
+      </Section>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Component lot lens
+// ---------------------------------------------------------------------------
+
+function PrefixNote({ children }) {
+  return (
+    <p className="text-amber-400 text-xs mb-3">{children}</p>
+  )
+}
+
+function ComponentLotLens({ lotText, onOpenLot, onOpenSku, onOpenParty }) {
+  const { data } = useAsyncData(() => componentLotLens(lotText), lotText)
+  const lotIds = data?.lotIds || []
+  // The id set is already ordered newest-kit-first; loadLots pages it as given.
+  const lots = usePagedLots({ lotIds }, `${lotText}::${lotIds.length}`)
+
+  if (!data) return <Spinner label="Tracing the component lot…" />
+
+  const partsSub = data.byPart.map(g => `${g.part} — ${g.kits} kit${g.kits === 1 ? '' : 's'}`).join(' · ')
+
+  return (
+    <>
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <h2 className="text-white text-lg font-semibold font-mono">{lotText}</h2>
+        <span className="text-gray-400 text-sm">shipped component lot</span>
+      </div>
+
+      {data.rows.length > 0 && !data.exactMatch && (
+        <PrefixNote>
+          No exact match — showing prefix matches on “{lotText}”.
+        </PrefixNote>
+      )}
+
+      <Section title="Reach">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard label="Kit lots" value={data.kitLotCount}
+            sub="kits shipped containing this lot" />
+          <StatCard label="Part numbers" value={data.byPart.length || '—'}
+            sub={partsSub || 'none'} />
+          <StatCard label="Shipped" value={formatLogDate(data.shipDates.first)}
+            sub={`through ${formatLogDate(data.shipDates.last)}`} />
+          <StatCard label="Total qty shipped" value={data.totalQty} />
+        </div>
+      </Section>
+
+      <Section title="Kit lots" right={<Pager page={lots.page} total={lots.total} onPage={lots.setPage} />}>
+        {lots.loading ? <Spinner /> : (
+          <LotsTable rows={lots.rows} lotSub={data.subByLot}
+            onOpenLot={onOpenLot} onOpenSku={onOpenSku} onOpenParty={onOpenParty}
+            emptyText="No shipped component lot matches that number — the backfill covers lots whose SO resolves inside the Fishbowl export window." />
         )}
       </Section>
     </>

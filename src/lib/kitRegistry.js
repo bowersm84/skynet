@@ -30,6 +30,14 @@ export const SOURCE_LABEL = {
   fishbowl: 'Fishbowl',
 }
 
+// kit_lot_component_lots.source is its own vocabulary (D-KSTC-24) — the kit
+// lot's own SOURCE_LABEL set doesn't apply to a shipped component row.
+export const COMPONENT_LOT_SOURCE_LABEL = {
+  fishbowl_backfill: 'Fishbowl backfill',
+  packing_slip: 'Packing slip',
+  manual: 'Manual',
+}
+
 export const OPEN_REQUEST_STATUSES = ['new', 'needs_info', 'matched']
 
 // ---------------------------------------------------------------------------
@@ -153,6 +161,13 @@ export const LOT_ROW_COLS =
   'id, lot_number, log_date, kit_part_as_written, customer_as_written, invoice_as_written, ' +
   'record_status, source, transcription_confidence, kit_sku_id, party_id, book_id, ' +
   'book:kit_books(code, category), sku:kit_skus(part_number, description), party:kit_parties(name)'
+
+// Component-lot rows are read as-written and merged client-side — no embed at
+// all, because the part string is the record and component_id is only
+// sometimes resolvable (D-KSTC-24).
+export const COMPONENT_LOT_COLS =
+  'id, kit_lot_id, component_id, part_number_as_written, lot_number_as_written, ' +
+  'qty_shipped, ship_date, shipment_number, so_line_no, source, needs_review'
 
 // ---------------------------------------------------------------------------
 // Reference data
@@ -391,26 +406,36 @@ export async function loadLots(filters, page = 0) {
 // Stat cards for the filtered lens.
 export async function filteredLotStats(filters) {
   const books = await loadBooks()
-  const base = f => applyLotFilters(supabase.from('kit_lots').select('id', { count: 'exact', head: true }), f)
+  const chunkedSkus = !!(filters.skuIds && filters.skuIds.length > IN_CHUNK)
+  const head = () => supabase.from('kit_lots').select('id', { count: 'exact', head: true })
 
-  const withIn = (q) => (filters.skuIds && filters.skuIds.length <= IN_CHUNK)
-    ? q.in('kit_sku_id', filters.skuIds)
-    : q
-
-  // A chunked sku set can't ride along on a head count — sum per chunk instead.
-  const countWith = async (extra = {}) => {
+  // One counting primitive for every card. A pre-resolved lot-id set (aircraft,
+  // component lot) must constrain the STATS too, not just the table below them —
+  // a stat card that ignores an active filter overstates the match.
+  const countWith = async (extra = {}, decorate) => {
     const f = { ...filters, ...extra }
-    if (filters.skuIds && filters.skuIds.length > IN_CHUNK) {
+    const run = async (q) => {
+      let out = applyLotFilters(q, f)
+      if (filters.skuIds && !chunkedSkus) out = out.in('kit_sku_id', filters.skuIds)
+      if (decorate) out = decorate(out)
+      const { count, error } = await out
+      if (error) throw error
+      return count || 0
+    }
+
+    // Neither id set can ride along on one head count — sum per chunk instead.
+    if (filters.lotIds) {
+      if (!filters.lotIds.length) return 0
       let total = 0
-      for (const part of chunk(filters.skuIds)) {
-        const { count } = await applyLotFilters(
-          supabase.from('kit_lots').select('id', { count: 'exact', head: true }).in('kit_sku_id', part), f)
-        total += count || 0
-      }
+      for (const part of chunk(filters.lotIds)) total += await run(head().in('id', part))
       return total
     }
-    const { count } = await withIn(base(f))
-    return count || 0
+    if (chunkedSkus) {
+      let total = 0
+      for (const part of chunk(filters.skuIds)) total += await run(head().in('kit_sku_id', part))
+      return total
+    }
+    return run(head())
   }
 
   const [total, ...byBookCounts] = await Promise.all([
@@ -424,13 +449,8 @@ export async function filteredLotStats(filters) {
   ])
 
   // % with SKU resolved — count the null-SKU remainder and subtract.
-  let nullSku = 0
-  if (filters.skuIds && filters.skuIds.length > IN_CHUNK) {
-    nullSku = 0 // an sku-constrained set can't contain null-SKU rows
-  } else {
-    const { count } = await withIn(base(filters)).is('kit_sku_id', null)
-    nullSku = count || 0
-  }
+  // An sku-constrained set can't contain null-SKU rows, so that case is 0.
+  const nullSku = chunkedSkus ? 0 : await countWith({}, q => q.is('kit_sku_id', null))
 
   return {
     total,
@@ -576,6 +596,92 @@ export async function invoiceLens(invoiceNumber) {
   return { invoice, lotIds: uniq([...byWritten, ...byLine].map(r => r.id)) }
 }
 
+// --- Component lot ----------------------------------------------------------
+
+// The as-written lot string IS the record, so an exact match is the answer
+// whenever there is one. Only when nothing matches do we retry as a prefix —
+// and `exactMatch: false` travels with the rows so the screen can say so
+// rather than passing a prefix sweep off as a hit (D-KSTC-26).
+export async function componentLotSearch(lotText) {
+  const raw = String(lotText || '').trim()
+  if (!raw) return { rows: [], exactMatch: true }
+
+  const exact = await fetchAll('kit_lot_component_lots', COMPONENT_LOT_COLS,
+    q => q.eq('lot_number_as_written', raw))
+  if (exact.length) return { rows: exact, exactMatch: true }
+
+  const t = sanitizeTerm(raw)
+  if (!t) return { rows: [], exactMatch: true }
+  const prefixed = await fetchAll('kit_lot_component_lots', COMPONENT_LOT_COLS,
+    q => q.ilike('lot_number_as_written', `${t}%`))
+  return { rows: prefixed, exactMatch: !prefixed.length }
+}
+
+// Lot ids alone, for the AND-filter path.
+export async function componentLotLotIds(lotText) {
+  const { rows, exactMatch } = await componentLotSearch(lotText)
+  return { lotIds: uniq(rows.map(r => r.kit_lot_id)), exactMatch, rowCount: rows.length }
+}
+
+// Stat bundle for the ComponentLotLens. Grouped BY PART because one lot string
+// legitimately spans several parts (D-KSTC-26) — "12 kits" is only meaningful
+// once you know which part carried the lot into them.
+export async function componentLotLens(lotText) {
+  const { rows, exactMatch } = await componentLotSearch(lotText)
+  const empty = {
+    rows: [], exactMatch, lotIds: [], kitLotCount: 0, byPart: [],
+    shipDates: { first: null, last: null }, totalQty: 0, subByLot: {},
+  }
+  if (!rows.length) return empty
+
+  const lotIds = uniq(rows.map(r => r.kit_lot_id))
+
+  // Newest kit first — the lens reads as a recall list, not a book sequence.
+  const lots = await selectIn('kit_lots', 'id, lot_number', 'id', lotIds)
+  const numById = new Map(lots.map(l => [l.id, l.lot_number]))
+  const orderedLotIds = [...lotIds].sort(
+    (a, b) => (numById.get(b) ?? -1) - (numById.get(a) ?? -1))
+
+  const byPartMap = new Map()
+  const perLot = new Map()
+  let totalQty = 0
+  for (const r of rows) {
+    const qty = Number(r.qty_shipped) || 0
+    totalQty += qty
+
+    const part = r.part_number_as_written || '—'
+    let g = byPartMap.get(part)
+    if (!g) { g = { part, lotIds: new Set(), qty: 0 }; byPartMap.set(part, g) }
+    g.lotIds.add(r.kit_lot_id)
+    g.qty += qty
+
+    const bucket = perLot.get(r.kit_lot_id) || []
+    bucket.push(`${part}${r.qty_shipped == null ? '' : ` ×${r.qty_shipped}`}`)
+    perLot.set(r.kit_lot_id, bucket)
+  }
+
+  const byPart = [...byPartMap.values()]
+    .map(g => ({ part: g.part, kits: g.lotIds.size, qty: g.qty }))
+    .sort((a, b) => b.kits - a.kits || (a.part || '').localeCompare(b.part || ''))
+
+  // ISO dates sort lexically, so no Date objects are needed for the span.
+  const shipped = rows.map(r => r.ship_date).filter(Boolean).sort()
+
+  const subByLot = {}
+  for (const [id, parts] of perLot) subByLot[id] = parts.join(' · ')
+
+  return {
+    rows,
+    exactMatch,
+    lotIds: orderedLotIds,
+    kitLotCount: lotIds.length,
+    byPart,
+    shipDates: { first: shipped[0] || null, last: shipped[shipped.length - 1] || null },
+    totalQty,
+    subByLot,
+  }
+}
+
 export async function aircraftLens(aircraftId) {
   const [{ data: ac }, { data: history }, { data: installs }, { data: requests }] = await Promise.all([
     supabase.from('aircraft').select('*').eq('id', aircraftId).maybeSingle(),
@@ -613,6 +719,19 @@ export async function aircraftLens(aircraftId) {
 // Drawers
 // ---------------------------------------------------------------------------
 
+// Shipped component lots for one kit lot, in SO-line order — the order the
+// packing slip lists them, which is how the bench reads a shipment back.
+export async function lotComponentLots(lotId) {
+  const { data, error } = await supabase
+    .from('kit_lot_component_lots')
+    .select(COMPONENT_LOT_COLS)
+    .eq('kit_lot_id', lotId)
+    .order('so_line_no', { ascending: true, nullsFirst: false })
+    .order('part_number_as_written', { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
 export async function lotDetail(lotId) {
   const { data: lot, error } = await supabase
     .from('kit_lots')
@@ -643,13 +762,14 @@ export async function lotDetail(lotId) {
     }
   }
 
-  const [{ data: requests }, { data: installs }] = await Promise.all([
+  const [{ data: requests }, { data: installs }, componentLots] = await Promise.all([
     supabase.from('stc_requests')
       .select('id, intake_number, received_date, requester_name, requester_company, status, claimed_kit_number, claimed_registration, claimed_aircraft_serial, aircraft_id, notes')
       .eq('kit_lot_id', lotId).order('intake_number'),
     supabase.from('kit_installations')
       .select('id, aircraft_id, kit_sku_id, install_date, status, evidence, notes')
       .eq('kit_lot_id', lotId),
+    lotComponentLots(lotId),
   ])
 
   const acIds = uniq([...(installs || []).map(i => i.aircraft_id), ...(requests || []).map(r => r.aircraft_id)])
@@ -667,6 +787,7 @@ export async function lotDetail(lotId) {
   return {
     lot,
     saleLine, sale, invoices,
+    componentLots,
     requests: (requests || []).map(r => ({ ...r, aircraft: acById.get(r.aircraft_id) || null })),
     installations: (installs || []).map(i => ({ ...i, aircraft: acById.get(i.aircraft_id) || null })),
     issuances: issuanceRows.map(r => ({ ...r, certificate: certById.get(r.stc_certificate_id) || null })),

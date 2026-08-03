@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { X, ChevronLeft, ExternalLink, Paperclip, Loader2, Pencil, CheckCircle } from 'lucide-react'
 import {
   lotDetail, skuDetail, partyDetail, componentDetail, aircraftLens, loadLots,
-  formatLogDate, lotLabel,
+  formatLogDate, lotLabel, COMPONENT_LOT_SOURCE_LABEL,
 } from '../../lib/kitRegistry'
 import { stcRequestDetail, STATUS_LABEL, DOCUMENT_TYPES } from '../../lib/stcIntake'
 import { getDocumentUrl } from '../../lib/s3'
@@ -107,6 +107,64 @@ function Block({ title, children }) {
   )
 }
 
+// --- Component lots ---------------------------------------------------------
+
+// What physically shipped inside this kit, in SO-line order (D-KSTC-26). A full
+// kit runs to dozens of lines, so the section stays drawer-height-friendly:
+// twelve rows, then an expander.
+const COMPONENT_LOT_PREVIEW = 12
+
+function ComponentLotList({ rows }) {
+  const [expanded, setExpanded] = useState(false)
+  if (!rows.length) return <Empty>No shipped component lots recorded yet.</Empty>
+
+  const shown = expanded ? rows : rows.slice(0, COMPONENT_LOT_PREVIEW)
+
+  return (
+    <>
+      <div className="space-y-1.5">
+        {shown.map(r => {
+          const when = [
+            r.ship_date ? `shipped ${formatLogDate(r.ship_date)}` : null,
+            r.shipment_number || null,
+          ].filter(Boolean).join(' · ')
+          return (
+            <div key={r.id} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm">
+                    <span className="font-mono text-gray-200">{r.part_number_as_written}</span>
+                    <span className="text-gray-600"> — </span>
+                    <span className="font-mono text-white">{r.lot_number_as_written}</span>
+                  </p>
+                  {when && <p className="text-gray-500 text-[11px] mt-0.5">{when}</p>}
+                </div>
+                <span className="font-mono text-gray-200 text-sm shrink-0">{r.qty_shipped ?? '—'}</span>
+              </div>
+              {/* The backfill is the baseline — only a later capture path is
+                  worth calling out (D-KSTC-25). */}
+              {r.source !== 'fishbowl_backfill' && (
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  <Pill>{COMPONENT_LOT_SOURCE_LABEL[r.source] || r.source}</Pill>
+                  {r.needs_review && <Pill tone="amber">needs review</Pill>}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      {rows.length > COMPONENT_LOT_PREVIEW && (
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="mt-2 text-skynet-accent hover:underline text-xs"
+        >
+          {expanded ? 'Show fewer' : `Show all ${rows.length}`}
+        </button>
+      )}
+    </>
+  )
+}
+
 // --- Lot --------------------------------------------------------------------
 
 function LotBody({ id, onPush }) {
@@ -114,7 +172,7 @@ function LotBody({ id, onPush }) {
   if (loading) return <Spinner />
   if (error) return <Empty>{error}</Empty>
   if (!data) return <Empty>Lot not found.</Empty>
-  const { lot, saleLine, sale, invoices, requests, installations, issuances } = data
+  const { lot, saleLine, sale, invoices, componentLots, requests, installations, issuances } = data
 
   return (
     <>
@@ -155,6 +213,10 @@ function LotBody({ id, onPush }) {
           <Row label="Transcription notes">{lot.transcription_notes}</Row>
           <Row label="Notes">{lot.notes}</Row>
         </dl>
+      </Block>
+
+      <Block title="Component Lots">
+        <ComponentLotList rows={componentLots || []} />
       </Block>
 
       <Block title="Sale line / order">

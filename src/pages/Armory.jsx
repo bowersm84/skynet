@@ -48,9 +48,9 @@ export default function Armory({ profile }) {
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
     admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'receiving', 'replenishment'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment'],
     finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
-    machinist:        ['inventory', 'adjustments', 'reconciliation'],
+    machinist:        ['inventory', 'adjustments', 'reconciliation', 'rmforecast'],
     // 'customers' stays first so the scheduler's default Armory tab is unchanged.
     scheduler:        ['customers', 'rmforecast'],
     customer_service: ['customers'],
@@ -3561,7 +3561,8 @@ export default function Armory({ profile }) {
         )}
 
         {/* RM Forecast Tab (D-RMF-01) — sits beside Reconciliation in the Raw
-            Materials group. Role-gated to admin/scheduler/purchaser, matching the
+            Materials group. Role-gated to admin/scheduler/purchaser/compliance/
+            machinist (D-RMF-06, multi-role aware), matching the
             forecast RPCs; the section hides itself for anyone else. */}
         {activeTab === 'rmforecast' && (
           <RMForecastSection

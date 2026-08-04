@@ -2458,3 +2458,18 @@ The bench logs the kit and uploads the packing slip in one motion (one save, one
 
 ### D-KSTC-30 — SK203 PDF2 supplement batch (2026-08-03)
 A second SK203 PDF log (kits 99431–100074, Mar 2025 – Jul 2026) was missing from the original digitization; workbook v5_5 adds it as the "SK203 PDF2 Supplement" tab (644 rows: 624 active, 20 no-entry; all other tabs data-identical to v5_4). Loaded via the standard kit_stc_load rerun (natural-key upserts), TEST before PROD. The supplement abuts the bench boundary (100074 | 100075); 99011–99430 remains the known SK203 transcription hole. Rerunning the component-lot backfill loader after this batch extends shipped-lot traceability to the new lots via the invoice≡SO direct path (D-KSTC-27). STATUS: loaded TEST + PROD 2026-08-03, both verified identical (1292 lots; 624 active + 20 no_entry added; no pre-existing lot mutated). The load bound 34 catch-up stc_requests to their now-transcribed lots and created 34 kit_installations (all status 'claimed'), authorized as the loader's designed transcription-catch-up behaviour (D-KSTC-19/21); the link passes leave request status untouched; no issuance rows were written, so D-KSTC-22 is unaffected and intakes 60/61/70 remain issuance-less. Party resolution is partial by design (491 of 624 active supplement lots; SO-based resolution is a future pass) and 10 active lots carry an unknown kit SKU as-written with kit_sku_id NULL. The exception headline "Conversion kits with no STC activity" grew 324 → 904 on both environments: +624 new active conversion lots, less the 34 now carrying STC activity, less 10 whose paper rows carry no log date (a null anchor falls outside the D-KSTC-12 baseline). Loader property: ON CONFLICT DO UPDATE re-fires the touch trigger on every staged row, so updated_at on kit_parties/kit_skus/kit_components/kit_sales/aircraft moves on every rerun without content change — never treat updated_at on those tables as a change signal; substantive-column fingerprints are the comparison method.
+
+### D-RMF-06 — RM Forecast view access widened; gate honors multi-role (2026-07-31)
+**What:** _rm_forecast_gate() allowed set widened to admin/scheduler/purchaser/
+compliance/machinist and now resolves roles via profiles.role OR roles[]
+(multi-role, Spec v4.0) — the original gate checked primary role only, which
+locked out Sawyer (purchaser as additional role) despite correct frontend
+gating. Frontend: 'rmforecast' added to compliance and machinist tab arrays;
+canView widened; gated-panel copy updated. Write actions (Needs-data Save,
+Correct material, Extract) remain admin/scheduler; part_dimensions RLS and the
+Edge Function gate unchanged.
+**Why:** Purchaser hit the "Forecast access is limited" panel — tab visible,
+RPCs 403. Compliance and machinists need the forecast for material planning and
+bar verification.
+**Files:** Docs/migrations/2026-07-31_rmf_gate_roles.sql, src/pages/Armory.jsx,
+src/components/rmforecast/RMForecastSection.jsx.

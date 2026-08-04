@@ -10,12 +10,13 @@ import ExceptionsPanel from './ExceptionsPanel'
 const EMPTY = { bars: [], barParts: [], blankDemand: [], blankOnhand: [], exceptions: [] }
 
 export default function RMForecastSection({ profile, materialTypes = [], barSizes = [] }) {
-  // The five RPCs are role-gated to admin/scheduler/purchaser and raise
-  // 'Not authorized' otherwise — mirror that in the UI so the section is
-  // hidden entirely rather than erroring for everyone else.
-  const canView = hasRole(profile, 'admin', 'scheduler', 'purchaser')
+  // The five RPCs are role-gated to admin/scheduler/purchaser/compliance/
+  // machinist (D-RMF-06, multi-role aware) and raise 'Not authorized'
+  // otherwise — mirror that here so the section is hidden entirely rather
+  // than erroring for everyone else.
+  const canView = hasRole(profile, 'admin', 'scheduler', 'purchaser', 'compliance', 'machinist')
   // Exceptions and corrections both write part_dimensions, whose INSERT/UPDATE
-  // RLS is admin/scheduler. Purchaser sees everything read-only.
+  // RLS is admin/scheduler. Every other viewing role is read-only.
   const canWriteDimensions = hasRole(profile, 'admin', 'scheduler')
 
   const [data, setData] = useState(EMPTY)
@@ -257,7 +258,7 @@ export default function RMForecastSection({ profile, materialTypes = [], barSize
           <Lock size={40} className="mx-auto text-gray-600 mb-3" />
           <p className="text-gray-300 font-medium">Forecast access is limited</p>
           <p className="text-gray-500 text-sm mt-1">
-            The raw material forecast is available to admin, scheduler, and purchaser roles.
+            The raw material forecast is available to the admin, scheduler, purchaser, compliance, and machinist roles.
           </p>
         </div>
       )}

@@ -1441,3 +1441,26 @@ CREATE TABLE public.kit_stc_documents (
   CONSTRAINT ksd_lot_fkey FOREIGN KEY (kit_lot_id) REFERENCES public.kit_lots(id),
   CONSTRAINT ksd_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES public.profiles(id)
 );
+CREATE TABLE public.kit_lot_component_lots (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  kit_lot_id uuid NOT NULL,
+  component_id uuid,
+  part_number_as_written text NOT NULL,
+  lot_number_as_written text NOT NULL,
+  qty_shipped numeric,
+  ship_date date,
+  shipment_number text,
+  so_line_no integer,
+  source text NOT NULL DEFAULT 'packing_slip'::text CHECK (source = ANY (ARRAY['fishbowl_backfill'::text, 'packing_slip'::text, 'manual'::text])),
+  needs_review boolean NOT NULL DEFAULT false,
+  review_reason text,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_by uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT kit_lot_component_lots_pkey PRIMARY KEY (id),
+  CONSTRAINT klcl_lot_fkey FOREIGN KEY (kit_lot_id) REFERENCES public.kit_lots(id),
+  CONSTRAINT klcl_component_fkey FOREIGN KEY (component_id) REFERENCES public.kit_components(id),
+  CONSTRAINT klcl_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
+  CONSTRAINT klcl_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.profiles(id)
+);

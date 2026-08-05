@@ -41,6 +41,26 @@ import {
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 
+// Same key as Kiosk.jsx — a shared tablet has ONE device identity across
+// pages, so kiosk and finishing sessions on it are mutually recognizable.
+const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
+
+function getKioskDeviceId() {
+  try {
+    let id = localStorage.getItem(KIOSK_DEVICE_ID_KEY)
+    if (!id) {
+      id = (crypto?.randomUUID?.() || `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      localStorage.setItem(KIOSK_DEVICE_ID_KEY, id)
+    }
+    return id
+  } catch {
+    // Storage blocked (private mode etc.). Fall back to a per-tab id —
+    // the user will have to PIN in every refresh, which is the SAFE
+    // failure mode.
+    return `ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+}
+
 // Stage definitions
 const STAGES = [
   { key: 'wash', label: 'Wash', icon: Droplets },
@@ -49,6 +69,13 @@ const STAGES = [
 ]
 
 export default function Finishing() {
+  // Per-device id — stable across reloads via localStorage. Binds the
+  // kiosk_sessions row to this physical device so logging out here only
+  // touches this device's session, not the operator's kiosk sessions.
+  const deviceIdRef = useRef(getKioskDeviceId())
+  // Finishing machine anchor for the current session, captured at login.
+  const finishingMachineIdRef = useRef(null)
+
   // Auth state
   const [pin, setPin] = useState('')
   const [operator, setOperator] = useState(null)
@@ -735,15 +762,22 @@ export default function Finishing() {
             // Delay + re-check to avoid race with own login sequence
             setTimeout(async () => {
               try {
+                // Scope to this device and to active rows, newest first —
+                // otherwise accumulated inactive rows (or another device's
+                // session) force a wrongful logout.
                 const { data: currentSession } = await supabase
                   .from('kiosk_sessions')
                   .select('is_active')
                   .eq('operator_id', operator.id)
                   .eq('machine_id', machineId)
-                  .single()
+                  .eq('device_id', deviceIdRef.current)
+                  .eq('is_active', true)
+                  .order('logged_in_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle()
 
                 if (!currentSession || !currentSession.is_active) {
-                  handleLogout()
+                  handleLogout('session_displaced')
                 }
               } catch {
                 // If query fails, don't force logout
@@ -845,14 +879,19 @@ export default function Finishing() {
           .single()
 
         if (finMachine) {
+          finishingMachineIdRef.current = finMachine.id
+          // INSERT, not upsert: there is no unique constraint on
+          // (operator_id, machine_id), so an onConflict upsert throws
+          // and the session row was never recorded.
           await supabase
             .from('kiosk_sessions')
-            .upsert({
+            .insert({
               operator_id: data.id,
               machine_id: finMachine.id,
+              device_id: deviceIdRef.current,
               logged_in_at: new Date().toISOString(),
               is_active: true
-            }, { onConflict: 'operator_id,machine_id' })
+            })
         }
       } catch (err) {
         // Session management failure must never block access
@@ -869,20 +908,31 @@ export default function Finishing() {
     }
   }
 
-  const handleLogout = async () => {
-    // Deactivate session on logout
+  const handleLogout = async (reason = 'manual') => {
+    if (typeof reason !== 'string') reason = 'manual'  // guard: onClick passes an event object
+    // Deactivate session on logout — scoped to (operator, machine, device).
+    // Without the machine/device filters this killed the operator's kiosk
+    // sessions on every other machine and device.
     if (operator) {
       try {
-        await supabase
+        let q = supabase
           .from('kiosk_sessions')
-          .update({ is_active: false })
+          .update({ is_active: false, logged_out_at: new Date().toISOString(), logout_reason: reason })
           .eq('operator_id', operator.id)
+        // Null when the session predates this fix (no anchor captured) —
+        // fall back to operator + device scoping only.
+        if (finishingMachineIdRef.current) {
+          q = q.eq('machine_id', finishingMachineIdRef.current)
+        }
+        await q
+          .eq('device_id', deviceIdRef.current)
           .eq('is_active', true)
       } catch (err) {
         console.error('Session deactivation error (non-blocking):', err)
       }
     }
 
+    finishingMachineIdRef.current = null
     setOperator(null)
     setActiveBatches([])
     setQueue([])
@@ -1699,7 +1749,7 @@ export default function Finishing() {
               <p className="text-gray-500 text-xs capitalize">{operator.role}</p>
             </div>
             <button
-              onClick={handleLogout}
+              onClick={() => handleLogout('manual')}
               className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded transition-colors"
             >
               <LogOut size={18} />

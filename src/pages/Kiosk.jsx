@@ -383,6 +383,34 @@ export default function Kiosk() {
     }
   }, [machineCode])
 
+  // iOS standalone apps resume a frozen page instead of remounting.
+  // On resume: retry a failed machine load, and if the operator's JWT
+  // expired while the tablet was asleep, drop to the PIN screen
+  // instead of a dead UI (suspended timers may not have fired).
+  useEffect(() => {
+    const onWake = async () => {
+      if (document.visibilityState !== 'visible') return
+      if (machineError || (!machine && !machineLoading)) {
+        loadMachine()
+        return
+      }
+      if (operator) {
+        try {
+          const { data: { session } } = await supabase.auth.getSession()
+          if (!session || (session.expires_at ?? 0) <= Math.floor(Date.now() / 1000)) {
+            handleLogout('jwt_expiry')
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    document.addEventListener('visibilitychange', onWake)
+    window.addEventListener('pageshow', onWake)
+    return () => {
+      document.removeEventListener('visibilitychange', onWake)
+      window.removeEventListener('pageshow', onWake)
+    }
+  }, [machine, machineError, machineLoading, operator])
+
   // Set document title when machine loads
   useEffect(() => {
     if (machine) {
@@ -520,16 +548,22 @@ export default function Kiosk() {
           // (step 1 deactivates all, step 2 reactivates this one)
           setTimeout(async () => {
             try {
+              // Filter by is_active=true and take the newest row —
+              // without it, accumulated inactive rows make .maybeSingle()
+              // return null and force a wrongful logout.
               const { data: currentSession } = await supabase
                 .from('kiosk_sessions')
                 .select('is_active')
                 .eq('operator_id', operator.id)
                 .eq('machine_id', machine.id)
                 .eq('device_id', deviceIdRef.current)
+                .eq('is_active', true)
+                .order('logged_in_at', { ascending: false })
+                .limit(1)
                 .maybeSingle()
 
               if (!currentSession || !currentSession.is_active) {
-                handleLogout()
+                handleLogout('session_displaced')
               }
             } catch {
               // If query fails, don't force logout
@@ -562,7 +596,7 @@ export default function Kiosk() {
 
         if (!session || !session.is_active) {
           console.log('Session deactivated — forcing logout')
-          handleLogout()
+          handleLogout('session_displaced')
         }
       } catch (err) {
         console.error('Session check failed:', err)
@@ -584,7 +618,7 @@ export default function Kiosk() {
       setToastMessage('Session expires in 15 minutes. PIN in again to continue.')
     }, WARN_AT)
     const forceTimer = setTimeout(() => {
-      handleLogout()
+      handleLogout('jwt_expiry')
     }, FORCE_AT)
     return () => {
       clearTimeout(warnTimer)
@@ -623,7 +657,7 @@ export default function Kiosk() {
       if (elapsed > INACTIVITY_TIMEOUT) {
         setShowTimeoutWarning(false)
         console.log('Inactivity timeout — logging out')
-        handleLogout()
+        handleLogout('inactivity')
       } else if (elapsed > INACTIVITY_TIMEOUT - 2 * 60 * 1000) {
         setShowTimeoutWarning(true)
       } else {
@@ -781,6 +815,18 @@ export default function Kiosk() {
   const loadMachine = async () => {
     setMachineLoading(true)
     setMachineError(null)
+    // iOS standalone containers hold their own (often expired) JWT.
+    // Clear it BEFORE querying, or the machines select goes out with a
+    // dead Bearer token and 401s. Must be awaited — the mount-time
+    // cleanup effect races this query and loses.
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session && (session.expires_at ?? 0) <= Math.floor(Date.now() / 1000)) {
+        await supabase.auth.signOut({ scope: 'local' })
+      }
+    } catch (e) {
+      console.warn('Pre-load stale-session check failed:', e)
+    }
     // iOS Safari and several browsers append a trailing slash when
     // saving a URL to the home screen. Strip it, plus any whitespace,
     // before lookup. DB stores codes uppercase; use ilike so the URL
@@ -1728,14 +1774,19 @@ export default function Kiosk() {
     setAuthError(null)
   }
 
-  const handleLogout = async () => {
+  const handleLogout = async (reason = 'manual') => {
+    if (typeof reason !== 'string') reason = 'manual'  // guard: onClick passes an event object
     // Deactivate kiosk session
     if (operator && machine) {
       try {
+        // Scoped to (operator, machine, device): without the machine_id
+        // filter, logging out of one kiosk window kills the session the
+        // operator just created in another window on the same device.
         await supabase
           .from('kiosk_sessions')
-          .update({ is_active: false })
+          .update({ is_active: false, logged_out_at: new Date().toISOString(), logout_reason: reason })
           .eq('operator_id', operator.id)
+          .eq('machine_id', machine.id)
           .eq('device_id', deviceIdRef.current)
           .eq('is_active', true)
       } catch (err) {
@@ -3971,6 +4022,12 @@ export default function Kiosk() {
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h1 className="text-2xl font-bold text-white mb-2">Machine Not Found</h1>
           <p className="text-gray-400 mb-6">{machineError}</p>
+          <button
+            onClick={() => loadMachine()}
+            className="px-6 py-3 bg-skynet-blue text-white rounded-lg font-semibold hover:bg-blue-600 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       </div>
     )
@@ -4073,7 +4130,7 @@ export default function Kiosk() {
                 <p className="text-gray-500 text-xs capitalize">{operator.role}</p>
               </div>
             </div>
-            <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors">
+            <button onClick={() => handleLogout('manual')} className="flex items-center gap-2 px-4 py-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded transition-colors">
               <LogOut size={18} /><span className="text-sm">Logout</span>
             </button>
           </div>

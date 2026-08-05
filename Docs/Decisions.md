@@ -2473,3 +2473,9 @@ RPCs 403. Compliance and machinists need the forecast for material planning and
 bar verification.
 **Files:** Docs/migrations/2026-07-31_rmf_gate_roles.sql, src/pages/Armory.jsx,
 src/components/rmforecast/RMForecastSection.jsx.
+
+### D-KIOSK-01 — Session deactivation scoped to (operator, machine, device); logout reasons recorded (2026-08-05)
+Kiosk/Finishing session deactivation is now scoped to (operator, machine, device); handleLogout records logged_out_at + logout_reason ('manual' | 'inactivity' | 'jwt_expiry' | 'session_displaced'). Fixes cascading forced logouts on multi-window tablets and Finishing-page crossfire. Finishing sessions now inserted (upsert removed — no unique constraint on operator_id+machine_id exists). Single-session-per-operator enforcement unchanged by design.
+
+### D-KIOSK-02 — Kiosk hardened for iOS standalone (home-screen icon) launches (2026-08-05)
+Expired JWT cleared synchronously before the machines lookup, Retry button added to the machine-error screen, and a visibilitychange/pageshow handler retries failed loads and forces re-PIN if the JWT expired during suspension. Root cause of "Failed to load machine" on tablet icons: isolated standalone storage container holding an expired 8h kiosk token, raced against the async cleanup effect.

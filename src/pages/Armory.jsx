@@ -3031,6 +3031,11 @@ export default function Armory({ profile }) {
               const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars <= LOW_STOCK_BAR_THRESHOLD).length
               const outCount = filteredInventoryRows.filter(r => r.available_bars === 0).length
               const negCount = filteredInventoryRows.filter(r => r.available_bars < 0).length
+              // Net available bars across the filtered lots. Negatives are included
+              // deliberately: the subtotal must reconcile with the forecast's ON HAND,
+              // which nets them too (D-INV-01).
+              const totalAvailBars = filteredInventoryRows.reduce(
+                (sum, r) => sum + Number(r.available_bars ?? 0), 0)
               const totalValue = filteredInventoryRows.reduce((sum, r) => (
                 r.price_per_bar != null && r.available_bars > 0
                   ? sum + r.available_bars * r.price_per_bar
@@ -3047,6 +3052,10 @@ export default function Armory({ profile }) {
                   <span className={outCount > 0 ? 'text-red-400' : ''}>{outCount} Out of Stock</span>
                   <span className="text-gray-700">·</span>
                   <span className={negCount > 0 ? 'text-red-400' : ''}>{negCount} Negative</span>
+                  <span className="text-gray-700">·</span>
+                  <span className="text-gray-300 font-medium">
+                    {totalAvailBars.toLocaleString(undefined, { maximumFractionDigits: 1 })} Bars Available
+                  </span>
                   <span className="text-gray-700">·</span>
                   <span>Est. Value ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>

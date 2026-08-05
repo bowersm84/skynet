@@ -474,9 +474,11 @@ export default function Armory({ profile }) {
 
       const rows = (data || []).map(r => {
         const receivedInches = (r.received_bars || 0) * (r.bar_length_inches || 0)
-        const availableBars = r.bar_length_inches > 0
-          ? (r.available_inches / r.bar_length_inches)
-          : r.available_bars
+        // Bars come straight from the view (received - used + adjustments).
+        // Never derive bars from inches / row bar_length: usage may have been
+        // logged against bars of a different length than the receipt row
+        // (D-INV-01; lot 2581 showed -64 instead of -20 this way).
+        const availableBars = Number(r.available_bars ?? 0)
         return {
           id: r.material_receiving_id,
           material_type: r.material_type,

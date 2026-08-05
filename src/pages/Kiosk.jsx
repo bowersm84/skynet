@@ -2837,18 +2837,35 @@ export default function Kiosk() {
         try {
           let matchedReceiving = null
 
-          // Step 1: Find matching material_receiving record (only if lot_number provided)
+          // Step 1: FIFO receipt attribution (D-INV-01). Oldest receipt row with
+          // bars remaining wins; zero-quantity stub rows are never charged. If
+          // every row is exhausted, charge the newest stocked row so the
+          // over-consumption stays visible in one place for reconciliation.
           if (savedLotNumber) {
-            const { data: recvData } = await supabase
+            const { data: recvRows } = await supabase
               .from('material_receiving')
-              .select('id, material_id, quantity')
+              .select('id, material_id, quantity, received_at')
               .eq('lot_number', savedLotNumber)
               .eq('material_type', savedMaterialType)
               .eq('bar_size', savedBarSize)
-              .order('received_at', { ascending: false })
-              .limit(1)
+              .gt('quantity', 0)
+              .order('received_at', { ascending: true })
 
-            matchedReceiving = recvData?.[0] || null
+            if (recvRows?.length) {
+              const ids = recvRows.map(r => r.id)
+              const { data: usageRows } = await supabase
+                .from('material_usage')
+                .select('material_receiving_id, quantity_used')
+                .in('material_receiving_id', ids)
+              const usedById = {}
+              for (const u of (usageRows || [])) {
+                usedById[u.material_receiving_id] =
+                  (usedById[u.material_receiving_id] || 0) + (u.quantity_used || 0)
+              }
+              matchedReceiving =
+                recvRows.find(r => (r.quantity - (usedById[r.id] || 0)) > 0) ||
+                recvRows[recvRows.length - 1]
+            }
           }
 
           // Step 2: Always insert usage record

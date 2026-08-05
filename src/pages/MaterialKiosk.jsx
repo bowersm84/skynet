@@ -471,12 +471,35 @@ export default function MaterialKiosk() {
       ;(async () => {
         try {
           let matchedReceiving = null
+          // FIFO receipt attribution (D-INV-01). Oldest receipt row with bars
+          // remaining wins; zero-quantity stub rows are never charged. If every
+          // row is exhausted, charge the newest stocked row so the
+          // over-consumption stays visible in one place for reconciliation.
           if (newLot) {
-            const { data: recv } = await supabase
-              .from('material_receiving').select('id, material_id, quantity')
-              .eq('lot_number', newLot).eq('material_type', savedType).eq('bar_size', savedSize)
-              .order('received_at', { ascending: false }).limit(1)
-            matchedReceiving = recv?.[0] || null
+            const { data: recvRows } = await supabase
+              .from('material_receiving')
+              .select('id, material_id, quantity, received_at')
+              .eq('lot_number', newLot)
+              .eq('material_type', savedType)
+              .eq('bar_size', savedSize)
+              .gt('quantity', 0)
+              .order('received_at', { ascending: true })
+
+            if (recvRows?.length) {
+              const ids = recvRows.map(r => r.id)
+              const { data: usageRows } = await supabase
+                .from('material_usage')
+                .select('material_receiving_id, quantity_used')
+                .in('material_receiving_id', ids)
+              const usedById = {}
+              for (const u of (usageRows || [])) {
+                usedById[u.material_receiving_id] =
+                  (usedById[u.material_receiving_id] || 0) + (u.quantity_used || 0)
+              }
+              matchedReceiving =
+                recvRows.find(r => (r.quantity - (usedById[r.id] || 0)) > 0) ||
+                recvRows[recvRows.length - 1]
+            }
           }
           await supabase.from('material_usage').insert({
             material_receiving_id: matchedReceiving?.id || null, material_id: matchedReceiving?.material_id || null,

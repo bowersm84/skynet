@@ -40,6 +40,9 @@ import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
 import { userRoles, hasRole, canWriteMasterData, canReceive } from '../lib/roles'
 
+// Lots at or below this many available bars render as low stock (amber).
+const LOW_STOCK_BAR_THRESHOLD = 5
+
 export default function Armory({ profile }) {
   const canWrite = canWriteMasterData(profile)
   // Per-role tab visibility. Single source of truth.
@@ -3025,7 +3028,7 @@ export default function Armory({ profile }) {
             {(() => {
               const totalLots = filteredInventoryRows.length
               const stagingCount = filteredInventoryRows.filter(r => r.rack === null).length
-              const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars < 2).length
+              const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars <= LOW_STOCK_BAR_THRESHOLD).length
               const outCount = filteredInventoryRows.filter(r => r.available_bars === 0).length
               const negCount = filteredInventoryRows.filter(r => r.available_bars < 0).length
               const totalValue = filteredInventoryRows.reduce((sum, r) => (
@@ -3099,7 +3102,7 @@ export default function Armory({ profile }) {
                   <tbody className="divide-y divide-gray-700">
                     {filteredInventoryRows.map(row => {
                       const isOut = row.available_bars === 0
-                      const isLow = row.available_bars > 0 && row.available_bars < 2
+                      const isLow = row.available_bars > 0 && row.available_bars <= LOW_STOCK_BAR_THRESHOLD
                       const isNeg = row.available_bars < 0
                       const isStaging = row.rack === null
                       const hasBarLength = row.bar_length_inches > 0

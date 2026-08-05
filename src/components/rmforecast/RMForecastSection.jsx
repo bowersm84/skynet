@@ -16,8 +16,9 @@ export default function RMForecastSection({ profile, materialTypes = [], barSize
   // than erroring for everyone else.
   const canView = hasRole(profile, 'admin', 'scheduler', 'purchaser', 'compliance', 'machinist')
   // Exceptions and corrections both write part_dimensions, whose INSERT/UPDATE
-  // RLS is admin/scheduler. Every other viewing role is read-only.
-  const canWriteDimensions = hasRole(profile, 'admin', 'scheduler')
+  // RLS is admin/scheduler/purchaser (D-RMF-07). Compliance and machinist
+  // remain read-only viewers.
+  const canWriteDimensions = hasRole(profile, 'admin', 'scheduler', 'purchaser')
 
   const [data, setData] = useState(EMPTY)
   const [dimRows, setDimRows] = useState([])

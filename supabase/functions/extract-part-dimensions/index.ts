@@ -124,14 +124,17 @@ Deno.serve(async (req) => {
     const user = userData?.user;
     if (userError || !user) return json({ error: "Unauthorized" }, 401);
 
-    // Mirrors part_dimensions INSERT/UPDATE RLS — only roles that could commit
-    // the value are allowed to ask for a suggestion.
+    // Mirrors part_dimensions INSERT/UPDATE RLS (D-RMF-07) — only roles that
+    // could commit the value are allowed to ask for a suggestion. Multi-role
+    // aware: primary role OR the roles[] array (D-MROLE-02).
     const { data: prof } = await admin
       .from("profiles")
-      .select("role")
+      .select("role, roles")
       .eq("id", user.id)
       .single();
-    if (!prof || !["admin", "scheduler"].includes(prof.role)) {
+    const allowedRoles = ["admin", "scheduler", "purchaser"];
+    const userRoles = [prof?.role, ...(prof?.roles ?? [])].filter(Boolean);
+    if (!userRoles.some((r) => allowedRoles.includes(r))) {
       return json({ error: "Not authorized" }, 403);
     }
 

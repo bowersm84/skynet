@@ -449,6 +449,50 @@ export function validateIntakeFields(form) {
   return errors
 }
 
+// ---------------------------------------------------------------------------
+// The linked lot is authoritative for the three claim fields (D-KSTC-34)
+// ---------------------------------------------------------------------------
+
+// On the lot-first path these are not asked: the warehouse's own log entry
+// already states them, and asking a second time invites a typo that reads as a
+// customer's claim. Extraction is not authoritative for them either — the lot
+// wins, and the operator sees the derived values as a read-only summary.
+export const LOT_DERIVED_FIELDS = ['claimedKitNumber', 'claimedKitPart', 'claimedOrderNumber']
+
+// Same COALESCE order the registry uses everywhere else: the resolved SKU
+// before the as-written kit part, and the bench's SO before the paper books'
+// invoice number (D-KSTC-11 / D-KSTC-27). Returns null when nothing is linked,
+// which is the escape-hatch path where all three stay real inputs.
+export function deriveClaimsFromLot(lot) {
+  if (!lot) return null
+  return {
+    claimedKitNumber: String(lot.lot_number ?? '').trim(),
+    claimedKitPart: String(lot.sku?.part_number || lot.kit_part_as_written || '').trim(),
+    claimedOrderNumber: String(lot.so_as_written || lot.invoice_as_written || '').trim(),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// STC intake raised from Kit Entry (D-KSTC-33)
+// ---------------------------------------------------------------------------
+
+// Everything else on an intake is derivable from the entry being saved — the
+// kit number it is about to be assigned, its SKU, its SO, today's date — so Kit
+// Entry asks only for what the customer's request carries and nothing else.
+// The messages come from REQUIRED_FIELDS so the two surfaces cannot drift.
+export const STC_AT_ENTRY_REQUIRED = [
+  'requesterName', 'requesterCompany', 'claimedAircraftSerial', 'claimedRegistration',
+]
+
+export function validateStcAtEntryFields(form) {
+  const errors = {}
+  for (const [key, message] of REQUIRED_FIELDS) {
+    if (!STC_AT_ENTRY_REQUIRED.includes(key)) continue
+    if (!String(form?.[key] ?? '').trim()) errors[key] = message
+  }
+  return errors
+}
+
 // The blank form. Exported so the intake form and the drawer's edit mode agree
 // on the field set without either one listing it again.
 export const BLANK_INTAKE = {

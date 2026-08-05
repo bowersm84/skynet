@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { FIELD_DEBOUNCE } from '../../lib/kitRegistry'
 import { matchClaimedKit, matchAircraftClaim, matchCompany } from '../../lib/stcIntake'
-import { extractPackingSlip, seedLines } from '../../lib/packingSlip'
+import { extractPackingSlip, seedLines, compressImageForExtraction } from '../../lib/packingSlip'
 
 // Hooks live outside the .jsx so `react-refresh/only-export-components` stays
 // clean — the same split D-RMF-04 settled on for usePartDimensionEditor.
@@ -105,13 +105,16 @@ export function useSlipExtraction() {
     const picked = [...(files || [])][0]
     if (!picked) return null
 
+    // The ORIGINAL file is what is held and later attached to the lot — it is
+    // the evidence. Only the copy sent to the extractor is shrunk (D-KSTC-31).
     setFile(picked)
     setError(null)
     setSlip(null)
     setLines({})
     setBusy(true)
     try {
-      const envelope = await extractPackingSlip(picked)
+      const forExtraction = await compressImageForExtraction(picked)
+      const envelope = await extractPackingSlip(forExtraction)
       setSlip(envelope)
       setLines(seedLines(envelope))
       return envelope

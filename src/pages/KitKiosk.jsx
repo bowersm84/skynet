@@ -9,11 +9,12 @@ import PackingSlipTab from '../components/kitregistry/PackingSlipTab'
 // can't drift apart on formatting or filter escaping.
 import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
 import { slipPlan, savePackingSlipGroup, attachSlipDocument } from '../lib/packingSlip'
+import { createStcRequest, validateStcAtEntryFields, STC_AT_ENTRY_REQUIRED } from '../lib/stcIntake'
 import { useSlipExtraction } from '../components/kitregistry/hooks'
 import KitEntrySlipSection from '../components/kitregistry/KitEntrySlipSection'
 import {
   Loader2, LogOut, BookOpen, Search, FileCheck, CheckCircle,
-  X, ClipboardList, Plus, PackageOpen,
+  ClipboardList, Plus, PackageOpen,
 } from 'lucide-react'
 
 // Shared with the machine kiosk / rack kiosk — this is the same physical device.
@@ -24,6 +25,19 @@ const BOOKS_WITHOUT_STUD = ['RV']
 
 const TYPEAHEAD_DEBOUNCE = 250
 const SO_DEBOUNCE = 400
+
+// The only intake fields Kit Entry asks for (D-KSTC-33). Everything else on the
+// request — the date, the kit number, the kit part, the order — is derived from
+// the entry being saved, so asking for it again would invite a contradiction.
+const BLANK_STC_AT_ENTRY = {
+  requesterName: '',
+  requesterEmail: '',
+  requesterCompany: '',
+  claimedAircraftSerial: '',
+  claimedRegistration: '',
+  purchasedFrom: '',
+  notes: '',
+}
 
 // A kit_skus row whose description is missing, or just repeats the part number,
 // has no second line worth showing — never render the same string twice.
@@ -118,11 +132,22 @@ export default function KitKiosk() {
   // thing by "the slip says" (D-KSTC-29).
   const slipState = useSlipExtraction()
 
+  // --- Customer requested STC (OFFICE ONLY, D-KSTC-33) ---------------------
+  // Never rendered at the bench: an intake is a compliance record that must
+  // trace to a real authenticated user, and a device JWT is not one — the same
+  // reason the Log STC tab itself is office-only (D-KSTC-06).
+  const [stcWanted, setStcWanted] = useState(false)
+  const [stcForm, setStcForm] = useState(BLANK_STC_AT_ENTRY)
+  const [stcFieldErrors, setStcFieldErrors] = useState({})
+  const stcRefs = useRef({})
+
   // --- Entry state ---------------------------------------------------------
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [fieldErrors, setFieldErrors] = useState({})
-  const [success, setSuccess] = useState(null)  // { lotNumber, bookName, who }
+  // { lotNumber, bookName, kitLabel, who, slip, stc } — set once, and while it
+  // is set the form is GONE (D-KSTC-32).
+  const [success, setSuccess] = useState(null)
 
   // Focus targets for the first invalid field, in visual order.
   const kitPartRef = useRef(null)
@@ -146,6 +171,15 @@ export default function KitKiosk() {
   // Clears one field's error as soon as the operator starts fixing it.
   const clearFieldError = useCallback((key) => {
     setFieldErrors(prev => (prev[key] ? { ...prev, [key]: undefined } : prev))
+  }, [])
+
+  // Read by both the save chain and the render, so what the operator ticked and
+  // what the save does cannot disagree. Kiosk mode can never reach it.
+  const wantsStc = mode === 'office' && stcWanted
+
+  const setStcField = useCallback((key, value) => {
+    setStcForm(prev => ({ ...prev, [key]: value }))
+    setStcFieldErrors(prev => (prev[key] ? { ...prev, [key]: undefined } : prev))
   }, [])
 
   useEffect(() => {
@@ -498,6 +532,19 @@ export default function KitKiosk() {
     }
   }
 
+  // STC_AT_ENTRY_REQUIRED is in screen order, so it doubles as the focus order —
+  // the same rule the Log STC form follows.
+  const focusFirstInvalidStc = (errors) => {
+    for (const key of STC_AT_ENTRY_REQUIRED) {
+      const el = stcRefs.current[key]
+      if (errors[key] && el) {
+        el.focus({ preventScroll: true })
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        return
+      }
+    }
+  }
+
   // kit_assign_and_log returns the new row's id; the lookup is a fallback for a
   // deployment still on an older signature, because without an id the slip half
   // has nothing to attach to.
@@ -536,6 +583,32 @@ export default function KitKiosk() {
     }
   }
 
+  // The STC half, run after the kit is logged and independently of the slip
+  // half: either can fail without touching the other, and neither may ever make
+  // a saved kit look unsaved (D-KSTC-33). Returns a verdict, never throws.
+  //
+  // The three claim fields are taken from the entry itself — the same rule the
+  // intake form applies to a linked lot (D-KSTC-34): the kit is the authority
+  // on its own number, part and order, so nobody retypes them into a claim.
+  const recordStcRequest = async (lotId, lotNumber) => {
+    if (!lotId) return { ok: false, reason: 'the new kit lot could not be resolved' }
+    try {
+      const { intakeNumber } = await createStcRequest({
+        ...stcForm,
+        receivedDate: todayLocal(),
+        channel: 'email',
+        claimedKitNumber: String(lotNumber),
+        claimedKitPart: kitPartText.trim(),
+        claimedOrderNumber: soText.trim(),
+        kitLotId: lotId,
+      })
+      return { ok: true, intakeNumber }
+    } catch (err) {
+      console.error('Creating the STC request failed after the kit was logged:', err)
+      return { ok: false, reason: err.message || 'the request could not be created' }
+    }
+  }
+
   // The number is assigned server-side under a kit_books row lock, so two
   // benches saving at once can never collide and never leave a gap
   // (D-KSTC-10). Never insert into kit_lots directly from here.
@@ -562,10 +635,23 @@ export default function KitKiosk() {
       const assigned = Array.isArray(data) ? data[0] : data
       if (!assigned?.lot_number) throw new Error('The registry did not return a kit number.')
 
-      // The kit is logged. From here nothing may throw — a slip problem is
-      // reported beside the number, never instead of it, so the outer catch
+      // The kit is logged. From here nothing may throw — a slip or STC problem
+      // is reported beside the number, never instead of it, so the outer catch
       // (which says "could not save this entry") can never claim a saved kit
-      // was lost.
+      // was lost. Order is kit → slip → STC, and each result line stands alone.
+      //
+      // Both optional halves hang off the new lot's id, so it is resolved once.
+      const needsLot = slipState.hasFile || wantsStc
+      let lotId = null
+      if (needsLot) {
+        try {
+          lotId = await resolveLotId(assigned)
+        } catch (err) {
+          console.error('Resolving the new kit lot failed:', err)
+          lotId = null
+        }
+      }
+
       let slip = null
       if (slipState.hasFile) {
         try {
@@ -576,7 +662,6 @@ export default function KitKiosk() {
           } else if (!plan.recordable.length) {
             slip = { ok: false, reason: 'no component lines were left to record' }
           } else {
-            const lotId = await resolveLotId(assigned)
             slip = lotId
               ? await recordSlip(lotId, createdById)
               : { ok: false, reason: 'the new kit lot could not be resolved' }
@@ -587,6 +672,8 @@ export default function KitKiosk() {
         }
       }
 
+      const stc = wantsStc ? await recordStcRequest(lotId, assigned.lot_number) : null
+
       // Whatever the RPC returned is the number on the kit. If it differs from
       // the advisory (someone else logged first) it is simply correct — shown
       // without comment.
@@ -595,10 +682,14 @@ export default function KitKiosk() {
         // The RPC returns the code; the friendly name is what the bench reads.
         // Both name the same book — the RPC assigned into the one we selected.
         bookName: book.name || assigned.book_code || book.code,
+        bookCode: book.code || assigned.book_code || '',
+        // The kit's name as the registry knows it: the catalog description when
+        // there is a real one, otherwise whatever was typed / picked.
+        kitLabel: kitSkuDesc || kitPartText.trim(),
         who: createdByName || '',
         slip,
+        stc,
       })
-      await applyLogAnother()
       return true
     } catch (err) {
       console.error('Error saving kit lot:', err)
@@ -614,12 +705,18 @@ export default function KitKiosk() {
     if (reason) { setSaveError(reason); return }
 
     // Validate FIRST — before the RPC in office mode, and before the PIN pad in
-    // kiosk mode. An operator must never enter a PIN for a doomed save.
+    // kiosk mode. An operator must never enter a PIN for a doomed save. The STC
+    // block is checked in the same breath: a request that would be refused must
+    // stop the save here, not after the kit already has a number.
     const errors = validateEntry()
+    const stcErrors = wantsStc ? validateStcAtEntryFields(stcForm) : {}
     setFieldErrors(errors)
-    if (Object.keys(errors).length > 0) {
+    setStcFieldErrors(stcErrors)
+    if (Object.keys(errors).length > 0 || Object.keys(stcErrors).length > 0) {
       setSaveError(null)
-      focusFirstInvalid(errors)
+      // The kit's own fields sit above the STC block, so they get the cursor first.
+      if (Object.keys(errors).length > 0) focusFirstInvalid(errors)
+      else focusFirstInvalidStc(stcErrors)
       return
     }
 
@@ -663,23 +760,13 @@ export default function KitKiosk() {
     }
   }
 
-  // ---------- Resets --------------------------------------------------------
-  // The batch-of-kits flow: same kit name, book, date, customer and SO carry
-  // over; only the per-kit lot fields clear. The advisory number is refetched
-  // so it reflects the row we just wrote.
-  const applyLogAnother = async () => {
-    setStudNumber('')
-    setPlatemount('')
-    setNotes('')
-    setSaveError(null)
-    setFieldErrors({})
-    // The slip belongs to the kit just logged, not the next one. A multi-kit
-    // slip is re-uploaded for its sibling — safe, because the unique key makes
-    // re-recording a no-op (D-KSTC-29).
-    slipState.reset()
-    await refreshAdvisory(book)
-  }
-
+  // ---------- Reset ---------------------------------------------------------
+  // ONE reset, and it is total (D-KSTC-32). The old "log another" carried the
+  // kit name, book, customer and SO into the next entry beside a freshly
+  // advanced number — which is exactly how the same kit gets logged twice, or a
+  // second kit gets logged under the first one's customer. Nothing survives now:
+  // every field, the SO echo, the slip, the STC block, and the advisory number,
+  // which the next book selection refetches from the row we just wrote.
   const resetAll = () => {
     setBook(null)
     setAdvisoryNumber(null)
@@ -690,9 +777,11 @@ export default function KitKiosk() {
     setKitPartText(''); setKitSkuId(null); setKitSkuDesc(null); setSkuSuggestions([]); setSkuOpen(false)
     if (customerText) partySuppressRef.current = true
     setCustomerText(''); setPartyId(null); setPartySuggestions([]); setPartyOpen(false)
-    setSoText(''); setSoInfo(null); setSaleLineId(null)
+    setSoText(''); setSoInfo(null); setSoChecking(false); setSaleLineId(null)
     setStudNumber(''); setPlatemount(''); setNotes('')
     slipState.reset()
+    setStcWanted(false); setStcForm(BLANK_STC_AT_ENTRY); setStcFieldErrors({})
+    stcRefs.current = {}
     setSaveError(null); setSuccess(null); setFieldErrors({})
   }
 
@@ -796,64 +885,76 @@ export default function KitKiosk() {
         </nav>
       </header>
 
-      {nav === 'entry' && (
+      {/* ---- Confirmation: TERMINAL (D-KSTC-32) ----
+          A saved entry replaces the form outright. There is no way back to the
+          fields that produced it and no second button offering one — the number
+          is assigned, the record exists, and the only thing left to do is start
+          a genuinely new entry. */}
+      {nav === 'entry' && success && (
         <div className="p-5 max-w-3xl mx-auto">
-          {/* The assigned number is the authoritative moment — rendered bare and
-              huge so it can be copied straight onto the kit label. */}
-          {success && (
-            <div className="mb-5 bg-green-900/30 border border-green-700 rounded-xl p-5">
-              <div className="flex items-start gap-3">
-                <CheckCircle size={22} className="text-green-400 shrink-0 mt-1" />
-                <div className="min-w-0 flex-1">
-                  <p className="font-mono font-bold text-green-200 text-6xl leading-none tracking-tight">
-                    {success.lotNumber}
-                  </p>
-                  <p className="text-green-300/80 text-sm mt-2">
-                    {success.bookName}{success.who ? ` · logged by ${success.who}` : ''}
-                  </p>
+          <div className="bg-green-900/30 border border-green-700 rounded-xl p-6">
+            <div className="flex items-start gap-3">
+              <CheckCircle size={22} className="text-green-400 shrink-0 mt-1" />
+              <div className="min-w-0 flex-1">
+                {/* The assigned number is the authoritative moment — rendered
+                    bare and huge so it can be copied straight onto the kit
+                    label. */}
+                <p className="font-mono font-bold text-green-200 text-6xl leading-none tracking-tight">
+                  {success.lotNumber}
+                </p>
+                <p className="text-green-300/90 text-sm mt-3">
+                  <span className="font-mono">
+                    {success.bookCode ? `${success.bookCode} ` : ''}{success.lotNumber}
+                  </span>
+                  {success.kitLabel ? ` — ${success.kitLabel}` : ''}
+                  {success.who ? ` · logged by ${success.who}` : ''}
+                </p>
 
-                  {/* The kit number is the headline whatever happened to the
-                      slip. The slip's fate is reported UNDER it, never in place
-                      of it — the operator must never be left unsure the kit
-                      saved (D-KSTC-29). */}
-                  {success.slip?.ok && (
-                    <p className="text-green-300/80 text-sm mt-1">
-                      {success.slip.inserted} component lot{success.slip.inserted === 1 ? '' : 's'} recorded
-                      {success.slip.skipped ? ` (${success.slip.skipped} already on file)` : ''}
-                      {success.slip.docError
-                        ? ` — but ${success.slip.docError}; re-attach it from the Packing Slip tab`
-                        : ''}
-                    </p>
-                  )}
-                  {success.slip && !success.slip.ok && (
-                    <p className="text-amber-300 text-sm mt-1">
-                      Kit saved. Slip not recorded ({success.slip.reason}) — use the Packing Slip
-                      tab to attach it.
-                    </p>
-                  )}
+                {/* The kit number is the headline whatever happened to the
+                    paperwork riding with it. Each optional half reports its own
+                    fate UNDER it, never in place of it — the operator must never
+                    be left unsure the kit saved (D-KSTC-29 / D-KSTC-33). */}
+                {success.slip?.ok && (
+                  <p className="text-green-300/80 text-sm mt-1.5">
+                    {success.slip.inserted} component lot{success.slip.inserted === 1 ? '' : 's'} recorded
+                    {success.slip.skipped ? ` (${success.slip.skipped} already on file)` : ''}
+                    {success.slip.docError
+                      ? ` — but ${success.slip.docError}; re-attach it from the Packing Slip tab`
+                      : ''}
+                  </p>
+                )}
+                {success.slip && !success.slip.ok && (
+                  <p className="text-amber-300 text-sm mt-1.5">
+                    Kit saved. Slip not recorded ({success.slip.reason}) — use the Packing Slip
+                    tab to attach it.
+                  </p>
+                )}
 
-                  <div className="flex flex-wrap gap-2 mt-4">
-                    <button
-                      onClick={() => setSuccess(null)}
-                      className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-700 hover:bg-green-600 text-white text-sm font-medium"
-                    >
-                      <Plus size={16} /> Log another
-                    </button>
-                    <button
-                      onClick={resetAll}
-                      className="px-4 py-2.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-medium"
-                    >
-                      New entry
-                    </button>
-                  </div>
-                </div>
-                <button onClick={() => setSuccess(null)} className="text-green-400/60 hover:text-green-200">
-                  <X size={18} />
+                {success.stc?.ok && (
+                  <p className="text-green-300/80 text-sm mt-1.5">
+                    STC request #{success.stc.intakeNumber} opened · matched to this kit.
+                  </p>
+                )}
+                {success.stc && !success.stc.ok && (
+                  <p className="text-amber-300 text-sm mt-1.5">
+                    Kit saved. STC request not created ({success.stc.reason}) — use Log STC.
+                  </p>
+                )}
+
+                <button
+                  onClick={resetAll}
+                  className="mt-6 flex items-center gap-2 px-5 py-3 rounded-xl bg-green-700 hover:bg-green-600 text-white text-base font-semibold"
+                >
+                  <Plus size={18} /> Add new entry
                 </button>
               </div>
             </div>
-          )}
+          </div>
+        </div>
+      )}
 
+      {nav === 'entry' && !success && (
+        <div className="p-5 max-w-3xl mx-auto">
           {/* ---- Book ---- */}
           <Field label="Book">
             {booksLoading ? (
@@ -1052,6 +1153,135 @@ export default function KitKiosk() {
                 />
               </Field>
 
+              {/* ---- Customer requested STC — OFFICE ONLY (D-KSTC-33) ----
+                  Hidden entirely at the bench, not merely disabled: an intake is
+                  a compliance record that must trace to a real authenticated
+                  user, and a shared device's JWT cannot satisfy that. */}
+              {mode === 'office' && (
+                <div className="mb-5">
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={stcWanted}
+                      onChange={e => {
+                        const on = e.target.checked
+                        setStcWanted(on)
+                        if (on) {
+                          // Pre-filled from the Customer field and editable from
+                          // there — the requester is usually, but not always,
+                          // the company the kit was sold to.
+                          setStcForm(prev => (prev.requesterCompany.trim()
+                            ? prev
+                            : { ...prev, requesterCompany: customerText.trim() }))
+                        } else {
+                          setStcFieldErrors({})
+                        }
+                      }}
+                      className="mt-0.5 h-5 w-5 shrink-0 rounded border-gray-600 bg-gray-800 text-skynet-accent focus:ring-skynet-accent"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-gray-200 text-sm font-medium">
+                        Customer requested STC with this kit
+                      </span>
+                      <span className="block text-gray-500 text-xs mt-0.5">
+                        Opens the STC request against this kit as it is logged — born matched,
+                        so it never joins the resolution backlog.
+                      </span>
+                    </span>
+                  </label>
+
+                  {stcWanted && (
+                    <div className="mt-4 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+                      {/* The same derive-don't-ask rule the intake form applies to
+                          a linked lot (D-KSTC-34) — stated up front so nobody
+                          hunts for fields that are answered already. */}
+                      <p className="text-gray-400 text-xs mb-4">
+                        Taken from this entry — not asked again: kit&nbsp;
+                        <span className="font-mono text-gray-300">{advisoryNumber ?? '—'}</span>
+                        {kitPartText.trim() ? <> · <span className="font-mono text-gray-300">{kitPartText.trim()}</span></> : null}
+                        {soText.trim() ? <> · SO <span className="font-mono text-gray-300">{soText.trim()}</span></> : null}
+                        {' '}· received today
+                      </p>
+
+                      <div className="grid sm:grid-cols-2 gap-4">
+                        <Field label="Requester name" required error={stcFieldErrors.requesterName}>
+                          <input
+                            ref={el => { stcRefs.current.requesterName = el }}
+                            aria-required="true"
+                            value={stcForm.requesterName}
+                            onChange={e => setStcField('requesterName', e.target.value)}
+                            className={stcInputClass(stcFieldErrors.requesterName)}
+                          />
+                        </Field>
+                        <Field label="Email" optional>
+                          <input
+                            value={stcForm.requesterEmail}
+                            onChange={e => setStcField('requesterEmail', e.target.value)}
+                            className={stcInputClass()}
+                          />
+                        </Field>
+                      </div>
+
+                      <Field label="Company" required error={stcFieldErrors.requesterCompany}>
+                        <input
+                          ref={el => { stcRefs.current.requesterCompany = el }}
+                          aria-required="true"
+                          value={stcForm.requesterCompany}
+                          onChange={e => setStcField('requesterCompany', e.target.value)}
+                          className={stcInputClass(stcFieldErrors.requesterCompany)}
+                        />
+                      </Field>
+
+                      <div className="grid sm:grid-cols-2 gap-4">
+                        <Field label="Aircraft serial" required error={stcFieldErrors.claimedAircraftSerial}>
+                          <input
+                            ref={el => { stcRefs.current.claimedAircraftSerial = el }}
+                            aria-required="true"
+                            value={stcForm.claimedAircraftSerial}
+                            onChange={e => setStcField('claimedAircraftSerial', e.target.value)}
+                            className={stcInputClass(stcFieldErrors.claimedAircraftSerial)}
+                          />
+                        </Field>
+                        <Field label="Registration" required error={stcFieldErrors.claimedRegistration}>
+                          <input
+                            ref={el => { stcRefs.current.claimedRegistration = el }}
+                            aria-required="true"
+                            value={stcForm.claimedRegistration}
+                            onChange={e => setStcField('claimedRegistration', e.target.value)}
+                            className={stcInputClass(stcFieldErrors.claimedRegistration)}
+                          />
+                        </Field>
+                      </div>
+
+                      <Field label="Purchased from" optional>
+                        <input
+                          value={stcForm.purchasedFrom}
+                          onChange={e => setStcField('purchasedFrom', e.target.value)}
+                          className={stcInputClass()}
+                        />
+                      </Field>
+
+                      <div className="mb-0">
+                        <Field label="Request notes" optional>
+                          <textarea
+                            value={stcForm.notes}
+                            onChange={e => setStcField('notes', e.target.value)}
+                            rows={2}
+                            placeholder="What the customer asked for, in their words"
+                            className={`${stcInputClass()} resize-none`}
+                          />
+                        </Field>
+                      </div>
+
+                      <p className="text-gray-500 text-xs">
+                        Saved exactly as the customer wrote it — serials and registrations are
+                        claims, not facts, and are never reformatted or checked here.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <p className="text-gray-500 text-xs mb-3">
                 <span className="text-red-400">*</span> required
               </p>
@@ -1151,6 +1381,15 @@ function Field({ label, required, optional, error, children }) {
 // Border treatment for an input that failed validation.
 const INVALID_BORDER = 'border-red-500'
 const VALID_BORDER = 'border-gray-700'
+
+// The STC block sits inside a card rather than on the page, so its inputs are
+// the compact variant — matching StcRequestFields, which is what the operator
+// sees for the same fields over on the Log STC tab.
+function stcInputClass(error) {
+  return `w-full px-3 py-2.5 bg-gray-900 border rounded-lg text-white text-sm placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${
+    error ? INVALID_BORDER : VALID_BORDER
+  }`
+}
 
 function Suggestions({ children, onDismiss }) {
   return (

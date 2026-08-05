@@ -21,16 +21,22 @@ import { Pill } from './ui'
 //                  ALL of them (creation, D-KSTC-20). Edit mode passes the set
 //                  that currently holds a value, because there the asterisk
 //                  means "cannot be blanked", not "must be filled" (D-KSTC-23).
+//   hiddenFields   optional Set of keys not to render at all. Used by the
+//                  lot-first intake path, where the linked kit log is
+//                  authoritative for the three claim fields and the form shows
+//                  them as a derived summary instead of asking (D-KSTC-34).
+//                  Omitted means every field renders — edit mode never passes it.
 
 export default function StcRequestFields({
   form, onChange, fieldErrors = {}, registerField = () => {},
   chipFor, kitMismatch = null, hints = null, lockedExceptNotes = false,
-  requiredFields = null,
+  requiredFields = null, hiddenFields = null,
 }) {
   const chip = key => (chipFor ? chipFor(key) : null)
   const locked = lockedExceptNotes
   // No set supplied = creation, where every one of the eight is required.
   const req = key => (requiredFields ? requiredFields.has(key) : true)
+  const hid = key => !!hiddenFields?.has(key)
 
   return (
     <div>
@@ -98,10 +104,15 @@ export default function StcRequestFields({
         )}
       </Field>
 
+      {/* Required on every request the operator is ASKED for (D-KSTC-20). On the
+          lot-first path both are derived from the linked log instead of typed,
+          and the whole row drops out rather than leaving a lone half-width
+          field behind (D-KSTC-34). */}
+      {(!hid('claimedKitNumber') || !hid('claimedKitPart')) && (
       <div className="grid sm:grid-cols-2 gap-4">
-        {/* Required on every request, linked or not (D-KSTC-20). A claim that
-            disagrees with the linked log shows the mismatch chip and still saves —
-            the disagreement is data the office needs, not an error. */}
+        {/* A claim that disagrees with the linked log shows the mismatch chip and
+            still saves — the disagreement is data the office needs, not an error. */}
+        {!hid('claimedKitNumber') && (
         <Field
           label="Claimed kit #"
           required={req('claimedKitNumber')}
@@ -123,6 +134,8 @@ export default function StcRequestFields({
             </Hint>
           )}
         </Field>
+        )}
+        {!hid('claimedKitPart') && (
         <Field label="Claimed kit part" required={req('claimedKitPart')} error={fieldErrors.claimedKitPart} chip={chip('claimedKitPart')}>
           <input
             ref={el => registerField('claimedKitPart', el)}
@@ -133,7 +146,9 @@ export default function StcRequestFields({
             className={inputClass(fieldErrors.claimedKitPart)}
           />
         </Field>
+        )}
       </div>
+      )}
 
       <div className="grid sm:grid-cols-2 gap-4">
         <Field label="Aircraft serial" required={req('claimedAircraftSerial')} error={fieldErrors.claimedAircraftSerial} chip={chip('claimedAircraftSerial')}>
@@ -167,6 +182,7 @@ export default function StcRequestFields({
       )}
 
       <div className="grid sm:grid-cols-2 gap-4">
+        {!hid('claimedOrderNumber') && (
         <Field label="Order #" required={req('claimedOrderNumber')} error={fieldErrors.claimedOrderNumber} chip={chip('claimedOrderNumber')}>
           <input
             ref={el => registerField('claimedOrderNumber', el)}
@@ -178,6 +194,7 @@ export default function StcRequestFields({
             className={inputClass(fieldErrors.claimedOrderNumber)}
           />
         </Field>
+        )}
         <Field label="Purchased from" optional chip={chip('purchasedFrom')}>
           <input
             disabled={locked}

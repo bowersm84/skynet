@@ -35,6 +35,29 @@ const EXT_MEDIA_TYPE = {
   webp: 'image/webp',
 }
 
+const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+// A bench photo of a slip goes to the extractor as base64 inside one JSON body.
+// Measured against TEST 2026-08-05: a 5.6 MB image extracts fine, an 8.3 MB one
+// comes back "Extraction service error 400" from the model API, and only above
+// the function's own 20 MB gate does the operator get a sentence they can act
+// on. That silent middle band is what the bench hit, so images are re-encoded
+// well below it rather than sent as the camera wrote them.
+export const MAX_IMAGE_BYTES = 3 * 1024 * 1024
+export const MAX_PDF_BYTES = 8 * 1024 * 1024
+
+// 2200px on the longest edge keeps a printed slip's lot numbers legible — the
+// text is what the model reads, and a 12 MP camera photo carries no more usable
+// detail than this once it is a document rather than a picture.
+const MAX_IMAGE_EDGE = 2200
+// Quality ladder, then a scale step. Tried in order until the output fits.
+const JPEG_QUALITIES = [0.8, 0.7, 0.6, 0.5]
+const SCALE_STEPS = [1, 0.8, 0.65, 0.5]
+
+function mb(bytes) {
+  return (bytes / 1048576).toFixed(1)
+}
+
 // ---------------------------------------------------------------------------
 // Part-number comparison
 // ---------------------------------------------------------------------------
@@ -198,6 +221,144 @@ function fileToBase64(file) {
   })
 }
 
+// A canvas the browser will hand back a JPEG blob from. OffscreenCanvas is not
+// on every bench tablet, so the plain element is the path and the blob call is
+// promisified rather than assumed.
+function drawToCanvas(bitmap, scale) {
+  const width = Math.max(1, Math.round(bitmap.width * scale))
+  const height = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Unsupported or unreadable image — use PNG/JPEG or the PDF')
+  // White under the image: a transparent PNG flattened to JPEG would otherwise
+  // come out on black and the printed text would be unreadable.
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, width, height)
+  ctx.drawImage(bitmap, 0, 0, width, height)
+  return canvas
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    if (typeof canvas.toBlob !== 'function') {
+      reject(new Error('Unsupported or unreadable image — use PNG/JPEG or the PDF'))
+      return
+    }
+    canvas.toBlob(
+      blob => (blob
+        ? resolve(blob)
+        : reject(new Error('Unsupported or unreadable image — use PNG/JPEG or the PDF'))),
+      'image/jpeg',
+      quality,
+    )
+  })
+}
+
+/**
+ * Shrink a slip photo to something the extractor will actually read: longest
+ * edge 2200px, JPEG, stepped down until the encoded result is <= 3 MB.
+ *
+ * PDFs pass through untouched below 8 MB and are REFUSED above it — a PDF is
+ * the pages, and silently sending part of one would be worse than saying no.
+ *
+ * Returns the file to send. Throws with a sentence the operator can act on.
+ */
+export async function compressImageForExtraction(file) {
+  if (!file) throw new Error('No file to read.')
+  const type = mediaTypeFor(file)
+
+  if (type === 'application/pdf') {
+    if (file.size > MAX_PDF_BYTES) {
+      throw new Error(
+        `That PDF is ${mb(file.size)} MB — the limit is 8 MB. Re-export it at a lower `
+        + 'resolution, or split it and upload the pages that carry the line table.',
+      )
+    }
+    return file
+  }
+
+  if (!IMAGE_MEDIA_TYPES.includes(type)) {
+    throw new Error('Unsupported or unreadable image — use PNG/JPEG or the PDF')
+  }
+
+  // EXIF orientation applied at decode: a slip photographed in portrait on a
+  // tablet arrives rotated otherwise, and the model reads it sideways.
+  let bitmap
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch (err) {
+    console.error('Decoding the slip image failed:', err)
+    throw new Error('Unsupported or unreadable image — use PNG/JPEG or the PDF')
+  }
+
+  try {
+    const longest = Math.max(bitmap.width, bitmap.height)
+    const fit = longest > MAX_IMAGE_EDGE ? MAX_IMAGE_EDGE / longest : 1
+
+    let smallest = null
+    for (const step of SCALE_STEPS) {
+      for (const quality of JPEG_QUALITIES) {
+        const blob = await canvasToJpeg(drawToCanvas(bitmap, fit * step), quality)
+        if (!smallest || blob.size < smallest.size) smallest = blob
+        if (blob.size <= MAX_IMAGE_BYTES) return asJpegFile(blob, file)
+      }
+    }
+    // Every rung tried and still over. Send the smallest rather than refuse:
+    // it is far below the band that fails, and the operator gets an answer.
+    console.warn(
+      `Slip image would not compress under ${mb(MAX_IMAGE_BYTES)} MB; `
+      + `sending the smallest re-encode at ${mb(smallest.size)} MB.`,
+    )
+    return asJpegFile(smallest, file)
+  } finally {
+    bitmap.close?.()
+  }
+}
+
+function asJpegFile(blob, original) {
+  const base = String(original?.name || 'slip').replace(/\.[^.]+$/, '')
+  return new File([blob], `${base}.jpg`, { type: 'image/jpeg' })
+}
+
+// What actually went wrong, in the operator's banner: the error's own name, the
+// HTTP status when the SDK carries one, and the function's message when it sent
+// one. A generic "that slip could not be read" hides exactly the difference
+// between an expired station sign-in and a photo the model refused.
+async function describeInvokeError(error) {
+  let serverMessage = ''
+  try {
+    const body = await error?.context?.json?.()
+    serverMessage = body?.error || body?.message || ''
+  } catch {
+    serverMessage = ''
+  }
+  const status = error?.context?.status ?? null
+  const parts = []
+  if (error?.name) parts.push(error.name)
+  if (status) parts.push(`HTTP ${status}`)
+  const message = serverMessage || error?.message
+  if (message) parts.push(message)
+  return parts.join(' · ') || 'The extraction service could not be reached.'
+}
+
+// The Authorization header, taken from the session the way every PostgREST call
+// in this app takes it. supabase-js routes functions.invoke through the same
+// authed fetch, but that fetch falls back to the ANON key when the session has
+// gone — and an anon bearer reaches the function and is refused there as
+// "Unauthorized" (verified against TEST). At a bench station whose 8h kiosk JWT
+// has expired that is precisely what happens, so the token is read explicitly
+// and a dead session is named rather than sent.
+async function invokeAuthHeaders() {
+  const { data: { session } } = await supabase.auth.getSession()
+  const token = session?.access_token
+  if (!token) {
+    throw new Error('This station is signed out — PIN in again, then upload the slip.')
+  }
+  return { Authorization: `Bearer ${token}` }
+}
+
 /**
  * Returns the `slip` envelope, or throws. Every caller must treat a throw as
  * "the operator uploads again or files this one by hand" — extraction is a
@@ -210,24 +371,21 @@ export async function extractPackingSlip(file) {
     throw new Error('That file type is not a packing slip — upload a PDF or a photo.')
   }
   const file_base64 = await fileToBase64(file)
+  const headers = await invokeAuthHeaders()
 
   const { data, error } = await withTimeout(
-    supabase.functions.invoke(FUNCTION_NAME, { body: { file_base64, media_type } }),
+    supabase.functions.invoke(FUNCTION_NAME, { body: { file_base64, media_type }, headers }),
     EXTRACTION_TIMEOUT_MS,
     'Reading the slip timed out after 2 minutes.',
   )
 
   if (error) {
-    // FunctionsHttpError carries the function's own JSON body — surface that
-    // instead of the generic "non-2xx status code" the SDK produces.
-    let detail = ''
-    try {
-      const body = await error.context?.json?.()
-      detail = body?.error || ''
-    } catch {
-      detail = ''
-    }
-    throw new Error(detail || error.message || 'The extraction service could not be reached.')
+    // The whole object, not just its message — the SDK hides the status and the
+    // function's own body behind `context`, and that is what a diagnosis needs.
+    console.error('packing-slip-extract failed:', error, {
+      media_type, base64_length: file_base64.length, file_name: file?.name,
+    })
+    throw new Error(await describeInvokeError(error))
   }
   if (!data?.ok || !data.slip) {
     throw new Error(data?.error || 'The extraction service returned nothing readable.')

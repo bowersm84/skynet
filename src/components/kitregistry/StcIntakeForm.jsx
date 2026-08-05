@@ -6,6 +6,7 @@ import { todayLocal, formatLogDate, lotLabel } from '../../lib/kitRegistry'
 import {
   BLANK_INTAKE, DOCUMENT_TYPES, createStcRequest, attachRequestDocuments, invokeStcExtract,
   REQUIRED_FIELDS, validateIntakeFields, kitMismatchLabel,
+  LOT_DERIVED_FIELDS, deriveClaimsFromLot,
 } from '../../lib/stcIntake'
 import { ACCEPT_ATTR, buildIntakePayload } from '../../lib/emailIntake'
 import { Pill, SourceBadge } from './ui'
@@ -89,7 +90,20 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
   const [created, setCreated] = useState(null)  // { requestId, intakeNumber, failures, linkLabel }
 
   const linkedLot = kitChoice?.lot || null
-  const kitMismatch = kitMismatchLabel(form.claimedKitNumber, linkedLot)
+
+  // On the lot-first path the linked log entry states the kit number, the kit
+  // part and the order, so those three are derived rather than asked — and the
+  // derived values, not whatever is sitting in form state, are what saves
+  // (D-KSTC-34). On the escape hatch `derived` is null and nothing changes:
+  // there the three inputs are the request's only identity.
+  const derived = deriveClaimsFromLot(linkedLot)
+  const isLinked = !!derived
+  const hiddenFields = derived ? new Set(LOT_DERIVED_FIELDS) : null
+  const effectiveForm = derived ? { ...form, ...derived } : form
+
+  // Always null while linked — the claim IS the lot's number there, so there is
+  // nothing left for the two to disagree about.
+  const kitMismatch = kitMismatchLabel(effectiveForm.claimedKitNumber, linkedLot)
 
   const commitForm = useCallback((next) => {
     formRef.current = next
@@ -149,6 +163,10 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
       const conf = {}
       for (const [aiKey, formKey] of Object.entries(FIELD_MAP)) {
         const value = fields[aiKey]
+        // The linked lot outranks the model on the three claim fields it
+        // states itself — the suggestion is dropped rather than parked in
+        // hidden state where it could not be seen or corrected (D-KSTC-34).
+        if (isLinked && LOT_DERIVED_FIELDS.includes(formKey)) continue
         if (formKey === 'receivedDate') {
           // The date is the one field a suggestion may CLEAR: a manual default
           // of "today" is wrong the moment we know the email is from a
@@ -177,7 +195,7 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
     } finally {
       setExtracting(false)
     }
-  }, [commitForm, commitPayload])
+  }, [commitForm, commitPayload, isLinked])
 
   const removeHolding = (key) => {
     const prev = payloadRef.current
@@ -220,7 +238,9 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
   }
 
   const handleSave = async () => {
-    const errors = validateIntakeFields(form)
+    // Validated on the EFFECTIVE form: a derived field is answered by the linked
+    // lot, so it must never be flagged blank under an input that isn't rendered.
+    const errors = validateIntakeFields(effectiveForm)
     setFieldErrors(errors)
     if (Object.keys(errors).length) {
       setSaveError(null)
@@ -240,7 +260,7 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
         : typed
 
       const { requestId, intakeNumber } = await createStcRequest({
-        ...form, notes, kitLotId: linkedLot?.id || null,
+        ...effectiveForm, notes, kitLotId: linkedLot?.id || null,
       })
       const linkLabel = linkedLot ? lotLabel(linkedLot) : null
       const failures = await runAttachments(requestId, payload.holdings)
@@ -526,6 +546,24 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
         </div>
       )}
 
+      {/* ---- What the linked kit answers on the operator's behalf ----
+          The three derived claims are shown before the fields they replace, so
+          the person saving can see exactly what will be recorded against the
+          request rather than trusting that something sensible happens
+          off-screen (D-KSTC-34). */}
+      {derived && (
+        <div className="mt-6 rounded-xl border border-gray-700 bg-gray-800/60 px-4 py-3">
+          <p className="text-gray-400 text-xs font-medium mb-2">
+            Taken from the linked kit — not asked again
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill tone="blue">From kit {lotLabel(linkedLot)}</Pill>
+            <Pill>{derived.claimedKitPart || 'no kit part on the log entry'}</Pill>
+            <Pill>{derived.claimedOrderNumber ? `SO ${derived.claimedOrderNumber}` : 'no order # on the log entry'}</Pill>
+          </div>
+        </div>
+      )}
+
       {/* ---- Fields: the shared set, identical to the drawer edit form ---- */}
       <div className="mt-6">
         <StcRequestFields
@@ -536,6 +574,7 @@ export default function StcIntakeForm({ profile, onCancel, onCreated }) {
           chipFor={key => chipFor(key, aiFilled, confidence)}
           kitMismatch={kitMismatch}
           hints={hints}
+          hiddenFields={hiddenFields}
         />
       </div>
 

@@ -2500,3 +2500,6 @@ Purchaser granted full write access on the RM Forecast — part_dimensions INSER
 
 ### D-KSTC-34 — Claimed fields derive from the linked lot (2026-08-05)
 On the lot-first intake path the Claimed kit #, Claimed kit part, and Order # inputs are removed and derived from the linked lot (shown as a read-only summary); extraction is not authoritative for them. The escape-hatch (unlinked) path retains all three inputs as the request's only identity. RPC contract and edit-mode no-regression validation unchanged.
+
+### D-SCHED-01 — Mainframe machine card queues sort by schedule (2026-08-06)
+Mainframe machine card queues now sort by scheduled_start (nulls last, created_at tiebreak), matching Kiosk.jsx and Schedule.jsx. Previously sorted by created_at, so the Mainframe showed a different run order than the kiosk the machinist works from. MachineCard.jsx applies no sort of its own — it renders the parent's order — so the fix belongs in the Mainframe fetch.

@@ -162,6 +162,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         `)
         .not('status', 'eq', 'complete')
         .not('status', 'eq', 'cancelled')
+        // Run order must match Kiosk.jsx and Schedule.jsx, which both sort by
+        // scheduled_start (D-SCHED-01). nullsFirst: false keeps unscheduled jobs
+        // at the bottom of a machine's queue instead of ahead of scheduled work;
+        // created_at is the tiebreaker so same-slot jobs stay stable.
+        .order('scheduled_start', { ascending: true, nullsFirst: false })
         .order('created_at', { ascending: true })
 
       if (jobsError) {

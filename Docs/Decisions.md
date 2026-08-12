@@ -2503,3 +2503,35 @@ On the lot-first intake path the Claimed kit #, Claimed kit part, and Order # in
 
 ### D-SCHED-01 — Mainframe machine card queues sort by schedule (2026-08-06)
 Mainframe machine card queues now sort by scheduled_start (nulls last, created_at tiebreak), matching Kiosk.jsx and Schedule.jsx. Previously sorted by created_at, so the Mainframe showed a different run order than the kiosk the machinist works from. MachineCard.jsx applies no sort of its own — it renders the parent's order — so the fix belongs in the Mainframe fetch.
+
+### D-DATA-01 — Wrong-job production reattributed: J-000136 -> J-000148; J-000183 re-homed (2026-08-12)
+**What:** Operator set up Nexturn 7 for SK4C13S but selected J-000136 (SK4C7S,
+WO-2607-0021) and ran the -13s under it: 1,464 pcs across two batches
+(machinist-typed sends 491+929 = 1,420; finishing verified 491+973 = 1,464),
+PLN-2592-260806-0002, FLN-100159, 16 of 20 staged bars of lot 2592 consumed
+(four staging events of 5 — two machine-kiosk, two material-kiosk — confirmed
+real against material_loads and a physical rack reconcile; the floor's "15
+staged" was off by one event). Corrected via guarded single-block PROD SQL:
+finishing_sends, job_materials, material_loads and usage moved to J-000148
+(status manufacturing_complete, good_pieces 1420); the last 5-bar usage row
+reduced to 1 so the 4 unmachined bars returned to on-hand for normal kiosk
+restaging on J-000183; the first usage row's quantity_used_inches repaired
+(0 -> 720, blank bar-length field on first load); J-000183 moved from
+WO-2608-0036 to WO-2607-0021; J-000136 stripped of lots/counts/timestamps and
+cancelled; WO-2608-0036 cancelled empty.
+**Why this shape:** The PLN embeds the material lot (2592), not the part, so
+physical bin labels stay valid on the -13s. good_pieces must equal the SEND
+total (1420, not verified 1464) — ComplianceReview's canAdvance gate compares
+the sum of non-rejected send quantities against good_pieces. Batch B's
+929-typed / 973-verified delta is machinist under-typing (dock incoming_count
+was 973; count_discrepancy 0) and is preserved for compliance. Routing steps
+were left untouched on both jobs: nothing in the system marks internal steps
+complete (only outsourcing and step-removal flows write them), so all-pending
+steps on a finished job is normal state. Soft cancel over hard delete:
+audit_logs FK on job_id, and an unbroken J-number sequence for AS9100.
+**Also shipped:** Build Summary now excludes cancelled jobs from Ordered/Built.
+**Lesson:** material_usage is written at staging time. When splitting a job's
+material, keep only consumed bars attributed and RETURN leftovers to on-hand so
+the next job stages them through the normal kiosk flow — never pre-attribute
+leftovers to the next job, which either double-deducts on restage or requires
+floor workarounds.

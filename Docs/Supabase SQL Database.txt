@@ -550,6 +550,8 @@ CREATE TABLE public.kiosk_sessions (
   logged_in_at timestamp with time zone DEFAULT now(),
   is_active boolean DEFAULT true,
   device_id text,
+  logged_out_at timestamp with time zone,
+  logout_reason text,
   CONSTRAINT kiosk_sessions_pkey PRIMARY KEY (id),
   CONSTRAINT kiosk_sessions_operator_id_fkey FOREIGN KEY (operator_id) REFERENCES public.profiles(id),
   CONSTRAINT kiosk_sessions_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id)

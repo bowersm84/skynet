@@ -2709,7 +2709,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                           <div className="border-t border-gray-700 bg-gray-900/50">
                             {/* Build Summary — products (assemblies) + component parts beneath, with total built through finishing (SKY87) */}
                             {(() => {
-                              const jobs = wo.jobs || []
+                              const jobs = (wo.jobs || []).filter(j => j.status !== 'cancelled')
                               const woas = wo.work_order_assemblies || []
                               const groupComponents = (jobList) => {
                                 const byPart = {}

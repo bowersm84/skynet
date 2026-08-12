@@ -2535,3 +2535,39 @@ material, keep only consumed bars attributed and RETURN leftovers to on-hand so
 the next job stages them through the normal kiosk flow — never pre-attribute
 leftovers to the next job, which either double-deducts on restage or requires
 floor workarounds.
+
+### D-DATA-02 — Late finishing batches added to closed-out jobs (2026-08-12)
+**What:** Two jobs were completed at the kiosk with parts still sitting at the
+machine, unsent to finishing, and had already advanced to pending_tco.
+J-000143 (SK213-2B, WO-2607-0008, Mazak 4): 5 approved batches totalling 2,162
+against a 2,018 target; 298 pcs added as a sixth batch -> 2,460 (+442).
+J-000089 (SK247P, WO-2606-0034, Mazak 1): 5 approved batches totalling 2,072
+against a 1,639 target; 349 pcs added as a sixth batch -> 2,421 (+782).
+Each correction was a guarded single-block PROD transaction: insert a
+pending_finishing finishing_sends row inheriting machine, sent_by, PLN and
+material lot from the job's last batch, then step the job from pending_tco back
+to manufacturing_complete with good_pieces re-derived to the new send total.
+Neither job needed material work — material_usage is charged at staging, so the
+rack was already correct. co_fulfillment_applied_at was left untouched on both;
+CO line quantity_fulfilled was compared before and after.
+**Why the step-back:** ComplianceReview's canAdvance gate requires
+status === 'manufacturing_complete'. A job left at pending_tco will accept and
+approve a new batch but never re-advance, and it stays in the TCO-ready pool
+while unfinished parts are in flight. Stepping back is what lets the normal
+compliance path close the job out again.
+**Why good_pieces is re-derived:** the gate compares the sum of non-rejected
+send quantities against good_pieces (falling back to job quantity when
+good_pieces is 0), so a stale good_pieces either strands the job or advances it
+early. Both corrections guard that every prior batch is compliance-approved,
+since a rejected batch makes those two totals diverge.
+**Manual Batch is NOT a finishing batch:** the "+ Manual Batch" control on the
+WO Lookup job card writes missed_production_entries, which getEffectiveQty ADDS
+on top of the tracked count. It is only for parts SkyNet will never otherwise
+log (pre-go-live, prior-WO carry-over). Using it for parts that will then flow
+through finishing double-counts them. Both transactions guard on
+missed_production_entries being empty for exactly this reason.
+**Lesson:** kiosk Complete does not verify that everything produced has been
+sent to finishing, so an operator can close a job with parts still at the
+machine — and the job then advances out of reach of the normal finishing path.
+Recovery is always the same two moves: insert the missing send, step the job
+back to manufacturing_complete.

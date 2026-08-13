@@ -356,12 +356,12 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
         byLocation[loc][brand].sort(naturalCompare)
       }
     }
-    // Location ordering: Leesburg first, Tavares/Taveres next, others alphabetically.
+    // Location ordering: Leesburg first, Tavares next, others alphabetically.
     const locOrder = Object.keys(byLocation).sort((a, b) => {
       const score = (s) => {
         const lc = s.toLowerCase()
         if (lc.includes('leesburg')) return 0
-        if (lc.includes('tavares') || lc.includes('taveres')) return 1
+        if (lc.includes('tavares')) return 1
         return 2
       }
       const sa = score(a)

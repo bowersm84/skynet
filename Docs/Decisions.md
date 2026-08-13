@@ -2571,3 +2571,22 @@ sent to finishing, so an operator can close a job with parts still at the
 machine — and the job then advances out of reach of the normal finishing path.
 Recovery is always the same two moves: insert the missing send, step the job
 back to manufacturing_complete.
+
+### D-DATA-03 — "Taveres" corrected to "Tavares" across data and UI (2026-08-13)
+**What:** The Tavares facility was misspelled "Taveres" throughout SkyNet. A
+full scan of every text, varchar and jsonb column in the public schema found
+exactly two: locations.name ('Taveres Facility') and locations.address
+('Taveres Manufacturing Center, Taveres, FL'), both on one row, corrected by
+targeted UPDATE. Four source files carried it in copy or literals:
+Schedule.jsx (default collapsed group), ScheduleJobModal.jsx (ordering comment
+and a spelling-tolerant includes check, now narrowed to 'tavares'), and
+PresidentsBridge.jsx (two display strings).
+**Latent bug fixed alongside:** Schedule.jsx's collapsedGroups default was the
+bare string 'Taveres', but the collapse state is matched with
+collapsedGroups.includes(group.name) where group.name is the FULL location name
+from the database. 'Taveres' never equalled 'Taveres Facility', so the Tavares
+group had never collapsed by default. Now set to 'Tavares Facility'.
+**Lesson:** collapsedGroups, and anything else keyed on a location or machine
+name from the database, breaks silently when the stored name changes. Prefer
+matching on a stable id or code over a display string; where a literal is
+unavoidable, it must be updated in the same change as the data.

@@ -117,7 +117,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // Grouping is fixed to 'location' (the toggle UI was removed for header space —
   // see D-SCHED-DECLUT01). Setter dropped since nothing sets it anymore.
   const [groupingMode] = useState('location') // 'location' or 'type'
-  const [collapsedGroups, setCollapsedGroups] = useState(['Taveres'])
+  const [collapsedGroups, setCollapsedGroups] = useState(['Tavares Facility'])
   
   // Maintenance modal state
   const [showMaintenanceModal, setShowMaintenanceModal] = useState(false)

@@ -393,7 +393,7 @@ export default function PresidentsBridge() {
                   {' · '}
                 </>
               )}
-              {data.machinesIdle} IDLE · LEESBURG + TAVERES
+              {data.machinesIdle} IDLE · LEESBURG + TAVARES
             </div>
           </div>
 
@@ -569,7 +569,7 @@ export default function PresidentsBridge() {
               <span>◆ {data.complianceQueue} JOBS PENDING COMPLIANCE</span>
               <span>◆ {data.finishingQueue} BATCHES IN FINISHING</span>
               <span>◆ MISSION ELAPSED TIME T+ {metDays.toLocaleString()} DAYS</span>
-              <span>◆ SKYBOLT AEROMOTIVE · LEESBURG · TAVERES · EST 1982</span>
+              <span>◆ SKYBOLT AEROMOTIVE · LEESBURG · TAVARES · EST 1982</span>
               <span>◆ FOUNDED BY NED BOWERS · APOLLO PROGRAM ALUMNUS</span>
               <span>◆ ALL STATIONS NOMINAL</span>
             </div>

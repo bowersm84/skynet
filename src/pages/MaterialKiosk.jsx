@@ -261,7 +261,7 @@ export default function MaterialKiosk() {
     try {
       const { data, error } = await supabase
         .from('machines')
-        .select('id, name, code, machine_type, kiosk_enabled, display_order, location_id, locations:location_id(name)')
+        .select('id, name, code, machine_type, max_bar_length, kiosk_enabled, display_order, location_id, locations:location_id(name)')
         .eq('is_active', true).eq('is_commissioned', true)
         .neq('machine_type', 'finishing')   // finishing tanks don't receive raw material
         .order('display_order')
@@ -408,6 +408,15 @@ export default function MaterialKiosk() {
     if (!isBlanks && !stageForm.bar_size) { showToast('Select a bar size', 'error'); return }
     const addBars = parseInt(stageForm.add_bars)
     if (!addBars || addBars <= 0) { showToast(`Enter the number of ${isBlanks ? 'blanks' : 'bars'} staged`, 'error'); return }
+
+    // D-KIOSK-03: machines with a bar-length limit hard-block longer bars (see Kiosk.jsx).
+    const maxLen = selectedMachine?.max_bar_length != null ? Number(selectedMachine.max_bar_length) : null
+    if (!isBlanks && maxLen) {
+      const existingLen = stageExisting?.bar_length != null ? Number(stageExisting.bar_length) : null
+      const effLen = existingLen ?? (parseFloat(stageForm.bar_length) || 0)
+      if (!effLen || effLen <= 0) { showToast(`${selectedMachine.name} has a ${maxLen}" bar limit — enter the bar length before staging`, 'error'); return }
+      if (effLen > maxLen) { showToast(`STOP: ${selectedMachine.name} takes bars up to ${maxLen}" only — ${effLen}" bars cannot be loaded`, 'error'); return }
+    }
 
     setStaging(true)
     try {
@@ -977,7 +986,7 @@ export default function MaterialKiosk() {
                   <label className="block text-gray-400 text-sm mb-2">Bar Length (in) — optional</label>
                   <input type="number" inputMode="decimal" step="0.01" value={stageForm.bar_length}
                     disabled={!!stageExisting && stageExisting.bar_length != null}
-                    onChange={e => setStageForm({ ...stageForm, bar_length: e.target.value })} placeholder="e.g. 144"
+                    onChange={e => setStageForm({ ...stageForm, bar_length: e.target.value })} placeholder={selectedMachine?.max_bar_length ? `e.g. ${selectedMachine.max_bar_length}` : "e.g. 144"}
                     className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:border-skynet-accent focus:outline-none disabled:opacity-60" />
                 </div>
               )}

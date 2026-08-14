@@ -2725,6 +2725,23 @@ export default function Kiosk() {
       return
     }
 
+    // D-KIOSK-03: machines with a bar-length limit hard-block longer bars.
+    // Effective length = the job's recorded bar length if present, else the form
+    // entry — an inherited 144" can't slip past a limit via a blank field.
+    const maxLen = machine?.max_bar_length != null ? Number(machine.max_bar_length) : null
+    if (!isBlanks && maxLen) {
+      const existingLen = jobMaterials?.[0]?.bar_length != null ? Number(jobMaterials[0].bar_length) : null
+      const effLen = existingLen ?? (parseFloat(materialForm.bar_length) || 0)
+      if (!effLen || effLen <= 0) {
+        alert(`${machine.name} has a ${maxLen}" bar limit — enter the bar length before loading.`)
+        return
+      }
+      if (effLen > maxLen) {
+        alert(`STOP: ${machine.name} takes bars up to ${maxLen}" only. ${effLen}" bars cannot be loaded on this machine.`)
+        return
+      }
+    }
+
     // B1: Block lot number changes — compliance check
     const newLot = materialForm.lot_number?.trim()
     if (newLot) {
@@ -5821,7 +5838,7 @@ export default function Kiosk() {
                       step="0.25"
                       value={materialForm.bar_length}
                       onChange={(e) => setMaterialForm({...materialForm, bar_length: e.target.value})}
-                      placeholder="144"
+                      placeholder={machine?.max_bar_length ? String(machine.max_bar_length) : "144"}
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                     />
                   </div>

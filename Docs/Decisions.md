@@ -2590,3 +2590,22 @@ group had never collapsed by default. Now set to 'Tavares Facility'.
 name from the database, breaks silently when the stored name changes. Prefer
 matching on a stable id or code over a display string; where a literal is
 unavoidable, it must be updated in the same change as the data.
+
+### D-KIOSK-03 — Per-machine bar-length limits enforced at both kiosks (2026-08-13)
+**What:** machines.max_bar_length (numeric inches, NULL = no limit) added on
+TEST and PROD; Mazaks seeded at 48, Nexturns at 144, others NULL. Both the
+machine kiosk (handleAddMaterial) and the rack kiosk (handleStage) hard-stop
+any load whose effective bar length exceeds the machine's limit, where
+effective length is the job's recorded bar length if present, else the form
+entry. On machines with a limit, a bar length is now REQUIRED before loading —
+previously the field could be left blank, which is how zero-inch
+quantity_used_inches rows occurred (see D-DATA-01). Bar-length placeholders
+show the machine's limit. Blanks are exempt. Optional DB trigger
+trg_enforce_machine_bar_length on job_materials backstops every write path
+including admin SQL; disable it per-statement for a sanctioned exception.
+**Why a column, not a name check:** matching on machine names breaks silently
+when names change (D-DATA-03). The limit is data on the machine record, so the
+Mazak 7 replacement gets its limit as data entry, not a code change.
+**Why max rather than exact:** remnants shorter than the limit are physically
+loadable and remnant staging is a supported flow; the rule blocks only bars too
+long for the feeder.

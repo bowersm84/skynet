@@ -1,4 +1,4 @@
-# refresh-test-from-prod.ps1   (v2 — 2026-06-22)
+# refresh-test-from-prod.ps1   (v3 — 2026-08-14)
 # -----------------------------------------------------------------------------
 # Mirrors PROD Supabase public-schema DATA into the SkyNet TEST project, while
 # PRESERVING the test users. This WIPES test data (except profiles) and replaces
@@ -9,17 +9,31 @@
 #
 # How it works (Supabase-safe):
 #   Supabase does NOT let you disable FK triggers or use session_replication_role,
-#   so we cannot just "load with checks off." Instead:
+#   so we cannot just "load with checks off." Referential integrity stays enforced
+#   for the whole load; only our own business-rule triggers are suspended. Steps:
 #     1. Dump PROD data (excluding profiles).
 #     2. Remap every PROD user id in the dump to the TEST admin id, so every
-#        user-reference column lands on a valid TEST profile (no FK violations).
+#        user-reference column lands on a valid TEST profile (no FK violations),
+#        and bracket the dump with DISABLE/ENABLE TRIGGER USER.
 #     3. Back up TEST profiles (TRUNCATE CASCADE can reach them via FKs), and
 #        REFUSE to proceed if there are none to preserve.
 #     4. Wipe TEST data tables, then restore profiles (with home_location_id
 #        nulled — see note) if the cascade removed them.
 #     5. Load the remapped dump in one transaction (empty tables -> no dup keys).
+#        The disable, the data, and the re-enable are one atomic unit — a failure
+#        anywhere rolls back the trigger state too, so TEST can never be left with
+#        user triggers disabled.
 #   Imported "who did this" columns all read as the TEST admin (cosmetic only;
 #   test roles by logging in as each user, not by historical attribution).
+#
+# v3 changes:
+#   * public.cert_signatures is excluded from the PROD dump. UNIQUE (user_id)
+#     collides the moment the step-2 remap collapses multiple PROD signers onto
+#     the single TEST admin id. See the STEP 1 comment for the full reasoning.
+#   * The load is bracketed with ALTER TABLE ... DISABLE/ENABLE TRIGGER USER, so
+#     business-rule triggers don't reject PROD rows that predate those rules. Side
+#     benefit: touch triggers stay quiet, so updated_at keeps PROD's values
+#     instead of being stamped with the load time.
 #
 # v2 changes (why this is safe now):
 #   * profiles.home_location_id is NULLED in the restore. The wipe truncates
@@ -94,13 +108,17 @@ $wipeSql  = Join-Path $tmp 'wipe.sql'
 # ---------------------------------------------------------------------------
 # STEP 1 — Dump PROD data, excluding profiles (we keep TEST's own users).
 # ---------------------------------------------------------------------------
-Write-Host "1/5  Dumping PROD public data (excluding profiles + kiosk_sessions)..." -ForegroundColor Cyan
+Write-Host "1/5  Dumping PROD public data (excluding profiles + kiosk_sessions + cert_signatures)..." -ForegroundColor Cyan
 # Exclude profiles (we keep TEST's users) and kiosk_sessions. The latter is
 # ephemeral live-login state AND a remap-collision source: its partial unique
 # index (one active session per operator+machine+device) is violated once every
 # PROD operator is collapsed onto the single TEST admin. It's a leaf table, so
 # leaving it empty on TEST is safe; sessions regenerate as people log in.
-pg_dump $prod --data-only --no-owner --no-privileges --schema=public --exclude-table=public.profiles --exclude-table=public.kiosk_sessions -f $pubSql
+# cert_signatures is excluded for the same reason: UNIQUE (user_id) means the
+# remap collapses every PROD signer onto one TEST admin id and row 2 collides.
+# Also a leaf table. Consequence: TEST has no signature images after a refresh;
+# compliance users re-upload if cert package generation needs exercising.
+pg_dump $prod --data-only --no-owner --no-privileges --schema=public --exclude-table=public.profiles --exclude-table=public.kiosk_sessions --exclude-table=public.cert_signatures -f $pubSql
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pubSql) -or (Get-Item $pubSql).Length -eq 0) {
   throw "PROD dump failed or produced an empty file. Aborting before touching TEST."
 }
@@ -115,8 +133,36 @@ if (-not $prodUserIds -or $prodUserIds.Count -eq 0) {
 }
 $text = Get-Content $pubSql -Raw
 foreach ($id in $prodUserIds) { $text = $text.Replace($id, $ADMIN_ID) }
+# Wrap the load in a user-trigger suspension. Business-rule triggers (bar-length
+# limits, cert-package immutability, consolidation lot checks) validate rows that
+# were written to PROD before those rules existed, and the reconciliation trigger
+# would manufacture flag rows the dump is already carrying. USER (not ALL) leaves
+# system/FK triggers armed, which is what Supabase permits and what we still want
+# enforcing referential integrity during the load.
+$trgOff = @"
+DO `$`$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I DISABLE TRIGGER USER;', r.tablename);
+  END LOOP;
+END
+`$`$;
+
+"@
+$trgOn = @"
+
+DO `$`$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE TRIGGER USER;', r.tablename);
+  END LOOP;
+END
+`$`$;
+"@
 # Write UTF-8 without BOM; psql cannot parse UTF-16 and would silently no-op.
-[System.IO.File]::WriteAllText($fixedSql, $text, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText($fixedSql, ($trgOff + $text + $trgOn), (New-Object System.Text.UTF8Encoding($false)))
 
 # ---------------------------------------------------------------------------
 # STEP 3 — Back up TEST profiles. TRUNCATE ... CASCADE on data tables can reach

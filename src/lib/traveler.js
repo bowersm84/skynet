@@ -76,6 +76,53 @@ export async function fetchAssemblyChainForTraveler(supabase, jobId) {
   return chain
 }
 
+// D-JOBMERGE-04: merge context for a traveler. Host mode when the job has
+// active members; member mode when the job is merged into a host; else null.
+// Two-step queries throughout (no >2-level nesting).
+export async function fetchMergeInfoForTraveler(supabase, job) {
+  if (!job?.id) return null
+  const { data: memberAllocs } = await supabase
+    .from('job_merge_allocations')
+    .select('member_job_id, requested_qty')
+    .eq('host_job_id', job.id)
+    .eq('is_active', true)
+  if (memberAllocs && memberAllocs.length > 0) {
+    const ids = memberAllocs.map(a => a.member_job_id)
+    const { data: memberJobs } = await supabase
+      .from('jobs')
+      .select('id, job_number, work_order:work_orders(wo_number, customer, due_date)')
+      .in('id', ids)
+    const byId = {}
+    for (const j of (memberJobs || [])) byId[j.id] = j
+    const members = memberAllocs.map(a => ({
+      job_number: byId[a.member_job_id]?.job_number || '—',
+      wo_number: byId[a.member_job_id]?.work_order?.wo_number || '—',
+      customer: byId[a.member_job_id]?.work_order?.customer || '',
+      due_date: byId[a.member_job_id]?.work_order?.due_date || null,
+      requested_qty: a.requested_qty || 0
+    }))
+    const memberQty = members.reduce((s, m) => s + m.requested_qty, 0)
+    return { mode: 'host', members, memberQty, runTarget: (job.quantity || 0) + memberQty }
+  }
+  if (job.merged_into_job_id) {
+    const { data: host } = await supabase
+      .from('jobs')
+      .select('job_number, assigned_machine:machines!assigned_machine_id(name), work_order:work_orders(wo_number)')
+      .eq('id', job.merged_into_job_id)
+      .maybeSingle()
+    if (!host) return null
+    return {
+      mode: 'member',
+      host: {
+        job_number: host.job_number,
+        machine_name: host.assigned_machine?.name || null,
+        wo_number: host.work_order?.wo_number || null
+      }
+    }
+  }
+  return null
+}
+
 // Fetch everything buildTravelerHTML / buildTravelerModel need for one job.
 // The four interactive surfaces (Kiosk, Finishing, ComplianceReview, Mainframe)
 // each inline this same query block; this export exists so non-interactive
@@ -86,7 +133,7 @@ export async function fetchTravelerData(supabase, jobId) {
   const { data: job, error: jobError } = await supabase
     .from('jobs')
     .select(`
-      id, job_number, quantity, status,
+      id, job_number, quantity, status, merged_into_job_id,
       production_lot_number, good_pieces, actual_end,
       work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
       component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
@@ -131,6 +178,7 @@ export async function fetchTravelerData(supabase, jobId) {
   const woId = job.work_order?.id || job.work_order_id
   const coAllocations = woId ? await fetchCOAllocationsForTraveler(supabase, woId) : []
   const assemblyChain = await fetchAssemblyChainForTraveler(supabase, job.id)
+  const mergeInfo = await fetchMergeInfoForTraveler(supabase, job)
 
   return {
     job,
@@ -139,6 +187,7 @@ export async function fetchTravelerData(supabase, jobId) {
     outboundSends: outboundSends || [],
     coAllocations,
     assemblyChain,
+    mergeInfo,
   }
 }
 
@@ -288,7 +337,7 @@ export function buildTravelerModel(travelerData) {
       if (!rowOp && isMachineStep && job.assigned_user?.full_name) rowOp = initials(job.assigned_user.full_name)
 
       const station = step.station
-        || (isMachineStep ? job.assigned_machine?.name : '')
+        || (isMachineStep ? (job.assigned_machine?.name || travelerData.mergeInfo?.host?.machine_name || '') : '')
         || (isExternalStep ? linkedSend?.vendor_name : '')
         || ''
 
@@ -363,7 +412,7 @@ export function buildTravelerModel(travelerData) {
   }
 }
 
-export function buildTravelerHTML(travelerData) {
+export function buildTravelerBodyHTML(travelerData) {
   const { job, coAllocations, assemblyChain } = travelerData
   const wo = job.work_order
   const comp = job.component
@@ -443,6 +492,51 @@ export function buildTravelerHTML(travelerData) {
     </table>`
   })()
 
+  // D-JOBMERGE-04: combined-run section + quantity suffix. Host mode explains
+  // why the run quantity exceeds this WO's order; member mode records which
+  // host run physically produced the pieces.
+  const mergeInfo = travelerData.mergeInfo || null
+  const mergeQtySuffix = (mergeInfo && mergeInfo.mode === 'host')
+    ? ` (+${Number(mergeInfo.memberQty).toLocaleString()} merged = ${Number(mergeInfo.runTarget).toLocaleString()} run)`
+    : ''
+  const mergeSectionHTML = (() => {
+    if (!mergeInfo) return ''
+    const cellHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
+    const cellCSS = 'padding:6px 8px; border:1px solid #000;'
+    if (mergeInfo.mode === 'host') {
+      const rows = mergeInfo.members.map(m => `
+        <tr>
+          <td style="${cellCSS}">${_esc(m.job_number)}</td>
+          <td style="${cellCSS}">${_esc(m.wo_number)}</td>
+          <td style="${cellCSS}">${_esc(m.customer)}</td>
+          <td style="${cellCSS} text-align:right;">${Number(m.requested_qty).toLocaleString()}</td>
+          <td style="${cellCSS}">${m.due_date ? _esc(new Date(m.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })) : '&mdash;'}</td>
+        </tr>`).join('')
+      return `
+    <table style="width:100%; border-collapse:collapse; margin-top:14px; font-size:12px;">
+      <tbody>
+        <tr><th colspan="5" style="${cellHeaderCSS}">Combined Run &mdash; additional orders produced under this job</th></tr>
+        <tr>
+          <th style="${cellHeaderCSS}">Job #</th>
+          <th style="${cellHeaderCSS}">WO #</th>
+          <th style="${cellHeaderCSS}">Customer</th>
+          <th style="${cellHeaderCSS}">Qty</th>
+          <th style="${cellHeaderCSS}">Due</th>
+        </tr>
+        ${rows}
+        <tr><td colspan="5" style="${cellCSS} font-size:11px; color:#333;">Good pieces allocate back to each work order by earliest due date after compliance approval. One setup, one production lot.</td></tr>
+      </tbody>
+    </table>`
+    }
+    return `
+    <table style="width:100%; border-collapse:collapse; margin-top:14px; font-size:12px;">
+      <tbody>
+        <tr><th style="${cellHeaderCSS}">Combined Run</th></tr>
+        <tr><td style="${cellCSS}">Produced under host <b>${_esc(mergeInfo.host.job_number)}</b>${mergeInfo.host.wo_number ? ' &middot; ' + _esc(mergeInfo.host.wo_number) : ''}${mergeInfo.host.machine_name ? ' &middot; ' + _esc(mergeInfo.host.machine_name) : ''} &mdash; good pieces allocate back to this work order by earliest due date after compliance approval.</td></tr>
+      </tbody>
+    </table>`
+  })()
+
   // Assembly Genealogy — only renders when the caller passes assemblyChain and
   // the part is a component of an assembly. Shows the chain this component feeds:
   // immediate (sub-)assembly up to the finished assembly, with each ALN.
@@ -480,6 +574,53 @@ export function buildTravelerHTML(travelerData) {
     month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
   })
 
+  return `
+  <div class="print-page">
+    <div style="text-align:center; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:16px;">
+      <h1 style="margin:0; font-size:28px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
+    </div>
+    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:17px;">
+      <tbody>
+        <tr><td style="${headerLabelCSS}">Part Number</td><td style="${headerValueCSS}">${_esc(comp?.part_number) || '&mdash;'}</td>
+            <td style="${headerLabelCSS}">Job Number</td><td style="${headerValueCSS}">${_esc(job.job_number)}</td></tr>
+        <tr><td style="${headerLabelCSS}">Description</td><td style="${headerValueCSS}">${_esc(comp?.description) || '&mdash;'}</td>
+            <td style="${headerLabelCSS}">Order / WO #</td><td style="${headerValueCSS}">${_esc(wo?.wo_number) || '&mdash;'}</td></tr>
+        <tr><td style="${headerLabelCSS}">Material</td><td style="${headerValueCSS}">${_esc(comp?.material_type?.name) || '&mdash;'}</td>
+            <td style="${headerLabelCSS}">PO Number</td><td style="${headerValueCSS}">${_esc(wo?.po_number) || '&mdash;'}</td></tr>
+        <tr><td style="${headerLabelCSS}">Drawing Rev</td><td style="${headerValueCSS}">${_esc(comp?.drawing_revision) || '&mdash;'}</td>
+            <td style="${headerLabelCSS}">Due Date</td><td style="${headerValueCSS}">${dueDateDisplay}</td></tr>
+        <tr><td style="${headerLabelCSS}">Customer</td><td style="${headerValueCSS}">${customerDisplay}</td>
+            <td style="${headerLabelCSS}">Quantity</td><td style="${headerValueCSS} font-weight:bold;">${_esc(qtyDisplay)}${_esc(mergeQtySuffix)}</td></tr>
+      </tbody>
+    </table>
+    ${mergeSectionHTML}
+    ${assemblyChainHTML}
+    <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+      <colgroup>
+        <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%) -->
+        <col style="width:4%" /><col style="width:25%" /><col style="width:19%" /><col style="width:5%" /><col style="width:23%" /><col style="width:6%" /><col style="width:9%" /><col style="width:9%" />
+      </colgroup>
+      <thead>
+        <tr><th style="${routingHeaderCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>
+            <th style="${routingHeaderCSS}">Type</th><th style="${routingHeaderCSS}">Lot #</th><th style="${routingHeaderCSS}">Qty</th>
+            <th style="${routingHeaderCSS}">Date</th><th style="${routingHeaderCSS}">Operator</th></tr>
+      </thead>
+      <tbody>${stepsHTML}${blankRows}</tbody>
+    </table>
+    ${coSectionHTML}
+    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:16px;"><strong>Notes:</strong></div>
+    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:13px; color:#666;">
+      <span>Generated from SkyNet MES &mdash; ${printTime}</span><span>Skybolt Aeromotive Corp</span>
+    </div>
+  </div>`
+}
+
+// Full standalone traveler document — thin shell around the canonical body.
+// Consumers that open the traveler in its own window/iframe (Mainframe
+// popup, PrintTraveler route) use this; multi-document surfaces
+// (PrintPackageModal's print hub) embed buildTravelerBodyHTML directly.
+export function buildTravelerHTML(travelerData) {
+  const { job } = travelerData
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -496,43 +637,7 @@ export function buildTravelerHTML(travelerData) {
     <span>Job Traveler — ${_esc(job.job_number)}</span>
     <button onclick="window.print()">Print</button>
   </div>
-  <div class="print-page">
-    <div style="text-align:center; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:16px;">
-      <h1 style="margin:0; font-size:28px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
-    </div>
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:17px;">
-      <tbody>
-        <tr><td style="${headerLabelCSS}">Part Number</td><td style="${headerValueCSS}">${_esc(comp?.part_number) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Job Number</td><td style="${headerValueCSS}">${_esc(job.job_number)}</td></tr>
-        <tr><td style="${headerLabelCSS}">Description</td><td style="${headerValueCSS}">${_esc(comp?.description) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Order / WO #</td><td style="${headerValueCSS}">${_esc(wo?.wo_number) || '&mdash;'}</td></tr>
-        <tr><td style="${headerLabelCSS}">Material</td><td style="${headerValueCSS}">${_esc(comp?.material_type?.name) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">PO Number</td><td style="${headerValueCSS}">${_esc(wo?.po_number) || '&mdash;'}</td></tr>
-        <tr><td style="${headerLabelCSS}">Drawing Rev</td><td style="${headerValueCSS}">${_esc(comp?.drawing_revision) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Due Date</td><td style="${headerValueCSS}">${dueDateDisplay}</td></tr>
-        <tr><td style="${headerLabelCSS}">Customer</td><td style="${headerValueCSS}">${customerDisplay}</td>
-            <td style="${headerLabelCSS}">Quantity</td><td style="${headerValueCSS} font-weight:bold;">${_esc(qtyDisplay)}</td></tr>
-      </tbody>
-    </table>
-    ${coSectionHTML}
-    ${assemblyChainHTML}
-    <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
-      <colgroup>
-        <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%) -->
-        <col style="width:4%" /><col style="width:25%" /><col style="width:19%" /><col style="width:5%" /><col style="width:23%" /><col style="width:6%" /><col style="width:9%" /><col style="width:9%" />
-      </colgroup>
-      <thead>
-        <tr><th style="${routingHeaderCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>
-            <th style="${routingHeaderCSS}">Type</th><th style="${routingHeaderCSS}">Lot #</th><th style="${routingHeaderCSS}">Qty</th>
-            <th style="${routingHeaderCSS}">Date</th><th style="${routingHeaderCSS}">Operator</th></tr>
-      </thead>
-      <tbody>${stepsHTML}${blankRows}</tbody>
-    </table>
-    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:16px;"><strong>Notes:</strong></div>
-    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:13px; color:#666;">
-      <span>Generated from SkyNet MES &mdash; ${printTime}</span><span>Skybolt Aeromotive Corp</span>
-    </div>
-  </div>
+${buildTravelerBodyHTML(travelerData)}
 </body>
 </html>`
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchMergeHostCandidates, mergeJobIntoHost, unmergeJob, isMemberEligible, getRunTarget } from '../lib/jobMerge'
 import { 
   ArrowLeft, 
   ChevronLeft, 
@@ -30,6 +31,8 @@ import {
   Settings,
   LayoutGrid,
   List,
+  FastForward,
+  CheckCircle,
   CalendarClock
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
@@ -42,6 +45,119 @@ const ONGOING_STATUSES = [
   'pending_passivation',
   'in_passivation',
 ]
+
+// D-SCHED-02: an ongoing job past its scheduled_end is still physically on
+// the machine — the single test every overrun surface uses.
+const isJobOverrun = (job) =>
+  ONGOING_STATUSES.includes(job?.status) &&
+  !!job?.scheduled_end &&
+  new Date(job.scheduled_end).getTime() < Date.now()
+
+// D-SCHED-03: scheduled but never started, and the whole slot has elapsed.
+const MISSABLE_STATUSES = ['ready', 'assigned', 'pending_compliance']
+const isJobMissedSlot = (job) =>
+  MISSABLE_STATUSES.includes(job?.status) &&
+  !!job?.scheduled_end &&
+  new Date(job.scheduled_end).getTime() < Date.now()
+
+// D-SCHED-03: for a missed-slot job whose slot fully predates today, the
+// synthetic display span pinned at today's start (2h wide). Null when the job
+// isn't pin-eligible — a slot missed earlier TODAY renders at its real
+// position (amber via getJobBlockColor) with no pin. Display-only; the real
+// scheduled_start/end are never modified.
+const getMissedPinSpan = (job) => {
+  if (!isJobMissedSlot(job)) return null
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  if (new Date(job.scheduled_end) >= todayStart) return null
+  return {
+    start: todayStart,
+    end: new Date(todayStart.getTime() + 2 * 60 * 60 * 1000),
+  }
+}
+
+// D-SCHED-04: display-only projection of each machine's live timeline.
+//  - actual_end set  → machine freed then; bar truncates there.
+//  - ongoing         → occupies until max(scheduled_end, now).
+//  - queued          → once the chain has a LIVE anchor (completion or a
+//    running job), queued work pulls to the cursor (floored at now),
+//    durations preserved, gaps compressed. No anchor → plan untouched.
+// Missed-slot jobs are excluded (D-SCHED-03 pins them; they occupy nothing).
+// scheduled_start/end are never modified anywhere.
+const buildProjection = (jobs) => {
+  const byMachine = {}
+  for (const j of jobs || []) {
+    if (!j.assigned_machine_id || !j.scheduled_start) continue
+    if (isJobMissedSlot(j)) continue
+    ;(byMachine[j.assigned_machine_id] ||= []).push(j)
+  }
+  const map = {}
+  const now = Date.now()
+  for (const arr of Object.values(byMachine)) {
+    arr.sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
+    let cursor = null
+    for (const j of arr) {
+      const schedStart = new Date(j.scheduled_start).getTime()
+      const schedEnd = j.scheduled_end ? new Date(j.scheduled_end).getTime() : null
+      if (j.actual_end) {
+        // D-SCHED-08: completed bars carry their REAL occupancy span — the
+        // same occupancy-ordered start as the ongoing branch (D-SCHED-07),
+        // so a started-early-then-finished job doesn't render half-real
+        // (right edge true, left edge planned). 30-minute floor guards
+        // degenerate spans.
+        const liveStart =
+          j.setup_start || j.production_start || j.actual_start || null
+        const start = liveStart ? new Date(liveStart).getTime() : schedStart
+        const rawEnd = new Date(j.actual_end).getTime()
+        const end = Math.max(rawEnd, start + 30 * 60000)
+        map[j.id] = { start, end, truncated: !!schedEnd && rawEnd < schedEnd, projected: false }
+        cursor = Math.max(cursor ?? end, end)
+      } else if (ONGOING_STATUSES.includes(j.status)) {
+        // D-SCHED-06/07: a running job's live start is where the MACHINE
+        // became occupied. The kiosk stamps setup_start / production_start
+        // (actual_start stays null in the live flow — confirmed on TEST
+        // rows), so read through in occupancy order. Started-early work
+        // pulls back to its true start instead of rendering as future work
+        // while it runs. End extends per D-SCHED-02; the 30-minute floor
+        // guards degenerate spans.
+        const liveStart =
+          j.setup_start || j.production_start || j.actual_start || null
+        const start = liveStart ? new Date(liveStart).getTime() : schedStart
+        const end = Math.max(schedEnd ?? now, now, start + 30 * 60000)
+        map[j.id] = { start, end, truncated: false, projected: false }
+        cursor = Math.max(cursor ?? end, end)
+      } else if (MISSABLE_STATUSES.includes(j.status) && !j.is_maintenance) {
+        // Genuinely queued production work — the ONLY pull-eligible class.
+        if (cursor === null) {
+          map[j.id] = {
+            start: schedStart,
+            end: schedEnd ?? (schedStart + (j.estimated_minutes || 60) * 60000),
+            truncated: false,
+            projected: false,
+          }
+          continue
+        }
+        const duration = schedEnd
+          ? Math.max(schedEnd - schedStart, 30 * 60000)
+          : (j.estimated_minutes || 60) * 60000
+        const start = Math.max(cursor, now)
+        const end = start + duration
+        map[j.id] = { start, end, truncated: false, projected: Math.abs(start - schedStart) > 60000 }
+        cursor = end
+      } else {
+        // D-SCHED-05: every other fall-through — terminal rows missing
+        // actual_end (hand repairs, interrupted completions), queued
+        // MAINTENANCE windows (fixed appointments), and any exotic status —
+        // keeps its real span and advances the cursor. Finished work is
+        // never future work; planned maintenance never slides.
+        const end = schedEnd ?? schedStart
+        map[j.id] = { start: schedStart, end, truncated: false, projected: false }
+        cursor = Math.max(cursor ?? end, end)
+      }
+    }
+  }
+  return map
+}
 
 export default function Schedule({ user, profile, onNavigate, canEdit = false }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
@@ -66,6 +182,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   
   // Selected job for detail popup
   const [selectedJob, setSelectedJob] = useState(null)
+
+  // D-JOBMERGE-02: active merge allocations keyed by host job id
+  const [mergeAllocs, setMergeAllocs] = useState({})
   
   // Drag and drop state
   const [draggedJob, setDraggedJob] = useState(null)
@@ -286,7 +405,15 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .or(
           `and(scheduled_start.gte.${weekStartIso},scheduled_start.lte.${weekEndIso}),` +
           `and(scheduled_start.lt.${weekStartIso},scheduled_end.gte.${weekStartIso}),` +
-          `and(scheduled_start.lt.${weekStartIso},scheduled_end.is.null,status.in.(${ongoingList}))`
+          `and(scheduled_start.lt.${weekStartIso},scheduled_end.is.null,status.in.(${ongoingList})),` +
+          // D-SCHED-02: overrun carryover — ongoing jobs whose whole slot
+          // predates the window are still occupying machines; fetch them so
+          // the render can extend their bars to "now".
+          `and(scheduled_end.lt.${weekStartIso},status.in.(${ongoingList})),` +
+          // D-SCHED-03: missed-slot carryover — scheduled-but-never-started
+          // jobs whose whole slot predates the window; the render pins them
+          // at today's left edge for rescheduling.
+          `and(scheduled_end.lt.${weekStartIso},status.in.(ready,assigned,pending_compliance))`
         )
         .order('scheduled_start', { ascending: true })
 
@@ -294,6 +421,53 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         console.error('Error fetching scheduled jobs:', scheduledError)
       } else {
         setScheduledJobs(scheduledData || [])
+      }
+
+      // D-JOBMERGE-02: active merge allocations for every job on the board —
+      // drives host badges, run targets, and the combined-run panel. Member
+      // details come from a second query (nesting past two levels is
+      // unreliable in a single select — merge client-side instead).
+      const boardIds = [
+        ...(unassignedData || []).map(j => j.id),
+        ...(scheduledData || []).map(j => j.id)
+      ]
+      if (boardIds.length === 0) {
+        setMergeAllocs({})
+      } else {
+        const { data: allocRows, error: allocError } = await supabase
+          .from('job_merge_allocations')
+          .select('id, host_job_id, member_job_id, requested_qty')
+          .eq('is_active', true)
+          .in('host_job_id', boardIds)
+        if (allocError) {
+          console.error('Error fetching merge allocations:', allocError)
+          setMergeAllocs({})
+        } else if ((allocRows || []).length === 0) {
+          setMergeAllocs({})
+        } else {
+          const memberIds = allocRows.map(a => a.member_job_id)
+          const { data: memberJobs } = await supabase
+            .from('jobs')
+            .select('id, job_number, quantity, work_order:work_orders(wo_number, customer, due_date)')
+            .in('id', memberIds)
+          const memberById = {}
+          for (const mj of (memberJobs || [])) memberById[mj.id] = mj
+          const map = {}
+          for (const a of allocRows) {
+            const mj = memberById[a.member_job_id]
+            if (!map[a.host_job_id]) map[a.host_job_id] = []
+            map[a.host_job_id].push({
+              allocation_id: a.id,
+              member_job_id: a.member_job_id,
+              requested_qty: a.requested_qty,
+              job_number: mj?.job_number,
+              wo_number: mj?.work_order?.wo_number,
+              customer: mj?.work_order?.customer,
+              due_date: mj?.work_order?.due_date
+            })
+          }
+          setMergeAllocs(map)
+        }
       }
 
       const { data: machinesData, error: machinesError } = await supabase
@@ -491,6 +665,32 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     return grouped
   }, [scheduledJobs])
 
+  // D-SCHED-04: display-only projection of every machine's live timeline.
+  const projectedSpans = useMemo(() => buildProjection(scheduledJobs), [scheduledJobs])
+
+  // D-SCHED-03/04: pins apply only when today is on screen; past windows
+  // render missed jobs at their real slots so history stays browsable. A
+  // function (not a memo) so the weekDates reference resolves at
+  // block-render time regardless of declaration order.
+  const windowContainsToday = () => {
+    const t = new Date().toDateString()
+    return (weekDates || []).some(d => new Date(d).toDateString() === t)
+  }
+
+  // D-SCHED-05: projection is a live lens — never rewrite history. When the
+  // visible window ends before today, every consumer falls back to the real
+  // schedule, keeping past weeks browsable exactly as planned/ran.
+  const windowEndsBeforeToday = () => {
+    const last = (weekDates || [])[(weekDates || []).length - 1]
+    if (!last) return false
+    const t = new Date()
+    t.setHours(0, 0, 0, 0)
+    const end = new Date(last)
+    end.setHours(23, 59, 59, 999)
+    return end < t
+  }
+  const getLiveSpan = (jobId) => (windowEndsBeforeToday() ? null : projectedSpans[jobId])
+
   // Shift hours constants (7am to 4pm = 9 hours = 540 minutes)
   const SHIFT_START_HOUR = 7
   const SHIFT_END_HOUR = 16
@@ -560,7 +760,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const getJobBlockStyle = (job, dayDate) => {
     if (!job.scheduled_start) return null
 
-    const jobStart = new Date(job.scheduled_start)
+    let jobStart = new Date(job.scheduled_start)
     // Use actual_end for completed jobs, otherwise scheduled_end
     const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
       ? job.actual_end
@@ -572,16 +772,40 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     viewEnd.setHours(23, 59, 59, 999)
 
     const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
-    const jobEnd = endTime
+    let jobEnd = endTime
       ? new Date(endTime)
       : isOngoingNoEnd
         ? viewEnd
         : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
 
+    // D-SCHED-02: live overrun — still on the machine past its slot. Extend
+    // the displayed end to now so the bar stays on today's grid (the existing
+    // carryover logic pins its left edge) instead of falling off entirely.
+    if (isJobOverrun(job)) jobEnd = new Date()
+
     const dayStart = new Date(dayDate)
     dayStart.setHours(0, 0, 0, 0)
     const dayEnd = new Date(dayDate)
     dayEnd.setHours(23, 59, 59, 999)
+
+    // D-SCHED-03/04: missed slot — pin to today only when today is on
+    // screen; on past windows the job renders at its real slot so history
+    // stays browsable.
+    const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+    if (missedPin) {
+      if (dayStart.getTime() !== missedPin.start.getTime()) return null
+      jobStart = missedPin.start
+      jobEnd = missedPin.end
+    }
+
+    // D-SCHED-04/05: live projection — actual_end truncation, overrun
+    // extension, and queue pull-forward all resolve here. Display-only, and
+    // null on historic windows (raw schedule renders instead).
+    const proj = getLiveSpan(job.id)
+    if (!missedPin && proj) {
+      jobStart = new Date(proj.start)
+      jobEnd = new Date(proj.end)
+    }
 
     // Anchor day = the day column this block renders from
     // Job must touch this day to be visible
@@ -619,7 +843,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const getJobBlockStyleZoomed = (job, dayDate) => {
     if (!job.scheduled_start) return null
 
-    const jobStart = new Date(job.scheduled_start)
+    let jobStart = new Date(job.scheduled_start)
     // Use actual_end for completed jobs, otherwise scheduled_end
     const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
       ? job.actual_end
@@ -633,11 +857,32 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     // Ongoing jobs without a recorded scheduled_end stretch to the end of the
     // visible day rather than collapsing to a 60-minute fallback.
     const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
-    const jobEnd = endTime
+    let jobEnd = endTime
       ? new Date(endTime)
       : isOngoingNoEnd
         ? dayEnd
         : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+
+    // D-SCHED-02: live overrun — see getJobBlockStyle. Same extension here so
+    // the zoomed day shows the bar running to now.
+    if (isJobOverrun(job)) jobEnd = new Date()
+
+    // D-SCHED-03/04: missed-slot pin — today's zoomed day only, and only
+    // while today is the viewed day; past days show the real slot.
+    const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+    if (missedPin) {
+      if (dayStart.getTime() !== missedPin.start.getTime()) return null
+      jobStart = missedPin.start
+      jobEnd = missedPin.end
+    }
+
+    // D-SCHED-04/05: live projection — see getJobBlockStyle. Null on
+    // historic windows.
+    const proj = getLiveSpan(job.id)
+    if (!missedPin && proj) {
+      jobStart = new Date(proj.start)
+      jobEnd = new Date(proj.end)
+    }
     
     if (jobStart > dayEnd) return null
     if (jobEnd < dayStart) return null
@@ -1377,6 +1622,12 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const getJobBlockColor = (job) => {
     const priority = job.priority || job.work_order?.priority
     const isUnplanned = job.work_order?.maintenance_type === 'unplanned'
+
+    // D-SCHED-03: missed slot — amber + dashed overrides every normal color
+    // (including maintenance) so forgotten work reads instantly on the board.
+    if (isJobMissedSlot(job)) {
+      return 'bg-amber-900/70 border-2 border-dashed border-amber-500'
+    }
     
     // Maintenance jobs - distinguish planned vs unplanned
     // Planned = Blue, Unplanned = Purple
@@ -1399,8 +1650,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         : 'bg-blue-600 border-blue-400'
     }
     
-    // Completed jobs are grayed out
-    if (job.status === 'complete' || job.status === 'manufacturing_complete') {
+    // D-SCHED-06: completed AT THE MACHINE is grayed out — actual_end covers
+    // the finishing-stage statuses (machining done, parts washing /
+    // passivating), matching the check the block wears. Sits after the
+    // maintenance branches so completed maintenance keeps its own dim style.
+    if (job.actual_end || job.status === 'complete' || job.status === 'manufacturing_complete') {
       return 'bg-gray-700/50 border-gray-500 opacity-60'
     }
 
@@ -1562,7 +1816,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
     return machineJobs.filter(job => {
       if (!job.scheduled_start) return false
-      const jobStart = new Date(job.scheduled_start)
+      let jobStart = new Date(job.scheduled_start)
       const endTime = (job.status === 'complete' || job.status === 'manufacturing_complete') && job.actual_end
         ? job.actual_end
         : job.scheduled_end
@@ -1572,11 +1826,35 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       // ending from estimated_minutes (which would put them in the past for
       // long-running carryover jobs).
       const isOngoingNoEnd = !endTime && ONGOING_STATUSES.includes(job.status)
-      const jobEnd = endTime
+      let jobEnd = endTime
         ? new Date(endTime)
         : isOngoingNoEnd
           ? weekEnd
           : new Date(jobStart.getTime() + (job.estimated_minutes || 60) * 60000)
+
+      // D-SCHED-02: this week-view filter runs BEFORE getJobBlockStyle, so it
+      // needs the same overrun extension — otherwise a job whose scheduled_end
+      // predates the visible window is rejected here and never reaches the
+      // style function that would have pinned it into today.
+      if (isJobOverrun(job)) jobEnd = new Date()
+
+      // D-SCHED-03/04: missed-slot pin — this job belongs to TODAY's column
+      // only, and only while today is on screen; on past windows there is no
+      // pin and the job falls through to its real slot. getJobBlockStyle
+      // renders the pinned span.
+      const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+      if (missedPin) {
+        return dayStart.getTime() === missedPin.start.getTime()
+      }
+
+      // D-SCHED-04: day membership must follow the PROJECTED span so a
+      // pulled-forward job appears in the day it now occupies and disappears
+      // from the day it left. Display-only; the real schedule is untouched.
+      const proj = getLiveSpan(job.id)
+      if (proj) {
+        jobStart = new Date(proj.start)
+        jobEnd = new Date(proj.end)
+      }
 
       // Job must touch this day
       if (jobStart > dayEnd || jobEnd < dayStart) return false
@@ -1860,6 +2138,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // Block content component — adapts layout based on block size
   const JobBlockContent = ({ job, sizeTier }) => {
     const isMaint = isMaintenanceJob(job)
+    // D-SCHED-04/05: projection-aware content — machine-done (actual_end
+    // set) and pulled-forward context. Null on historic windows, so past
+    // weeks show the scheduled times.
+    const proj = getLiveSpan(job.id)
+    const machineDone = !!job.actual_end
     const isUnplanned = job.work_order?.maintenance_type === 'unplanned'
     const isCompleted = job.status === 'complete' || job.status === 'manufacturing_complete'
 
@@ -1868,10 +2151,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       ? (isUnplanned ? 'UNPLANNED' : 'MAINTENANCE')
       : (job.component?.part_number || job.job_number)
 
-    // Time range string
-    const timeRange = job.scheduled_start
-      ? `${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
-      : ''
+    // Time range string — live: projected/truncated spans show their
+    // effective times; the real schedule stays in the popup.
+    const timeRange = proj
+      ? `${formatTime(new Date(proj.start))} – ${formatTime(new Date(proj.end))}`
+      : job.scheduled_start
+        ? `${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
+        : ''
 
     return (
       <div className="flex flex-col justify-center min-w-0 w-full leading-tight py-0.5">
@@ -1883,22 +2169,52 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           {isOverdue(job) && !isMaint && (
             <AlertTriangle size={10} className="text-red-300 flex-shrink-0" />
           )}
+          {isJobOverrun(job) && (
+            <Clock
+              size={10}
+              className="text-red-400 animate-pulse flex-shrink-0"
+              title="Running past scheduled end"
+            />
+          )}
+          {isJobMissedSlot(job) && (
+            <AlertTriangle
+              size={10}
+              className="text-amber-400 flex-shrink-0"
+              title="Missed slot — never started. Drag to reschedule."
+            />
+          )}
+          {proj?.projected && (
+            <FastForward
+              size={10}
+              className="text-sky-300 flex-shrink-0"
+              title={`Projected — scheduled ${formatTime(job.scheduled_start)}`}
+            />
+          )}
           <span className="text-white text-xs font-bold truncate">{line1}</span>
+          {(mergeAllocs[job.id]?.length > 0) && (
+            <Layers size={10} className="text-cyan-300 flex-shrink-0 ml-0.5" title={`Combined run · ${mergeAllocs[job.id].length + 1} orders`} />
+          )}
           {job.requires_attendance && (
             <User size={10} className="text-white/70 flex-shrink-0 ml-0.5" />
           )}
-          {isCompleted && (
-            <span className="text-[10px] text-gray-400 flex-shrink-0 ml-0.5">✓</span>
+          {(isCompleted || machineDone) && (
+            <CheckCircle
+              size={10}
+              className="text-emerald-300 flex-shrink-0 ml-0.5"
+              title={machineDone && !isCompleted ? 'Completed at kiosk — parts in finishing' : 'Complete'}
+            />
           )}
         </div>
 
         {/* Line 2: Job number + quantity */}
         <div className="truncate text-white/70 text-[10px]">
-          {isMaint ? (job.maintenance_description || job.job_number) : (
-            sizeTier === 'large'
-              ? `${job.job_number} · Qty: ${job.quantity}`
-              : `${job.job_number} (${job.quantity})`
-          )}
+          {isMaint ? (job.maintenance_description || job.job_number) : (() => {
+            const extraQty = (mergeAllocs[job.id] || []).reduce((s, a) => s + (a.requested_qty || 0), 0)
+            const qtyStr = extraQty > 0 ? `${job.quantity}+${extraQty}` : `${job.quantity}`
+            return sizeTier === 'large'
+              ? `${job.job_number} · Qty: ${qtyStr}`
+              : `${job.job_number} (${qtyStr})`
+          })()}
         </div>
 
         {/* Line 3: Customer + due date (large only) */}
@@ -3227,7 +3543,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                 </div>
                 <div>
                   <span className="text-gray-500 text-sm">Quantity</span>
-                  <p className="text-white">{selectedJob.quantity}</p>
+                  <p className="text-white">
+                    {selectedJob.quantity}
+                    {(mergeAllocs[selectedJob.id]?.length > 0) && (
+                      <span className="text-cyan-300 text-sm ml-1.5">
+                        +{mergeAllocs[selectedJob.id].reduce((s, a) => s + (a.requested_qty || 0), 0)} merged = {getRunTarget(selectedJob, mergeAllocs[selectedJob.id]).toLocaleString()}
+                      </span>
+                    )}
+                  </p>
                 </div>
               </div>
 
@@ -3295,6 +3618,15 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   </span>
                 </div>
               </div>
+
+              <JobMergePanel
+                job={selectedJob}
+                members={mergeAllocs[selectedJob.id] || []}
+                canEdit={canEdit}
+                formatDateFn={formatDate}
+                onMerged={async () => { setSelectedJob(null); await fetchData(); await loadAllScheduledJobs() }}
+                onUnmerged={async () => { await fetchData(); await loadAllScheduledJobs() }}
+              />
 
               {/* Action buttons - disabled for in-progress or completed jobs */}
               {(selectedJob.status === 'in_progress' || selectedJob.status === 'in_setup') ? (
@@ -3793,6 +4125,139 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           }
         />
       )}
+    </div>
+  )
+}
+
+// ─────────── D-JOBMERGE-02: merge/unmerge panel for the selected-job popup ───────────
+// Host view: lists the combined run's members with unmerge controls.
+// Member-eligible view: lists same-component host candidates to merge into.
+
+function JobMergePanel({ job, members, canEdit, formatDateFn, onMerged, onUnmerged }) {
+  const [candidates, setCandidates] = useState([])
+  const [busy, setBusy] = useState(false)
+  const isHost = members.length > 0
+  const runTarget = getRunTarget(job, members)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!isHost && canEdit && isMemberEligible(job)) {
+      fetchMergeHostCandidates(job.component_id, job.id).then(rows => {
+        if (!cancelled) setCandidates(rows)
+      })
+    } else {
+      setCandidates([])
+    }
+    return () => { cancelled = true }
+  }, [job.id, job.status, isHost, canEdit])
+
+  const unmergeOpen = ['pending_compliance', 'ready', 'assigned', 'in_setup', 'in_progress'].includes(job.status)
+
+  const handleMerge = async (c) => {
+    const ok = window.confirm(
+      `Merge ${job.job_number} (${job.quantity} pcs) into ${c.job_number}` +
+      `${c.machine_name ? ` on ${c.machine_name}` : ''}? ` +
+      `New run target: ${(Number(c.run_target) + (job.quantity || 0)).toLocaleString()}. ` +
+      `${job.work_order?.wo_number || 'Its work order'} receives its share back after compliance.`
+    )
+    if (!ok) return
+    setBusy(true)
+    try {
+      await mergeJobIntoHost(job.id, c.job_id)
+      await onMerged()
+    } catch (e) {
+      alert('Merge failed: ' + e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleUnmerge = async (m) => {
+    const ok = window.confirm(
+      `Unmerge ${m.job_number} (${m.requested_qty} pcs, ${m.wo_number || 'no WO'}) from ${job.job_number}? ` +
+      `It returns to the unscheduled queue.`
+    )
+    if (!ok) return
+    setBusy(true)
+    try {
+      await unmergeJob(m.member_job_id)
+      await onUnmerged()
+    } catch (e) {
+      alert('Unmerge failed: ' + e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (isHost) {
+    return (
+      <div className="pt-4 border-t border-gray-700">
+        <div className="flex items-center gap-2 mb-2">
+          <Layers size={16} className="text-cyan-300" />
+          <span className="text-white font-medium">Combined run · target {runTarget.toLocaleString()}</span>
+        </div>
+        <div className="space-y-2">
+          {members.map(m => (
+            <div key={m.member_job_id} className="flex items-center justify-between bg-gray-800/60 border border-gray-700 rounded p-2">
+              <div className="min-w-0 text-sm">
+                <span className="text-skynet-accent font-mono">{m.job_number}</span>
+                <span className="text-gray-500"> · </span>
+                <span className="text-gray-300">{[m.wo_number, m.customer].filter(Boolean).join(' · ')}</span>
+                <span className="text-gray-500"> · </span>
+                <span className="text-white">{Number(m.requested_qty).toLocaleString()} pcs</span>
+                {m.due_date && <span className="text-gray-500 text-xs"> · Due {formatDateFn(m.due_date)}</span>}
+              </div>
+              {canEdit && unmergeOpen && (
+                <button
+                  onClick={() => handleUnmerge(m)}
+                  disabled={busy}
+                  className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors flex-shrink-0 ml-2"
+                >
+                  Unmerge
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <p className="text-gray-500 text-xs mt-2">
+          Members allocate back by earliest due date once the run clears compliance.
+        </p>
+      </div>
+    )
+  }
+
+  if (!canEdit || candidates.length === 0) return null
+
+  return (
+    <div className="pt-4 border-t border-gray-700">
+      <div className="flex items-center gap-2 mb-2">
+        <Layers size={16} className="text-cyan-300" />
+        <span className="text-white font-medium">Merge into another run</span>
+      </div>
+      <div className="space-y-2">
+        {candidates.map(c => (
+          <div key={c.job_id} className="flex items-center justify-between bg-cyan-950/40 border border-cyan-700/60 rounded p-2">
+            <div className="min-w-0 text-sm">
+              <span className="text-skynet-accent font-mono">{c.job_number}</span>
+              {c.status === 'in_progress'
+                ? <span className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-green-500/20 text-green-400 rounded">RUNNING</span>
+                : <span className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-gray-600/40 text-gray-300 rounded">QUEUED</span>}
+              <span className="text-gray-500"> · </span>
+              <span className="text-gray-300">{c.machine_name || 'Not scheduled yet'}</span>
+              <span className="text-gray-500"> · </span>
+              <span className="text-gray-400 text-xs">{[c.wo_number, c.customer].filter(Boolean).join(' · ')}</span>
+              <span className="text-gray-500 text-xs"> · RT {Number(c.run_target).toLocaleString()}</span>
+            </div>
+            <button
+              onClick={() => handleMerge(c)}
+              disabled={busy}
+              className="px-2 py-1 text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors flex-shrink-0 ml-2"
+            >
+              Merge
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

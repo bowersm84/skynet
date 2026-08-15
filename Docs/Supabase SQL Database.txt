@@ -47,6 +47,7 @@ CREATE TABLE public.machines (
   status_updated_by uuid,
   kiosk_enabled boolean NOT NULL DEFAULT false,
   is_commissioned boolean NOT NULL DEFAULT true,
+  max_bar_length numeric,
   CONSTRAINT machines_pkey PRIMARY KEY (id),
   CONSTRAINT machines_location_id_fkey FOREIGN KEY (location_id) REFERENCES public.locations(id),
   CONSTRAINT machines_status_updated_by_fkey FOREIGN KEY (status_updated_by) REFERENCES public.profiles(id)

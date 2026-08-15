@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { resolveCompletionStatus } from '../lib/finishingCompletion'
+import { getRunTarget, isPaperworkStale, fetchActiveMembers } from '../lib/jobMerge'
 import { 
   Lock,
   ArrowLeft,
@@ -35,7 +36,7 @@ import {
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 
@@ -92,6 +93,21 @@ export default function Kiosk() {
   const [jobs, setJobs] = useState([])
   const [jobsLoading, setJobsLoading] = useState(false)
   const [activeJob, setActiveJob] = useState(null)
+
+  // D-JOBMERGE-04: active member claims on the current host job.
+  const [activeJobMembers, setActiveJobMembers] = useState([])
+  useEffect(() => {
+    let cancelled = false
+    if (activeJob?.id) {
+      fetchActiveMembers(activeJob.id).then(rows => {
+        if (!cancelled) setActiveJobMembers(rows)
+      })
+    } else {
+      setActiveJobMembers([])
+    }
+    return () => { cancelled = true }
+  }, [activeJob?.id])
+  const activeRunTarget = activeJob ? getRunTarget(activeJob, activeJobMembers) : 0
   const [selectedJob, setSelectedJob] = useState(null)
   
   // Action states
@@ -1381,7 +1397,7 @@ export default function Kiosk() {
       const { data: fullJob, error: jobError } = await supabase
         .from('jobs')
         .select(`
-          id, job_number, quantity, status,
+          id, job_number, quantity, status, merged_into_job_id,
           production_lot_number, good_pieces, actual_end,
           work_order:work_orders (
             id, wo_number, customer, po_number, due_date,
@@ -1442,6 +1458,9 @@ export default function Kiosk() {
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
       const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
+      // D-JOBMERGE-10: combined-run context — the piece these inline
+      // assemblies were missing versus the canonical fetchTravelerData.
+      const mergeInfo = await fetchMergeInfoForTraveler(supabase, fullJob)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1450,6 +1469,7 @@ export default function Kiosk() {
         outboundSends: outboundSends || [],
         coAllocations,
         assemblyChain,
+        mergeInfo,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -1459,6 +1479,19 @@ export default function Kiosk() {
       win.document.open()
       win.document.write(html)
       win.document.close()
+      // D-JOBMERGE-10: record the print — staleness clears by timestamp.
+      supabase.auth.getUser().then(({ data: authData }) => {
+        supabase
+          .from('jobs')
+          .update({
+            traveler_printed_at: new Date().toISOString(),
+            traveler_printed_by: authData?.user?.id || null,
+          })
+          .eq('id', targetId)
+          .then(({ error: stampErr }) => {
+            if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+          })
+      })
     } catch (err) {
       console.error('Failed to open traveler:', err)
       alert('Failed to open traveler: ' + err.message)
@@ -2007,7 +2040,7 @@ export default function Kiosk() {
           status: secondaryConfig.nextStatus,
           [secondaryConfig.endField]: endTime,
           [secondaryConfig.notesField]: secondaryCompletionForm.notes || null,
-          good_pieces: secondaryCompletionForm.good_pieces || activeJob.quantity,
+          good_pieces: secondaryCompletionForm.good_pieces || activeRunTarget || activeJob.quantity,
           bad_pieces: secondaryCompletionForm.bad_pieces || 0,
           updated_at: new Date().toISOString()
         })
@@ -2351,6 +2384,28 @@ export default function Kiosk() {
     setFinishingSends(data || [])
   }
 
+  // D-JOBMERGE-15: the machinist confirms the fresh printout is physically
+  // in the folder — clears the stale-traveler state (gate includes
+  // machinist since D-JOBMERGE-14). Note carries the operator.
+  const handlePaperworkReceived = async () => {
+    if (!activeJob) return
+    setActionLoading(true)
+    try {
+      const { error } = await supabase.rpc('ack_job_paperwork', {
+        p_job_id: activeJob.id,
+        p_note: 'New paperwork received at machine'
+          + (operator?.full_name ? ` — ${operator.full_name}` : ''),
+      })
+      if (error) throw error
+      await loadJobs()
+    } catch (err) {
+      console.error('Paperwork ack failed:', err)
+      alert('Failed to record paperwork: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleFinishingSend = async () => {
     if (!activeJob || !finishingSendQty) return
     const qty = parseInt(finishingSendQty)
@@ -2358,8 +2413,8 @@ export default function Kiosk() {
 
     // Warn if total sent exceeds job quantity
     const totalSent = finishingSends.reduce((sum, s) => sum + s.quantity, 0)
-    if (totalSent + qty > activeJob.quantity) {
-      if (!confirm(`Warning: Total sent (${totalSent + qty}) will exceed job quantity (${activeJob.quantity}). Continue?`)) return
+    if (totalSent + qty > activeRunTarget) {
+      if (!confirm(`Warning: Total sent (${totalSent + qty}) will exceed the run target (${activeRunTarget}). Continue?`)) return
     }
 
     setActionLoading(true)
@@ -2432,7 +2487,7 @@ export default function Kiosk() {
     if (!lotChangeForm.send_choice) { alert('Choose whether to send a final batch or complete without sending.'); return }
     if (lotChangeForm.send_choice === 'send' && finalBatch <= 0) { alert('Enter the final batch quantity being sent to finishing.'); return }
     if (made <= 0) { alert('Nothing made on this lot — nothing to finalize.'); return }
-    if (made >= (activeJob.quantity || 0)) { alert('That leaves no remainder — use Complete Job instead.'); return }
+    if (made >= (activeRunTarget || activeJob.quantity || 0)) { alert('That leaves no remainder — use Complete Job instead.'); return }
     if (!lotChangeNewLot.trim()) { alert('Enter the new material lot number.'); return }
 
     setActionLoading(true)
@@ -4336,7 +4391,7 @@ export default function Kiosk() {
                       <p className="text-gray-400 text-sm ml-8">{activeJob.component?.description}</p>
                       <div className="flex items-center gap-6 mt-3 ml-8">
                         <span className="text-gray-500 text-sm">
-                          Quantity: <span className="text-white">{activeJob.quantity}</span>
+                          Quantity: <span className="text-white">{activeRunTarget}</span>
                         </span>
                         <span className="text-gray-500 text-sm">
                           Good: <span className="text-green-400">{activeJob.good_pieces || 0}</span>
@@ -4374,7 +4429,7 @@ export default function Kiosk() {
                             .toISOString().slice(0, 16)
                           setSecondaryCompletionForm({
                             end_time: localDateTime,
-                            good_pieces: activeJob.good_pieces || activeJob.quantity,
+                            good_pieces: activeJob.good_pieces || activeRunTarget || activeJob.quantity,
                             bad_pieces: activeJob.bad_pieces || 0,
                             notes: ''
                           })
@@ -4625,6 +4680,35 @@ export default function Kiosk() {
                           <span className="text-green-400 font-mono text-sm">{activeJob.production_lot_number}</span>
                         </div>
                       )}
+                      {activeJobMembers.length > 0 && (
+                        <div className="mt-2 p-3 bg-cyan-950/40 border border-cyan-700/60 rounded-lg">
+                          <div className="flex items-center gap-2 text-cyan-300 font-medium text-sm">
+                            <Layers size={16} />
+                            Combined run · target {activeRunTarget.toLocaleString()}
+                          </div>
+                          <div className="text-gray-400 text-xs mt-1">
+                            {activeJobMembers.map(m => `${m.job_number} · ${m.wo_number || 'no WO'}${m.customer ? ' · ' + m.customer : ''} · ${Number(m.requested_qty).toLocaleString()} pcs`).join('  |  ')}
+                          </div>
+                        </div>
+                      )}
+                      {isPaperworkStale(activeJob) && (
+                        <div className="mt-2 p-3 bg-amber-950/40 border border-amber-600 rounded-lg">
+                          <div className="flex items-center gap-2 text-amber-300 font-medium text-sm">
+                            <AlertCircle size={16} />
+                            Traveler in folder is out of date
+                          </div>
+                          <div className="text-gray-300 text-xs mt-1">
+                            {activeJob.paperwork_changed_reason || 'Job quantity changed.'} Get a current printout from the office, or compliance sign-off, before relying on the paper copy.
+                          </div>
+                          <button
+                            onClick={handlePaperworkReceived}
+                            disabled={actionLoading}
+                            className="mt-2 px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-medium rounded"
+                          >
+                            New Paperwork Received
+                          </button>
+                        </div>
+                      )}
                       {finishingSends.length > 0 && (() => {
                         const rollup = getFinishingSendsRollup(finishingSends)
                         return (
@@ -4682,7 +4766,7 @@ export default function Kiosk() {
                     </div>
                     <p className="text-gray-400 text-sm ml-8">{activeJob.component?.description}</p>
                     <div className="flex items-center gap-6 mt-3 ml-8">
-                      <span className="text-gray-500 text-sm">Quantity: <span className="text-white">{activeJob.quantity}</span></span>
+                      <span className="text-gray-500 text-sm">Quantity: <span className="text-white">{activeRunTarget}</span></span>
                       <span className="text-gray-500 text-sm">Scheduled: <span className="text-white">{formatTime(activeJob.scheduled_start)}</span></span>
                     </div>
                   </div>
@@ -6290,7 +6374,7 @@ export default function Kiosk() {
                   className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-lg focus:border-cyan-500 focus:outline-none"
                 />
                 <p className="text-gray-500 text-xs mt-1">
-                  Job quantity: {activeJob.quantity} | Already sent: {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} | Remaining: {activeJob.quantity - finishingSends.reduce((sum, s) => sum + s.quantity, 0)}
+                  Run target: {activeRunTarget} | Already sent: {finishingSends.reduce((sum, s) => sum + s.quantity, 0)} | Remaining: {activeRunTarget - finishingSends.reduce((sum, s) => sum + s.quantity, 0)}
                 </p>
               </div>
 
@@ -6377,7 +6461,7 @@ export default function Kiosk() {
 
       {/* Lot-Change Split Modal — machinist switches material lot mid-run */}
       {showLotChangeModal && activeJob && (() => {
-        const target = activeJob.quantity || 0
+        const target = activeRunTarget || activeJob.quantity || 0
         const alreadySent = finishingSends.reduce((sum, s) => sum + (s.quantity || 0), 0)
         const finalBatch = lotChangeForm.send_choice === 'send' ? (parseInt(lotChangeForm.final_batch_qty) || 0) : 0
         const made = alreadySent + finalBatch
@@ -6618,11 +6702,11 @@ export default function Kiosk() {
                 </div>
 
                 {/* Quantity validation warning */}
-                {(secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces) !== activeJob.quantity && (
+                {(secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces) !== activeRunTarget && (
                   <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 flex items-start gap-2">
                     <AlertTriangle size={18} className="text-yellow-500 flex-shrink-0 mt-0.5" />
                     <p className="text-yellow-400 text-sm">
-                      Total ({secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces}) doesn't match job quantity ({activeJob.quantity})
+                      Total ({secondaryCompletionForm.good_pieces + secondaryCompletionForm.bad_pieces}) doesn't match the run target ({activeRunTarget})
                     </p>
                   </div>
                 )}
@@ -6841,10 +6925,15 @@ export default function Kiosk() {
             {completionStep === 'form' && (
               <>
                 <div className="flex-1 overflow-y-auto p-6 space-y-4">
-                  {/* Required Pieces - Prominent Display */}
+                  {/* Required Pieces - Prominent Display (D-JOBMERGE-10: run target) */}
                   <div className="bg-skynet-accent/10 border border-skynet-accent/30 rounded-lg p-4 text-center">
                     <p className="text-gray-400 text-sm">Required Pieces</p>
-                    <p className="text-3xl font-bold text-white">{activeJob.quantity}</p>
+                    <p className="text-3xl font-bold text-white">{activeRunTarget}</p>
+                    {activeJobMembers.length > 0 && (
+                      <p className="text-[11px] text-cyan-300 mt-1">
+                        Combined run · {activeJob.quantity} own + {activeRunTarget - activeJob.quantity} merged
+                      </p>
+                    )}
                   </div>
 
                   {finishingSends.length > 0 && (() => {
@@ -6995,15 +7084,15 @@ export default function Kiosk() {
                           </div>
                           <div className="flex justify-between">
                             <span>Job good total after completion</span>
-                            <span className={projected >= activeJob.quantity ? 'text-green-400' : 'text-amber-300'}>{projected} / {activeJob.quantity}</span>
+                            <span className={projected >= activeRunTarget ? 'text-green-400' : 'text-amber-300'}>{projected} / {activeRunTarget}</span>
                           </div>
                         </div>
 
-                        {completeForm.send_choice && projected < activeJob.quantity && (
+                        {completeForm.send_choice && projected < activeRunTarget && (
                           <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 text-sm text-amber-200 flex items-start gap-2">
                             <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
                             <span>
-                              Job good total ({projected}) is below target ({activeJob.quantity}). This will be flagged to the scheduler for shortfall review.
+                              Job good total ({projected}) is below target ({activeRunTarget}). This will be flagged to the scheduler for shortfall review.
                             </span>
                           </div>
                         )}

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { batchRequiresChemicals } from '../lib/routing'
 import { evaluateJobShortfall } from '../lib/shortfall'
@@ -1037,7 +1037,7 @@ export default function Finishing() {
       const { data: fullJob, error: jobError } = await supabase
         .from('jobs')
         .select(`
-          id, job_number, quantity, status,
+          id, job_number, quantity, status, merged_into_job_id,
           production_lot_number, good_pieces, actual_end,
           work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
           component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
@@ -1088,6 +1088,9 @@ export default function Finishing() {
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
       const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
+      // D-JOBMERGE-10: combined-run context — the piece these inline
+      // assemblies were missing versus the canonical fetchTravelerData.
+      const mergeInfo = await fetchMergeInfoForTraveler(supabase, fullJob)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1096,6 +1099,7 @@ export default function Finishing() {
         outboundSends: outboundSends || [],
         coAllocations,
         assemblyChain,
+        mergeInfo,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -1105,6 +1109,19 @@ export default function Finishing() {
       win.document.open()
       win.document.write(html)
       win.document.close()
+      // D-JOBMERGE-10: record the print — staleness clears by timestamp.
+      supabase.auth.getUser().then(({ data: authData }) => {
+        supabase
+          .from('jobs')
+          .update({
+            traveler_printed_at: new Date().toISOString(),
+            traveler_printed_by: authData?.user?.id || null,
+          })
+          .eq('id', jobId)
+          .then(({ error: stampErr }) => {
+            if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+          })
+      })
     } catch (err) {
       console.error('Failed to open traveler:', err)
       alert('Failed to open traveler: ' + err.message)

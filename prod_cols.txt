@@ -1,0 +1,1229 @@
+aircraft.country :: text
+aircraft.created_at :: timestamp with time zone
+aircraft.created_by :: uuid
+aircraft.id :: uuid
+aircraft.make_model :: text
+aircraft.notes :: text
+aircraft.registration :: text
+aircraft.serial_number :: text
+aircraft.updated_at :: timestamp with time zone
+aircraft.updated_by :: uuid
+aircraft_registrations.aircraft_id :: uuid
+aircraft_registrations.created_at :: timestamp with time zone
+aircraft_registrations.id :: uuid
+aircraft_registrations.notes :: text
+aircraft_registrations.observed_date :: date
+aircraft_registrations.registration :: text
+aircraft_registrations.source :: text
+assembly_bom.assembly_id :: uuid
+assembly_bom.component_id :: uuid
+assembly_bom.created_at :: timestamp with time zone
+assembly_bom.id :: uuid
+assembly_bom.quantity :: integer
+assembly_bom.sort_order :: integer
+assembly_component_checkins.checked_in_at :: timestamp with time zone
+assembly_component_checkins.checked_in_by :: uuid
+assembly_component_checkins.condition_notes :: text
+assembly_component_checkins.created_at :: timestamp with time zone
+assembly_component_checkins.id :: uuid
+assembly_component_checkins.job_id :: uuid
+assembly_component_checkins.quantity_received :: integer
+assembly_component_checkins.source_work_order_assembly_id :: uuid
+assembly_component_checkins.work_order_assembly_id :: uuid
+audit_logs.created_at :: timestamp with time zone
+audit_logs.details :: jsonb
+audit_logs.event_type :: text
+audit_logs.id :: uuid
+audit_logs.job_id :: uuid
+audit_logs.machine_id :: uuid
+audit_logs.operator_id :: uuid
+bar_sizes.created_at :: timestamp with time zone
+bar_sizes.id :: uuid
+bar_sizes.is_active :: boolean
+bar_sizes.shape :: text
+bar_sizes.size :: text
+bar_sizes.size_decimal :: numeric
+blank_types.alloy :: text
+blank_types.created_at :: timestamp with time zone
+blank_types.id :: uuid
+blank_types.is_active :: boolean
+blank_types.is_unmarked :: boolean
+blank_types.material_type :: text
+blank_types.notes :: text
+blank_types.stud_length :: text
+blank_types.stud_series :: text
+blank_types.updated_at :: timestamp with time zone
+blank_types.vendor :: text
+cert_packages.approved_at :: timestamp with time zone
+cert_packages.approved_by :: uuid
+cert_packages.conversion_manifest :: jsonb
+cert_packages.created_at :: timestamp with time zone
+cert_packages.created_by :: uuid
+cert_packages.file_path :: text
+cert_packages.finishing_lot_number :: text
+cert_packages.form_data :: jsonb
+cert_packages.id :: uuid
+cert_packages.job_id :: uuid
+cert_packages.package_number :: text
+cert_packages.part_id :: uuid
+cert_packages.snapshot :: jsonb
+cert_packages.status :: text
+cert_packages.work_order_id :: uuid
+cert_signatures.created_at :: timestamp with time zone
+cert_signatures.id :: uuid
+cert_signatures.is_active :: boolean
+cert_signatures.signature_image_path :: text
+cert_signatures.stamp_image_path :: text
+cert_signatures.title :: text
+cert_signatures.updated_at :: timestamp with time zone
+cert_signatures.user_id :: uuid
+co_fulfillment_adjustments.adjusted_at :: timestamp with time zone
+co_fulfillment_adjustments.adjusted_by :: uuid
+co_fulfillment_adjustments.customer_order_line_id :: uuid
+co_fulfillment_adjustments.delta :: integer
+co_fulfillment_adjustments.id :: uuid
+co_fulfillment_adjustments.new_fulfilled :: integer
+co_fulfillment_adjustments.old_fulfilled :: integer
+co_fulfillment_adjustments.reason :: text
+component_lot_documents.component_lot_id :: uuid
+component_lot_documents.document_type :: text
+component_lot_documents.file_name :: text
+component_lot_documents.file_path :: text
+component_lot_documents.file_size :: bigint
+component_lot_documents.id :: uuid
+component_lot_documents.mime_type :: text
+component_lot_documents.uploaded_at :: timestamp with time zone
+component_lot_documents.uploaded_by :: uuid
+component_lots.created_at :: timestamp with time zone
+component_lots.created_by :: uuid
+component_lots.id :: uuid
+component_lots.lot_number :: text
+component_lots.notes :: text
+component_lots.parent_lot_id :: uuid
+component_lots.part_id :: uuid
+component_lots.po_number :: text
+component_lots.process_description :: text
+component_lots.quantity :: integer
+component_lots.received_at :: date
+component_lots.received_by :: uuid
+component_lots.vendor :: text
+customer_order_allocations.created_at :: timestamp with time zone
+customer_order_allocations.created_by :: uuid
+customer_order_allocations.customer_order_line_id :: uuid
+customer_order_allocations.deactivated_at :: timestamp with time zone
+customer_order_allocations.deactivated_by :: uuid
+customer_order_allocations.id :: uuid
+customer_order_allocations.is_active :: boolean
+customer_order_allocations.quantity_allocated :: integer
+customer_order_allocations.work_order_id :: uuid
+customer_order_lines.cancel_reason :: text
+customer_order_lines.cancelled_at :: timestamp with time zone
+customer_order_lines.cancelled_by :: uuid
+customer_order_lines.components_needed :: text
+customer_order_lines.created_at :: timestamp with time zone
+customer_order_lines.customer_order_id :: uuid
+customer_order_lines.due_date :: date
+customer_order_lines.fulfilled_at :: timestamp with time zone
+customer_order_lines.fulfilled_by :: uuid
+customer_order_lines.id :: uuid
+customer_order_lines.line_number :: integer
+customer_order_lines.notes :: text
+customer_order_lines.part_id :: uuid
+customer_order_lines.priority :: text
+customer_order_lines.quantity_fulfilled :: integer
+customer_order_lines.quantity_ordered :: integer
+customer_order_lines.status :: text
+customer_order_lines.updated_at :: timestamp with time zone
+customer_orders.cancel_reason :: text
+customer_orders.cancelled_at :: timestamp with time zone
+customer_orders.cancelled_by :: uuid
+customer_orders.co_number :: text
+customer_orders.created_at :: timestamp with time zone
+customer_orders.created_by :: uuid
+customer_orders.customer_id :: uuid
+customer_orders.fishbowl_order_id :: text
+customer_orders.id :: uuid
+customer_orders.notes :: text
+customer_orders.po_number :: text
+customer_orders.salesperson_id :: uuid
+customer_orders.status :: text
+customer_orders.updated_at :: timestamp with time zone
+customers.created_at :: timestamp with time zone
+customers.customer_id :: text
+customers.id :: uuid
+customers.is_active :: boolean
+customers.name :: text
+customers.notes :: text
+customers.updated_at :: timestamp with time zone
+document_types.category :: character varying
+document_types.code :: character varying
+document_types.created_at :: timestamp with time zone
+document_types.description :: text
+document_types.file_types_allowed :: ARRAY
+document_types.id :: uuid
+document_types.is_active :: boolean
+document_types.is_digital_form :: boolean
+document_types.name :: character varying
+document_types.requires_approval :: boolean
+document_types.sort_order :: integer
+finishing_sends.chemical_lot_number :: text
+finishing_sends.chemical_lot_number_2 :: text
+finishing_sends.compliance_approved_at :: timestamp with time zone
+finishing_sends.compliance_approved_by :: uuid
+finishing_sends.compliance_bad_qty :: integer
+finishing_sends.compliance_good_qty :: integer
+finishing_sends.compliance_notes :: text
+finishing_sends.compliance_outcome :: text
+finishing_sends.compliance_status :: text
+finishing_sends.count_discrepancy :: integer
+finishing_sends.created_at :: timestamp with time zone
+finishing_sends.finishing_completed_at :: timestamp with time zone
+finishing_sends.finishing_lot_number :: text
+finishing_sends.finishing_operator_id :: uuid
+finishing_sends.finishing_stage :: text
+finishing_sends.finishing_started_at :: timestamp with time zone
+finishing_sends.id :: uuid
+finishing_sends.incoming_count :: integer
+finishing_sends.is_partial_send :: boolean
+finishing_sends.is_standalone :: boolean
+finishing_sends.job_id :: uuid
+finishing_sends.machine_id :: uuid
+finishing_sends.material_lot_number :: text
+finishing_sends.notes :: text
+finishing_sends.production_lot_number :: text
+finishing_sends.quantity :: integer
+finishing_sends.sent_at :: timestamp with time zone
+finishing_sends.sent_by :: uuid
+finishing_sends.stage_started_at :: timestamp with time zone
+finishing_sends.standalone_operation_type :: text
+finishing_sends.status :: text
+finishing_sends.updated_at :: timestamp with time zone
+finishing_sends.verified_at :: timestamp with time zone
+finishing_sends.verified_by :: uuid
+finishing_sends.verified_count :: integer
+fishbowl_invoices.created_at :: timestamp with time zone
+fishbowl_invoices.first_ship_date :: date
+fishbowl_invoices.id :: uuid
+fishbowl_invoices.invoice_lines :: integer
+fishbowl_invoices.invoice_number :: text
+fishbowl_invoices.party_id :: uuid
+fishbowl_invoices.salesperson :: text
+fishbowl_invoices.so_number :: text
+fishbowl_invoices.source :: text
+import_bom_staging.assembly_part_number :: text
+import_bom_staging.component_part_number :: text
+import_bom_staging.quantity :: integer
+import_bom_staging.sort_order :: integer
+import_parts_staging.description :: text
+import_parts_staging.part_number :: text
+import_parts_staging.part_type :: text
+inventory_adjustment_requests.adjustment_delta :: numeric
+inventory_adjustment_requests.bar_size :: text
+inventory_adjustment_requests.count_session_id :: uuid
+inventory_adjustment_requests.counted_bars :: numeric
+inventory_adjustment_requests.financial_impact :: numeric
+inventory_adjustment_requests.id :: uuid
+inventory_adjustment_requests.lot_number :: text
+inventory_adjustment_requests.material_receiving_id :: uuid
+inventory_adjustment_requests.material_type :: text
+inventory_adjustment_requests.price_per_bar_at_count :: numeric
+inventory_adjustment_requests.reason :: text
+inventory_adjustment_requests.requested_at :: timestamp with time zone
+inventory_adjustment_requests.requested_by :: uuid
+inventory_adjustment_requests.review_notes :: text
+inventory_adjustment_requests.reviewed_at :: timestamp with time zone
+inventory_adjustment_requests.reviewed_by :: uuid
+inventory_adjustment_requests.status :: text
+inventory_adjustment_requests.system_bars_at_count :: numeric
+job_document_snapshots.created_at :: timestamp with time zone
+job_document_snapshots.document_type_id :: uuid
+job_document_snapshots.id :: uuid
+job_document_snapshots.job_id :: uuid
+job_document_snapshots.part_document_id :: uuid
+job_document_snapshots.snapshot_file_url :: text
+job_document_snapshots.snapshot_version :: character varying
+job_documents.approved_at :: timestamp with time zone
+job_documents.approved_by :: uuid
+job_documents.created_at :: timestamp with time zone
+job_documents.document_type_id :: uuid
+job_documents.file_name :: character varying
+job_documents.file_size :: integer
+job_documents.file_url :: text
+job_documents.form_data :: jsonb
+job_documents.id :: uuid
+job_documents.job_id :: uuid
+job_documents.mime_type :: character varying
+job_documents.notes :: text
+job_documents.rejection_reason :: text
+job_documents.source :: text
+job_documents.status :: character varying
+job_documents.updated_at :: timestamp with time zone
+job_documents.uploaded_by :: uuid
+job_material_consumption.bar_size :: text
+job_material_consumption.bars_consumed :: integer
+job_material_consumption.bars_loaded :: integer
+job_material_consumption.bars_remaining :: integer
+job_material_consumption.completed_at :: timestamp with time zone
+job_material_consumption.completed_by :: uuid
+job_material_consumption.created_at :: timestamp with time zone
+job_material_consumption.id :: uuid
+job_material_consumption.job_id :: uuid
+job_material_consumption.job_number :: character varying
+job_material_consumption.job_status :: character varying
+job_material_consumption.loaded_at :: timestamp with time zone
+job_material_consumption.loaded_by :: uuid
+job_material_consumption.lot_number :: text
+job_material_consumption.material_type :: text
+job_material_consumption.part_number :: character varying
+job_material_consumption.updated_at :: timestamp with time zone
+job_materials.bar_length :: numeric
+job_materials.bar_size :: text
+job_materials.bars_loaded :: integer
+job_materials.bars_remaining :: integer
+job_materials.completed_at :: timestamp with time zone
+job_materials.completed_by :: uuid
+job_materials.created_at :: timestamp with time zone
+job_materials.id :: uuid
+job_materials.job_id :: uuid
+job_materials.loaded_at :: timestamp with time zone
+job_materials.loaded_by :: uuid
+job_materials.lot_number :: text
+job_materials.material_master_id :: uuid
+job_materials.material_type :: text
+job_materials.reconciled_at :: timestamp with time zone
+job_materials.reconciled_by :: uuid
+job_materials.updated_at :: timestamp with time zone
+job_routing_steps.added_at :: timestamp with time zone
+job_routing_steps.added_by :: uuid
+job_routing_steps.completed_at :: timestamp with time zone
+job_routing_steps.completed_by :: uuid
+job_routing_steps.created_at :: timestamp with time zone
+job_routing_steps.id :: uuid
+job_routing_steps.is_added_step :: boolean
+job_routing_steps.job_id :: uuid
+job_routing_steps.lot_number :: text
+job_routing_steps.notes :: text
+job_routing_steps.operator_initials :: text
+job_routing_steps.quantity :: integer
+job_routing_steps.removal_approved_at :: timestamp with time zone
+job_routing_steps.removal_approved_by :: uuid
+job_routing_steps.removal_reason :: text
+job_routing_steps.removal_requested_at :: timestamp with time zone
+job_routing_steps.removal_requested_by :: uuid
+job_routing_steps.started_at :: timestamp with time zone
+job_routing_steps.station :: text
+job_routing_steps.status :: text
+job_routing_steps.step_name :: text
+job_routing_steps.step_order :: integer
+job_routing_steps.step_type :: text
+job_routing_steps.updated_at :: timestamp with time zone
+job_shortfall_resolutions.created_at :: timestamp with time zone
+job_shortfall_resolutions.fulfillment_applied_at :: timestamp with time zone
+job_shortfall_resolutions.id :: uuid
+job_shortfall_resolutions.job_id :: uuid
+job_shortfall_resolutions.job_quantity :: integer
+job_shortfall_resolutions.produced_quantity :: integer
+job_shortfall_resolutions.requeue_job_id :: uuid
+job_shortfall_resolutions.resolution :: text
+job_shortfall_resolutions.resolution_notes :: text
+job_shortfall_resolutions.resolved_at :: timestamp with time zone
+job_shortfall_resolutions.resolved_by :: uuid
+job_shortfall_resolutions.shortfall_quantity :: integer
+job_shortfall_resolutions.status :: text
+job_shortfall_resolutions.work_order_id :: uuid
+job_splits.compliance_ack_at :: timestamp with time zone
+job_splits.compliance_ack_by :: uuid
+job_splits.id :: uuid
+job_splits.new_job_id :: uuid
+job_splits.new_job_qty :: integer
+job_splits.new_lot_number :: text
+job_splits.old_lot_number :: text
+job_splits.original_job_id :: uuid
+job_splits.original_qty_after :: integer
+job_splits.original_qty_before :: integer
+job_splits.reason :: text
+job_splits.scheduler_ack_at :: timestamp with time zone
+job_splits.scheduler_ack_by :: uuid
+job_splits.split_at :: timestamp with time zone
+job_splits.split_by :: uuid
+job_tools.added_at :: timestamp with time zone
+job_tools.added_by :: uuid
+job_tools.created_at :: timestamp with time zone
+job_tools.id :: uuid
+job_tools.job_id :: uuid
+job_tools.notes :: text
+job_tools.serial_number :: character varying
+job_tools.tool_instance_id :: uuid
+job_tools.tool_name :: character varying
+job_tools.tool_type :: character varying
+jobs.actual_end :: timestamp with time zone
+jobs.actual_start :: timestamp with time zone
+jobs.assigned_machine_id :: uuid
+jobs.assigned_user_id :: uuid
+jobs.bad_pieces :: integer
+jobs.blank_dash :: text
+jobs.blank_lot_number :: text
+jobs.checked_in_at :: timestamp with time zone
+jobs.checked_out_at :: timestamp with time zone
+jobs.co_fulfillment_applied_at :: timestamp with time zone
+jobs.compliance_notes :: text
+jobs.compliance_outcome :: text
+jobs.component_id :: uuid
+jobs.created_at :: timestamp with time zone
+jobs.documents_deferred :: boolean
+jobs.documents_deferred_at :: timestamp with time zone
+jobs.documents_deferred_by :: uuid
+jobs.documents_deferred_reason :: text
+jobs.estimated_minutes :: integer
+jobs.finishing_end :: timestamp with time zone
+jobs.finishing_lot_number :: text
+jobs.finishing_notes :: text
+jobs.finishing_operator_id :: uuid
+jobs.finishing_start :: timestamp with time zone
+jobs.good_pieces :: integer
+jobs.has_open_shortfall :: boolean
+jobs.id :: uuid
+jobs.incomplete_at :: timestamp with time zone
+jobs.incomplete_by :: uuid
+jobs.incomplete_reason :: text
+jobs.is_maintenance :: boolean
+jobs.is_standalone_finishing :: boolean
+jobs.job_number :: character varying
+jobs.maintenance_description :: text
+jobs.material_confirmed :: boolean
+jobs.material_confirmed_at :: timestamp with time zone
+jobs.material_confirmed_by :: uuid
+jobs.material_override :: boolean
+jobs.material_override_at :: timestamp with time zone
+jobs.material_override_by :: uuid
+jobs.notes :: text
+jobs.part_id :: uuid
+jobs.pause_reason :: text
+jobs.paused_at :: timestamp with time zone
+jobs.post_mfg_bad_qty :: integer
+jobs.post_mfg_good_qty :: integer
+jobs.post_mfg_notes :: text
+jobs.post_mfg_reviewed_at :: timestamp with time zone
+jobs.post_mfg_reviewed_by :: uuid
+jobs.priority :: character varying
+jobs.production_lot_number :: text
+jobs.production_start :: timestamp with time zone
+jobs.qty_override :: integer
+jobs.qty_override_at :: timestamp with time zone
+jobs.qty_override_by :: uuid
+jobs.qty_override_reason :: text
+jobs.quantity :: integer
+jobs.requires_attendance :: boolean
+jobs.scheduled_at :: timestamp with time zone
+jobs.scheduled_by :: uuid
+jobs.scheduled_end :: timestamp with time zone
+jobs.scheduled_start :: timestamp with time zone
+jobs.setup_start :: timestamp with time zone
+jobs.source_description :: text
+jobs.status :: character varying
+jobs.time_per_unit :: numeric
+jobs.tooling_confirmed :: boolean
+jobs.tooling_override :: boolean
+jobs.tooling_override_at :: timestamp with time zone
+jobs.tooling_override_by :: uuid
+jobs.tooling_required :: boolean
+jobs.updated_at :: timestamp with time zone
+jobs.work_order_assembly_id :: uuid
+jobs.work_order_id :: uuid
+kiosk_sessions.device_id :: text
+kiosk_sessions.id :: uuid
+kiosk_sessions.is_active :: boolean
+kiosk_sessions.logged_in_at :: timestamp with time zone
+kiosk_sessions.logged_out_at :: timestamp with time zone
+kiosk_sessions.logout_reason :: text
+kiosk_sessions.machine_id :: uuid
+kiosk_sessions.operator_id :: uuid
+kit_bom_lines.component_id :: uuid
+kit_bom_lines.created_at :: timestamp with time zone
+kit_bom_lines.id :: uuid
+kit_bom_lines.kit_sku_id :: uuid
+kit_bom_lines.line_number :: integer
+kit_bom_lines.qty_per_kit :: numeric
+kit_bom_lines.source :: text
+kit_bom_lines.uom :: text
+kit_books.category :: text
+kit_books.code :: text
+kit_books.created_at :: timestamp with time zone
+kit_books.first_lot :: integer
+kit_books.id :: uuid
+kit_books.is_active :: boolean
+kit_books.last_lot :: integer
+kit_books.name :: text
+kit_books.notes :: text
+kit_books.revision :: text
+kit_books.updated_at :: timestamp with time zone
+kit_components.created_at :: timestamp with time zone
+kit_components.description :: text
+kit_components.id :: uuid
+kit_components.part_id :: uuid
+kit_components.part_number :: text
+kit_components.updated_at :: timestamp with time zone
+kit_installations.aircraft_id :: uuid
+kit_installations.created_at :: timestamp with time zone
+kit_installations.created_by :: uuid
+kit_installations.evidence :: text
+kit_installations.id :: uuid
+kit_installations.install_date :: date
+kit_installations.installer_party_id :: uuid
+kit_installations.kit_lot_id :: uuid
+kit_installations.kit_sku_id :: uuid
+kit_installations.notes :: text
+kit_installations.status :: text
+kit_installations.updated_at :: timestamp with time zone
+kit_installations.updated_by :: uuid
+kit_lot_component_lots.component_id :: uuid
+kit_lot_component_lots.created_at :: timestamp with time zone
+kit_lot_component_lots.created_by :: uuid
+kit_lot_component_lots.id :: uuid
+kit_lot_component_lots.kit_lot_id :: uuid
+kit_lot_component_lots.lot_number_as_written :: text
+kit_lot_component_lots.needs_review :: boolean
+kit_lot_component_lots.part_number_as_written :: text
+kit_lot_component_lots.qty_shipped :: numeric
+kit_lot_component_lots.review_reason :: text
+kit_lot_component_lots.ship_date :: date
+kit_lot_component_lots.shipment_number :: text
+kit_lot_component_lots.so_line_no :: integer
+kit_lot_component_lots.source :: text
+kit_lot_component_lots.updated_at :: timestamp with time zone
+kit_lot_component_lots.updated_by :: uuid
+kit_lots.book_id :: uuid
+kit_lots.created_at :: timestamp with time zone
+kit_lots.created_by :: uuid
+kit_lots.customer_as_written :: text
+kit_lots.id :: uuid
+kit_lots.invoice_as_written :: text
+kit_lots.kit_part_as_written :: text
+kit_lots.kit_sale_line_id :: uuid
+kit_lots.kit_sku_id :: uuid
+kit_lots.log_date :: date
+kit_lots.lot_number :: integer
+kit_lots.notes :: text
+kit_lots.party_id :: uuid
+kit_lots.rec_platemount_number :: text
+kit_lots.record_status :: text
+kit_lots.so_as_written :: text
+kit_lots.source :: text
+kit_lots.source_page :: text
+kit_lots.stud_number :: text
+kit_lots.transcription_confidence :: text
+kit_lots.transcription_notes :: text
+kit_lots.updated_at :: timestamp with time zone
+kit_lots.updated_by :: uuid
+kit_parties.country :: text
+kit_parties.created_at :: timestamp with time zone
+kit_parties.fishbowl_customer_number :: text
+kit_parties.id :: uuid
+kit_parties.is_distributor :: boolean
+kit_parties.name :: text
+kit_parties.normalized_name :: text
+kit_parties.notes :: text
+kit_parties.updated_at :: timestamp with time zone
+kit_sale_lines.created_at :: timestamp with time zone
+kit_sale_lines.id :: uuid
+kit_sale_lines.invoice_numbers :: text
+kit_sale_lines.kit_sale_id :: uuid
+kit_sale_lines.kit_sku_id :: uuid
+kit_sale_lines.qty_ordered :: integer
+kit_sale_lines.qty_shipped :: integer
+kit_sales.created_at :: timestamp with time zone
+kit_sales.customer_po :: text
+kit_sales.id :: uuid
+kit_sales.order_date :: date
+kit_sales.party_id :: uuid
+kit_sales.salesperson :: text
+kit_sales.ship_date :: date
+kit_sales.so_number :: text
+kit_sales.so_status :: text
+kit_sales.source :: text
+kit_sales.updated_at :: timestamp with time zone
+kit_sku_stc_map.created_at :: timestamp with time zone
+kit_sku_stc_map.id :: uuid
+kit_sku_stc_map.kit_sku_id :: uuid
+kit_sku_stc_map.notes :: text
+kit_sku_stc_map.ruled_at :: timestamp with time zone
+kit_sku_stc_map.ruled_by :: uuid
+kit_sku_stc_map.stc_certificate_id :: uuid
+kit_skus.applicability_ruled_at :: timestamp with time zone
+kit_skus.applicability_ruled_by :: uuid
+kit_skus.created_at :: timestamp with time zone
+kit_skus.description :: text
+kit_skus.id :: uuid
+kit_skus.is_active :: boolean
+kit_skus.kit_scope :: text
+kit_skus.notes :: text
+kit_skus.part_number :: text
+kit_skus.stc_applicability :: text
+kit_skus.updated_at :: timestamp with time zone
+kit_stc_documents.document_type :: text
+kit_stc_documents.file_name :: text
+kit_stc_documents.file_path :: text
+kit_stc_documents.file_size :: bigint
+kit_stc_documents.id :: uuid
+kit_stc_documents.kit_installation_id :: uuid
+kit_stc_documents.kit_lot_id :: uuid
+kit_stc_documents.mime_type :: text
+kit_stc_documents.stc_request_id :: uuid
+kit_stc_documents.uploaded_at :: timestamp with time zone
+kit_stc_documents.uploaded_by :: uuid
+locations.address :: text
+locations.code :: character varying
+locations.created_at :: timestamp with time zone
+locations.id :: uuid
+locations.is_active :: boolean
+locations.name :: character varying
+locations.updated_at :: timestamp with time zone
+lot_number_sequences.created_at :: timestamp with time zone
+lot_number_sequences.date_part :: text
+lot_number_sequences.id :: uuid
+lot_number_sequences.last_sequence :: integer
+lot_number_sequences.prefix :: text
+machine_downtime_logs.created_at :: timestamp with time zone
+machine_downtime_logs.end_time :: timestamp with time zone
+machine_downtime_logs.id :: uuid
+machine_downtime_logs.job_id :: uuid
+machine_downtime_logs.logged_by :: uuid
+machine_downtime_logs.machine_id :: uuid
+machine_downtime_logs.notes :: text
+machine_downtime_logs.reason :: character varying
+machine_downtime_logs.sent_to_scheduling :: boolean
+machine_downtime_logs.sent_to_scheduling_at :: timestamp with time zone
+machine_downtime_logs.start_time :: timestamp with time zone
+machine_downtime_logs.updated_at :: timestamp with time zone
+machine_idle_logs.created_at :: timestamp with time zone
+machine_idle_logs.id :: uuid
+machine_idle_logs.idle_end :: timestamp with time zone
+machine_idle_logs.idle_minutes :: integer
+machine_idle_logs.idle_start :: timestamp with time zone
+machine_idle_logs.machine_id :: uuid
+machine_idle_logs.next_job_id :: uuid
+machine_idle_logs.previous_job_id :: uuid
+machines.code :: character varying
+machines.created_at :: timestamp with time zone
+machines.display_order :: integer
+machines.id :: uuid
+machines.is_active :: boolean
+machines.is_commissioned :: boolean
+machines.kiosk_enabled :: boolean
+machines.location_id :: uuid
+machines.machine_type :: character varying
+machines.max_bar_length :: numeric
+machines.name :: character varying
+machines.status :: character varying
+machines.status_reason :: text
+machines.status_updated_at :: timestamp with time zone
+machines.status_updated_by :: uuid
+machines.updated_at :: timestamp with time zone
+material_availability.adjustment_delta :: numeric
+material_availability.available_bars :: numeric
+material_availability.available_inches :: numeric
+material_availability.bar_length_inches :: numeric
+material_availability.bar_size :: text
+material_availability.lot_number :: text
+material_availability.material_id :: uuid
+material_availability.material_receiving_id :: uuid
+material_availability.material_type :: text
+material_availability.po_number :: text
+material_availability.price_per_bar :: numeric
+material_availability.rack :: text
+material_availability.received_at :: timestamp with time zone
+material_availability.received_bars :: integer
+material_availability.used_bars :: bigint
+material_availability.used_inches :: numeric
+material_availability.vendor :: text
+material_documents.document_type :: text
+material_documents.file_name :: text
+material_documents.file_path :: text
+material_documents.file_size :: bigint
+material_documents.id :: uuid
+material_documents.material_receiving_id :: uuid
+material_documents.mime_type :: text
+material_documents.uploaded_at :: timestamp with time zone
+material_documents.uploaded_by :: uuid
+material_loads.bar_size :: text
+material_loads.bars :: integer
+material_loads.id :: uuid
+material_loads.job_id :: uuid
+material_loads.lot_number :: text
+material_loads.material_type :: text
+material_loads.source :: text
+material_loads.staged_at :: timestamp with time zone
+material_loads.staged_by :: uuid
+material_receiving.bar_length_inches :: numeric
+material_receiving.bar_size :: text
+material_receiving.blank_type_id :: uuid
+material_receiving.category :: text
+material_receiving.created_at :: timestamp with time zone
+material_receiving.heat_number :: text
+material_receiving.id :: uuid
+material_receiving.lot_number :: text
+material_receiving.material_id :: uuid
+material_receiving.material_type :: text
+material_receiving.notes :: text
+material_receiving.po_number :: text
+material_receiving.price_per_bar :: numeric
+material_receiving.price_per_lb :: numeric
+material_receiving.quantity :: integer
+material_receiving.rack :: text
+material_receiving.received_at :: timestamp with time zone
+material_receiving.received_by :: uuid
+material_receiving.vendor :: text
+material_receiving.weight_lbs :: numeric
+material_reconciliation_flags.bar_size :: text
+material_reconciliation_flags.flag_type :: text
+material_reconciliation_flags.id :: uuid
+material_reconciliation_flags.job_id :: uuid
+material_reconciliation_flags.last_seen_at :: timestamp with time zone
+material_reconciliation_flags.lot_number :: text
+material_reconciliation_flags.material_receiving_id :: uuid
+material_reconciliation_flags.material_type :: text
+material_reconciliation_flags.material_usage_id :: uuid
+material_reconciliation_flags.occurrence_count :: integer
+material_reconciliation_flags.quantity_delta :: integer
+material_reconciliation_flags.raised_at :: timestamp with time zone
+material_reconciliation_flags.resolution_notes :: text
+material_reconciliation_flags.resolved_at :: timestamp with time zone
+material_reconciliation_flags.resolved_by :: uuid
+material_reconciliation_flags.status :: text
+material_replenishment_rules.bar_size_id :: uuid
+material_replenishment_rules.created_at :: timestamp with time zone
+material_replenishment_rules.created_by :: uuid
+material_replenishment_rules.id :: uuid
+material_replenishment_rules.is_active :: boolean
+material_replenishment_rules.material_type_id :: uuid
+material_replenishment_rules.min_bars :: numeric
+material_replenishment_rules.notes :: text
+material_replenishment_rules.updated_at :: timestamp with time zone
+material_types.category :: text
+material_types.created_at :: timestamp with time zone
+material_types.id :: uuid
+material_types.is_active :: boolean
+material_types.name :: text
+material_types.short_code :: text
+material_usage.created_at :: timestamp with time zone
+material_usage.finishing_send_id :: uuid
+material_usage.id :: uuid
+material_usage.job_id :: uuid
+material_usage.lot_number :: text
+material_usage.material_id :: uuid
+material_usage.material_receiving_id :: uuid
+material_usage.notes :: text
+material_usage.quantity_used :: integer
+material_usage.quantity_used_inches :: numeric
+material_usage.used_at :: timestamp with time zone
+material_usage.used_by :: uuid
+materials.bar_size_inches :: numeric
+materials.created_at :: timestamp with time zone
+materials.density_lbs_per_cubic_inch :: numeric
+materials.id :: uuid
+materials.is_active :: boolean
+materials.material_type_id :: uuid
+materials.notes :: text
+materials.updated_at :: timestamp with time zone
+materials.vendor :: text
+missed_production_entries.created_at :: timestamp with time zone
+missed_production_entries.created_by :: uuid
+missed_production_entries.id :: uuid
+missed_production_entries.job_id :: uuid
+missed_production_entries.passivation_lot :: text
+missed_production_entries.production_lot :: text
+missed_production_entries.quantity :: integer
+missed_production_entries.reason :: text
+outbound_sends.cert_document_path :: text
+outbound_sends.consolidation_group_id :: uuid
+outbound_sends.created_at :: timestamp with time zone
+outbound_sends.expected_return_at :: date
+outbound_sends.finishing_send_id :: uuid
+outbound_sends.id :: uuid
+outbound_sends.job_id :: uuid
+outbound_sends.job_routing_step_id :: uuid
+outbound_sends.notes :: text
+outbound_sends.operation_type :: text
+outbound_sends.quantity :: integer
+outbound_sends.quantity_returned :: integer
+outbound_sends.returned_at :: timestamp with time zone
+outbound_sends.returned_by :: uuid
+outbound_sends.routing_step_id :: uuid
+outbound_sends.sent_at :: timestamp with time zone
+outbound_sends.sent_by :: uuid
+outbound_sends.source_id :: uuid
+outbound_sends.source_type :: text
+outbound_sends.updated_at :: timestamp with time zone
+outbound_sends.vendor_lot_number :: text
+outbound_sends.vendor_name :: text
+outbound_sends.work_order_id :: uuid
+part_cert_profiles.assy_country_of_origin :: text
+part_cert_profiles.camloc_equivalent :: text
+part_cert_profiles.component_origins :: jsonb
+part_cert_profiles.conflict_minerals :: boolean
+part_cert_profiles.created_at :: timestamp with time zone
+part_cert_profiles.dfars_compliant :: boolean
+part_cert_profiles.id :: uuid
+part_cert_profiles.monadnock_equivalent :: text
+part_cert_profiles.nadcap_heat_treat :: boolean
+part_cert_profiles.nadcap_plating :: boolean
+part_cert_profiles.notes :: text
+part_cert_profiles.part_id :: uuid
+part_cert_profiles.primer :: text
+part_cert_profiles.rohs_compliant :: boolean
+part_cert_profiles.tso_c148 :: text
+part_cert_profiles.updated_at :: timestamp with time zone
+part_cert_profiles.updated_by :: uuid
+part_dimensions.bar_size :: text
+part_dimensions.confirmed_at :: timestamp with time zone
+part_dimensions.confirmed_by :: uuid
+part_dimensions.corrected_at :: timestamp with time zone
+part_dimensions.corrected_by :: uuid
+part_dimensions.correction_note :: text
+part_dimensions.created_at :: timestamp with time zone
+part_dimensions.extraction_meta :: jsonb
+part_dimensions.family :: text
+part_dimensions.id :: uuid
+part_dimensions.length_in :: numeric
+part_dimensions.material_locked :: boolean
+part_dimensions.material_type :: text
+part_dimensions.part_number :: text
+part_dimensions.series :: text
+part_dimensions.source_file :: text
+part_dimensions.updated_at :: timestamp with time zone
+part_document_requirements.created_at :: timestamp with time zone
+part_document_requirements.document_type_id :: uuid
+part_document_requirements.id :: uuid
+part_document_requirements.is_required :: boolean
+part_document_requirements.notes :: text
+part_document_requirements.part_id :: uuid
+part_document_requirements.required_at :: character varying
+part_documents.created_at :: timestamp with time zone
+part_documents.document_type_id :: uuid
+part_documents.file_name :: character varying
+part_documents.file_size :: integer
+part_documents.file_url :: text
+part_documents.id :: uuid
+part_documents.is_current :: boolean
+part_documents.mime_type :: character varying
+part_documents.part_id :: uuid
+part_documents.revision_notes :: text
+part_documents.uploaded_by :: uuid
+part_documents.version :: character varying
+part_machine_durations.base_quantity :: integer
+part_machine_durations.created_at :: timestamp with time zone
+part_machine_durations.created_by :: uuid
+part_machine_durations.estimated_minutes :: integer
+part_machine_durations.id :: uuid
+part_machine_durations.is_preferred :: boolean
+part_machine_durations.machine_id :: uuid
+part_machine_durations.notes :: text
+part_machine_durations.part_id :: uuid
+part_machine_durations.preference_order :: integer
+part_machine_durations.updated_at :: timestamp with time zone
+part_machine_tool_history.job_completed_at :: timestamp with time zone
+part_machine_tool_history.job_number :: character varying
+part_machine_tool_history.machine_id :: uuid
+part_machine_tool_history.machine_name :: character varying
+part_machine_tool_history.part_id :: uuid
+part_machine_tool_history.serial_number :: character varying
+part_machine_tool_history.times_used :: bigint
+part_machine_tool_history.tool_name :: character varying
+part_machine_tool_history.tool_type :: character varying
+part_routing_steps.created_at :: timestamp with time zone
+part_routing_steps.default_station :: text
+part_routing_steps.id :: uuid
+part_routing_steps.is_active :: boolean
+part_routing_steps.notes :: text
+part_routing_steps.part_id :: uuid
+part_routing_steps.step_name :: text
+part_routing_steps.step_order :: integer
+part_routing_steps.step_type :: text
+part_routing_steps.updated_at :: timestamp with time zone
+parts.created_at :: timestamp with time zone
+parts.customer :: character varying
+parts.description :: text
+parts.drawing_revision :: character varying
+parts.id :: uuid
+parts.is_active :: boolean
+parts.material_type_id :: uuid
+parts.part_number :: character varying
+parts.part_type :: character varying
+parts.requires_passivation :: boolean
+parts.specification :: character varying
+parts.unit_cost :: numeric
+parts.updated_at :: timestamp with time zone
+profiles.can_approve_compliance :: boolean
+profiles.can_float :: boolean
+profiles.created_at :: timestamp with time zone
+profiles.email :: character varying
+profiles.full_name :: character varying
+profiles.home_location_id :: uuid
+profiles.id :: uuid
+profiles.is_active :: boolean
+profiles.is_salesperson :: boolean
+profiles.must_change_password :: boolean
+profiles.pin_code :: character varying
+profiles.role :: character varying
+profiles.roles :: ARRAY
+profiles.updated_at :: timestamp with time zone
+profiles.username :: text
+routing_template_steps.created_at :: timestamp with time zone
+routing_template_steps.default_station :: text
+routing_template_steps.id :: uuid
+routing_template_steps.notes :: text
+routing_template_steps.step_name :: text
+routing_template_steps.step_order :: integer
+routing_template_steps.step_type :: text
+routing_template_steps.template_id :: uuid
+routing_templates.created_at :: timestamp with time zone
+routing_templates.description :: text
+routing_templates.id :: uuid
+routing_templates.is_active :: boolean
+routing_templates.material_category :: text
+routing_templates.name :: text
+routing_templates.template_type :: text
+routing_templates.updated_at :: timestamp with time zone
+schedule_change_requests.actioned_at :: timestamp with time zone
+schedule_change_requests.actioned_by :: uuid
+schedule_change_requests.created_at :: timestamp with time zone
+schedule_change_requests.current_end :: timestamp with time zone
+schedule_change_requests.id :: uuid
+schedule_change_requests.job_id :: uuid
+schedule_change_requests.note :: text
+schedule_change_requests.requested_by :: uuid
+schedule_change_requests.requested_end :: timestamp with time zone
+schedule_change_requests.source :: text
+schedule_change_requests.status :: text
+stc_certificates.created_at :: timestamp with time zone
+stc_certificates.description :: text
+stc_certificates.id :: uuid
+stc_certificates.is_active :: boolean
+stc_certificates.notes :: text
+stc_certificates.stc_number :: text
+stc_certificates.updated_at :: timestamp with time zone
+stc_issuances.created_at :: timestamp with time zone
+stc_issuances.created_by :: uuid
+stc_issuances.doc_version :: text
+stc_issuances.id :: uuid
+stc_issuances.installation_id :: uuid
+stc_issuances.is_voided :: boolean
+stc_issuances.method :: text
+stc_issuances.notes :: text
+stc_issuances.sent_by :: uuid
+stc_issuances.sent_date :: date
+stc_issuances.sent_to_email :: text
+stc_issuances.sent_to_name :: text
+stc_issuances.stc_certificate_id :: uuid
+stc_issuances.stc_request_id :: uuid
+stc_issuances.voided_at :: timestamp with time zone
+stc_issuances.voided_by :: uuid
+stc_issuances.voided_reason :: text
+stc_requests.aircraft_id :: uuid
+stc_requests.channel :: text
+stc_requests.claimed_aircraft_serial :: text
+stc_requests.claimed_kit_number :: text
+stc_requests.claimed_kit_part :: text
+stc_requests.claimed_order_number :: text
+stc_requests.claimed_registration :: text
+stc_requests.created_at :: timestamp with time zone
+stc_requests.created_by :: uuid
+stc_requests.id :: uuid
+stc_requests.installation_id :: uuid
+stc_requests.intake_number :: integer
+stc_requests.kit_lot_id :: uuid
+stc_requests.notes :: text
+stc_requests.purchased_from_party_id :: uuid
+stc_requests.purchased_from_text :: text
+stc_requests.received_date :: date
+stc_requests.requester_company :: text
+stc_requests.requester_email :: text
+stc_requests.requester_name :: text
+stc_requests.requester_party_id :: uuid
+stc_requests.status :: text
+stc_requests.updated_at :: timestamp with time zone
+stc_requests.updated_by :: uuid
+tool_instances.created_at :: timestamp with time zone
+tool_instances.id :: uuid
+tool_instances.logged_at :: timestamp with time zone
+tool_instances.logged_by :: uuid
+tool_instances.notes :: text
+tool_instances.serial_number :: character varying
+tool_instances.status :: character varying
+tool_instances.tool_id :: uuid
+tool_instances.updated_at :: timestamp with time zone
+tooling_override_report.email :: character varying
+tooling_override_report.job_number :: character varying
+tooling_override_report.machine_name :: character varying
+tooling_override_report.part_number :: character varying
+tooling_override_report.tooling_override_at :: timestamp with time zone
+tooling_override_report.user_name :: character varying
+tooling_override_report.wo_number :: character varying
+tools.created_at :: timestamp with time zone
+tools.description :: text
+tools.id :: uuid
+tools.is_active :: boolean
+tools.name :: character varying
+tools.tool_type :: character varying
+tools.updated_at :: timestamp with time zone
+user_notifications.body :: text
+user_notifications.created_at :: timestamp with time zone
+user_notifications.created_by :: uuid
+user_notifications.id :: uuid
+user_notifications.payload :: jsonb
+user_notifications.read_at :: timestamp with time zone
+user_notifications.recipient_id :: uuid
+user_notifications.title :: text
+user_notifications.type :: text
+v_sales_active_production.actual_end :: timestamp with time zone
+v_sales_active_production.actual_start :: timestamp with time zone
+v_sales_active_production.appears_stalled :: boolean
+v_sales_active_production.assigned_machine :: character varying
+v_sales_active_production.co_numbers :: text
+v_sales_active_production.customer :: text
+v_sales_active_production.customer_due_date :: date
+v_sales_active_production.days_to_due :: integer
+v_sales_active_production.documents_deferred :: boolean
+v_sales_active_production.due_bucket :: text
+v_sales_active_production.good_pieces_so_far :: integer
+v_sales_active_production.has_cancelled_allocation :: boolean
+v_sales_active_production.has_open_shortfall :: boolean
+v_sales_active_production.is_combined :: boolean
+v_sales_active_production.job_number :: character varying
+v_sales_active_production.job_priority :: character varying
+v_sales_active_production.job_qty :: integer
+v_sales_active_production.job_status_raw :: character varying
+v_sales_active_production.machine_location :: character varying
+v_sales_active_production.part_description :: text
+v_sales_active_production.part_number :: character varying
+v_sales_active_production.part_type :: character varying
+v_sales_active_production.pct_complete :: numeric
+v_sales_active_production.po_numbers :: text
+v_sales_active_production.production_phase :: text
+v_sales_active_production.sales_qty :: integer
+v_sales_active_production.salesperson_id :: uuid
+v_sales_active_production.salesperson_name :: character varying
+v_sales_active_production.scheduled_end :: timestamp with time zone
+v_sales_active_production.scheduled_start :: timestamp with time zone
+v_sales_active_production.wo_due_date :: date
+v_sales_active_production.wo_number :: character varying
+v_sales_active_production.wo_order_qty :: integer
+v_sales_active_production.wo_priority :: character varying
+v_sales_job_effective_qty.effective_good_qty :: integer
+v_sales_job_effective_qty.job_id :: uuid
+v_sales_open_demand.age_days :: integer
+v_sales_open_demand.co_created_date :: date
+v_sales_open_demand.co_number :: text
+v_sales_open_demand.co_status :: text
+v_sales_open_demand.components_needed :: text
+v_sales_open_demand.customer :: text
+v_sales_open_demand.customer_code :: text
+v_sales_open_demand.days_to_due :: integer
+v_sales_open_demand.due_bucket :: text
+v_sales_open_demand.fishbowl_order_id :: text
+v_sales_open_demand.line_due_date :: date
+v_sales_open_demand.line_notes :: text
+v_sales_open_demand.line_number :: integer
+v_sales_open_demand.line_status :: text
+v_sales_open_demand.part_description :: text
+v_sales_open_demand.part_number :: character varying
+v_sales_open_demand.part_type :: character varying
+v_sales_open_demand.po_number :: text
+v_sales_open_demand.priority :: text
+v_sales_open_demand.qty_in_production :: integer
+v_sales_open_demand.qty_open_demand :: integer
+v_sales_open_demand.quantity_fulfilled :: integer
+v_sales_open_demand.quantity_ordered :: integer
+v_sales_open_demand.salesperson_id :: uuid
+v_sales_open_demand.salesperson_name :: character varying
+v_sales_summary_by_person.active_jobs :: bigint
+v_sales_summary_by_person.active_wos :: bigint
+v_sales_summary_by_person.demand_past_due :: bigint
+v_sales_summary_by_person.docs_deferred :: bigint
+v_sales_summary_by_person.due_this_week :: bigint
+v_sales_summary_by_person.earliest_demand_due_date :: date
+v_sales_summary_by_person.oldest_demand_age_days :: integer
+v_sales_summary_by_person.open_demand_lines :: bigint
+v_sales_summary_by_person.open_demand_qty :: integer
+v_sales_summary_by_person.past_due_jobs :: bigint
+v_sales_summary_by_person.salesperson_id :: uuid
+v_sales_summary_by_person.salesperson_name :: character varying
+v_sales_summary_by_person.stalled_jobs :: bigint
+v_sales_weekly_report.customer :: text
+v_sales_weekly_report.days_to_due :: integer
+v_sales_weekly_report.due_bucket :: text
+v_sales_weekly_report.due_date :: date
+v_sales_weekly_report.flags_or_notes :: text
+v_sales_weekly_report.line_no :: integer
+v_sales_weekly_report.machine_or_co :: character varying
+v_sales_weekly_report.part_description :: text
+v_sales_weekly_report.part_number :: text
+v_sales_weekly_report.priority :: text
+v_sales_weekly_report.qty_in_progress :: bigint
+v_sales_weekly_report.qty_ordered :: bigint
+v_sales_weekly_report.qty_remaining :: bigint
+v_sales_weekly_report.reference :: text
+v_sales_weekly_report.salesperson_name :: character varying
+v_sales_weekly_report.scheduled_or_age_days :: integer
+v_sales_weekly_report.section :: text
+v_sales_weekly_report.status_or_phase :: text
+v_sales_weekly_report.sub_reference :: text
+v_sales_weekly_report_v2.co_due_date :: date
+v_sales_weekly_report_v2.co_number :: text
+v_sales_weekly_report_v2.co_qty_ordered :: integer
+v_sales_weekly_report_v2.customer :: text
+v_sales_weekly_report_v2.days_to_due :: integer
+v_sales_weekly_report_v2.due_bucket :: text
+v_sales_weekly_report_v2.flags_or_notes :: text
+v_sales_weekly_report_v2.good_pieces :: integer
+v_sales_weekly_report_v2.job_number :: text
+v_sales_weekly_report_v2.line_number :: integer
+v_sales_weekly_report_v2.machine :: text
+v_sales_weekly_report_v2.part_description :: text
+v_sales_weekly_report_v2.part_number :: text
+v_sales_weekly_report_v2.pct_complete :: integer
+v_sales_weekly_report_v2.po_number :: text
+v_sales_weekly_report_v2.production_phase :: text
+v_sales_weekly_report_v2.qty_this_row :: bigint
+v_sales_weekly_report_v2.row_type :: text
+v_sales_weekly_report_v2.salesperson_name :: character varying
+v_sales_weekly_report_v2.scheduled_end :: date
+v_sales_weekly_report_v2.scheduled_start :: date
+v_sales_weekly_report_v2.section :: text
+v_sales_weekly_report_v2.wo_number :: text
+v_sales_weekly_report_v3.co_due_date :: date
+v_sales_weekly_report_v3.co_number :: text
+v_sales_weekly_report_v3.co_qty_ordered :: integer
+v_sales_weekly_report_v3.customer :: text
+v_sales_weekly_report_v3.days_to_due :: integer
+v_sales_weekly_report_v3.due_bucket :: text
+v_sales_weekly_report_v3.earliest_sched_start :: date
+v_sales_weekly_report_v3.flags_or_notes :: text
+v_sales_weekly_report_v3.good_pieces :: integer
+v_sales_weekly_report_v3.job_count :: bigint
+v_sales_weekly_report_v3.latest_sched_end :: date
+v_sales_weekly_report_v3.line_number :: integer
+v_sales_weekly_report_v3.machines :: text
+v_sales_weekly_report_v3.part_description :: text
+v_sales_weekly_report_v3.part_number :: text
+v_sales_weekly_report_v3.pct_complete :: integer
+v_sales_weekly_report_v3.po_number :: text
+v_sales_weekly_report_v3.production_phase :: text
+v_sales_weekly_report_v3.qty_this_row :: bigint
+v_sales_weekly_report_v3.row_type :: text
+v_sales_weekly_report_v3.salesperson_name :: character varying
+v_sales_weekly_report_v3.section :: text
+v_sales_weekly_report_v3.wo_numbers :: text
+v_sales_wo_salesperson.co_numbers :: text
+v_sales_wo_salesperson.customer_names :: text
+v_sales_wo_salesperson.earliest_co_due_date :: date
+v_sales_wo_salesperson.is_combined :: boolean
+v_sales_wo_salesperson.po_numbers :: text
+v_sales_wo_salesperson.qty_allocated_to_salesperson :: integer
+v_sales_wo_salesperson.salesperson_email :: character varying
+v_sales_wo_salesperson.salesperson_id :: uuid
+v_sales_wo_salesperson.salesperson_name :: character varying
+v_sales_wo_salesperson.wo_number :: character varying
+v_sales_wo_salesperson.work_order_id :: uuid
+v_schedulable_jobs.assigned_machine_id :: uuid
+v_schedulable_jobs.component_id :: uuid
+v_schedulable_jobs.created_at :: timestamp with time zone
+v_schedulable_jobs.customer :: character varying
+v_schedulable_jobs.due_date :: date
+v_schedulable_jobs.id :: uuid
+v_schedulable_jobs.job_estimated_minutes :: integer
+v_schedulable_jobs.job_number :: character varying
+v_schedulable_jobs.machine_options :: json
+v_schedulable_jobs.order_type :: character varying
+v_schedulable_jobs.part_description :: text
+v_schedulable_jobs.part_number :: character varying
+v_schedulable_jobs.priority :: character varying
+v_schedulable_jobs.quantity :: integer
+v_schedulable_jobs.requires_attendance :: boolean
+v_schedulable_jobs.scheduled_end :: timestamp with time zone
+v_schedulable_jobs.scheduled_start :: timestamp with time zone
+v_schedulable_jobs.status :: character varying
+v_schedulable_jobs.wo_number :: character varying
+v_schedulable_jobs.work_order_id :: uuid
+work_order_assemblies.assembler_number :: integer
+work_order_assemblies.assembly_completed_at :: timestamp with time zone
+work_order_assemblies.assembly_completed_by :: uuid
+work_order_assemblies.assembly_id :: uuid
+work_order_assemblies.assembly_lot_entered_at :: timestamp with time zone
+work_order_assemblies.assembly_lot_entered_by :: uuid
+work_order_assemblies.assembly_lot_number :: text
+work_order_assemblies.assembly_notes :: text
+work_order_assemblies.assembly_started_at :: timestamp with time zone
+work_order_assemblies.assembly_started_by :: uuid
+work_order_assemblies.bad_quantity :: integer
+work_order_assemblies.created_at :: timestamp with time zone
+work_order_assemblies.good_quantity :: integer
+work_order_assemblies.id :: uuid
+work_order_assemblies.order_quantity :: integer
+work_order_assemblies.parent_work_order_assembly_id :: uuid
+work_order_assemblies.quantity :: integer
+work_order_assemblies.station_number :: integer
+work_order_assemblies.status :: character varying
+work_order_assemblies.stock_quantity :: integer
+work_order_assemblies.work_order_id :: uuid
+work_order_assembly_routing_steps.added_at :: timestamp with time zone
+work_order_assembly_routing_steps.added_by :: uuid
+work_order_assembly_routing_steps.completed_at :: timestamp with time zone
+work_order_assembly_routing_steps.completed_by :: uuid
+work_order_assembly_routing_steps.created_at :: timestamp with time zone
+work_order_assembly_routing_steps.id :: uuid
+work_order_assembly_routing_steps.is_added_step :: boolean
+work_order_assembly_routing_steps.lot_number :: text
+work_order_assembly_routing_steps.notes :: text
+work_order_assembly_routing_steps.operator_initials :: text
+work_order_assembly_routing_steps.quantity :: integer
+work_order_assembly_routing_steps.removal_approved_at :: timestamp with time zone
+work_order_assembly_routing_steps.removal_approved_by :: uuid
+work_order_assembly_routing_steps.removal_reason :: text
+work_order_assembly_routing_steps.removal_requested_at :: timestamp with time zone
+work_order_assembly_routing_steps.removal_requested_by :: uuid
+work_order_assembly_routing_steps.started_at :: timestamp with time zone
+work_order_assembly_routing_steps.station :: text
+work_order_assembly_routing_steps.status :: text
+work_order_assembly_routing_steps.step_name :: text
+work_order_assembly_routing_steps.step_order :: integer
+work_order_assembly_routing_steps.step_type :: text
+work_order_assembly_routing_steps.updated_at :: timestamp with time zone
+work_order_assembly_routing_steps.work_order_assembly_id :: uuid
+work_order_component_jobs.id :: uuid
+work_order_component_jobs.job_id :: uuid
+work_order_component_jobs.linked_at :: timestamp with time zone
+work_order_component_jobs.linked_by :: uuid
+work_order_component_jobs.notes :: text
+work_order_component_jobs.work_order_id :: uuid
+work_order_component_lots.component_lot_id :: uuid
+work_order_component_lots.id :: uuid
+work_order_component_lots.linked_at :: timestamp with time zone
+work_order_component_lots.linked_by :: uuid
+work_order_component_lots.notes :: text
+work_order_component_lots.work_order_id :: uuid
+work_orders.closed_at :: timestamp with time zone
+work_orders.closed_by :: uuid
+work_orders.created_at :: timestamp with time zone
+work_orders.created_by :: uuid
+work_orders.customer :: character varying
+work_orders.due_date :: date
+work_orders.has_cancelled_allocation :: boolean
+work_orders.has_open_shortfall :: boolean
+work_orders.id :: uuid
+work_orders.is_combined :: boolean
+work_orders.machine_id :: uuid
+work_orders.maintenance_type :: text
+work_orders.notes :: text
+work_orders.order_quantity :: integer
+work_orders.order_type :: character varying
+work_orders.po_number :: character varying
+work_orders.priority :: character varying
+work_orders.status :: character varying
+work_orders.stock_quantity :: integer
+work_orders.tco_notes :: text
+work_orders.tco_parts_tested :: integer
+work_orders.tco_shear_pass :: boolean
+work_orders.tco_tensile_pass :: boolean
+work_orders.updated_at :: timestamp with time zone
+work_orders.wo_number :: character varying

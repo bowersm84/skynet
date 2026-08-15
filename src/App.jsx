@@ -39,7 +39,16 @@ function MainApp() {
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
   const [showLoadingScreen, setShowLoadingScreen] = useState(false)
-  const [currentPage, setCurrentPage] = useState('mainframe')
+  // D-NAV-02: survive refresh — restore the last page from localStorage.
+  // The restored value is validated against role access once the profile
+  // loads (one-shot effect below the access flags).
+  const [currentPage, setCurrentPage] = useState(() => {
+    try {
+      return localStorage.getItem('skynet.currentPage') || 'mainframe'
+    } catch {
+      return 'mainframe'
+    }
+  })
   // Cross-page navigation payload (e.g. deep-link into Mainframe's WO Lookup).
   // The destination page consumes it once, then clears it via
   // onNavPayloadConsumed so a later remount can't re-fire a stale deep link.
@@ -205,6 +214,29 @@ function MainApp() {
   // SKY56 — all authenticated roles get the Dashboards menu; the Bridge entry
   // is filtered per-role below (president + admin only).
   const canAccessDashboards = !!profile?.role
+
+  // D-NAV-02: persist the current page so a refresh restores it.
+  useEffect(() => {
+    try {
+      localStorage.setItem('skynet.currentPage', currentPage)
+    } catch { /* storage unavailable — persistence is best-effort */ }
+  }, [currentPage])
+
+  // D-NAV-02: validate the RESTORED page against role access exactly once,
+  // after the profile arrives. Known-blocked pages fall back to mainframe;
+  // unknown keys pass through untouched (this must never police live
+  // navigation, only the value read back from storage).
+  const restoredPageCheckedRef = useRef(false)
+  useEffect(() => {
+    if (!profile || restoredPageCheckedRef.current) return
+    restoredPageCheckedRef.current = true
+    const blocked =
+      (currentPage === 'schedule' && !canAccessSchedule) ||
+      (currentPage === 'customer_orders' && !canAccessCustomerOrders) ||
+      (currentPage === 'armory' && !canAccessArmory) ||
+      (currentPage === 'certs' && !canAccessCerts)
+    if (blocked) setCurrentPage('mainframe')
+  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessArmory, canAccessCerts])
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
   const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)

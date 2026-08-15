@@ -8,6 +8,11 @@
 //
 // Retired May 2026: the old qty_override "wins / freezes the count" branch.
 // Carry-over pieces are now recorded as missed_production_entries rows.
+//
+// D-JOBMERGE-08: combined-run hosts carry jobs.merged_out_good (stamped at
+// allocation) — the run-level artifact branches subtract it so a host WO's
+// built count is its OWN share. good_pieces needs no adjustment: allocation
+// rewrites it to the own share directly.
 
 export function sumMissedEntries(job) {
   return (job?.missed_production_entries || [])
@@ -36,7 +41,8 @@ export function getEffectiveQty(job) {
       })
       groups.sort((a, b) => b.latestMs - a.latestMs)
       const sum = groups[0].sends.reduce((acc, s) => acc + (s.quantity_returned || 0), 0)
-      return { qty: sum + missed, verified: true, hasMissed: missed > 0 }
+      const own = Math.max(0, sum - (job.merged_out_good || 0))
+      return { qty: own + missed, verified: true, hasMissed: missed > 0 }
     }
   }
 
@@ -53,7 +59,8 @@ export function getEffectiveQty(job) {
         if (s.verified_count != null) return acc + s.verified_count
         return acc + s.quantity
       }, 0)
-      return { qty: sum + missed, verified: true, hasMissed: missed > 0 }
+      const own = Math.max(0, sum - (job.merged_out_good || 0))
+      return { qty: own + missed, verified: true, hasMissed: missed > 0 }
     }
   }
 

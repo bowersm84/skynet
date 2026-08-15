@@ -1,214 +1,13 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { getDocumentUrl } from '../lib/s3'
-import { fetchCOAllocationsForTraveler } from '../lib/traveler'
+import { fetchTravelerData, buildTravelerBodyHTML } from '../lib/traveler'
 import { Printer, X, Loader2, FileText } from 'lucide-react'
 
 // HTML escape for template strings
 const esc = (str) => {
   if (!str) return ''
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-}
-
-// CSS string constants (mirrors PrintTraveler.jsx style objects)
-const headerLabelCSS = 'padding:4px 8px; font-weight:bold; background-color:#f0f0f0; border:1px solid #ccc; width:15%; white-space:nowrap;'
-const headerValueCSS = 'padding:4px 8px; border:1px solid #ccc; width:35%;'
-const routingHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
-const routingCellCSS = 'padding:8px; border:1px solid #000; height:28px; vertical-align:middle;'
-
-function formatDate(dateStr) {
-  if (!dateStr) return '&mdash;'
-  return new Date(dateStr).toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric'
-  })
-}
-
-function buildTravelerHTML(travelerData) {
-  const { job, steps, finishingBatch, coAllocations } = travelerData
-  const wo = job.work_order
-  const comp = job.component
-
-  // Quantity display (same logic as PrintTraveler.jsx lines 109-114)
-  let qtyDisplay = String(job.quantity)
-  if (wo?.order_type === 'make_to_order' && wo?.order_quantity && wo?.stock_quantity) {
-    qtyDisplay = `${wo.order_quantity} order + ${wo.stock_quantity} stock = ${job.quantity} total`
-  } else if (wo?.order_type === 'make_to_stock') {
-    qtyDisplay = `${job.quantity} (stock)`
-  }
-
-  const customerDisplay = (() => {
-    if (wo?.order_type === 'make_to_stock') return 'STOCK'
-    const names = Array.from(new Set(
-      (coAllocations || [])
-        .map(a => a.customer_order_line?.customer_order?.customer?.name)
-        .filter(Boolean)
-    )).sort()
-    if (names.length === 0) return esc(wo?.customer) || '&mdash;'
-    if (names.length === 1) return esc(names[0])
-    // Multi-customer: list all, comma-separated. The traveler is a
-    // physical paper artifact — full disclosure beats "+N more".
-    return names.map(esc).join(', ')
-  })()
-
-  // Earliest CO due date when wo.due_date is null (multi-CO WOs).
-  const dueDateDisplay = (() => {
-    if (wo?.due_date) return formatDate(wo.due_date)
-    const dates = (coAllocations || [])
-      .map(a => a.customer_order_line?.due_date)
-      .filter(Boolean)
-      .sort()
-    return dates.length > 0 ? formatDate(dates[0]) : '&mdash;'
-  })()
-
-  // Helper: derive last-name initials from a full_name like "James Smith" -> "JS"
-  const initials = (name) => {
-    if (!name) return ''
-    return name.split(/\s+/).map(p => p[0]).filter(Boolean).join('').toUpperCase().slice(0, 3)
-  }
-
-  // Helper: short date format for the routing table
-  const shortDate = (iso) => {
-    if (!iso) return ''
-    return new Date(iso).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit' })
-  }
-
-  // Only use finishing data if the job has actually progressed past manufacturing.
-  // Without this guard, stale finishing_sends rows (from earlier testing or from a
-  // reset job) would falsely populate finishing rows.
-  // Source of truth: an approved finishing batch must actually exist.
-  // Job status is unreliable as a guard because compliance-pending and other
-  // transient states aren't in any clean enumeration.
-  const fb = (finishingBatch && finishingBatch.compliance_approved_at) ? finishingBatch : null
-  const finishingQty = fb ? (fb.compliance_good_qty ?? fb.verified_count ?? '') : ''
-  const finishingDate = fb ? shortDate(fb.compliance_approved_at || fb.finishing_completed_at) : ''
-  const finishingOp = fb ? initials(fb.finishing_operator?.full_name) : ''
-
-  const stepsHTML = steps.map(step => {
-    const stepName = (step.step_name || '').toLowerCase()
-    const isWash = stepName === 'wash'
-    const isTreatment = stepName === 'treatment' || stepName === 'passivation'
-    const isDry = stepName === 'dry'
-
-    let rowLot = step.lot_number || ''
-    if (!rowLot && (isWash || isTreatment || isDry) && fb?.finishing_lot_number) {
-      rowLot = fb.finishing_lot_number
-    }
-
-    let rowQty = step.quantity != null ? String(step.quantity) : ''
-    if (!rowQty && (isWash || isTreatment || isDry) && finishingQty !== '') {
-      rowQty = String(finishingQty)
-    }
-
-    let rowDate = shortDate(step.completed_at)
-    if (!rowDate && (isWash || isTreatment || isDry)) {
-      rowDate = finishingDate
-    }
-
-    let rowOp = step.operator_initials || initials(step.completed_by_profile?.full_name) || ''
-    if (!rowOp && (isWash || isTreatment || isDry)) {
-      rowOp = finishingOp
-    }
-
-    return `
-    <tr>
-      <td style="${routingCellCSS} text-align:center; width:40px;">${step.step_order}</td>
-      <td style="${routingCellCSS}">${esc(step.step_name)}${step.is_added_step ? ' *' : ''}</td>
-      <td style="${routingCellCSS} width:90px;">${esc(step.station) || ''}</td>
-      <td style="${routingCellCSS} text-align:center; width:45px;">${step.step_type === 'external' ? 'EXT' : 'INT'}</td>
-      <td style="${routingCellCSS} width:90px;">${esc(rowLot)}</td>
-      <td style="${routingCellCSS} width:55px; text-align:center;">${esc(rowQty)}</td>
-      <td style="${routingCellCSS} width:80px;">${esc(rowDate)}</td>
-      <td style="${routingCellCSS} width:90px; text-align:center;">${esc(rowOp)}</td>
-    </tr>
-  `
-  }).join('')
-
-  const blankRows = Array.from({ length: 3 }).map(() =>
-    `<tr>${Array.from({ length: 8 }).map(() => `<td style="${routingCellCSS}">&nbsp;</td>`).join('')}</tr>`
-  ).join('')
-
-  const printTime = new Date().toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit'
-  })
-
-  return `
-    <div class="print-page" style="font-family:Arial,Helvetica,sans-serif; color:#000; background:#fff;">
-      <!-- Title -->
-      <div style="text-align:center; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:16px;">
-        <h1 style="margin:0; font-size:22px; font-weight:bold; letter-spacing:2px;">
-          SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER
-        </h1>
-      </div>
-
-      <!-- Header Fields Grid -->
-      <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:13px;">
-        <tbody>
-          <tr>
-            <td style="${headerLabelCSS}">Part Number</td>
-            <td style="${headerValueCSS}">${esc(comp?.part_number) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Job Number</td>
-            <td style="${headerValueCSS}">${esc(job.job_number)}</td>
-          </tr>
-          <tr>
-            <td style="${headerLabelCSS}">Description</td>
-            <td style="${headerValueCSS}">${esc(comp?.description) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Order / WO #</td>
-            <td style="${headerValueCSS}">${esc(wo?.wo_number) || '&mdash;'}</td>
-          </tr>
-          <tr>
-            <td style="${headerLabelCSS}">Material</td>
-            <td style="${headerValueCSS}">${esc(comp?.material_type?.name) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">PO Number</td>
-            <td style="${headerValueCSS}">${esc(wo?.po_number) || '&mdash;'}</td>
-          </tr>
-          <tr>
-            <td style="${headerLabelCSS}">Drawing Rev</td>
-            <td style="${headerValueCSS}">${esc(comp?.drawing_revision) || '&mdash;'}</td>
-            <td style="${headerLabelCSS}">Due Date</td>
-            <td style="${headerValueCSS}">${dueDateDisplay}</td>
-          </tr>
-          <tr>
-            <td style="${headerLabelCSS}">Customer</td>
-            <td style="${headerValueCSS}">${customerDisplay}</td>
-            <td style="${headerLabelCSS}">Quantity</td>
-            <td style="${headerValueCSS} font-weight:bold;">${esc(qtyDisplay)}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <!-- Routing Steps Table -->
-      <table style="width:100%; border-collapse:collapse; font-size:12px; margin-bottom:16px;">
-        <thead>
-          <tr>
-            <th style="${routingHeaderCSS}">Step</th>
-            <th style="${routingHeaderCSS}">Process</th>
-            <th style="${routingHeaderCSS}">Station</th>
-            <th style="${routingHeaderCSS}">Type</th>
-            <th style="${routingHeaderCSS}">Lot #</th>
-            <th style="${routingHeaderCSS}">Qty</th>
-            <th style="${routingHeaderCSS}">Date</th>
-            <th style="${routingHeaderCSS}">Operator</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${stepsHTML}
-          ${blankRows}
-        </tbody>
-      </table>
-
-      <!-- Notes area -->
-      <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:12px;">
-        <strong>Notes:</strong>
-      </div>
-
-      <!-- Footer -->
-      <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:10px; color:#666;">
-        <span>Printed from SkyNet MES &mdash; ${printTime}</span>
-        <span>Skybolt Aeromotive Corp</span>
-      </div>
-    </div>
-  `
 }
 
 function buildPrintHubHTML(jobNumber, travelerData, docsWithUrls) {
@@ -262,7 +61,7 @@ function buildPrintHubHTML(jobNumber, travelerData, docsWithUrls) {
       <button onclick="window.close()" style="background:#374151; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:14px;">Close</button>
     </div>
   </div>
-  ${hasTraveler ? buildTravelerHTML(travelerData) : ''}
+  ${hasTraveler ? buildTravelerBodyHTML(travelerData) : ''}
   ${hasDocs ? `
     <div class="no-print" style="max-width:11in; margin:24px auto; padding:0 0.5in;">
       <div style="border-top:1px solid #334155; padding-top:20px;">
@@ -299,62 +98,18 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
 
     const fetchData = async () => {
       try {
-        // Fetch full job data (same query as PrintTraveler)
-        const { data: fullJob, error: jobError } = await supabase
-          .from('jobs')
-          .select(`
-            id, job_number, quantity, status,
-            work_order:work_orders (
-              id, wo_number, customer, po_number, due_date,
-              order_type, order_quantity, stock_quantity
-            ),
-            component:parts!component_id (
-              id, part_number, description, drawing_revision,
-              requires_passivation,
-              material_type:material_types ( name )
-            )
-          `)
-          .eq('id', job.id)
-          .single()
-        if (jobError) throw jobError
+        // D-JOBMERGE-08: the canonical traveler dataset — routing lots /
+        // quantities / dates / operators, CO allocations, assembly genealogy
+        // and mergeInfo — the same source every other traveler surface uses.
+        // Replaces this modal's own job/steps/batch queries and its local
+        // renderer, so the folder packet tells the combined-run truth.
+        const canonicalTraveler = await fetchTravelerData(supabase, job.id)
+        if (!canonicalTraveler) {
+          throw new Error('Traveler data unavailable for this job')
+        }
+        const fullJob = canonicalTraveler.job
 
-        // Pull active CO allocations so the traveler renders multi-customer
-        // and earliest-due-date correctly (Batch C of 2026-05-05 traveler fix).
-        const coAllocations = await fetchCOAllocationsForTraveler(supabase, fullJob.work_order?.id)
-
-        // Fetch routing steps
-        const { data: steps, error: stepsError } = await supabase
-          .from('job_routing_steps')
-          .select(`
-            *,
-            completed_by_profile:profiles!completed_by(full_name)
-          `)
-          .eq('job_id', job.id)
-          .neq('status', 'removed')
-          .order('step_order')
-        if (stepsError) throw stepsError
-
-        // Fetch approved finishing batches for Wash/Treatment/Dry routing rows
-        const { data: finishingBatches, error: fsError } = await supabase
-          .from('finishing_sends')
-          .select(`
-            finishing_lot_number, chemical_lot_number, chemical_lot_number_2,
-            material_lot_number, verified_count, compliance_good_qty,
-            finishing_completed_at, compliance_approved_at,
-            finishing_operator:profiles!finishing_operator_id(full_name)
-          `)
-          .eq('job_id', job.id)
-          .eq('compliance_status', 'approved')
-          .order('finishing_completed_at', { ascending: false })
-          .limit(1)
-        if (fsError) throw fsError
-
-        setTravelerData({
-          job: fullJob,
-          steps: steps || [],
-          finishingBatch: finishingBatches?.[0] || null,
-          coAllocations,
-        })
+        setTravelerData(canonicalTraveler)
 
         // Fetch part documents (master docs for this component)
         let pDocs = []
@@ -423,14 +178,33 @@ export default function PrintPackageModal({ isOpen, job, onClose }) {
       )
 
       // Build and write the Print Hub page
+      const hasTraveler = !!(selectedDocs.traveler && travelerData)
       const html = buildPrintHubHTML(
         job.job_number,
-        selectedDocs.traveler ? travelerData : null,
+        hasTraveler ? travelerData : null,
         docsWithUrls
       )
       printHub.document.open()
       printHub.document.write(html)
       printHub.document.close()
+
+      // D-JOBMERGE-08: the packet carries the canonical traveler, so this
+      // print legitimately clears paperwork staleness. Non-blocking; the
+      // modal has no profile prop, so resolve the signer from the session.
+      if (hasTraveler) {
+        supabase.auth.getUser().then(({ data: authData }) => {
+          supabase
+            .from('jobs')
+            .update({
+              traveler_printed_at: new Date().toISOString(),
+              traveler_printed_by: authData?.user?.id || null,
+            })
+            .eq('id', job.id)
+            .then(({ error: stampErr }) => {
+              if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+            })
+        })
+      }
 
       onClose()
     } catch (err) {

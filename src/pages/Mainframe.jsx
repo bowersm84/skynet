@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split, Archive, Pencil } from 'lucide-react'
+import { Plus, ChevronDown, AlertTriangle, Edit3, X, Loader2, Trash2, RefreshCw, Wrench, Search, ClipboardList, ChevronRight, Package, Clock, CheckCircle, Calendar, User, Beaker, Printer, FileText, ExternalLink, Truck, Pause, Flag, AlertCircle, Split, Archive, Pencil, Layers } from 'lucide-react'
 import { getDocumentUrl, deleteDocument } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import CustomerOrders from './CustomerOrders'
 import MachineCard from '../components/MachineCard'
 import CreateWorkOrderModal from '../components/CreateWorkOrderModal'
@@ -13,6 +13,7 @@ import TCOReview from '../components/TCOReview'
 import OutsourcedJobs from '../components/OutsourcedJobs'
 import EditWorkOrderModal from '../components/EditWorkOrderModal'
 import PrintPackageModal from '../components/PrintPackageModal'
+import MergeAllocationModal from '../components/MergeAllocationModal'
 import CreatePinPromptModal from '../components/CreatePinPromptModal'
 import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
@@ -64,6 +65,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
   const [finishingSends, setFinishingSends] = useState([])
   const [pendingBatchComplianceCount, setPendingBatchComplianceCount] = useState(0)
   const [lotChangePaperworkCount, setLotChangePaperworkCount] = useState(0)
+  // D-JOBMERGE-15: merged members awaiting pre-production acknowledgment.
+  const [mergedAckPendingCount, setMergedAckPendingCount] = useState(0)
   const [outsourcedCount, setOutsourcedCount] = useState(0)
   
   // Auto-refresh state
@@ -117,6 +120,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
   const [cancelStep, setCancelStep] = useState(0) // 0=none, 1=first warning, 2=final confirmation
   const [cancelSaving, setCancelSaving] = useState(false)
   const [printPackageJob, setPrintPackageJob] = useState(null)
+  // D-JOBMERGE-15: combined-run allocation modal + the host ids that earn it.
+  const [allocationHostId, setAllocationHostId] = useState(null)
+  const [mergeHostJobIds, setMergeHostJobIds] = useState(new Set())
 
   // WO Lookup — per-job document expansion
   const [expandedJobDocs, setExpandedJobDocs] = useState({})
@@ -239,6 +245,15 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         .eq('reason', 'material lot change')
         .is('compliance_ack_at', null)
       setLotChangePaperworkCount(lotChangeCount || 0)
+
+      // D-JOBMERGE-15: merged members awaiting pre-production acknowledgment
+      // are pending compliance work — same KPI treatment as lot-change
+      // paperwork.
+      const { count: mergedAckCount } = await supabase
+        .from('jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('merge_requires_compliance_ack', true)
+      setMergedAckPendingCount(mergedAckCount || 0)
 
       // Fetch for assembly-ready work orders
       // An assembly is ready when ALL its linked jobs have status ready_for_assembly
@@ -553,6 +568,13 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
             scheduled_start,
             work_order_assembly_id,
             component_id,
+            merged_into_job_id,
+            merged_out_good,
+            merge_requires_compliance_ack,
+            paperwork_changed_at,
+            paperwork_changed_reason,
+            paperwork_ack_at,
+            traveler_printed_at,
             compliance_outcome,
             compliance_notes,
             missed_production_entries (id, quantity, production_lot, passivation_lot, reason, created_at),
@@ -677,6 +699,47 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         .from('work_orders')
         .select(WO_LOOKUP_SELECT)
         .order('created_at', { ascending: false })
+
+      // D-JOBMERGE-04: resolve host info for merged member jobs in one extra
+      // query, client-merged (avoids a 3-level nested select).
+      if (!woError && workOrders) {
+        const hostIds = [...new Set(
+          workOrders.flatMap(wo => (wo.jobs || [])
+            .map(j => j.merged_into_job_id)
+            .filter(Boolean))
+        )]
+        if (hostIds.length > 0) {
+          const { data: hostRows } = await supabase
+            .from('jobs')
+            .select('id, job_number, assigned_machine:machines!assigned_machine_id(name), work_order:work_orders(wo_number)')
+            .in('id', hostIds)
+          const hostMap = {}
+          for (const h of (hostRows || [])) {
+            hostMap[h.id] = {
+              job_number: h.job_number,
+              machine_name: h.assigned_machine?.name || null,
+              wo_number: h.work_order?.wo_number || null
+            }
+          }
+          setMergeHostInfo(hostMap)
+        } else {
+          setMergeHostInfo({})
+        }
+
+        // D-JOBMERGE-15: which of the loaded jobs are combined-run HOSTS —
+        // one query, ids only (two-level rule). Drives the Allocation button.
+        const loadedJobIds = workOrders.flatMap(wo => (wo.jobs || []).map(j => j.id))
+        if (loadedJobIds.length > 0) {
+          const { data: hostAllocRows } = await supabase
+            .from('job_merge_allocations')
+            .select('host_job_id')
+            .eq('is_active', true)
+            .in('host_job_id', loadedJobIds)
+          setMergeHostJobIds(new Set((hostAllocRows || []).map(r => r.host_job_id)))
+        } else {
+          setMergeHostJobIds(new Set())
+        }
+      }
 
       if (woError) throw woError
 
@@ -853,12 +916,28 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
       in_assembly: { label: 'In Assembly', color: 'bg-emerald-900/50 text-emerald-300 border-emerald-700' },
       pending_tco: { label: 'Pending TCO', color: 'bg-amber-900/50 text-amber-300 border-amber-700' },
       complete: { label: 'Complete', color: 'bg-gray-800 text-gray-400 border-gray-700' },
+      merged: { label: 'Merged', color: 'bg-cyan-900/40 text-cyan-300 border-cyan-700' },
       cancelled: { label: 'Cancelled', color: 'bg-gray-800 text-gray-500 border-gray-700' }
     }
     return statusConfig[status] || { label: status, color: 'bg-gray-800 text-gray-400 border-gray-700' }
   }
 
   // Small icon-name lookup for badge rendering
+  // D-JOBMERGE-04: host info for merged member rows (host J#, WO, machine).
+  const [mergeHostInfo, setMergeHostInfo] = useState({})
+
+  // D-JOBMERGE-06: one string for every merge-hover surface (machine cells +
+  // status chip), so the wording can never drift between them.
+  const describeMergeHost = (job) => {
+    const h = job?.merged_into_job_id ? mergeHostInfo[job.merged_into_job_id] : null
+    if (!h) return undefined
+    const where = [h.job_number, h.wo_number, h.machine_name].filter(Boolean).join(' · ')
+    const qty = job.quantity
+      ? ` — this job's ${Number(job.quantity).toLocaleString()} pcs are produced under the host run`
+      : ''
+    return `Merged into ${where}${qty}`
+  }
+
   const renderBadgeIcon = (iconName) => {
     switch (iconName) {
       case 'pause':       return <Pause size={10} />
@@ -878,6 +957,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
   const getJobBadges = (job) => {
     const badges = []
 
+    // D-JOBMERGE-17: traveler staleness is surfaced at the kiosk and in
+    // Compliance Review; the WO Lookup badge was redundant noise.
+
     // Primary badge: Hold overrides pending_compliance; Out-for-[Vendor] overrides at_external_vendor.
     if (job.compliance_outcome === 'hold' && job.status === 'pending_compliance') {
       badges.push({
@@ -895,6 +977,25 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         })
       } else {
         badges.push({ ...getStatusBadge(job.status), icon: 'truck' })
+      }
+    } else if (job.status === 'merged') {
+      // D-JOBMERGE-06: labeled chip with the shared merge tooltip. Icon is
+      // intentionally omitted (renderBadgeIcon has no entry — renders null).
+      badges.push({
+        label: 'Merged',
+        color: 'bg-cyan-900/40 text-cyan-300 border-cyan-700',
+        title: describeMergeHost(job),
+      })
+      // D-JOBMERGE-13: merged while still awaiting pre-production review —
+      // the obligation survives the merge and blocks allocation until
+      // compliance acknowledges it.
+      if (job.merge_requires_compliance_ack) {
+        badges.push({
+          label: 'Awaiting compliance ack',
+          color: 'bg-amber-900/40 text-amber-300 border-amber-700',
+          icon: 'alertcircle',
+          title: 'Merged while awaiting pre-production review — acknowledge in Compliance Review before allocation.',
+        })
       }
     } else {
       const iconByStatus = {
@@ -1366,7 +1467,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
       const { data: fullJob, error: jobError } = await supabase
         .from('jobs')
         .select(`
-          id, job_number, quantity, status,
+          id, job_number, quantity, status, merged_into_job_id,
           production_lot_number, good_pieces, actual_end,
           work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
           component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
@@ -1417,6 +1518,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
       const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
+      const mergeInfo = await fetchMergeInfoForTraveler(supabase, fullJob)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -1425,6 +1527,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         outboundSends: outboundSends || [],
         coAllocations,
         assemblyChain,
+        mergeInfo,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -1434,6 +1537,13 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
       win.document.open()
       win.document.write(html)
       win.document.close()
+      // D-JOBMERGE-04: record the print — staleness clears by timestamp.
+      supabase.from('jobs')
+        .update({ traveler_printed_at: new Date().toISOString(), traveler_printed_by: profile?.id || null })
+        .eq('id', fullJob.id)
+        .then(({ error: stampErr }) => {
+          if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+        })
     } catch (err) {
       console.error('Failed to open traveler:', err)
       alert('Failed to open traveler: ' + err.message)
@@ -1692,9 +1802,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         <StatCard
           id="compliance"
           label="Pending Compliance"
-          value={pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount}
+          value={pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount}
           colorClass="text-purple-400"
-          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
+          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
         <StatCard
@@ -1963,7 +2073,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                               <span className="mx-2">•</span>
                               {(() => {
                                 const eq = getEffectiveQty(job)
-                                return eq.verified && eq.qty !== job.quantity
+                                return eq.verified
                                   ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
                                   : <span>Qty: {job.quantity}</span>
                               })()}
@@ -2062,7 +2172,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                           <span className="mx-2">•</span>
                           {(() => {
                             const eq = getEffectiveQty(job)
-                            return eq.verified && eq.qty !== job.quantity
+                            return eq.verified
                               ? <span>Qty: <span className="text-white">{eq.qty}</span><span className="text-gray-500">/{job.quantity}</span></span>
                               : <span>Qty: {job.quantity}</span>
                           })()}
@@ -2531,7 +2641,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                 </div>
                                 <div className="col-span-2 text-sm text-gray-300">{job.component?.customer || '—'}</div>
                                 <div className="col-span-1 text-center">
-                                  {eq.verified && eq.qty !== job.quantity ? (
+                                  {eq.verified ? (
                                     <span className="text-sm">
                                       <span className="text-white font-medium">{eq.qty}</span>
                                       <span className="text-gray-500">/{job.quantity}</span>
@@ -3143,7 +3253,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                     const eq = getEffectiveQty(job)
                                                     return (
                                                       <div className="flex items-center justify-center gap-1">
-                                                        {eq.verified && eq.qty !== job.quantity ? (
+                                                        {eq.verified ? (
                                                           <span className="text-sm">
                                                             <span className="text-white font-medium">{eq.qty}</span>
                                                             <span className="text-gray-500">/{job.quantity}</span>
@@ -3166,12 +3276,22 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                   })()}
                                                 </div>
                                                 <div className="col-span-2">
-                                                  <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
+                                                  {job.merged_into_job_id && mergeHostInfo[job.merged_into_job_id] ? (
+                                                    <span
+                                                      className="text-gray-400 text-sm truncate block cursor-help"
+                                                      title={describeMergeHost(job)}
+                                                    >
+                                                      Merged → <span className="text-cyan-300 font-mono">{mergeHostInfo[job.merged_into_job_id].job_number}</span>
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
+                                                  )}
                                                 </div>
                                                 <div className="col-span-2 flex flex-wrap gap-1">
                                                   {getJobBadges(job).map((badge, idx) => (
                                                     <span key={idx}
-                                                      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${badge.color}`}>
+                                                      title={badge.title}
+                                                      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${badge.color} ${badge.title ? 'cursor-help' : ''}`}>
                                                       {renderBadgeIcon(badge.icon)}
                                                       {badge.label}
                                                     </span>
@@ -3185,6 +3305,26 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                     >
                                                       <Printer size={12} />
                                                       Print
+                                                    </button>
+                                                  )}
+                                                  {/* D-JOBMERGE-15/17: either side of a merge opens the combined run */}
+                                                  {mergeHostJobIds.has(job.id) && hasRole(profile, 'admin', 'scheduler', 'compliance') && (
+                                                    <button
+                                                      onClick={() => setAllocationHostId(job.id)}
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-cyan-300 hover:text-cyan-200 hover:bg-cyan-900/30 border border-cyan-800/50 hover:border-cyan-700 rounded transition-colors"
+                                                    >
+                                                      <Layers size={12} />
+                                                      Allocation
+                                                    </button>
+                                                  )}
+                                                  {job.merged_into_job_id && hasRole(profile, 'admin', 'scheduler', 'compliance') && (
+                                                    <button
+                                                      onClick={() => setAllocationHostId(job.merged_into_job_id)}
+                                                      title="Opens the combined run's allocation"
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-cyan-300 hover:text-cyan-200 hover:bg-cyan-900/30 border border-cyan-800/50 hover:border-cyan-700 rounded transition-colors"
+                                                    >
+                                                      <Layers size={12} />
+                                                      Allocation
                                                     </button>
                                                   )}
                                                   {canSplit && (
@@ -3493,7 +3633,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                             const eq = getEffectiveQty(job)
                                             return (
                                               <div className="flex items-center justify-center gap-1">
-                                                {eq.verified && eq.qty !== job.quantity ? (
+                                                {eq.verified ? (
                                                   <span className="text-sm">
                                                     <span className="text-white font-medium">{eq.qty}</span>
                                                     <span className="text-gray-500">/{job.quantity}</span>
@@ -3516,7 +3656,16 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                           })()}
                                         </div>
                                         <div className="col-span-2">
-                                          <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
+                                          {job.merged_into_job_id && mergeHostInfo[job.merged_into_job_id] ? (
+                                            <span
+                                              className="text-gray-400 text-sm truncate block cursor-help"
+                                              title={describeMergeHost(job)}
+                                            >
+                                              Merged → <span className="text-cyan-300 font-mono">{mergeHostInfo[job.merged_into_job_id].job_number}</span>
+                                            </span>
+                                          ) : (
+                                            <span className="text-gray-400 text-sm truncate block">{job.machine?.name || 'Unassigned'}</span>
+                                          )}
                                         </div>
                                         <div className="col-span-2">
                                           <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs border ${statusBadge.color}`}>
@@ -3534,6 +3683,26 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                             >
                                               <Printer size={12} />
                                               Print
+                                            </button>
+                                          )}
+                                          {/* D-JOBMERGE-15/17: either side of a merge opens the combined run */}
+                                          {mergeHostJobIds.has(job.id) && hasRole(profile, 'admin', 'scheduler', 'compliance') && (
+                                            <button
+                                              onClick={() => setAllocationHostId(job.id)}
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-cyan-300 hover:text-cyan-200 hover:bg-cyan-900/30 border border-cyan-800/50 hover:border-cyan-700 rounded transition-colors"
+                                            >
+                                              <Layers size={12} />
+                                              Allocation
+                                            </button>
+                                          )}
+                                          {job.merged_into_job_id && hasRole(profile, 'admin', 'scheduler', 'compliance') && (
+                                            <button
+                                              onClick={() => setAllocationHostId(job.merged_into_job_id)}
+                                              title="Opens the combined run's allocation"
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-cyan-300 hover:text-cyan-200 hover:bg-cyan-900/30 border border-cyan-800/50 hover:border-cyan-700 rounded transition-colors"
+                                            >
+                                              <Layers size={12} />
+                                              Allocation
                                             </button>
                                           )}
                                           {canSplit && (
@@ -3978,6 +4147,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         isOpen={!!printPackageJob}
         job={printPackageJob}
         onClose={() => setPrintPackageJob(null)}
+      />
+
+      {/* D-JOBMERGE-15: Combined-run allocation (WO Lookup host rows) */}
+      <MergeAllocationModal
+        hostJobId={allocationHostId}
+        isOpen={!!allocationHostId}
+        onClose={() => setAllocationHostId(null)}
+        onApplied={() => fetchWOLookup()}
       />
 
       {/* Add Job Document Modal (WO Lookup, admin/compliance only) */}

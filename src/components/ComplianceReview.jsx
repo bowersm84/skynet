@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler } from '../lib/traveler'
+import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { FEATURES } from '../config'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { evaluateJobShortfall } from '../lib/shortfall'
@@ -112,6 +112,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
 
   // Lot-change paperwork worklist (informational, compliance-side)
   const [lotChangePaperwork, setLotChangePaperwork] = useState([])
+
+  // D-JOBMERGE-13: members merged while still awaiting pre-production review.
+  const [mergedAwaitingAck, setMergedAwaitingAck] = useState([])
+  const [ackingMemberId, setAckingMemberId] = useState(null)
   const [acknowledgingPaperworkId, setAcknowledgingPaperworkId] = useState(null)
   // Shape: { [jobId]: [sends sorted by sent_at] }
 
@@ -218,6 +222,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     fetchPendingBatches()
     fetchRecentlyApprovedBatches()
     fetchLotChangePaperwork()
+    fetchMergedAwaitingAck()
 
     const sub = supabase
       .channel('compliance-finishing-sends')
@@ -261,6 +266,56 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       .order('split_at', { ascending: true })
     if (error) { console.error('Error loading lot-change paperwork:', error); return }
     setLotChangePaperwork(data || [])
+  }
+
+  // D-JOBMERGE-13: members that merged while still pending_compliance. The
+  // obligation survives the merge (merge_job_into_host sets the flag) and
+  // blocks allocation until acknowledged here — without this section the
+  // order leaves the review queue entirely. Host job numbers come from a
+  // second query (nesting past two levels is unreliable in one select).
+  const fetchMergedAwaitingAck = async () => {
+    const { data, error } = await supabase
+      .from('jobs')
+      .select(`
+        id, job_number, quantity, merged_into_job_id,
+        work_order:work_orders(wo_number, customer),
+        component:parts!component_id(part_number, description)
+      `)
+      .eq('merge_requires_compliance_ack', true)
+      .order('job_number', { ascending: true })
+    if (error) { console.error('Error loading merged members awaiting ack:', error); return }
+    const rows = data || []
+    const hostIds = [...new Set(rows.map(r => r.merged_into_job_id).filter(Boolean))]
+    const hostById = {}
+    if (hostIds.length > 0) {
+      const { data: hosts } = await supabase
+        .from('jobs')
+        .select('id, job_number')
+        .in('id', hostIds)
+      for (const h of (hosts || [])) hostById[h.id] = h.job_number
+    }
+    setMergedAwaitingAck(rows.map(r => ({
+      ...r,
+      host_job_number: hostById[r.merged_into_job_id] || null,
+    })))
+  }
+
+  const handleAckMergedMember = async (member) => {
+    setAckingMemberId(member.id)
+    try {
+      const { error } = await supabase.rpc('ack_merged_member_compliance', {
+        p_member_job_id: member.id,
+        p_note: null,
+      })
+      if (error) throw error
+      await fetchMergedAwaitingAck()
+      onUpdate()
+    } catch (err) {
+      console.error('Merged-member acknowledgment failed:', err)
+      alert('Failed to acknowledge: ' + err.message)
+    } finally {
+      setAckingMemberId(null)
+    }
   }
 
   // Produce Job B's paperwork (traveler + production log + pulled docs) for the
@@ -423,7 +478,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       const { data: fullJob, error: jobError } = await supabase
         .from('jobs')
         .select(`
-          id, job_number, quantity, status,
+          id, job_number, quantity, status, merged_into_job_id,
           production_lot_number, good_pieces, actual_end,
           work_order:work_orders ( id, wo_number, customer, po_number, due_date, order_type, order_quantity, stock_quantity ),
           component:parts!component_id ( id, part_number, description, drawing_revision, requires_passivation, material_type:material_types ( name ) ),
@@ -474,6 +529,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       }
       const coAllocations = woIdForAllocs ? await fetchCOAllocationsForTraveler(supabase, woIdForAllocs) : []
       const assemblyChain = await fetchAssemblyChainForTraveler(supabase, fullJob.id)
+      // D-JOBMERGE-10: combined-run context — the piece these inline
+      // assemblies were missing versus the canonical fetchTravelerData.
+      const mergeInfo = await fetchMergeInfoForTraveler(supabase, fullJob)
 
       const html = buildTravelerHTML({
         job: fullJob,
@@ -482,6 +540,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         outboundSends: outboundSends || [],
         coAllocations,
         assemblyChain,
+        mergeInfo,
       })
       const win = window.open('', '_blank')
       if (!win) {
@@ -491,6 +550,19 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       win.document.open()
       win.document.write(html)
       win.document.close()
+      // D-JOBMERGE-10: record the print — staleness clears by timestamp.
+      supabase.auth.getUser().then(({ data: authData }) => {
+        supabase
+          .from('jobs')
+          .update({
+            traveler_printed_at: new Date().toISOString(),
+            traveler_printed_by: authData?.user?.id || null,
+          })
+          .eq('id', jobId)
+          .then(({ error: stampErr }) => {
+            if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+          })
+      })
     } catch (err) {
       console.error('Failed to open traveler:', err)
       alert('Failed to open traveler: ' + err.message)
@@ -594,6 +666,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
 
       // Short-circuit rejected: do not check in parts, do not advance job
       if (isReject) {
+        // D-JOBMERGE-09: a rejected batch still RESOLVES it, so this can be
+        // the last resolution on a combined-run host. jobId isn't bound yet
+        // on this path — use the send's parent directly.
+        fireAllocationIfHost(send.job_id)
         await fetchPendingBatches()
         await fetchRecentlyApprovedBatches()
         onUpdate()
@@ -680,6 +756,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           .eq('id', jobId)
         if (jobError) throw jobError
       }
+
+      // D-JOBMERGE-09: combined-run allocation — fires on every batch
+      // resolution; the RPC raises quietly until the LAST batch resolves.
+      fireAllocationIfHost(jobId)
 
       await fetchPendingBatches()
       await fetchRecentlyApprovedBatches()
@@ -1239,6 +1319,30 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     setApproving(null)
   }
 
+  // D-JOBMERGE-09: one allocation hook, every resolution path. The RPC is
+  // idempotent, raises while batches remain, and no-ops for non-hosts —
+  // whichever path resolves the host LAST fires it; the rest are quiet.
+  const fireAllocationIfHost = (hostJobId) => {
+    if (!hostJobId) return
+    supabase.rpc('allocate_merged_batch', { p_host_job_id: hostJobId })
+      .then(({ data, error }) => {
+        if (error) {
+          const msg = error.message || ''
+          if (!/awaiting compliance|not complete|no active unallocated/i.test(msg)) {
+            console.error('allocate_merged_batch failed:', error)
+          }
+          return
+        }
+        if (data && !data.no_op) {
+          console.log('Combined run allocated:', data)
+          // D-JOBMERGE-11: this fires after the resolution flow's own
+          // refetch, so refresh the pending list here — otherwise the UI
+          // sits one manual refresh behind the allocated state.
+          fetchPendingBatches()
+        }
+      })
+  }
+
   const handleApproveJob = async (jobId, currentStatus, outcome, deferInfo = null) => {
     setApproving(jobId)
     const pmData = postMfgData[jobId] || {}
@@ -1402,6 +1506,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         evaluateJobShortfall(jobId).catch(err =>
           console.error('evaluateJobShortfall failed (non-blocking):', err)
         )
+
+        // D-JOBMERGE-09: combined-run allocation (see fireAllocationIfHost).
+        fireAllocationIfHost(jobId)
       }
       onUpdate()
     } catch (err) {
@@ -1564,6 +1671,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         evaluateJobShortfall(job.id).catch(err =>
           console.error('evaluateJobShortfall failed (non-blocking):', err)
         )
+
+        // D-JOBMERGE-09: combined-run allocation (see fireAllocationIfHost).
+        fireAllocationIfHost(job.id)
       }
 
       onUpdate()
@@ -2567,6 +2677,60 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                       <button
                         disabled={busy}
                         onClick={() => handlePaperworkGathered(item)}
+                        className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded inline-flex items-center gap-1"
+                      >
+                        {busy ? 'Saving…' : <><CheckCircle size={12} />Acknowledge</>}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* D-JOBMERGE-13: Merged members whose pre-production review never
+          happened. Informational worklist — allocation is not blocked. Self-hides when empty. */}
+      {mergedAwaitingAck.length > 0 && (
+        <div className="border border-amber-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 bg-amber-900/20 border-b border-amber-800 flex items-center gap-2">
+            <AlertCircle size={16} className="text-amber-400" />
+            <h3 className="text-white font-semibold text-sm">
+              Merged — awaiting pre-production acknowledgment ({mergedAwaitingAck.length})
+            </h3>
+          </div>
+          <div className="p-3 space-y-2">
+            {mergedAwaitingAck.map(m => {
+              const busy = ackingMemberId === m.id
+              return (
+                <div key={m.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      <span className="text-skynet-accent text-sm font-mono">{m.component?.part_number || '—'}</span>
+                      <span className="text-gray-500 text-xs truncate">{m.component?.description || ''}</span>
+                    </div>
+                    <span className="text-amber-400 text-[10px] uppercase tracking-wider shrink-0">Never reviewed</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1 text-xs flex-wrap">
+                    <span className="text-white font-mono">{m.job_number}</span>
+                    <span className="text-gray-600">·</span>
+                    <span className="text-gray-400">{m.work_order?.wo_number || 'no WO'}</span>
+                    {m.work_order?.customer && (<>
+                      <span className="text-gray-600">·</span>
+                      <span className="text-gray-400">{m.work_order.customer}</span>
+                    </>)}
+                    <span className="text-gray-600">·</span>
+                    <span className="text-gray-300">{Number(m.quantity || 0).toLocaleString()} pcs</span>
+                  </div>
+                  <p className="text-gray-500 text-xs mt-1">
+                    Merged into <span className="text-cyan-300 font-mono">{m.host_job_number || '—'}</span> before its pre-production review.
+                  </p>
+                  <div className="flex items-center justify-end gap-2 mt-2">
+                    {canWrite && (
+                      <button
+                        disabled={busy}
+                        onClick={() => handleAckMergedMember(m)}
                         className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1 rounded inline-flex items-center gap-1"
                       >
                         {busy ? 'Saving…' : <><CheckCircle size={12} />Acknowledge</>}

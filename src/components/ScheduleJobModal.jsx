@@ -2,12 +2,13 @@ import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   X, Loader2, AlertTriangle, ArrowLeft, ArrowRight, Star,
-  CheckCircle, Calendar as CalendarIcon, RotateCcw
+  CheckCircle, Calendar as CalendarIcon, RotateCcw, Layers
 } from 'lucide-react'
 import {
   getMachineQueue, isJobRunning, buildPropagatedQueue,
   formatDurationDH, applySchedule
 } from '../lib/scheduling'
+import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible } from '../lib/jobMerge'
 
 export default function ScheduleJobModal({
   isOpen,
@@ -29,6 +30,12 @@ export default function ScheduleJobModal({
   const [durationHours, setDurationHours] = useState(0)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
+
+  // D-JOBMERGE-02: Step 1 merge card state
+  const [mergeCandidates, setMergeCandidates] = useState([])
+  const [mergeTarget, setMergeTarget] = useState(null)
+  const [merging, setMerging] = useState(false)
+  const [mergeError, setMergeError] = useState(null)
 
   // Initialize state on open
   useEffect(() => {
@@ -52,6 +59,23 @@ export default function ScheduleJobModal({
       setDurationHours(0)
     }
   }, [isOpen, defaults?.machineId, editMode, job?.id])
+
+  // D-JOBMERGE-02: same-component host candidates for the Step 1 merge card.
+  // Skipped when the job can no longer be a member (started, merged, etc.).
+  useEffect(() => {
+    if (!isOpen) return
+    setMergeTarget(null)
+    setMergeError(null)
+    if (!isMemberEligible(job)) {
+      setMergeCandidates([])
+      return
+    }
+    let cancelled = false
+    fetchMergeHostCandidates(job.component_id, job.id).then(rows => {
+      if (!cancelled) setMergeCandidates(rows)
+    })
+    return () => { cancelled = true }
+  }, [isOpen, job?.id, job?.component_id, job?.status])
 
   // Reset position when machine changes (user picks a different machine in step 1)
   useEffect(() => {
@@ -186,6 +210,20 @@ export default function ScheduleJobModal({
     }
   }
 
+  const handleMergeConfirm = async () => {
+    if (!mergeTarget || merging) return
+    setMerging(true)
+    setMergeError(null)
+    try {
+      await mergeJobIntoHost(job.id, mergeTarget.job_id)
+      onSuccess()
+    } catch (e) {
+      setMergeError(e.message || 'Merge failed.')
+    } finally {
+      setMerging(false)
+    }
+  }
+
   if (!isOpen || !job) return null
 
   return (
@@ -202,7 +240,7 @@ export default function ScheduleJobModal({
               {editMode ? 'Reschedule' : 'Schedule'}
             </h3>
             <p className="text-gray-500 text-xs mt-1">
-              Step {step} of 3 · {step === 1 ? 'Choose machine' : step === 2 ? 'Pick position' : 'Estimated duration'}
+              {mergeTarget ? 'Merge into existing run' : <>Step {step} of 3 · {step === 1 ? 'Choose machine' : step === 2 ? 'Pick position' : 'Estimated duration'}</>}
             </p>
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors ml-4">
@@ -229,12 +267,31 @@ export default function ScheduleJobModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6">
-          {step === 1 && (
-            <Step1Machines
-              availableMachines={availableMachines}
-              selectedMachineId={selectedMachineId}
-              setSelectedMachineId={setSelectedMachineId}
+          {step === 1 && mergeTarget && (
+            <MergeConfirmPanel
+              job={job}
+              target={mergeTarget}
+              merging={merging}
+              mergeError={mergeError}
+              onBack={() => { setMergeTarget(null); setMergeError(null) }}
+              onConfirm={handleMergeConfirm}
             />
+          )}
+          {step === 1 && !mergeTarget && (
+            <>
+              {mergeCandidates.length > 0 && (
+                <MergeIntoRunSection
+                  job={job}
+                  candidates={mergeCandidates}
+                  onPick={(c) => setMergeTarget(c)}
+                />
+              )}
+              <Step1Machines
+                availableMachines={availableMachines}
+                selectedMachineId={selectedMachineId}
+                setSelectedMachineId={setSelectedMachineId}
+              />
+            </>
           )}
           {step === 2 && (
             <Step2Position
@@ -300,7 +357,7 @@ export default function ScheduleJobModal({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {step === 1 && (
+            {step === 1 && !mergeTarget && (
               <button
                 onClick={() => setStep(2)}
                 disabled={!selectedMachineId}
@@ -667,6 +724,118 @@ function Step3Duration({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─────────── D-JOBMERGE-02: Step 1 merge card + confirmation ───────────
+
+function MergeIntoRunSection({ job, candidates, onPick }) {
+  return (
+    <div className="mb-6">
+      <div className="flex items-center gap-2 mb-1">
+        <Layers size={16} className="text-cyan-300" />
+        <h4 className="text-white font-semibold">
+          {job.component?.part_number || 'This part'} already has an active run
+        </h4>
+      </div>
+      <p className="text-gray-500 text-xs mb-3">
+        Merge this job into an existing run — one setup, one production lot. Pieces allocate back to each work order by earliest due date after compliance.
+      </p>
+      <div className="space-y-2">
+        {candidates.map(c => (
+          <button
+            key={c.job_id}
+            onClick={() => onPick(c)}
+            className="w-full text-left bg-cyan-950/40 hover:bg-cyan-900/40 border border-cyan-700/60 rounded-lg p-3 transition-colors"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-skynet-accent font-mono text-sm">{c.job_number}</span>
+                {c.status === 'in_progress' ? (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold bg-green-500/20 text-green-400 rounded">RUNNING</span>
+                ) : (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold bg-gray-600/40 text-gray-300 rounded">QUEUED</span>
+                )}
+                {Number(c.member_count) > 0 && (
+                  <span className="px-1.5 py-0.5 text-[10px] bg-cyan-500/20 text-cyan-300 rounded">{Number(c.member_count) + 1} orders</span>
+                )}
+              </div>
+              <span className="text-white text-sm whitespace-nowrap">{c.machine_name || 'Not scheduled yet'}</span>
+            </div>
+            <div className="text-gray-400 text-xs mt-1 truncate">
+              {[c.wo_number, c.customer, c.due_date ? `Due ${new Date(c.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}
+            </div>
+            <div className="text-gray-500 text-xs mt-0.5">
+              Run target {Number(c.run_target).toLocaleString()}
+              {c.status === 'in_progress' ? ` · ${Number(c.produced_so_far).toLocaleString()} sent to finishing` : ''}
+            </div>
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 mt-4 mb-1">
+        <div className="flex-1 border-t border-gray-800"></div>
+        <span className="text-gray-600 text-xs">or schedule separately</span>
+        <div className="flex-1 border-t border-gray-800"></div>
+      </div>
+    </div>
+  )
+}
+
+function MergeConfirmPanel({ job, target, merging, mergeError, onBack, onConfirm }) {
+  const memberQty = job.quantity || 0
+  const newTarget = Number(target.run_target || 0) + memberQty
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <Layers size={18} className="text-cyan-300" />
+        <h4 className="text-white font-semibold text-lg">
+          Merge {job.job_number} into {target.job_number}
+        </h4>
+      </div>
+      <div className="bg-gray-800/60 border border-gray-700 rounded-lg p-4 mb-4 space-y-2">
+        <div className="flex justify-between text-sm">
+          <span className="text-gray-400">Host run target today</span>
+          <span className="text-white font-mono">{Number(target.run_target).toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span className="text-gray-400">+ {job.job_number} ({job.work_order?.wo_number || 'no WO'})</span>
+          <span className="text-white font-mono">{memberQty.toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between text-sm border-t border-gray-700 pt-2">
+          <span className="text-gray-300 font-medium">New run target</span>
+          <span className="text-cyan-300 font-mono font-semibold">{newTarget.toLocaleString()}</span>
+        </div>
+      </div>
+      <ul className="text-gray-400 text-xs space-y-1.5 mb-4 list-disc pl-4">
+        <li>One setup, one production lot — {target.job_number} keeps its machine slot{target.machine_name ? ` on ${target.machine_name}` : ''}.</li>
+        <li>{job.job_number} leaves the schedule; {job.work_order?.wo_number || 'its work order'} keeps its own order and receives its share of good pieces (earliest due date first) after compliance.</li>
+        <li>Reversible from the Schedule screen until the host completes production.</li>
+      </ul>
+      {mergeError && (
+        <div className="bg-red-900/30 border border-red-700 rounded p-2 text-red-300 text-sm flex items-center gap-2 mb-3">
+          <AlertTriangle size={14} />
+          {mergeError}
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={onBack}
+          disabled={merging}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors"
+        >
+          <ArrowLeft size={14} />
+          Back
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={merging}
+          className="flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-sm font-medium rounded transition-colors"
+        >
+          {merging ? <Loader2 size={14} className="animate-spin" /> : <Layers size={14} />}
+          {merging ? 'Merging...' : `Merge into ${target.job_number}`}
+        </button>
+      </div>
     </div>
   )
 }

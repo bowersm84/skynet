@@ -1,0 +1,14 @@
+    full_name     |       role       |       roles        
+------------------+------------------+--------------------
+ Customer Service | customer_service | {purchaser}
+ Matt Bowers      | admin            | {customer_service}
+ mbowers          | machinist        | {}
+ Ned Bowers       | president        | {}
+ Test Sales       | customer_service | {}
+ Test User        | machinist        | {}
+ test-compliance  | compliance       | {}
+ test-finishing   | finishing        | {}
+ test-machinist   | machinist        | {}
+ test-scheduler   | scheduler        | {}
+(10 rows)
+

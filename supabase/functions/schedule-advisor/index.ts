@@ -1,16 +1,15 @@
 // supabase/functions/schedule-advisor/index.ts
-// "Uncle Bob" — single-shot schedule advisor (D-AISCHED-03, transport per
-// D-AISCHED-07). Reads a snapshot, returns a briefing + evidence-cited
-// placement proposals. WRITES NOTHING (D-RMF-05) — the panel owns all
-// persistence.
+// "Uncle Bob" — single-shot schedule advisor (D-AISCHED-03; transport per
+// D-AISCHED-07; capability model per D-AISCHED-09). Reads a snapshot, returns
+// a briefing + evidence-cited placement proposals. WRITES NOTHING (D-RMF-05).
 //
-// Transport (D-AISCHED-07): Fable 5 with extended thinking generates for
-// minutes; a buffered response outlives the gateway window (observed:
-// browser 502, worker EarlyDrop at ~200s with 44ms CPU). This function
-// therefore streams: it consumes Anthropic's SSE server-side, sends the
-// client a heartbeat comment every 10s while the model thinks, then exactly
-// one `result` event with { model, envelope, usage } — or one `error` event.
-// Fast-path failures (auth, validation, empty pool) still return plain JSON.
+// Capability (D-AISCHED-09): a machine is eligible for a job if ANY of —
+//   1. history: the part has completed runs on it (strongest evidence),
+//   2. standing rule: an active policy explicitly names the part/family on
+//      that machine (model cites the rule verbatim; server verifies the rule
+//      text names the machine),
+//   3. master data: part_machine_durations lists it (weakest; optional).
+// Preference and duration precedence follow the same ladder.
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -22,7 +21,9 @@ const corsHeaders = {
 
 const MODEL = "claude-fable-5";
 const MAX_TOKENS = 16000;
-const THINKING_BUDGET = 8000;
+// Fable 5 (Mythos-class) controls thinking via adaptive + effort, not a
+// token budget (D-AISCHED-08). "high" per the cost-no-object direction.
+const THINKING_EFFORT = "high";
 const MAX_SNAPSHOT_BYTES = 1_000_000;
 const HEARTBEAT_MS = 10_000;
 const ALLOWED_ROLES = ["admin", "scheduler"];
@@ -31,57 +32,101 @@ const SYSTEM_PROMPT = `You are "Uncle Bob", the schedule advisor inside SkyNet, 
 
 Your covenants. Violating any of these makes your output unusable:
 1. Propose placements ONLY for jobs listed in unassigned[]. Never propose moving a job that is already scheduled or in progress.
-2. For each job, propose ONLY machines listed in that job's capable_machines[]. No exceptions, even if another queue looks better.
-3. Every placement cites evidence.basis: "part_history" | "family_history" | "estimate_only". With basis "estimate_only", confidence is at most "medium", and the rationale says plainly there is no run history — it is the scheduler's call, and the first run will create the history.
-4. pending_compliance is the NORMAL state of unassigned work here (scheduling happens before compliance review by design). Do not flag it, caveat it, or treat it as a defect. Jobs with flags.has_open_shortfall: put them in risks[], do not place them.
-5. Durations: prefer est_minutes_scaled corrected by history (est_vs_actual_drift); when you correct a duration, say so in the rationale.
-6. The attended planning window is 07:00-16:00 Mon-Fri local. Jobs with requires_attendance=false may run past the window (lights-out); attended jobs may not. State assumptions rather than asserting certainty about material or attendance.
-7. Honor every policies[] entry. If two policies conflict, or a policy conflicts with a due date, surface it in the briefing — never silently resolve it.
+2. Machine eligibility comes from three sources, in order of authority:
+   (a) HISTORY — capable_machines[] entries whose sources include "history". The part has completed runs there; that is proof of capability and the strongest evidence you have.
+   (b) STANDING RULES — an entry in policies[] that explicitly names this part (or its family) on a machine grants capability even when the machine is absent from capable_machines[]. When you use one, set evidence.basis to "policy" and put the rule text verbatim in evidence.policy.
+   (c) MASTER DATA — capable_machines[] entries whose sources include "master_data". Hand-maintained and often sparse; treat as suggestion, not gatekeeper.
+   Never place a job on a machine supported by none of the three.
+3. When several machines qualify, prefer them in that same order: proven-by-history first (more runs and better observed rates win), then rule-named, then master-data-only. preferred=true breaks ties.
+4. evidence.basis is one of "part_history" | "family_history" | "policy" | "estimate_only". With basis "policy" and no run history on that machine, or basis "estimate_only", confidence is at most "medium", and the rationale says plainly there is no run history — it is the scheduler's call, and the first run will create the history.
+5. pending_compliance is the NORMAL state of unassigned work here (scheduling happens before compliance review by design). Do not flag it, caveat it, or treat it as a defect. Jobs with flags.has_open_shortfall: put them in risks[], do not place them.
+6. Durations, in order of trust: history-derived time (est_minutes_from_history, or est_minutes_scaled corrected by est_vs_actual_drift) > est_minutes_scaled from master data > the job's own estimated_minutes (machine-agnostic — say it is uncorrected) > none, in which case say plainly the scheduler sets the time. Always say which you used.
+7. The attended planning window is 07:00-16:00 Mon-Fri local. Jobs with requires_attendance=false may run past the window (lights-out); attended jobs may not. State assumptions rather than asserting certainty about material or attendance.
+8. Honor every policies[] entry. A standing rule granting capability is an instruction to use, not a conflict to report. If two policies conflict, or a policy conflicts with a due date or a down machine, surface that in the briefing — never silently resolve it.
+9. Identify work by PART NUMBER first, everywhere — briefing, risks, placements, data_gaps. Job numbers are secondary context. This is a shop standard.
 
-Also populate data_gaps[]: parts with no duration on any machine, stale estimates (|est_vs_actual_drift| > 0.25), and machines sitting with empty queues.
+Also populate data_gaps[]: parts with no capability from any source, stale estimates (|est_vs_actual_drift| > 0.25), and machines sitting with empty queues.
 
 Reply with exactly this shape:
 {
   "briefing": "short paragraph: the board in plain language — risks first, then opportunities",
-  "risks": [{ "job_number": "...", "wo_number": "...", "severity": "high|medium|low", "issue": "..." }],
+  "risks": [{ "part_number": "...", "job_number": "...", "wo_number": "...", "severity": "high|medium|low", "issue": "..." }],
   "placements": [{
-    "job_id": "...", "job_number": "...",
+    "job_id": "...", "job_number": "...", "part_number": "...",
     "machine_id": "...", "machine_code": "...",
     "insert_after_job_id": null,
     "proposed_start": "ISO-8601", "proposed_end": "ISO-8601",
     "estimated_minutes": 0,
     "confidence": "high|medium|low",
-    "rationale": "one or two sentences, evidence-forward",
-    "evidence": { "basis": "part_history|family_history|estimate_only",
+    "rationale": "one or two sentences, evidence-forward, part number first",
+    "evidence": { "basis": "part_history|family_history|policy|estimate_only",
+                  "policy": "verbatim rule text when basis is policy",
                   "runs": 0, "actual_pcs_per_hour": 0,
                   "est_vs_actual_drift": 0, "last_run_at": "..." }
   }],
   "data_gaps": ["..."]
 }`;
 
-// Server-side covenant enforcement: trust nothing. Placements must reference
-// an unassigned job AND one of that job's capable machines; estimate_only
-// caps confidence at medium. Violations are dropped and noted in data_gaps.
+// Server-side covenant enforcement: trust nothing. A placement must land on a
+// machine that is (a) in that job's capable_machines[] (already the union of
+// history + master data), or (b) authorized by a standing rule — basis
+// "policy" AND some active policy's text literally contains that machine's
+// name or code. Policy-authorized machines without run history are capped at
+// medium confidence. Violations are dropped and noted in data_gaps.
 function enforceCovenants(envelope: Record<string, unknown>, snapshot: Record<string, unknown>) {
   const capable = new Map<string, Set<string>>();
+  const historyOn = new Map<string, Set<string>>();
   for (const j of (snapshot.unassigned as Array<Record<string, unknown>>)) {
-    capable.set(
+    const caps = (j.capable_machines as Array<Record<string, unknown>>) || [];
+    capable.set(j.job_id as string, new Set(caps.map((c) => c.machine_id as string)));
+    historyOn.set(
       j.job_id as string,
-      new Set(((j.capable_machines as Array<Record<string, unknown>>) || [])
-        .map((c) => c.machine_id as string)),
+      new Set(caps.filter((c) => c.history).map((c) => c.machine_id as string)),
     );
   }
+
+  const machineNames = new Map<string, { name: string; code: string }>();
+  for (const m of ((snapshot.machines as Array<Record<string, unknown>>) || [])) {
+    machineNames.set(m.machine_id as string, {
+      name: String(m.name || "").toLowerCase(),
+      code: String(m.code || "").toLowerCase(),
+    });
+  }
+  const policies = ((snapshot.policies as string[]) || []).map((t) => String(t).toLowerCase());
+  // Containment check on full machine name or code. Cheap and honest for a
+  // shop this size; "Mazak 1" ⊂ "Carlos' machines (Mazak 1 and 2)". Note a
+  // rule naming "Mazak 10" would also contain "Mazak 1" — acceptable here
+  // (no Mazak 10 exists); revisit if the fleet ever grows overlapping names.
+  const policyNamesMachine = (machineId: string) => {
+    const m = machineNames.get(machineId);
+    if (!m) return false;
+    return policies.some((p) =>
+      (m.name.length >= 3 && p.includes(m.name)) ||
+      (m.code.length >= 3 && p.includes(m.code)),
+    );
+  };
+
   const dropped: string[] = [];
   const placements = (Array.isArray(envelope.placements) ? envelope.placements : [])
     .filter((p: Record<string, unknown>) => {
-      const ok = capable.has(p.job_id as string) &&
-        capable.get(p.job_id as string)!.has(p.machine_id as string);
-      if (!ok) dropped.push((p.job_number as string) || (p.job_id as string));
-      return ok;
+      const jobId = p.job_id as string;
+      const machineId = p.machine_id as string;
+      if (!capable.has(jobId)) { dropped.push(labelOf(p)); return false; }
+      const inUnion = capable.get(jobId)!.has(machineId);
+      const ev = p.evidence as Record<string, unknown> | undefined;
+      const byPolicy = ev?.basis === "policy" && policyNamesMachine(machineId);
+      if (!inUnion && !byPolicy) { dropped.push(labelOf(p)); return false; }
+      return true;
     })
     .map((p: Record<string, unknown>) => {
       const ev = p.evidence as Record<string, unknown> | undefined;
-      if (ev?.basis === "estimate_only" && p.confidence === "high") {
+      const jobId = p.job_id as string;
+      const machineId = p.machine_id as string;
+      const hasHistory = historyOn.get(jobId)?.has(machineId) === true;
+      const mustCap =
+        ev?.basis === "estimate_only" ||
+        (ev?.basis === "policy" && !hasHistory);
+      if (mustCap && p.confidence === "high") {
         return { ...p, confidence: "medium" };
       }
       return p;
@@ -90,7 +135,7 @@ function enforceCovenants(envelope: Record<string, unknown>, snapshot: Record<st
   const data_gaps = Array.isArray(envelope.data_gaps) ? envelope.data_gaps : [];
   if (dropped.length) {
     data_gaps.push(
-      `Server-side covenant check dropped ${dropped.length} placement(s) referencing non-capable machines or unknown jobs: ${dropped.join(", ")}`,
+      `Server-side covenant check dropped ${dropped.length} placement(s) with no capability from history, standing rules, or master data: ${dropped.join(", ")}`,
     );
   }
   return {
@@ -99,6 +144,10 @@ function enforceCovenants(envelope: Record<string, unknown>, snapshot: Record<st
     placements,
     data_gaps,
   };
+}
+
+function labelOf(p: Record<string, unknown>): string {
+  return (p.part_number as string) || (p.job_number as string) || (p.job_id as string);
 }
 
 Deno.serve(async (req) => {
@@ -192,7 +241,8 @@ Deno.serve(async (req) => {
             body: JSON.stringify({
               model: MODEL,
               max_tokens: MAX_TOKENS,
-              thinking: { type: "enabled", budget_tokens: THINKING_BUDGET },
+              thinking: { type: "adaptive" },
+              output_config: { effort: THINKING_EFFORT },
               system: SYSTEM_PROMPT,
               messages: [{ role: "user", content: serialized }],
               stream: true,

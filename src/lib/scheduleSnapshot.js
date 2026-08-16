@@ -113,34 +113,61 @@ export async function buildScheduleSnapshot({
     part_id: j.component_id,
     part_number: j.component?.part_number || null,
     qty: j.quantity,
+    estimated_minutes: j.estimated_minutes || null,
     requires_attendance: j.requires_attendance === true,
     flags: {
       pending_compliance: j.status === 'pending_compliance',
       has_open_shortfall: j.work_order?.has_open_shortfall === true,
     },
-    capable_machines: getMachineOptionsForPart(j.component_id).map(d => {
-      const h = statFor(j.component_id, d.machine_id)
-      const f = famFor(j.component_id, d.machine_id)
-      return {
-        machine_id: d.machine_id,
-        preferred: d.is_preferred === true,
-        est_minutes_scaled: getScaledDuration(d, j.quantity),
-        history: h ? {
-          runs: Number(h.completed_runs),
-          actual_pcs_per_hour: h.actual_pcs_per_hour == null ? null : Number(h.actual_pcs_per_hour),
-          avg_setup_minutes: h.avg_setup_minutes == null ? null : Number(h.avg_setup_minutes),
-          est_vs_actual_drift: h.est_vs_actual_drift == null ? null : Number(h.est_vs_actual_drift),
-          last_run_at: h.last_run_at,
-        } : null,
-        family_history: f ? {
-          family_key: f.family_key,
-          parts_in_family: Number(f.parts_in_family),
-          runs: Number(f.completed_runs),
-          actual_pcs_per_hour: f.actual_pcs_per_hour == null ? null : Number(f.actual_pcs_per_hour),
-          last_run_at: f.last_run_at,
-        } : null,
-      }
-    }),
+    // D-AISCHED-09: capability = union(history, master data). History is a
+    // first-class capability source — a part that has completed runs on a
+    // machine is proven capable there, durations row or not. Standing rules
+    // are the third source, resolved by the model and verified server-side
+    // (they are free text; the builder does not parse them). History-first
+    // ordering so the strongest evidence leads.
+    capable_machines: (() => {
+      const durRows = getMachineOptionsForPart(j.component_id)
+      const histIds = stats
+        .filter(s => s.part_id === j.component_id)
+        .map(s => s.machine_id)
+      const ids = [...new Set([...histIds, ...durRows.map(d => d.machine_id)])]
+      return ids.map(mid => {
+        const d = durRows.find(x => x.machine_id === mid) || null
+        const h = statFor(j.component_id, mid)
+        const f = famFor(j.component_id, mid)
+        const pph = h && Number(h.actual_pcs_per_hour) > 0
+          ? Number(h.actual_pcs_per_hour) : null
+        return {
+          machine_id: mid,
+          sources: [h ? 'history' : null, d ? 'master_data' : null].filter(Boolean),
+          preferred: d ? d.is_preferred === true : false,
+          est_minutes_scaled: d ? getScaledDuration(d, j.quantity) : null,
+          est_minutes_from_history: pph && j.quantity > 0
+            ? Math.max(15, Math.round((j.quantity / pph) * 60)) : null,
+          history: h ? {
+            runs: Number(h.completed_runs),
+            actual_pcs_per_hour: h.actual_pcs_per_hour == null ? null : Number(h.actual_pcs_per_hour),
+            avg_setup_minutes: h.avg_setup_minutes == null ? null : Number(h.avg_setup_minutes),
+            est_vs_actual_drift: h.est_vs_actual_drift == null ? null : Number(h.est_vs_actual_drift),
+            last_run_at: h.last_run_at,
+          } : null,
+          family_history: f ? {
+            family_key: f.family_key,
+            parts_in_family: Number(f.parts_in_family),
+            runs: Number(f.completed_runs),
+            actual_pcs_per_hour: f.actual_pcs_per_hour == null ? null : Number(f.actual_pcs_per_hour),
+            last_run_at: f.last_run_at,
+          } : null,
+        }
+      }).sort((a, b) => {
+        const ah = a.history ? 1 : 0, bh = b.history ? 1 : 0
+        if (ah !== bh) return bh - ah
+        const ar = a.history?.runs || 0, br = b.history?.runs || 0
+        if (ar !== br) return br - ar
+        if (a.preferred !== b.preferred) return a.preferred ? -1 : 1
+        return 0
+      })
+    })(),
   }))
 
   return {

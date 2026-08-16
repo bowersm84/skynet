@@ -250,7 +250,11 @@ export default function AIAdvisorPanel({
           estimated_minutes: p.estimated_minutes || null,
           confidence: p.confidence || 'low',
           rationale: p.rationale || '',
-          evidence: { ...(p.evidence || {}), queue_fp: fpFor(p.machine_id) },
+          evidence: {
+            ...(p.evidence || {}),
+            queue_fp: fpFor(p.machine_id),
+            part_number: p.part_number || null,
+          },
         }))
         const { error: propInsErr } = await supabase
           .from('schedule_ai_proposals')
@@ -296,6 +300,14 @@ export default function AIAdvisorPanel({
   const jobNumberFor = (p) => {
     const j = (unassignedJobs || []).find(x => x.id === p.job_id)
     return j?.job_number || 'This job'
+  }
+
+  // Shop standard: lead with the part number everywhere. Falls back to the
+  // copy stashed in evidence at insert time (survives the job leaving the
+  // pool), then to the job number.
+  const partNumberFor = (p) => {
+    const j = (unassignedJobs || []).find(x => x.id === p.job_id)
+    return j?.component?.part_number || p?.evidence?.part_number || jobNumberFor(p)
   }
 
   const confirmDismiss = async (p) => {
@@ -460,7 +472,8 @@ export default function AIAdvisorPanel({
                       : 'bg-gray-800 border-gray-600'}`}
                   >
                     <div className="flex items-center gap-2">
-                      <span className="text-white text-sm font-semibold">{jobNumberFor(p)}</span>
+                      <span className="text-white text-sm font-semibold">{partNumberFor(p)}</span>
+                      <span className="text-gray-500 text-[10px]">{jobNumberFor(p)}</span>
                       <span className="text-gray-400 text-xs">→</span>
                       <span className="text-skynet-accent text-sm font-medium">
                         {m ? `${m.code} · ${m.name}` : p.machine_id}
@@ -479,7 +492,9 @@ export default function AIAdvisorPanel({
                         ? `${ev.runs} runs · ${ev.actual_pcs_per_hour ?? '—'} pcs/hr actual · last ${ev.last_run_at ? new Date(ev.last_run_at).toLocaleDateString() : '—'}`
                         : ev.basis === 'family_history'
                           ? `family evidence · ${ev.runs ?? '—'} runs · ${ev.actual_pcs_per_hour ?? '—'} pcs/hr`
-                          : 'no run history — estimate only, your call; the first run creates the history'}
+                          : ev.basis === 'policy'
+                            ? `per standing rule: "${ev.policy || 'see rationale'}"`
+                            : 'no run history — estimate only, your call; the first run creates the history'}
                     </div>
 
                     {(stale || gone) && (

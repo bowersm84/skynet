@@ -107,7 +107,7 @@ CREATE TABLE public.jobs (
   job_number character varying NOT NULL,
   quantity integer NOT NULL DEFAULT 1,
   priority character varying DEFAULT 'normal'::character varying CHECK (priority::text = ANY (ARRAY['critical'::character varying, 'high'::character varying, 'normal'::character varying, 'low'::character varying]::text[])),
-  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending_compliance'::text, 'ready'::text, 'assigned'::text, 'in_setup'::text, 'in_progress'::text, 'manufacturing_complete'::text, 'pending_passivation'::text, 'in_passivation'::text, 'pending_post_manufacturing'::text, 'ready_for_outsourcing'::text, 'at_external_vendor'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'pending_tco'::text, 'complete'::text, 'incomplete'::text, 'cancelled'::text])),
+  status character varying DEFAULT 'pending'::character varying CHECK (status::text = ANY (ARRAY['pending_compliance'::text, 'ready'::text, 'assigned'::text, 'in_setup'::text, 'in_progress'::text, 'manufacturing_complete'::text, 'pending_passivation'::text, 'in_passivation'::text, 'pending_post_manufacturing'::text, 'ready_for_outsourcing'::text, 'at_external_vendor'::text, 'ready_for_assembly'::text, 'in_assembly'::text, 'pending_tco'::text, 'complete'::text, 'incomplete'::text, 'cancelled'::text, 'merged'::text])),
   assigned_machine_id uuid,
   assigned_user_id uuid,
   checked_in_at timestamp with time zone,
@@ -175,6 +175,16 @@ CREATE TABLE public.jobs (
   co_fulfillment_applied_at timestamp with time zone,
   blank_lot_number text,
   blank_dash text,
+  merged_into_job_id uuid,
+  traveler_printed_at timestamp with time zone,
+  traveler_printed_by uuid,
+  paperwork_changed_at timestamp with time zone,
+  paperwork_changed_reason text,
+  paperwork_ack_at timestamp with time zone,
+  paperwork_ack_by uuid,
+  paperwork_ack_note text,
+  merged_out_good integer,
+  merge_requires_compliance_ack boolean NOT NULL DEFAULT false,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -190,7 +200,10 @@ CREATE TABLE public.jobs (
   CONSTRAINT jobs_material_override_by_fkey FOREIGN KEY (material_override_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_finishing_operator_id_fkey FOREIGN KEY (finishing_operator_id) REFERENCES public.profiles(id),
   CONSTRAINT jobs_post_mfg_reviewed_by_fkey FOREIGN KEY (post_mfg_reviewed_by) REFERENCES public.profiles(id),
-  CONSTRAINT jobs_documents_deferred_by_fkey FOREIGN KEY (documents_deferred_by) REFERENCES public.profiles(id)
+  CONSTRAINT jobs_merged_into_fkey FOREIGN KEY (merged_into_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT jobs_documents_deferred_by_fkey FOREIGN KEY (documents_deferred_by) REFERENCES public.profiles(id),
+  CONSTRAINT jobs_traveler_printed_by_fkey FOREIGN KEY (traveler_printed_by) REFERENCES public.profiles(id),
+  CONSTRAINT jobs_paperwork_ack_by_fkey FOREIGN KEY (paperwork_ack_by) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.assembly_bom (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -1466,4 +1479,28 @@ CREATE TABLE public.kit_lot_component_lots (
   CONSTRAINT klcl_component_fkey FOREIGN KEY (component_id) REFERENCES public.kit_components(id),
   CONSTRAINT klcl_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
   CONSTRAINT klcl_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.job_merge_allocations (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  host_job_id uuid NOT NULL,
+  member_job_id uuid NOT NULL,
+  member_work_order_id uuid,
+  requested_qty integer NOT NULL CHECK (requested_qty > 0),
+  pre_merge_status text NOT NULL,
+  linked_wocj_id uuid,
+  is_active boolean NOT NULL DEFAULT true,
+  allocated_good integer,
+  allocated_at timestamp with time zone,
+  merged_by uuid,
+  merged_at timestamp with time zone NOT NULL DEFAULT now(),
+  unmerged_by uuid,
+  unmerged_at timestamp with time zone,
+  notes text,
+  CONSTRAINT job_merge_allocations_pkey PRIMARY KEY (id),
+  CONSTRAINT jma_host_fkey FOREIGN KEY (host_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT jma_member_fkey FOREIGN KEY (member_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT jma_member_wo_fkey FOREIGN KEY (member_work_order_id) REFERENCES public.work_orders(id),
+  CONSTRAINT jma_wocj_fkey FOREIGN KEY (linked_wocj_id) REFERENCES public.work_order_component_jobs(id),
+  CONSTRAINT jma_merged_by_fkey FOREIGN KEY (merged_by) REFERENCES public.profiles(id),
+  CONSTRAINT jma_unmerged_by_fkey FOREIGN KEY (unmerged_by) REFERENCES public.profiles(id)
 );

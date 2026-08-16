@@ -33,11 +33,14 @@ import {
   List,
   FastForward,
   CheckCircle,
-  CalendarClock
+  CalendarClock,
+  Bot
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
 import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH } from '../lib/scheduling'
+import AIAdvisorPanel from '../components/schedule/AIAdvisorPanel'
+import { FEATURES } from '../config'
 
 const ONGOING_STATUSES = [
   'in_setup',
@@ -254,6 +257,13 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [scheduleClickJob, setScheduleClickJob] = useState(null)
   const [scheduleClickEditMode, setScheduleClickEditMode] = useState(false)
   const [scheduleClickDefaults, setScheduleClickDefaults] = useState(null)
+
+  // D-AISCHED-04: "Uncle Bob" advisor drawer. advisorApplying carries the
+  // proposal being routed through ScheduleJobModal so onSuccess can mark it
+  // applied (and detect human edits). refreshKey nudges the panel to reload.
+  const [advisorOpen, setAdvisorOpen] = useState(false)
+  const [advisorApplying, setAdvisorApplying] = useState(null)
+  const [advisorRefreshKey, setAdvisorRefreshKey] = useState(0)
 
   // SKY55 — Adjust End Date (end-only quick edit; start + machine + position locked)
   const [endDateEditJob, setEndDateEditJob] = useState(null)
@@ -1105,6 +1115,24 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
     setDraggedJob(null)
     setDraggedScheduledJob(null)
+  }
+
+  // D-AISCHED-04: Apply an Uncle Bob proposal by opening the SAME unified
+  // ScheduleJobModal used by click/drag scheduling, prefilled with the
+  // proposed machine/date/time. The modal does its own live queue math and
+  // writes via applySchedule → reschedule_with_cascade; the human confirming
+  // is scheduled_by. Returns false if the job left the pool (stale proposal).
+  const handleAdvisorApply = (proposal) => {
+    const job = unassignedJobs.find(j => j.id === proposal.job_id)
+    if (!job) return false
+    const d = new Date(proposal.proposed_start)
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    const startTime = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    setAdvisorApplying(proposal)
+    setScheduleClickJob(job)
+    setScheduleClickEditMode(false)
+    setScheduleClickDefaults({ date, machineId: proposal.machine_id, startTime })
+    return true
   }
 
   // Unschedule a job - route through the Unschedule Confirmation modal so the
@@ -2494,6 +2522,18 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               title="Schedule Maintenance"
             >
               <Settings size={16} />
+            </button>
+          )}
+
+          {/* D-AISCHED-04: Uncle Bob — AI Schedule Advisor (admin/scheduler) */}
+          {canEdit && FEATURES.AI_SCHEDULER && (
+            <button
+              onClick={() => { loadAllScheduledJobs(); setAdvisorOpen(true) }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-skynet-accent hover:bg-skynet-accent/80 text-white rounded-lg transition-colors mr-2 text-sm"
+              title="Uncle Bob — AI Schedule Advisor"
+            >
+              <Bot size={16} />
+              <span className="hidden sm:inline">Uncle Bob</span>
             </button>
           )}
 
@@ -4095,6 +4135,24 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         />
       )}
 
+      {/* D-AISCHED-04: Uncle Bob advisor drawer */}
+      {FEATURES.AI_SCHEDULER && (
+        <AIAdvisorPanel
+          open={advisorOpen}
+          onClose={() => setAdvisorOpen(false)}
+          profile={profile}
+          machines={machines}
+          scheduledJobs={allScheduledJobs.length ? allScheduledJobs : scheduledJobs}
+          unassignedJobs={unassignedJobs}
+          ongoingDowntimes={ongoingDowntimes}
+          getMachineOptionsForPart={getMachineOptionsForPart}
+          getScaledDuration={getScaledDuration}
+          projectedSpans={projectedSpans}
+          onApplyProposal={handleAdvisorApply}
+          refreshKey={advisorRefreshKey}
+        />
+      )}
+
       {/* Click-to-Schedule / Reschedule / Drag-Drop Modal (unified) */}
       {scheduleClickJob && (
         <ScheduleJobModal
@@ -4103,11 +4161,41 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             setScheduleClickJob(null)
             setScheduleClickEditMode(false)
             setScheduleClickDefaults(null)
+            setAdvisorApplying(null)
           }}
-          onSuccess={() => {
+          onSuccess={async () => {
+            const applying = advisorApplying
             setScheduleClickJob(null)
             setScheduleClickEditMode(false)
             setScheduleClickDefaults(null)
+            setAdvisorApplying(null)
+            if (applying) {
+              // Mark the proposal applied; detect whether the human edited
+              // machine or start (>1 min shift) in the confirm step.
+              try {
+                const { data: fresh } = await supabase
+                  .from('jobs')
+                  .select('assigned_machine_id, scheduled_start')
+                  .eq('id', applying.job_id)
+                  .single()
+                const edited = !!fresh && (
+                  fresh.assigned_machine_id !== applying.machine_id ||
+                  Math.abs(new Date(fresh.scheduled_start) - new Date(applying.proposed_start)) > 60000
+                )
+                await supabase
+                  .from('schedule_ai_proposals')
+                  .update({
+                    status: 'applied',
+                    applied_by: profile?.id ?? null,
+                    applied_at: new Date().toISOString(),
+                    applied_with_edits: edited,
+                  })
+                  .eq('id', applying.id)
+              } catch (e) {
+                console.error('Failed to mark proposal applied:', e)
+              }
+              setAdvisorRefreshKey(k => k + 1)
+            }
             fetchData()
             loadAllScheduledJobs()
           }}

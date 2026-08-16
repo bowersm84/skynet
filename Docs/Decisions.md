@@ -2658,6 +2658,16 @@ long for the feeder.
 **Why:** J-000190 merged while pending_compliance and left the pre-production queue with status 'merged' — an unreviewed order producing pieces. The review is about the ORDER's paperwork, not the physical setup, so merging can't discharge it; blocking allocation (not the merge, not the run) is the control point that doesn't slow the scheduler.
 **Deploy:** TEST only. PROD with the promotion set.
 
+### D-JOBMERGE-14 — Explicit allocation + machinist paperwork ack (2026-08-15)
+**What:** ack_job_paperwork gate widens to machinist (kiosk "New Paperwork Received" — operator in the note). New _reconcile_merge_shortfall(job, target, produced): below target opens/refreshes the open row + flags; at/above resolves open rows (status='resolved', resolution NULL per CHECK, notes "Superseded by reallocation", resolved_by/at) and recomputes job/WO has_open_shortfall from remaining truth. New set_merge_allocation(host, shares jsonb, total DEFAULT NULL): same readiness + acknowledgment guards as allocate_merged_batch, TCO-closed parties (status 'complete') lock it; shares cover every active member (0..ask), host = remainder ≥ 0; restamps member jobs/allocation rows/merged_out_good, reconciles via the helper, audits 'job_merge_reallocated' with previous vs new, notifies compliance. ack_job_paperwork body extracted from applied R3 and patched, not retyped.
+**Why:** The live QL8C62 pair: the ack guard held correctly, but the scheduler had no hand on the split and sales reallocation had no path short of a SQL harness. Shortfall truth must follow the split in both directions or the flags lie.
+**Deploy:** TEST only. PROD with the promotion set.
+
+### D-JOBMERGE-16 — Acknowledgment is a worklist, not a gate (2026-08-15)
+**What:** allocate_merged_batch and set_merge_allocation lose the D-JOBMERGE-12/-14 acknowledgment guards (bodies extracted from the applied migrations and patched, not retyped; verification gate asserts the guard string is absent while each function's core markers remain). The flag, review section, KPI count, badge, and ack_merged_member_compliance all stand — visibility and audit only.
+**Why:** Process-owner ruling after living with the guard on the live QL8C62 pairs: pre-production acknowledgment of a merged member is compliance bookkeeping and must neither hinder nor trigger allocation. The original requirement said exactly that ("even if it does not interfere"); the gate was over-build.
+**Deploy:** TEST only. PROD with the promotion set.
+
 ### D-SCHED-02 — Overrun jobs stay on the command grid (2026-08-15)
 **What:** Schedule.jsx: module-scope isJobOverrun(job) (ongoing status + scheduled_end in the past); the scheduled-jobs fetch gains a fourth or-branch (scheduled_end before the window AND status ongoing) so fully-past ongoing jobs are fetched; getJobBlockStyle and getJobBlockStyleZoomed extend an overrun job's displayed end to now (let jobEnd + reassignment), which makes the block intersect today and ride the existing carryover left-pin; JobBlockContent shows a red pulsing Clock ("Running past scheduled end") on line 1, covering week/zoomed/mini-timeline surfaces with one edit.
 **Third extension point (not in the original plan):** getJobsForMachineDay's WEEK branch duplicates the jobEnd computation and rejects jobEnd < dayStart, and it runs BEFORE getJobBlockStyle. Without the same extension there, every job the new fourth or-branch fetches (end before the window start) was filtered out before reaching the fixed style function — the fetch and the render fix would not have met. The zoomed branch of the same function needed nothing: it delegates to getJobBlockStyleZoomed. Three copies of this jobEnd ladder now exist; a shared resolveDisplayEnd(job, fallbackEnd) is the obvious next consolidation.
@@ -2709,6 +2719,12 @@ long for the feeder.
 **Deploy:** TEST only; frontend-only.
 **Files:** src/pages/Schedule.jsx.
 
+### D-SCHED-08 — Completed bars carry their real occupancy span (2026-08-15)
+**What:** buildProjection's actual_end branch derives the bar's start through setup_start → production_start → actual_start → scheduled_start (same occupancy order as D-SCHED-07's ongoing branch), with a 30-minute floor; truncated still keys on the raw actual_end vs scheduled_end.
+**Why:** A started-early-then-finished job rendered half-real — actual right edge, planned left edge — so the bar's width misrepresented the work's true duration on the machine.
+**Deploy:** TEST only; frontend-only.
+**Files:** src/pages/Schedule.jsx.
+
 ### D-SCHED-09 — Completions never rewrite the schedule (2026-08-15)
 **What:** Dropped trg_repack_on_completion + its function — a pre-projection DB-side pull-forward that physically rewrote the machine queue on completion into manufacturing_complete/complete (row evidence: every scheduled_start on Nexturn 4 equals its predecessor's actual_end plus seconds). Rebuilt jobs_no_machine_overlap with the predicate inverted to the physically-occupying allowlist (ready/assigned/pending_compliance/in_setup/in_progress), DEFERRABLE INITIALLY DEFERRED as before; post-machine rows (pending_tco, pending_passivation, …) keep their historical ranges without guarding machines they've left.
 **Why:** Completing J-000098 fired the repack, which pulled J-000135 into J-000134's still-constraint-active pending_tco window — exclusion violation, completion aborted. Two compression systems existed: the trigger mutating the plan, and D-SCHED-04..08 displaying compression without touching it. One survives: the projection. The schedule is the plan — the permanent record for plan-vs-actual — and the inverted predicate also unblocks scheduling fresh work onto a machine that freed early.
@@ -2728,35 +2744,3 @@ long for the feeder.
 **Numbering:** the D-WOLOOKUP series had only suffixed entries (DOCDEL01, ROLLUP01-03, CANCELLED01); -01 is the first free plain number, following the precedent of D-SCHED-01 coexisting with D-SCHED-ZOOM01.
 **Deploy:** TEST only.
 **Files:** src/pages/Mainframe.jsx.
-
-### D-JOBMERGE-15 — Allocation modal + kiosk paperwork ack + KPI + traveler order (2026-08-15)
-**What:** Pending Compliance KPI adds a merged-awaiting-ack count (head-count query, same pattern as lot-change paperwork). Kiosk stale-traveler banner gains "New Paperwork Received" → ack_job_paperwork with the operator in the note (machinist gate from D-JOBMERGE-14). Traveler: Customer Orders section relocates after the routing steps, before Notes — one renderer, every surface. handleAckMergedMember fires fireAllocationIfHost on success, closing the gap where all batches resolved while the acknowledgment guard was up. New MergeAllocationModal (host rows in WO Lookup, scheduler/admin/compliance): distributable total from approved sends, typed member shares capped at ask, host as live remainder, Apply → set_merge_allocation (restamps, reconciles shortfalls both directions, audits with previous vs new, notifies compliance). Host detection is one ids-only query on job_merge_allocations alongside the lookup's existing merge resolution, kept in a Set.
-**Why:** The live QL8C62 pair proved the ack guard works and exposed both gaps at once: nothing re-fired allocation after acknowledgment, and the scheduler had no hand on the split — the second explicit request for allocation control. Sales reallocation and short-run redistribution now take one modal instead of a SQL harness.
-**Two unverifiable-from-repo dependencies:** D-JOBMERGE-14 is not in this log and set_merge_allocation appears nowhere in Docs/ or src/, so the RPC's parameter shape — p_shares as an array of {job_id, qty} — is taken from the brief and cannot be checked here. If PostgREST rejects the call, the payload shape is the first thing to look at. Same for ack_job_paperwork's machinist gate, which the kiosk button now depends on.
-**Layers was missing from Mainframe's lucide import** — the Allocation button would have thrown at render (bundlers do not catch undefined JSX identifiers, so the build was green either way). Added; worth remembering that a clean `npm run build` is not evidence that a new icon resolves.
-**Deploy:** TEST only, after JobMerge_R5b_TEST_Migration.sql. PROD with the promotion set.
-**Files:** src/pages/Mainframe.jsx, src/pages/Kiosk.jsx, src/lib/traveler.js, src/components/ComplianceReview.jsx, src/components/MergeAllocationModal.jsx (new).
-
-### D-JOBMERGE-17 — Ack informational · allocation from both rows · lookup warning retired (2026-08-15)
-**What:** ComplianceReview: the ack→allocate chain and the retired raise's quiet-regex entry are removed; the merged-awaiting-ack section's copy drops every blocking claim ("Informational worklist — allocation is not blocked"). MergeAllocationModal converts to a hostJobId prop and self-fetches the host's basics, so member rows can open the run's allocation across WOs; Mainframe renders the Allocation button on member rows (merged_into_job_id) in both action areas, passing the host id. The WO Lookup traveler-outdated badge, both Ack affordances, and handleAckPaperwork are removed — staleness lives at the kiosk (banner + New Paperwork Received) and in Compliance Review; stamps and every other surface unchanged.
-**Why:** Process-owner ruling after living with D-JOBMERGE-12/-15: the acknowledgment is compliance bookkeeping, not a gate — it must neither hinder nor trigger. The member J-000144 had no path to the run's allocation because its host lives on another WO. The lookup warning duplicated surfaces that already own the message.
-**Mainframe no longer imports lib/jobMerge at all** — removing the badge, both affordances and the handler left isPaperworkStale and ackJobPaperwork with zero references, so the whole import line went. Both helpers remain live elsewhere (Kiosk banner, ComplianceReview); nothing in the lib was orphaned.
-**The four batch/job allocation triggers are untouched** (handleApproveBatch accept + reject paths, handleApproveJob, handleApproveAndPrint) — only the ack-path trigger from D-JOBMERGE-15 came out, so a host still allocates the moment its last batch resolves.
-**Deploy:** TEST only, after JobMerge_R6_TEST_Migration.sql. PROD with the promotion set.
-**Files:** src/components/ComplianceReview.jsx, src/components/MergeAllocationModal.jsx, src/pages/Mainframe.jsx.
-
-### D-SCHED-08 — Completed bars carry their real occupancy span (2026-08-15)
-**What:** buildProjection's actual_end branch derives the bar's start through setup_start → production_start → actual_start → scheduled_start (same occupancy order as D-SCHED-07's ongoing branch), with a 30-minute floor; truncated still keys on the raw actual_end vs scheduled_end.
-**Why:** A started-early-then-finished job rendered half-real — actual right edge, planned left edge — so the bar's width misrepresented the work's true duration on the machine.
-**Deploy:** TEST 2026-08-15; PROD with D-DEPLOY-01.
-**Files:** src/pages/Schedule.jsx.
-
-### D-JOBMERGE-16 — Acknowledgment is a worklist, not a gate (2026-08-15)
-**What:** allocate_merged_batch and set_merge_allocation lose the D-JOBMERGE-12/-14 acknowledgment guards (bodies extracted from the applied migrations and patched; gate asserts the guard string is absent while core markers remain). Flag, review section, KPI count, badge, and ack_merged_member_compliance all stand — visibility and audit only.
-**Why:** Process-owner ruling after living with the guard: pre-production acknowledgment of a merged member is compliance bookkeeping and must neither hinder nor trigger allocation.
-**Deploy:** TEST 2026-08-15; PROD with D-DEPLOY-01.
-
-### D-DEPLOY-01 — PROD promotion of the 2026-08-15 set (2026-08-15)
-**What:** Single-transaction replay of the seven TEST-verified migrations in application order (D-JOBMERGE-01/-03/-07, D-SCHED-09, D-JOBMERGE-12/-14/-16) with per-section gates plus a master census gate; pre-flight checklist (absence of new objects, presence of prerequisites) + archived rollback material (repack trigger/function, old overlap constraint, status CHECK) + mandatory status-array diff before the run. Frontend: one branch carrying merge R2–R6, D-SCHED-02..08, D-NAV-02, and the day's UI corrections, merged after DB COMMIT.
-**Why:** Migrations before code, one motion, PROD never partial.
-**Deploy:** PROD.

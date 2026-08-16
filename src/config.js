@@ -50,6 +50,18 @@ export const FEATURES = {
   NESTED_ASSEMBLY: true,
 
   /**
+   * AI Scheduler — "Uncle Bob" (D-AISCHED-04). Adds the advisor button +
+   * drawer to the Schedule page for admin/scheduler. Autonomy L0: the
+   * advisor proposes placements for the unassigned pool; a human applies
+   * every one through the existing ScheduleJobModal write path.
+   *
+   * When false: no button, no panel, no advisor calls — Schedule.jsx is
+   * behaviorally identical to pre-Phase-1.
+   * Keep false in PROD until April's walkthrough; true on TEST.
+   */
+  AI_SCHEDULER: true,
+
+  /**
    * Kit & STC Registry — the serialized kit-lot / aircraft / STC paperwork
    * module at /kits (kiosk-style, outside MainApp; NOT a Mainframe tab).
    *

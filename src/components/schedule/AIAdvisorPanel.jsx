@@ -18,14 +18,82 @@ import {
 // goes. Swap the link here if the upload ever disappears.
 const UNCLE_BOB_CLIP_URL = 'https://www.youtube.com/watch?v=bOLGXgZ8ffE'
 
-const ADVISOR_TIMEOUT_MS = 120000
+const ADVISOR_TIMEOUT_MS = 300000 // outer guard; the stream's heartbeats do the real keep-alive
 
-function withTimeout(promise, ms, message) {
-  let timer
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms)
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+// D-AISCHED-07: Fable 5 thinks for minutes; a buffered invoke outlives the
+// gateway window (observed: browser 502 + worker EarlyDrop at ~200s with
+// 44ms CPU — pure network wait). The function now streams SSE: heartbeat
+// comments while the model generates, then exactly one `result` event with
+// the same { model, envelope, usage } shape invoke used to return, or one
+// `error` event. Fast-path failures (401/403/400) still arrive as plain
+// non-2xx JSON and are surfaced from the !resp.ok branch.
+async function invokeAdvisorStream(snapshot) {
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session?.access_token) throw new Error('No active session — sign in again.')
+
+  const controller = new AbortController()
+  const kill = setTimeout(() => controller.abort(), ADVISOR_TIMEOUT_MS)
+  try {
+    const resp = await fetch(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/schedule-advisor`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ snapshot }),
+        signal: controller.signal,
+      }
+    )
+
+    if (!resp.ok) {
+      let msg = `schedule-advisor HTTP ${resp.status}`
+      try {
+        const j = await resp.json()
+        if (j?.error) msg = j.error
+      } catch { /* body wasn't JSON; keep the status message */ }
+      throw new Error(msg)
+    }
+
+    const contentType = resp.headers.get('content-type') || ''
+    if (!contentType.includes('text/event-stream')) {
+      // Fast-path 200 (e.g. empty pool) still returns plain JSON.
+      const j = await resp.json()
+      if (j?.error) throw new Error(j.error)
+      return j
+    }
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const frames = buf.split('\n\n')
+      buf = frames.pop() ?? ''
+      for (const frame of frames) {
+        const lines = frame.split('\n')
+        const event = (lines.find(l => l.startsWith('event: ')) || '').slice(7).trim()
+        const dataLine = lines.find(l => l.startsWith('data: '))
+        if (!dataLine) continue // heartbeat comment
+        let payload
+        try { payload = JSON.parse(dataLine.slice(6)) } catch { continue }
+        if (event === 'error') throw new Error(payload.error || 'schedule-advisor failed')
+        if (event === 'result') return payload
+      }
+    }
+    throw new Error('Uncle Bob\u0027s stream ended without a result — try again.')
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      throw new Error('Uncle Bob timed out after 5 minutes. Try again.')
+    }
+    throw e
+  } finally {
+    clearTimeout(kill)
+  }
 }
 
 const startOfTodayIso = () => {
@@ -142,13 +210,7 @@ export default function AIAdvisorPanel({
         getMachineOptionsForPart, getScaledDuration, projectedSpans,
       })
 
-      const { data, error: fnErr } = await withTimeout(
-        supabase.functions.invoke('schedule-advisor', { body: { snapshot } }),
-        ADVISOR_TIMEOUT_MS,
-        'Uncle Bob timed out after 120 seconds. Try again.'
-      )
-      if (fnErr) throw new Error(fnErr.message || 'schedule-advisor failed')
-      if (data?.error) throw new Error(data.error)
+      const data = await invokeAdvisorStream(snapshot)
 
       const envelope = data?.envelope
       if (!envelope) throw new Error('Empty envelope from schedule-advisor')

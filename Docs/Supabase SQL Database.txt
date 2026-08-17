@@ -66,6 +66,7 @@ CREATE TABLE public.parts (
   requires_passivation boolean DEFAULT false,
   material_type_id uuid,
   drawing_revision character varying,
+  family_key text,
   CONSTRAINT parts_pkey PRIMARY KEY (id),
   CONSTRAINT parts_material_type_id_fkey FOREIGN KEY (material_type_id) REFERENCES public.material_types(id)
 );
@@ -1503,4 +1504,56 @@ CREATE TABLE public.job_merge_allocations (
   CONSTRAINT jma_wocj_fkey FOREIGN KEY (linked_wocj_id) REFERENCES public.work_order_component_jobs(id),
   CONSTRAINT jma_merged_by_fkey FOREIGN KEY (merged_by) REFERENCES public.profiles(id),
   CONSTRAINT jma_unmerged_by_fkey FOREIGN KEY (unmerged_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.schedule_ai_runs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  run_by uuid NOT NULL,
+  run_at timestamp with time zone NOT NULL DEFAULT now(),
+  model text NOT NULL,
+  snapshot jsonb NOT NULL,
+  briefing text,
+  risks jsonb,
+  data_gaps jsonb,
+  usage jsonb,
+  error text,
+  CONSTRAINT schedule_ai_runs_pkey PRIMARY KEY (id),
+  CONSTRAINT schedule_ai_runs_run_by_fkey FOREIGN KEY (run_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.schedule_ai_proposals (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  run_id uuid NOT NULL,
+  job_id uuid NOT NULL,
+  machine_id uuid NOT NULL,
+  insert_after_job_id uuid,
+  proposed_start timestamp with time zone NOT NULL,
+  proposed_end timestamp with time zone NOT NULL,
+  estimated_minutes integer CHECK (estimated_minutes > 0),
+  confidence text NOT NULL CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),
+  rationale text NOT NULL,
+  evidence jsonb,
+  status text NOT NULL DEFAULT 'open'::text CHECK (status = ANY (ARRAY['open'::text, 'applied'::text, 'dismissed'::text, 'superseded'::text, 'expired'::text])),
+  applied_by uuid,
+  applied_at timestamp with time zone,
+  applied_with_edits boolean NOT NULL DEFAULT false,
+  dismissed_by uuid,
+  dismissed_at timestamp with time zone,
+  dismissal_reason text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT schedule_ai_proposals_pkey PRIMARY KEY (id),
+  CONSTRAINT schedule_ai_proposals_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.schedule_ai_runs(id),
+  CONSTRAINT schedule_ai_proposals_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT schedule_ai_proposals_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
+  CONSTRAINT schedule_ai_proposals_insert_after_job_id_fkey FOREIGN KEY (insert_after_job_id) REFERENCES public.jobs(id),
+  CONSTRAINT schedule_ai_proposals_applied_by_fkey FOREIGN KEY (applied_by) REFERENCES public.profiles(id),
+  CONSTRAINT schedule_ai_proposals_dismissed_by_fkey FOREIGN KEY (dismissed_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.scheduler_policies (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  policy_text text NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by uuid NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  source text NOT NULL DEFAULT 'manual'::text CHECK (source = ANY (ARRAY['manual'::text, 'ai_suggested'::text])),
+  CONSTRAINT scheduler_policies_pkey PRIMARY KEY (id),
+  CONSTRAINT scheduler_policies_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id)
 );

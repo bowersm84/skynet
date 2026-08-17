@@ -2,7 +2,7 @@
 // report the user just ran. Proposes nothing, applies nothing, and never
 // touches the CSV export path (D-RPT-02).
 import { useState } from 'react'
-import { Bot, Loader2, RefreshCw, AlertTriangle, ChevronDown, ChevronRight, Eye, HelpCircle } from 'lucide-react'
+import { Loader2, RefreshCw, AlertTriangle, ChevronDown, ChevronRight, Eye, HelpCircle } from 'lucide-react'
 import { buildReportEnvelope, invokeReportAdvisor, recordAdvisorRun } from '../lib/reportAdvisor'
 
 const confidenceBadge = (c) =>
@@ -44,7 +44,7 @@ export default function ReportAdvisorPanel({ profile, report, rows }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg mb-4">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
-        <Bot size={18} className="text-skynet-accent" />
+        <span className="text-lg leading-none select-none" role="img" aria-label="Uncle Bob">🤔</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <h3 className="text-white text-sm font-semibold leading-tight">Uncle Bob&apos;s Read</h3>

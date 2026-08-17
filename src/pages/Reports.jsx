@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { FileSpreadsheet, ArrowLeft, Download, AlertTriangle, Info, Play } from 'lucide-react'
 import { canExportReports } from '../lib/roles'
+import ReportAdvisorPanel from '../components/ReportAdvisorPanel'
 import { fetchReports, runReport, toCsv, downloadCsv, reportFilename, summarize } from '../lib/reports'
 
 const PREVIEW_CAP = 200
@@ -94,6 +95,10 @@ export default function Reports({ profile }) {
               <p className="text-red-400/80 text-sm mt-1 font-mono">{runError}</p>
             </div>
           </div>
+        )}
+
+        {rows && rows.length > 0 && canExportReports(profile) && (
+          <ReportAdvisorPanel profile={profile} report={active} rows={rows} />
         )}
 
         {rows && summary && (

@@ -41,3 +41,11 @@ export function canViewSalesDashboard(profile) {
   if (!profile) return false
   return hasRole(profile, 'admin', 'customer_service', 'president', 'viewer') || profile.is_salesperson === true
 }
+
+// Reports module (D-RPT-01) — every authenticated role can VIEW reports;
+// CSV export is restricted to these roles. Effective role set: role ∪ roles[].
+export const REPORT_EXPORT_ROLES = ['admin', 'president', 'scheduler']
+
+export function canExportReports(profile) {
+  return hasRole(profile, ...REPORT_EXPORT_ROLES)
+}

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
@@ -15,6 +15,7 @@ import KitKiosk from './pages/KitKiosk'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
 import CertRepository from './pages/CertRepository'
+import Reports from './pages/Reports'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
@@ -215,6 +216,10 @@ function MainApp() {
   // is filtered per-role below (president + admin only).
   const canAccessDashboards = !!profile?.role
 
+  // Reports module (D-RPT-01) — visible to ALL authenticated roles; CSV
+  // export gated to admin/president/scheduler inside the page.
+  const canAccessReports = !!profile?.role
+
   // D-NAV-02: persist the current page so a refresh restores it.
   useEffect(() => {
     try {
@@ -234,9 +239,10 @@ function MainApp() {
       (currentPage === 'schedule' && !canAccessSchedule) ||
       (currentPage === 'customer_orders' && !canAccessCustomerOrders) ||
       (currentPage === 'armory' && !canAccessArmory) ||
-      (currentPage === 'certs' && !canAccessCerts)
+      (currentPage === 'certs' && !canAccessCerts) ||
+      (currentPage === 'reports' && !canAccessReports)
     if (blocked) setCurrentPage('mainframe')
-  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessArmory, canAccessCerts])
+  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessArmory, canAccessCerts, canAccessReports])
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
   const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
@@ -248,6 +254,7 @@ function MainApp() {
       case 'armory': return 'Armory'
       case 'customer_orders': return 'Customer Orders'
       case 'certs': return 'Cert Repository'
+      case 'reports': return 'Reports'
       default: return 'Mainframe'
     }
   }
@@ -381,6 +388,17 @@ function MainApp() {
               </button>
             )}
 
+            {/* Reports — all roles view; export gated inside the page (D-RPT-01) */}
+            {currentPage === 'mainframe' && canAccessReports && (
+              <button
+                onClick={() => setCurrentPage('reports')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <FileSpreadsheet size={18} />
+                <span className="text-sm font-medium">Reports</span>
+              </button>
+            )}
+
             {/* Dashboards dropdown - all roles; Bridge entry filtered per-role (SKY56) */}
             {currentPage === 'mainframe' && canAccessDashboards && (
               <div className="relative" ref={dashboardsMenuRef}>
@@ -484,6 +502,9 @@ function MainApp() {
         )}
         {currentPage === 'certs' && canAccessCerts && (
           <CertRepository profile={profile} />
+        )}
+        {currentPage === 'reports' && canAccessReports && (
+          <Reports profile={profile} />
         )}
       </main>
 

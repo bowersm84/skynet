@@ -28,6 +28,9 @@ export default function ScheduleJobModal({
   const [insertionIndex, setInsertionIndex] = useState(null)
   const [durationDays, setDurationDays] = useState(0)
   const [durationHours, setDurationHours] = useState(0)
+  // D-SCHED-10: parts/day duration calculator
+  const [partsPerDay, setPartsPerDay] = useState('')
+  const [historyRuns, setHistoryRuns] = useState([])
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
 
@@ -58,7 +61,26 @@ export default function ScheduleJobModal({
       setDurationDays(0)
       setDurationHours(0)
     }
+    setPartsPerDay('')
   }, [isOpen, defaults?.machineId, editMode, job?.id])
+
+  // D-SCHED-10: completed runs for this part prove real throughput.
+  // time_per_unit = minutes/piece from production_start → actual_end (written at completion).
+  useEffect(() => {
+    if (!isOpen || !job?.component_id) { setHistoryRuns([]); return }
+    let cancelled = false
+    supabase
+      .from('jobs')
+      .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end')
+      .eq('component_id', job.component_id)
+      .gt('time_per_unit', 0)
+      .order('actual_end', { ascending: false })
+      .limit(10)
+      .then(({ data }) => {
+        if (!cancelled) setHistoryRuns((data || []).filter(r => r.id !== job?.id))
+      })
+    return () => { cancelled = true }
+  }, [isOpen, job?.component_id, job?.id])
 
   // D-JOBMERGE-02: same-component host candidates for the Step 1 merge card.
   // Skipped when the job can no longer be a member (started, merged, etc.).
@@ -83,6 +105,49 @@ export default function ScheduleJobModal({
   }, [selectedMachineId])
 
   const totalMinutes = durationDays * 24 * 60 + durationHours * 60
+
+  // D-SCHED-10: weighted-average throughput from history, machine-specific when available.
+  const suggestedPartsPerDay = useMemo(() => {
+    if (!historyRuns.length) return null
+    const machineRuns = selectedMachineId
+      ? historyRuns.filter(r => r.assigned_machine_id === selectedMachineId)
+      : []
+    const basis = machineRuns.length > 0 ? machineRuns : historyRuns
+    let totalPieces = 0
+    let totalRunMinutes = 0
+    for (const r of basis) {
+      const pieces = (r.good_pieces > 0 ? r.good_pieces : r.quantity) || 0
+      const tpu = Number(r.time_per_unit)
+      if (pieces <= 0 || !(tpu > 0)) continue
+      totalPieces += pieces
+      totalRunMinutes += pieces * tpu
+    }
+    if (totalPieces <= 0 || totalRunMinutes <= 0) return null
+    return {
+      rate: Math.max(1, Math.round(totalPieces / (totalRunMinutes / (24 * 60)))),
+      runCount: basis.length,
+      machineSpecific: machineRuns.length > 0
+    }
+  }, [historyRuns, selectedMachineId])
+
+  // D-SCHED-10: parts/day → duration (+10% buffer, rounded up to the hour)
+  const applyPartsPerDay = (value) => {
+    const rate = parseFloat(value)
+    const qty = job?.quantity || 0
+    if (!(rate > 0) || !(qty > 0)) return
+    const raw = (qty / rate) * 24 * 60 * 1.10
+    const total = Math.max(60, Math.ceil(raw / 60) * 60)
+    setDurationDays(Math.floor(total / (24 * 60)))
+    setDurationHours(Math.floor((total % (24 * 60)) / 60))
+  }
+
+  // D-SCHED-10: prefill from history on entering Step 3; never clobber an existing duration.
+  useEffect(() => {
+    if (step !== 3 || partsPerDay !== '' || !suggestedPartsPerDay) return
+    setPartsPerDay(String(suggestedPartsPerDay.rate))
+    if (totalMinutes === 0) applyPartsPerDay(suggestedPartsPerDay.rate)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, suggestedPartsPerDay])
 
   const availableMachines = useMemo(() => {
     return (machines || [])
@@ -313,6 +378,10 @@ export default function ScheduleJobModal({
               durationHours={durationHours}
               setDurationHours={setDurationHours}
               totalMinutes={totalMinutes}
+              partsPerDay={partsPerDay}
+              setPartsPerDay={setPartsPerDay}
+              applyPartsPerDay={applyPartsPerDay}
+              suggestedPartsPerDay={suggestedPartsPerDay}
               propagation={propagation}
               fmtDateTime={fmtDateTime}
               job={job}
@@ -607,7 +676,8 @@ function Step3Duration({
   machine, queue, insertionIndex,
   durationDays, setDurationDays, durationHours, setDurationHours,
   totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert,
-  isLateSchedule, dueDateDisplay
+  isLateSchedule, dueDateDisplay,
+  partsPerDay, setPartsPerDay, applyPartsPerDay, suggestedPartsPerDay
 }) {
   const beforeJob = queue[insertionIndex - 1]
   const afterJob = queue[insertionIndex]
@@ -630,6 +700,34 @@ function Step3Duration({
           <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span> on <span className="text-white font-medium">{machine?.name}</span>
         </p>
         <p className="text-gray-500 text-xs mt-1">{placementText}</p>
+      </div>
+
+      <div>
+        <label className="block text-gray-400 text-sm mb-2">Parts per day</label>
+        <div className="flex items-center gap-3 flex-wrap">
+          <input
+            type="number"
+            min="1"
+            value={partsPerDay}
+            onChange={(e) => {
+              const v = e.target.value
+              setPartsPerDay(v)
+              applyPartsPerDay(v)
+            }}
+            placeholder="—"
+            className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:outline-none focus:border-skynet-accent"
+          />
+          <span className="text-gray-400 text-sm">parts / 24h day</span>
+          {suggestedPartsPerDay && (
+            <span className="text-gray-500 text-xs">
+              ≈ {suggestedPartsPerDay.rate.toLocaleString()}/day from {suggestedPartsPerDay.runCount} completed run{suggestedPartsPerDay.runCount === 1 ? '' : 's'}
+              {suggestedPartsPerDay.machineSpecific ? ' on this machine' : ' (all machines)'}
+            </span>
+          )}
+        </div>
+        <p className="text-gray-500 text-xs mt-1">
+          Duration = qty {(job.quantity || 0).toLocaleString()} ÷ parts/day, +10% buffer, rounded up to the whole hour. Estimate — adjust below if needed.
+        </p>
       </div>
 
       <div>

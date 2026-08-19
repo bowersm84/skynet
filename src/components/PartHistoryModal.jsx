@@ -7,22 +7,36 @@ import { computePartsPerDaySuggestion } from '../lib/scheduling'
 // and print output can flag truncation.
 const JOB_FETCH_LIMIT = 300
 
+// Machining finishes at manufacturing_complete. A job then walks finishing,
+// post-mfg review, outsourcing, assembly, and TCO before it ever reaches
+// 'complete', so production history must key off the former — gating on
+// 'complete' hides months of real runs. Mirrors fetchPartThroughputRuns in
+// lib/scheduling.js, which never filtered on status at all.
+const PRODUCTION_DONE_STATUSES = [
+  'manufacturing_complete', 'pending_passivation', 'in_passivation',
+  'pending_post_manufacturing', 'ready_for_outsourcing', 'at_external_vendor',
+  'ready_for_assembly', 'in_assembly', 'pending_tco', 'complete', 'incomplete'
+]
+
+// Still on, or headed for, a machine.
+const IN_FLIGHT_STATUSES = [
+  'pending_compliance', 'ready', 'assigned', 'in_setup', 'in_progress'
+]
+
+// Never counted in totals or rates; shown in the table with a badge.
+const EXCLUDED_STATUSES = ['cancelled', 'merged']
+
 const STATUS_BADGES = {
   complete: 'bg-green-900/50 text-green-300 border-green-700/50',
+  manufacturing_complete: 'bg-purple-900/50 text-purple-300 border-purple-700/50',
+  pending_tco: 'bg-teal-900/50 text-teal-300 border-teal-700/50',
   in_progress: 'bg-blue-900/50 text-blue-300 border-blue-700/50',
   in_setup: 'bg-blue-900/50 text-blue-300 border-blue-700/50',
   assigned: 'bg-sky-900/50 text-sky-300 border-sky-700/50',
   cancelled: 'bg-red-900/50 text-red-300 border-red-700/50',
-  merged: 'bg-purple-900/50 text-purple-300 border-purple-700/50',
+  merged: 'bg-gray-700/50 text-gray-300 border-gray-600/50',
   incomplete: 'bg-amber-900/50 text-amber-300 border-amber-700/50'
 }
-
-// Statuses counted as "open / in flight" for the summary tiles.
-const ACTIVE_STATUSES = [
-  'assigned', 'in_setup', 'in_progress', 'pending_passivation', 'in_passivation',
-  'pending_post_manufacturing', 'ready_for_outsourcing', 'at_external_vendor',
-  'ready_for_assembly', 'in_assembly', 'pending_tco'
-]
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : '—')
 const humanStatus = (s) => (s || '').replace(/_/g, ' ')
@@ -30,11 +44,32 @@ const _esc = (v) => String(v ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;')
 
-// Per-run parts/day from minutes-per-piece. Display-only; summary rates use
-// the shared D-SCHED-13 weighted basis instead.
+// Pieces basis, matching computePartsPerDaySuggestion in lib/scheduling.js.
+const piecesFor = (j) => {
+  const good = j.good_pieces || 0
+  return good > 0 ? good : (j.quantity || 0)
+}
+
+// Minutes per piece for a run. Prefers the value recorded at completion; falls
+// back to the identical calculation the kiosk performs (production_start →
+// actual_end ÷ pieces) for rows that predate that write or were closed by a
+// path that left it null. Derived values are labelled in the UI and print.
+const effectiveTimePerUnit = (j) => {
+  const recorded = Number(j.time_per_unit)
+  if (recorded > 0) return { tpu: recorded, derived: false }
+  const pieces = j.good_pieces || 0
+  if (!j.production_start || !j.actual_end || pieces <= 0) return null
+  const minutes = (new Date(j.actual_end) - new Date(j.production_start)) / 60000
+  if (!(minutes > 0)) return null
+  return { tpu: minutes / pieces, derived: true }
+}
+
+// Per-run parts/day for display. Summary rates use the shared D-SCHED-13
+// weighted basis instead of averaging these.
 const runRate = (j) => {
-  const tpu = Number(j.time_per_unit)
-  return tpu > 0 ? Math.max(1, Math.round(1440 / tpu)) : null
+  const eff = effectiveTimePerUnit(j)
+  if (!eff) return null
+  return { rate: Math.max(1, Math.round(1440 / eff.tpu)), derived: eff.derived }
 }
 
 export default function PartHistoryModal({ part, onClose }) {
@@ -77,15 +112,31 @@ export default function PartHistoryModal({ part, onClose }) {
   }, [part.id])
 
   const summary = useMemo(() => {
-    const completed = jobs.filter(j => j.status === 'complete')
-    // D-SCHED-13 basis: completed machining runs with a real time_per_unit.
-    const rateRuns = completed.filter(j => Number(j.time_per_unit) > 0 && !j.is_standalone_finishing)
-    const active = jobs.filter(j => ACTIVE_STATUSES.includes(j.status))
-    const totalGood = completed.reduce((s, j) => s + (j.good_pieces || 0), 0)
-    const totalBad = completed.reduce((s, j) => s + (j.bad_pieces || 0), 0)
+    const done = jobs.filter(j => PRODUCTION_DONE_STATUSES.includes(j.status))
+    const inFlight = jobs.filter(j => IN_FLIGHT_STATUSES.includes(j.status))
+    const excluded = jobs.filter(j => EXCLUDED_STATUSES.includes(j.status))
+
+    const totalGood = done.reduce((s, j) => s + (j.good_pieces || 0), 0)
+    const totalBad = done.reduce((s, j) => s + (j.bad_pieces || 0), 0)
     const scrapPct = (totalGood + totalBad) > 0
       ? (totalBad / (totalGood + totalBad)) * 100
       : null
+
+    // Runs that yield a usable rate. Standalone finishing jobs never touched a
+    // machine, so they carry no machining rate.
+    const rateRuns = []
+    let derivedCount = 0
+    const noRate = []
+    for (const j of done) {
+      if (j.is_standalone_finishing) continue
+      const eff = effectiveTimePerUnit(j)
+      if (!eff) { noRate.push(j); continue }
+      if (eff.derived) derivedCount += 1
+      // Feed the shared helper a normalised run so the weighted average stays
+      // single-source-of-truth (D-SCHED-13).
+      rateRuns.push({ ...j, time_per_unit: eff.tpu })
+    }
+
     const overall = computePartsPerDaySuggestion(rateRuns, null)
 
     // Per-machine breakdown, same piece-weighted math as the shared helper.
@@ -100,7 +151,7 @@ export default function PartHistoryModal({ part, onClose }) {
         })
       }
       const m = byMachine.get(key)
-      const pieces = (r.good_pieces > 0 ? r.good_pieces : r.quantity) || 0
+      const pieces = piecesFor(r)
       const tpu = Number(r.time_per_unit)
       if (pieces <= 0 || !(tpu > 0)) continue
       m.pieces += pieces
@@ -116,22 +167,28 @@ export default function PartHistoryModal({ part, onClose }) {
       }))
       .sort((a, b) => (b.rate || 0) - (a.rate || 0))
 
-    const ends = completed.map(j => j.actual_end).filter(Boolean).sort()
+    const ends = done.map(j => j.actual_end).filter(Boolean).sort()
     return {
-      completedCount: completed.length,
-      activeCount: active.length,
+      doneCount: done.length,
+      inFlightCount: inFlight.length,
+      excludedCount: excluded.length,
       totalGood,
       totalBad,
       scrapPct,
       overall,
       machineRows,
       rateRunCount: rateRuns.length,
+      derivedCount,
+      noRateCount: noRate.length,
       firstRun: ends[0] || null,
       lastRun: ends[ends.length - 1] || null
     }
   }, [jobs])
 
   const truncated = totalCount > jobs.length
+  const basisNote = summary.overall
+    ? `weighted over ${summary.rateRunCount} run${summary.rateRunCount === 1 ? '' : 's'}${summary.derivedCount > 0 ? `, ${summary.derivedCount} derived` : ''}`
+    : 'no runs with a usable time/unit'
 
   const handlePrint = () => {
     const now = new Date().toLocaleString()
@@ -142,11 +199,11 @@ export default function PartHistoryModal({ part, onClose }) {
     const summaryTiles = `
       <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
         <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Jobs (all time)</div><div style="font-size:20px; font-weight:700;">${totalCount}</div></div>
-        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Completed</div><div style="font-size:20px; font-weight:700;">${summary.completedCount}</div></div>
-        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Open / In Flight</div><div style="font-size:20px; font-weight:700;">${summary.activeCount}</div></div>
+        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Runs Complete</div><div style="font-size:20px; font-weight:700;">${summary.doneCount}</div></div>
+        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">In Flight</div><div style="font-size:20px; font-weight:700;">${summary.inFlightCount}</div></div>
         <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Good Pieces</div><div style="font-size:20px; font-weight:700;">${summary.totalGood.toLocaleString()}</div></div>
         <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Scrap</div><div style="font-size:20px; font-weight:700;">${summary.totalBad.toLocaleString()}${summary.scrapPct != null ? ` <span style="font-size:12px; color:#64748b;">(${summary.scrapPct.toFixed(1)}%)</span>` : ''}</div></div>
-        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Historic Run Rate</div><div style="font-size:20px; font-weight:700;">${summary.overall ? `${summary.overall.rate.toLocaleString()} parts/day` : '—'}</div><div style="font-size:10px; color:#94a3b8;">${summary.overall ? `weighted over ${summary.rateRunCount} completed run${summary.rateRunCount === 1 ? '' : 's'}` : 'no completed runs with recorded time/unit'}</div></div>
+        <div style="${tileCSS}"><div style="font-size:11px; color:#64748b;">Historic Run Rate</div><div style="font-size:20px; font-weight:700;">${summary.overall ? `${summary.overall.rate.toLocaleString()} parts/day` : '—'}</div><div style="font-size:10px; color:#94a3b8;">${_esc(basisNote)}</div></div>
       </div>`
 
     const machineTable = summary.machineRows.length === 0 ? '' : `
@@ -179,7 +236,10 @@ export default function PartHistoryModal({ part, onClose }) {
           <th style="${thCSS}">Prod Start</th><th style="${thCSS}">Completed</th>
           <th style="${thCSS}">Parts/Day</th>
         </tr></thead>
-        <tbody>${jobs.map(j => `
+        <tbody>${jobs.map(j => {
+          const rr = runRate(j)
+          const rateCell = rr ? `${rr.derived ? '~' : ''}${rr.rate.toLocaleString()}` : '—'
+          return `
           <tr>
             <td style="${tdCSS}">${_esc(j.job_number)}</td>
             <td style="${tdCSS}">${_esc(j.work_order?.wo_number || '—')}${j.work_order?.order_type === 'make_to_stock' ? ' (MTS)' : ''}</td>
@@ -191,10 +251,15 @@ export default function PartHistoryModal({ part, onClose }) {
             <td style="${tdCSS}">${_esc(humanStatus(j.status))}</td>
             <td style="${tdCSS}">${fmtDate(j.production_start)}</td>
             <td style="${tdCSS}">${fmtDate(j.actual_end)}</td>
-            <td style="${tdCSS}">${j.status === 'complete' && runRate(j) != null ? runRate(j).toLocaleString() : '—'}</td>
-          </tr>`).join('')}
+            <td style="${tdCSS}">${rateCell}</td>
+          </tr>`
+        }).join('')}
         </tbody>
-      </table>`
+      </table>
+      <p style="font-size:11px; color:#64748b; margin-top:6px;">
+        ~ rate derived from production start → completion because time/unit was not recorded on the run.
+        ${summary.noRateCount > 0 ? `${summary.noRateCount} completed run${summary.noRateCount === 1 ? '' : 's'} carry no rate at all (no production start recorded).` : ''}
+      </p>`
 
     const html = `<!DOCTYPE html>
 <html>
@@ -215,7 +280,7 @@ export default function PartHistoryModal({ part, onClose }) {
   <h2 style="margin:0 0 2px; font-size:20px;">${_esc(part.part_number)}</h2>
   <p style="margin:0 0 4px; color:#475569; font-size:13px;">${_esc(part.description || 'No description')}</p>
   <p style="margin:0 0 16px; color:#94a3b8; font-size:11px;">
-    ${summary.firstRun ? `First completed run ${fmtDate(summary.firstRun)} — last ${fmtDate(summary.lastRun)}. ` : ''}Rate basis: completed runs with recorded time/unit (D-SCHED-13 shared basis).
+    ${summary.firstRun ? `First recorded completion ${fmtDate(summary.firstRun)} — last ${fmtDate(summary.lastRun)}. ` : ''}Rate basis: runs at or past manufacturing complete with a usable time/unit (D-SCHED-13 shared basis).${summary.excludedCount > 0 ? ` ${summary.excludedCount} cancelled/merged job${summary.excludedCount === 1 ? '' : 's'} excluded from totals.` : ''}
   </p>
   ${summaryTiles}
   ${machineTable}
@@ -298,12 +363,13 @@ export default function PartHistoryModal({ part, onClose }) {
                   <p className="text-white text-xl font-semibold">{totalCount}</p>
                 </div>
                 <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-3">
-                  <p className="text-gray-500 text-xs">Completed</p>
-                  <p className="text-green-300 text-xl font-semibold">{summary.completedCount}</p>
+                  <p className="text-gray-500 text-xs">Runs Complete</p>
+                  <p className="text-green-300 text-xl font-semibold">{summary.doneCount}</p>
+                  <p className="text-gray-600 text-[10px] leading-tight">machining done or later</p>
                 </div>
                 <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-3">
-                  <p className="text-gray-500 text-xs">Open / In Flight</p>
-                  <p className="text-blue-300 text-xl font-semibold">{summary.activeCount}</p>
+                  <p className="text-gray-500 text-xs">In Flight</p>
+                  <p className="text-blue-300 text-xl font-semibold">{summary.inFlightCount}</p>
                 </div>
                 <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-3">
                   <p className="text-gray-500 text-xs">Good Pieces</p>
@@ -323,13 +389,26 @@ export default function PartHistoryModal({ part, onClose }) {
                   <p className="text-cyan-300 text-xl font-semibold">
                     {summary.overall ? `${summary.overall.rate.toLocaleString()}/day` : '—'}
                   </p>
-                  <p className="text-gray-600 text-[10px] leading-tight">
-                    {summary.overall
-                      ? `weighted over ${summary.rateRunCount} run${summary.rateRunCount === 1 ? '' : 's'}`
-                      : 'no completed runs with time/unit'}
-                  </p>
+                  <p className="text-gray-600 text-[10px] leading-tight">{basisNote}</p>
                 </div>
               </div>
+
+              {(summary.noRateCount > 0 || summary.excludedCount > 0) && (
+                <p className="text-gray-500 text-xs">
+                  {summary.noRateCount > 0 && (
+                    <>
+                      {summary.noRateCount} completed run{summary.noRateCount === 1 ? '' : 's'} carry no rate
+                      (no production start recorded) — these can be repaired from the kiosk job-history admin edit.
+                    </>
+                  )}
+                  {summary.noRateCount > 0 && summary.excludedCount > 0 && ' '}
+                  {summary.excludedCount > 0 && (
+                    <>
+                      {summary.excludedCount} cancelled/merged job{summary.excludedCount === 1 ? '' : 's'} shown below but excluded from totals.
+                    </>
+                  )}
+                </p>
+              )}
 
               {/* Per-machine breakdown */}
               {summary.machineRows.length > 0 && (
@@ -396,35 +475,46 @@ export default function PartHistoryModal({ part, onClose }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {jobs.map(j => (
-                        <tr key={j.id} className="border-t border-gray-700/60">
-                          <td className="px-3 py-2 font-mono text-skynet-accent">{j.job_number}</td>
-                          <td className="px-3 py-2 text-gray-300">
-                            {j.work_order?.wo_number || '—'}
-                            {j.work_order?.order_type === 'make_to_stock' && (
-                              <span className="text-emerald-400/70 text-xs ml-1">MTS</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-gray-400">{j.work_order?.customer || '—'}</td>
-                          <td className="px-3 py-2 text-gray-300">{j.assigned_machine?.name || '—'}</td>
-                          <td className="px-3 py-2 text-right text-gray-300">{j.quantity ?? '—'}</td>
-                          <td className="px-3 py-2 text-right text-green-300">{j.good_pieces ?? 0}</td>
-                          <td className="px-3 py-2 text-right text-amber-300">{j.bad_pieces ?? 0}</td>
-                          <td className="px-3 py-2">
-                            <span className={`text-xs px-2 py-0.5 rounded border capitalize ${STATUS_BADGES[j.status] || 'bg-gray-700/50 text-gray-300 border-gray-600/50'}`}>
-                              {humanStatus(j.status)}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-gray-400">{fmtDate(j.production_start)}</td>
-                          <td className="px-3 py-2 text-gray-400">{fmtDate(j.actual_end)}</td>
-                          <td className="px-3 py-2 text-right text-cyan-300">
-                            {j.status === 'complete' && runRate(j) != null ? runRate(j).toLocaleString() : '—'}
-                          </td>
-                        </tr>
-                      ))}
+                      {jobs.map(j => {
+                        const rr = runRate(j)
+                        return (
+                          <tr key={j.id} className="border-t border-gray-700/60">
+                            <td className="px-3 py-2 font-mono text-skynet-accent">{j.job_number}</td>
+                            <td className="px-3 py-2 text-gray-300">
+                              {j.work_order?.wo_number || '—'}
+                              {j.work_order?.order_type === 'make_to_stock' && (
+                                <span className="text-emerald-400/70 text-xs ml-1">MTS</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-gray-400">{j.work_order?.customer || '—'}</td>
+                            <td className="px-3 py-2 text-gray-300">{j.assigned_machine?.name || '—'}</td>
+                            <td className="px-3 py-2 text-right text-gray-300">{j.quantity ?? '—'}</td>
+                            <td className="px-3 py-2 text-right text-green-300">{j.good_pieces ?? 0}</td>
+                            <td className="px-3 py-2 text-right text-amber-300">{j.bad_pieces ?? 0}</td>
+                            <td className="px-3 py-2">
+                              <span className={`text-xs px-2 py-0.5 rounded border capitalize ${STATUS_BADGES[j.status] || 'bg-gray-700/50 text-gray-300 border-gray-600/50'}`}>
+                                {humanStatus(j.status)}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-gray-400">{fmtDate(j.production_start)}</td>
+                            <td className="px-3 py-2 text-gray-400">{fmtDate(j.actual_end)}</td>
+                            <td className="px-3 py-2 text-right text-cyan-300">
+                              {rr ? (
+                                <span title={rr.derived ? 'Derived from production start → completion; time/unit not recorded on this run' : 'Recorded at completion'}>
+                                  {rr.derived && <span className="text-gray-500">~</span>}
+                                  {rr.rate.toLocaleString()}
+                                </span>
+                              ) : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
+                <p className="text-gray-600 text-xs mt-2">
+                  ~ rate derived from production start → completion because time/unit was not recorded on the run.
+                </p>
               </div>
             </>
           )}

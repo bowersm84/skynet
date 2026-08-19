@@ -12,6 +12,11 @@ const SAMPLE_SIZE = 40            // D-RPT-07: bounded payload, never all rows
 // Columns worth sampling per report, in priority order. Unknown slugs fall
 // back to the registry's first eight columns.
 const SAMPLE_COLUMNS = {
+  'job-efficiency': [
+    'part_number', 'job_number', 'machine_name', 'status', 'quantity',
+    'pieces_done', 'elapsed_hours', 'current_parts_per_day',
+    'hist_parts_per_day', 'hist_runs', 'variance_pct',
+  ],
   'open-demand': [
     'part_number', 'co_number', 'customer_name', 'qty_open', 'due_date',
     'line_status', 'wo_count', 'wo_statuses', 'job_statuses', 'scheduled_finish',
@@ -23,6 +28,60 @@ const num = (v) => Number(v) || 0
 // Report-specific aggregate blocks. Keyed by slug; unknown slugs get the
 // generic shape (row count + deterministic summary only).
 const AGGREGATORS = {
+  'job-efficiency': (rows) => {
+    const val = (v) => (v === null || v === undefined || v === '') ? null : Number(v)
+    const line = (r) => ({
+      part_number: r.part_number, job_number: r.job_number,
+      machine_name: r.machine_name, status: r.status,
+      quantity: val(r.quantity), pieces_done: val(r.pieces_done),
+      current_parts_per_day: val(r.current_parts_per_day),
+      hist_parts_per_day: val(r.hist_parts_per_day),
+      hist_runs: val(r.hist_runs), variance_pct: val(r.variance_pct),
+      scheduled_end: r.scheduled_end, due_date: r.due_date,
+    })
+
+    const running = rows.filter(r => !r.actual_end && r.status === 'in_progress')
+    const completed = rows.filter(r => r.actual_end)
+    const comparable = rows.filter(r => val(r.variance_pct) !== null)
+    const behind = comparable.filter(r => val(r.variance_pct) <= -10)
+    const ahead = comparable.filter(r => val(r.variance_pct) >= 25)
+    const thinHistory = comparable.filter(r => val(r.hist_runs) === 1)
+    const noHistory = rows.filter(r => !val(r.hist_runs))
+    const noHistObserved = noHistory.filter(r => val(r.current_parts_per_day) !== null)
+    const histNoCurrent = rows.filter(r => (val(r.hist_runs) || 0) > 0 && val(r.variance_pct) === null)
+
+    const vs = comparable.map(r => val(r.variance_pct)).sort((a, b) => a - b)
+    const median = vs.length === 0 ? null
+      : vs.length % 2 === 1 ? vs[(vs.length - 1) / 2]
+      : (vs[vs.length / 2 - 1] + vs[vs.length / 2]) / 2
+
+    return {
+      running_jobs: running.length,
+      completed_last_7_days: completed.length,
+      comparable_count: comparable.length,
+      variance: {
+        median_pct: median,
+        min_pct: vs.length ? vs[0] : null,
+        max_pct: vs.length ? vs[vs.length - 1] : null,
+        single_run_history_count: thinHistory.length,
+      },
+      behind_pace_10pct_plus: {
+        count: behind.length,
+        jobs: behind.slice(0, 15).map(line),
+      },
+      well_ahead_25pct_plus: {
+        count: ahead.length,
+        jobs: ahead.slice(0, 10).map(line),
+      },
+      no_history: {
+        count: noHistory.length,
+        with_observed_current_rate: noHistObserved.length,
+        note: 'Machinist-estimate candidates. Where an observed current rate exists, it is the natural estimate seed.',
+        jobs: noHistory.slice(0, 15).map(line),
+      },
+      history_but_no_current_rate: histNoCurrent.slice(0, 10).map(line),
+    }
+  },
   'open-demand': (rows, today) => {
     const byCustomer = {}
     const byPart = {}

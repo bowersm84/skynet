@@ -195,8 +195,8 @@ function MainApp() {
   }
 
   // Roles that can VIEW the Command/Schedule page
-  // Read-only roles (president, viewer) see it but cannot edit (see canEditSchedule).
-  const canAccessSchedule = ['admin', 'scheduler', 'compliance', 'finishing', 'machinist', 'president', 'viewer'].includes(profile?.role)
+  // Read-only roles (president, viewer, customer_service) see it but cannot edit (see canEditSchedule). D-SCHED-11.
+  const canAccessSchedule = ['admin', 'scheduler', 'compliance', 'finishing', 'machinist', 'president', 'viewer', 'customer_service'].includes(profile?.role)
 
   // Roles that can EDIT the schedule (drag jobs, schedule maintenance, reschedule)
   // Also gates work order creation buttons in Mainframe

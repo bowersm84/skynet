@@ -121,6 +121,27 @@ function localToday() {
 }
 
 const SUMMARIZERS = {
+  'job-efficiency': (rows) => {
+    const num = v => (v === null || v === undefined || v === '') ? null : Number(v)
+    const running = rows.filter(r => !r.actual_end && r.status === 'in_progress')
+    const withBoth = rows.filter(r => num(r.variance_pct) !== null)
+    const behind = withBoth.filter(r => num(r.variance_pct) <= -10)
+    const noHistory = rows.filter(r => num(r.hist_runs) === null || num(r.hist_runs) === 0)
+    const variances = withBoth.map(r => num(r.variance_pct)).sort((a, b) => a - b)
+    const median = variances.length
+      ? variances[Math.floor((variances.length - 1) / 2)]
+      : null
+    return {
+      cards: [
+        { label: 'Jobs In Report', value: rows.length.toLocaleString() },
+        { label: 'Currently Running', value: running.length.toLocaleString() },
+        { label: 'Behind ≥10%', value: behind.length.toLocaleString(), alert: behind.length > 0 },
+        { label: 'No History', value: noHistory.length.toLocaleString(), alert: noHistory.length > 0 },
+        { label: 'Median Variance', value: median === null ? '—' : `${median > 0 ? '+' : ''}${median.toFixed(1)}%` },
+      ],
+      narrative: 'Variance compares each job\'s current parts/day against the weighted average of up to 10 prior completed runs of the same part. Negative = running slower than history. Jobs with no history are candidates for machinist estimates.'
+    }
+  },
   'open-demand': (rows) => {
     const num = v => Number(v) || 0
     const today = localToday()

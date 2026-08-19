@@ -6,7 +6,8 @@ import {
 } from 'lucide-react'
 import {
   getMachineQueue, isJobRunning, buildPropagatedQueue,
-  formatDurationDH, applySchedule
+  formatDurationDH, applySchedule,
+  fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes
 } from '../lib/scheduling'
 import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible } from '../lib/jobMerge'
 
@@ -69,16 +70,9 @@ export default function ScheduleJobModal({
   useEffect(() => {
     if (!isOpen || !job?.component_id) { setHistoryRuns([]); return }
     let cancelled = false
-    supabase
-      .from('jobs')
-      .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end')
-      .eq('component_id', job.component_id)
-      .gt('time_per_unit', 0)
-      .order('actual_end', { ascending: false })
-      .limit(10)
-      .then(({ data }) => {
-        if (!cancelled) setHistoryRuns((data || []).filter(r => r.id !== job?.id))
-      })
+    fetchPartThroughputRuns(supabase, job.component_id, job?.id).then(runs => {
+      if (!cancelled) setHistoryRuns(runs)
+    })
     return () => { cancelled = true }
   }, [isOpen, job?.component_id, job?.id])
 
@@ -107,36 +101,15 @@ export default function ScheduleJobModal({
   const totalMinutes = durationDays * 24 * 60 + durationHours * 60
 
   // D-SCHED-10: weighted-average throughput from history, machine-specific when available.
-  const suggestedPartsPerDay = useMemo(() => {
-    if (!historyRuns.length) return null
-    const machineRuns = selectedMachineId
-      ? historyRuns.filter(r => r.assigned_machine_id === selectedMachineId)
-      : []
-    const basis = machineRuns.length > 0 ? machineRuns : historyRuns
-    let totalPieces = 0
-    let totalRunMinutes = 0
-    for (const r of basis) {
-      const pieces = (r.good_pieces > 0 ? r.good_pieces : r.quantity) || 0
-      const tpu = Number(r.time_per_unit)
-      if (pieces <= 0 || !(tpu > 0)) continue
-      totalPieces += pieces
-      totalRunMinutes += pieces * tpu
-    }
-    if (totalPieces <= 0 || totalRunMinutes <= 0) return null
-    return {
-      rate: Math.max(1, Math.round(totalPieces / (totalRunMinutes / (24 * 60)))),
-      runCount: basis.length,
-      machineSpecific: machineRuns.length > 0
-    }
-  }, [historyRuns, selectedMachineId])
+  const suggestedPartsPerDay = useMemo(
+    () => computePartsPerDaySuggestion(historyRuns, selectedMachineId),
+    [historyRuns, selectedMachineId]
+  )
 
   // D-SCHED-10: parts/day → duration (+10% buffer, rounded up to the hour)
   const applyPartsPerDay = (value) => {
-    const rate = parseFloat(value)
-    const qty = job?.quantity || 0
-    if (!(rate > 0) || !(qty > 0)) return
-    const raw = (qty / rate) * 24 * 60 * 1.10
-    const total = Math.max(60, Math.ceil(raw / 60) * 60)
+    const total = partsPerDayToMinutes(job?.quantity, value)
+    if (total === null) return
     setDurationDays(Math.floor(total / (24 * 60)))
     setDurationHours(Math.floor((total % (24 * 60)) / 60))
   }

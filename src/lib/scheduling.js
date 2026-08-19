@@ -325,3 +325,52 @@ export async function applyEndDateChange({ supabase, job, newEnd, cascadeChanges
   })
   if (error) throw new Error(error.message)
 }
+
+// ─────────── D-SCHED-13: parts/day throughput history (shared) ───────────
+// History source is jobs.time_per_unit (minutes/piece, production_start →
+// actual_end, written at completion). Used by ScheduleJobModal Step 3 and the
+// Adjust End Date modal so both compute identical suggestions.
+
+export async function fetchPartThroughputRuns(supabase, componentId, excludeJobId) {
+  if (!componentId) return []
+  const { data } = await supabase
+    .from('jobs')
+    .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end')
+    .eq('component_id', componentId)
+    .gt('time_per_unit', 0)
+    .order('actual_end', { ascending: false })
+    .limit(10)
+  return (data || []).filter(r => r.id !== excludeJobId)
+}
+
+// Weighted-average parts per 24h day; prefers runs on machineId when any exist.
+export function computePartsPerDaySuggestion(runs, machineId) {
+  if (!runs?.length) return null
+  const machineRuns = machineId ? runs.filter(r => r.assigned_machine_id === machineId) : []
+  const basis = machineRuns.length > 0 ? machineRuns : runs
+  let totalPieces = 0
+  let totalRunMinutes = 0
+  for (const r of basis) {
+    const pieces = (r.good_pieces > 0 ? r.good_pieces : r.quantity) || 0
+    const tpu = Number(r.time_per_unit)
+    if (pieces <= 0 || !(tpu > 0)) continue
+    totalPieces += pieces
+    totalRunMinutes += pieces * tpu
+  }
+  if (totalPieces <= 0 || totalRunMinutes <= 0) return null
+  return {
+    rate: Math.max(1, Math.round(totalPieces / (totalRunMinutes / (24 * 60)))),
+    runCount: basis.length,
+    machineSpecific: machineRuns.length > 0
+  }
+}
+
+// qty at rate parts/day → total minutes, +10% buffer, rounded up to the whole
+// hour, minimum 1h. Returns null for invalid inputs.
+export function partsPerDayToMinutes(quantity, rate) {
+  const r = parseFloat(rate)
+  const qty = Number(quantity) || 0
+  if (!(r > 0) || !(qty > 0)) return null
+  const raw = (qty / r) * 24 * 60 * 1.10
+  return Math.max(60, Math.ceil(raw / 60) * 60)
+}

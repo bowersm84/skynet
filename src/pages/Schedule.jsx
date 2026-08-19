@@ -38,7 +38,7 @@ import {
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
-import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH } from '../lib/scheduling'
+import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes } from '../lib/scheduling'
 import AIAdvisorPanel from '../components/schedule/AIAdvisorPanel'
 import { FEATURES } from '../config'
 
@@ -268,6 +268,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // SKY55 — Adjust End Date (end-only quick edit; start + machine + position locked)
   const [endDateEditJob, setEndDateEditJob] = useState(null)
   const [endDateEditValue, setEndDateEditValue] = useState('') // datetime-local string
+  // D-SCHED-13: parts/day calculator in the Adjust End Date modal
+  const [endDatePartsPerDay, setEndDatePartsPerDay] = useState('')
+  const [endDateHistoryRuns, setEndDateHistoryRuns] = useState([])
   const [endDateSaving, setEndDateSaving] = useState(false)
   const [endDateError, setEndDateError] = useState(null)
 
@@ -1161,6 +1164,10 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     setEndDateError(null)
     setEndDateEditJob(job)
     setSelectedJob(null)
+    // D-SCHED-13: reset and load throughput history for the parts/day calculator
+    setEndDatePartsPerDay('')
+    setEndDateHistoryRuns([])
+    fetchPartThroughputRuns(supabase, job.component_id, job.id).then(setEndDateHistoryRuns)
   }
 
   const handleSaveEndDate = async () => {
@@ -3789,6 +3796,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'
         // D-DATE-03: late-vs-customer-due warning (due_date is a DATE — end of day).
         const isLate = validEnd && !!job.work_order?.due_date && newEnd > new Date(job.work_order.due_date + 'T23:59:59')
+        // D-SCHED-13: history-based parts/day suggestion for this job's machine
+        const ppdSuggestion = computePartsPerDaySuggestion(endDateHistoryRuns, job.assigned_machine_id)
         const dueShort = job.work_order?.due_date
           ? new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
           : '—'
@@ -3813,6 +3822,32 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                 <div className="flex items-center justify-between">
                   <span className="text-gray-500">Start (locked)</span>
                   <span className="text-gray-300 font-mono">{fmt(start)}</span>
+                </div>
+                <div>
+                  <label className="block text-gray-400 mb-1">Parts per day</label>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="number"
+                      min="1"
+                      value={endDatePartsPerDay}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setEndDatePartsPerDay(v)
+                        const mins = partsPerDayToMinutes(job.quantity, v)
+                        if (mins !== null && start) {
+                          setEndDateEditValue(toLocalDatetimeInput(new Date(start.getTime() + mins * 60000)))
+                        }
+                      }}
+                      placeholder="—"
+                      className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:outline-none focus:border-skynet-accent"
+                    />
+                    <span className="text-gray-500 text-xs">parts / 24h day → sets end from locked start (qty {(job.quantity || 0).toLocaleString()}, +10% buffer)</span>
+                  </div>
+                  {ppdSuggestion && (
+                    <p className="text-gray-500 text-xs mt-1">
+                      History: ≈ {ppdSuggestion.rate.toLocaleString()}/day from {ppdSuggestion.runCount} completed run{ppdSuggestion.runCount === 1 ? '' : 's'}{ppdSuggestion.machineSpecific ? ' on this machine' : ' (all machines)'}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-gray-400 mb-1">New end</label>

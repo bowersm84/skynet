@@ -501,14 +501,13 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                   return (
                     <button
                       key={m.id}
-                      onClick={() => !isDown && setSelectedMachineId(m.id)}
-                      disabled={isDown}
-                      className={`w-full text-left p-3 rounded-lg border transition-all ${
+                      onClick={() => setSelectedMachineId(m.id)}
+                      className={`w-full text-left p-3 rounded-lg border transition-all cursor-pointer ${
                         selected
                           ? 'bg-skynet-accent/10 border-skynet-accent'
                           : isDown
-                            ? 'bg-red-950/20 border-red-800 opacity-60 cursor-not-allowed'
-                            : 'bg-gray-800 border-gray-700 hover:border-gray-600 cursor-pointer'
+                            ? 'bg-red-950/20 border-red-800 hover:border-red-600'
+                            : 'bg-gray-800 border-gray-700 hover:border-gray-600'
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
@@ -522,7 +521,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                           )}
                           {isDown && (
                             <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 border border-red-700 rounded">
-                              DOWN
+                              DOWN — schedulable
                             </span>
                           )}
                         </div>
@@ -674,6 +673,16 @@ function Step3Duration({
         </p>
         <p className="text-gray-500 text-xs mt-1">{placementText}</p>
       </div>
+
+      {(machine?.status === 'down' || machine?.status === 'offline') && (
+        <div className="flex items-start gap-2 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm">
+          <AlertTriangle size={15} className="text-red-400 mt-0.5 shrink-0" />
+          <p className="text-red-200">
+            <span className="font-semibold">{machine.name} is {machine.status.toUpperCase()}.</span>{' '}
+            Scheduling is allowed so the queue can be pre-loaded, but these dates hold only once the machine is running. The queue starts when it comes back up.
+          </p>
+        </div>
+      )}
 
       <div>
         <label className="block text-gray-400 text-sm mb-2">Parts per day</label>

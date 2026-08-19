@@ -423,7 +423,13 @@ export default function ProductionDisplay() {
         : false
       const trafficLight = isBehind ? 'red' : 'green'
 
-      return { ...j, finished, targetQty, trafficLight, elapsedMs }
+      // D-SCHED-14: current run rate (Q/D) — pieces passed finishing over
+      // elapsed production time, suppressed under 1h elapsed or 0 pieces.
+      const currentPartsPerDay = (j.status === 'in_progress' && elapsedMs >= 3600000 && finished > 0)
+        ? Math.round(finished * 86400000 / elapsedMs)
+        : null
+
+      return { ...j, finished, targetQty, trafficLight, elapsedMs, currentPartsPerDay }
     })
 
     // UP NEXT enrichment. For each active row, find the next queued job on
@@ -921,6 +927,9 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
         </div>
         <div className="text-gray-300 text-sm font-mono mt-0.5">
           {(job.finished || 0).toLocaleString()} / {(job.targetQty || 0).toLocaleString()}
+          {job.currentPartsPerDay != null && (
+            <span className="text-gray-500 text-xs ml-2">≈ {job.currentPartsPerDay.toLocaleString()}/day</span>
+          )}
         </div>
         <div className="w-full bg-gray-800 rounded-full h-1 mt-1 overflow-hidden">
           <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />

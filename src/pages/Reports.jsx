@@ -1,10 +1,33 @@
 import { useState, useEffect, useCallback } from 'react'
 import { FileSpreadsheet, ArrowLeft, Download, AlertTriangle, Info, Play } from 'lucide-react'
 import { canExportReports } from '../lib/roles'
+import { supabase } from '../lib/supabase'
 import ReportAdvisorPanel from '../components/ReportAdvisorPanel'
 import { fetchReports, runReport, toCsv, downloadCsv, reportFilename, summarize } from '../lib/reports'
 
 const PREVIEW_CAP = 200
+
+// D-RPT-12: per-slug presentation config for the sales reports.
+// CSV headers stay the stable registry column names (wk1..wk8) — the weekly
+// automation contract wins; only the on-screen headers show dates.
+const WEEK_LABEL_SLUGS = ['drop-calendar-8wk', 'drop-calendar-by-part']
+const FILTER_COLUMNS = {
+  'drop-calendar-8wk': ['customer', 'salesperson'],
+  'drop-calendar-by-part': ['customers'],
+  'wip-near-term': ['customer', 'salesperson'],
+}
+const STANDING_NOTES = {
+  'drop-calendar-8wk': 'Dates are off-the-machine, not ship dates.',
+  'drop-calendar-by-part': 'Dates are off-the-machine, not ship dates.',
+  'wip-near-term': 'Made but not shipped — parts past the machines, still moving through finishing, compliance, or outside vendors.',
+}
+const ROW_HIGHLIGHTERS = {
+  'drop-calendar-8wk': (r) =>
+    r.risk ? 'bg-red-900/25' : (r.days_late_vs_customer != null && r.days_late_vs_customer !== '' ? 'bg-amber-900/20' : ''),
+  'wip-near-term': (r) =>
+    (r.days_past_due != null && r.days_past_due !== '') ? 'bg-red-900/25'
+      : (Number(r.days_since_moved) > 30 ? 'bg-amber-900/20' : ''),
+}
 
 export default function Reports({ profile }) {
   const [reports, setReports] = useState([])
@@ -14,6 +37,12 @@ export default function Reports({ profile }) {
   const [rows, setRows] = useState(null)
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState(null)
+  // D-RPT-12: presentation state for the sales reports
+  const [weekLabels, setWeekLabels] = useState({})
+  const [filterText, setFilterText] = useState('')
+  const [sortCol, setSortCol] = useState(null)
+  const [sortDir, setSortDir] = useState('asc')
+  const [ranAt, setRanAt] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -35,9 +64,20 @@ export default function Reports({ profile }) {
     setRows(null)
     setRunError(null)
     setRunning(true)
+    setFilterText('')
+    setSortCol(null)
+    setSortDir('asc')
+    setWeekLabels({})
+    if (WEEK_LABEL_SLUGS.includes(report.slug)) {
+      // Week-ending labels for on-screen headers only; CSV keeps wk1..wk8.
+      supabase.from('v_report_week_labels').select('week_no, label').then(({ data: wl }) => {
+        if (wl) setWeekLabels(Object.fromEntries(wl.map(w => [`wk${w.week_no}`, `W/E ${w.label}`])))
+      })
+    }
     try {
       const data = await runReport(report)
       setRows(data)
+      setRanAt(new Date())
     } catch (err) {
       setRunError(err.message || String(err))
     } finally {
@@ -45,9 +85,34 @@ export default function Reports({ profile }) {
     }
   }, [])
 
+  const displayRows = (() => {
+    if (!rows) return null
+    let out = rows
+    const cols = FILTER_COLUMNS[active?.slug]
+    const ft = filterText.trim().toLowerCase()
+    if (cols && ft) {
+      out = out.filter(r => cols.some(c => String(r[c] ?? '').toLowerCase().includes(ft)))
+    }
+    if (sortCol) {
+      const dir = sortDir === 'desc' ? -1 : 1
+      out = [...out].sort((a, b) => {
+        const av = a[sortCol]; const bv = b[sortCol]
+        if (av == null && bv == null) return 0
+        if (av == null) return 1
+        if (bv == null) return -1
+        const an = Number(av); const bn = Number(bv)
+        if (!Number.isNaN(an) && !Number.isNaN(bn)) return (an - bn) * dir
+        return String(av).localeCompare(String(bv)) * dir
+      })
+    }
+    return out
+  })()
+
   const handleDownload = () => {
-    if (!active || !rows) return
-    downloadCsv(toCsv(rows, active.columns), reportFilename(active.slug))
+    if (!active || !displayRows) return
+    const filtered = filterText.trim() !== ''
+    const name = reportFilename(active.slug).replace(/\.csv$/, filtered ? '_filtered.csv' : '.csv')
+    downloadCsv(toCsv(displayRows, active.columns), name)
   }
 
   // ------------------------------ result view ------------------------------
@@ -127,6 +192,36 @@ export default function Reports({ profile }) {
           </div>
         )}
 
+        {rows && (STANDING_NOTES[active.slug] || ranAt) && (
+          <div className="flex items-center justify-between gap-3 flex-wrap bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 mb-4">
+            <p className="text-amber-300/90 text-xs font-medium">
+              {STANDING_NOTES[active.slug] || ''}
+            </p>
+            {ranAt && (
+              <p className="text-gray-500 text-xs font-mono shrink-0">
+                Data pulled {ranAt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+              </p>
+            )}
+          </div>
+        )}
+
+        {rows && FILTER_COLUMNS[active.slug] && rows.length > 0 && (
+          <div className="flex items-center gap-3 mb-3">
+            <input
+              type="text"
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              placeholder="Filter by customer / salesperson..."
+              className="w-72 px-3 py-1.5 bg-gray-900 border border-gray-800 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+            />
+            {filterText.trim() !== '' && (
+              <span className="text-gray-500 text-xs">
+                {displayRows.length.toLocaleString()} of {rows.length.toLocaleString()} rows — CSV exports the filtered set
+              </span>
+            )}
+          </div>
+        )}
+
         {rows && rows.length === 0 && !runError && (
           <div className="text-center py-12 text-gray-500">
             <p className="text-sm">0 rows returned.</p>
@@ -136,9 +231,9 @@ export default function Reports({ profile }) {
 
         {rows && rows.length > 0 && (
           <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            {rows.length > PREVIEW_CAP && (
+            {displayRows.length > PREVIEW_CAP && (
               <p className="text-gray-500 text-xs px-4 py-2 border-b border-gray-800">
-                Preview capped at {PREVIEW_CAP} rows — the CSV download contains all {rows.length.toLocaleString()} rows.
+                Preview capped at {PREVIEW_CAP} rows — the CSV download contains all {displayRows.length.toLocaleString()} rows.
               </p>
             )}
             <div className="overflow-auto max-h-[60vh]">
@@ -146,20 +241,33 @@ export default function Reports({ profile }) {
                 <thead className="sticky top-0 bg-gray-800">
                   <tr>
                     {active.columns.map(c => (
-                      <th key={c} className="text-left text-gray-400 font-medium px-3 py-2 whitespace-nowrap">{c}</th>
+                      <th
+                        key={c}
+                        onClick={() => {
+                          if (sortCol === c) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+                          else { setSortCol(c); setSortDir('asc') }
+                        }}
+                        className="text-left text-gray-400 font-medium px-3 py-2 whitespace-nowrap cursor-pointer hover:text-white select-none"
+                        title="Click to sort (preview only — CSV keeps the report's default order unless filtered)"
+                      >
+                        {weekLabels[c] || c}{sortCol === c ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.slice(0, PREVIEW_CAP).map((row, i) => (
-                    <tr key={i} className="border-t border-gray-800 hover:bg-gray-800/50">
-                      {active.columns.map(c => (
-                        <td key={c} className="text-gray-300 px-3 py-1.5 whitespace-nowrap">
-                          {row[c] === null || row[c] === undefined ? '' : String(row[c])}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {displayRows.slice(0, PREVIEW_CAP).map((row, i) => {
+                    const hl = ROW_HIGHLIGHTERS[active.slug] ? ROW_HIGHLIGHTERS[active.slug](row) : ''
+                    return (
+                      <tr key={i} className={`border-t border-gray-800 hover:bg-gray-800/50 ${hl}`}>
+                        {active.columns.map(c => (
+                          <td key={c} className="text-gray-300 px-3 py-1.5 whitespace-nowrap">
+                            {row[c] === null || row[c] === undefined ? '' : String(row[c])}
+                          </td>
+                        ))}
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

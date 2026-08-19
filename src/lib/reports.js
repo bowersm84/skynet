@@ -121,6 +121,63 @@ function localToday() {
 }
 
 const SUMMARIZERS = {
+  'drop-calendar-8wk': (rows) => {
+    const num = v => Number(v) || 0
+    const remaining = rows.reduce((s, r) => s + num(r.qty_remaining), 0)
+    const inWindow = rows.reduce((s, r) => s + num(r.total_in_window), 0)
+    const wk1 = rows.reduce((s, r) => s + num(r.wk1), 0)
+    const late = rows.filter(r => r.days_late_vs_customer != null && r.days_late_vs_customer !== '')
+    const risk = rows.filter(r => r.risk)
+    const mismatch = remaining !== inWindow
+    return {
+      cards: [
+        { label: 'Jobs Scheduled', value: rows.length.toLocaleString() },
+        { label: 'Pieces Remaining', value: remaining.toLocaleString() },
+        { label: 'Dropping This Week', value: wk1.toLocaleString() },
+        { label: 'Late vs Customer', value: late.length.toLocaleString(), alert: late.length > 0 },
+        { label: 'At-Risk (machine down)', value: risk.length.toLocaleString(), alert: risk.length > 0 },
+      ],
+      narrative: mismatch
+        ? `INTEGRITY CHECK FAILED: qty_remaining (${remaining.toLocaleString()}) does not equal total_in_window (${inWindow.toLocaleString()}) — the week spread is multiplying rows. Do not quote this output; investigate the view.`
+        : `${remaining.toLocaleString()} pieces across ${rows.length.toLocaleString()} jobs are spread over the 8-week window (integrity check passed: remaining equals in-window). Dates are off-the-machine, not ship dates. Highlighted rows are late vs the customer date or sitting on a machine that is not running.`,
+    }
+  },
+  'drop-calendar-by-part': (rows) => {
+    const num = v => Number(v) || 0
+    const remaining = rows.reduce((s, r) => s + num(r.qty_remaining), 0)
+    const inWindow = rows.reduce((s, r) => s + num(r.total_in_window), 0)
+    const mismatch = remaining !== inWindow
+    return {
+      cards: [
+        { label: 'Parts', value: rows.length.toLocaleString() },
+        { label: 'Pieces Remaining', value: remaining.toLocaleString() },
+        { label: 'Dropping This Week', value: rows.reduce((s, r) => s + num(r.wk1), 0).toLocaleString() },
+        { label: 'Integrity', value: mismatch ? 'FAILED' : 'OK', alert: mismatch },
+      ],
+      narrative: mismatch
+        ? `INTEGRITY CHECK FAILED: qty_remaining (${remaining.toLocaleString()}) vs total_in_window (${inWindow.toLocaleString()}). Do not quote this output.`
+        : `One row per part, aggregated from the job-level calendar. ${remaining.toLocaleString()} pieces remaining across ${rows.length.toLocaleString()} parts.`,
+    }
+  },
+  'wip-near-term': (rows) => {
+    const num = v => Number(v) || 0
+    const pieces = rows.reduce((s, r) => s + num(r.pieces), 0)
+    const pastDue = rows.filter(r => r.days_past_due != null && r.days_past_due !== '')
+    const pastDuePieces = pastDue.reduce((s, r) => s + num(r.pieces), 0)
+    const parked = rows.filter(r => num(r.days_since_moved) > 30)
+    const stages = {}
+    for (const r of rows) stages[r.stage || '(none)'] = (stages[r.stage || '(none)'] || 0) + 1
+    return {
+      cards: [
+        { label: 'Jobs In Process', value: rows.length.toLocaleString() },
+        { label: 'Pieces Made, Not Shipped', value: pieces.toLocaleString() },
+        { label: 'Past Customer Due', value: pastDuePieces.toLocaleString(), alert: pastDue.length > 0 },
+        { label: 'Parked > 30 Days', value: parked.length.toLocaleString(), alert: parked.length > 0 },
+        { label: 'Stages In Play', value: Object.keys(stages).length.toLocaleString() },
+      ],
+      narrative: `${pieces.toLocaleString()} pieces are through the machines and not yet shipped. ${pastDuePieces.toLocaleString()} of them are already past the customer's due date — those customers are waiting on process, not production. Rows highlighted amber have not moved in over 30 days. pending_tco is deliberately excluded: those jobs are through production and belong to quality close-out, not available supply.`,
+    }
+  },
   'job-efficiency': (rows) => {
     const num = v => (v === null || v === undefined || v === '') ? null : Number(v)
     const running = rows.filter(r => !r.actual_end && r.status === 'in_progress')

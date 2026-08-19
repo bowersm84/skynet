@@ -2794,6 +2794,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                             No estimate
                           </span>
                         )}
+                        {canEdit && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -2806,6 +2807,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                           <Calendar size={10} />
                           Schedule
                         </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3419,13 +3421,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                   return (
                                     <div key={job.id}>
                                       <div
-                                        draggable
+                                        draggable={canEdit}
                                         onDragStart={(e) => handleScheduledDragStart(e, job)}
                                         onDragEnd={(e) => {
                                           handleDragEnd(e)
                                           setListDropTarget(null)
                                         }}
                                         onClick={() => {
+                                          if (!canEdit) return
                                           setScheduleClickJob(job)
                                           setScheduleClickEditMode(true)
                                         }}
@@ -3695,6 +3698,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               ) : (selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance') ? (
                 // Maintenance jobs - can edit times and cancel if not started
                 <div className="pt-4 border-t border-gray-700">
+                  {canEdit && (
                   <div className="flex items-center gap-3 mb-3">
                     <button
                       onClick={() => {
@@ -3731,6 +3735,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       </button>
                     )}
                   </div>
+                  )}
                   <p className="text-sm text-gray-500 flex items-center gap-2">
                     <Info size={14} />
                     {(selectedJob.status === 'assigned' || selectedJob.status === 'in_progress')
@@ -3738,7 +3743,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       : 'This maintenance order cannot be closed from here.'}
                   </p>
                 </div>
-              ) : (
+              ) : canEdit ? (
               <div className="flex items-center gap-3 pt-4 border-t border-gray-700 flex-wrap">
                 <button
                   onClick={() => {
@@ -3766,7 +3771,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   Unschedule
                 </button>
               </div>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -4154,7 +4159,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       )}
 
       {/* Click-to-Schedule / Reschedule / Drag-Drop Modal (unified) */}
-      {scheduleClickJob && (
+      {scheduleClickJob && canEdit && (
         <ScheduleJobModal
           isOpen={!!scheduleClickJob}
           onClose={() => {

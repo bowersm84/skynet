@@ -31,9 +31,11 @@ import {
   PowerOff,
   Paperclip,
   ExternalLink,
-  TrendingUp
+  TrendingUp,
+  History
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
+import PartHistoryModal from '../components/PartHistoryModal'
 import RMForecastSection from '../components/rmforecast/RMForecastSection'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
@@ -297,6 +299,7 @@ export default function Armory({ profile }) {
   // gates hard-delete. partToDelete drives the confirmation modal.
   const [partRefCounts, setPartRefCounts] = useState({})
   const [partToDelete, setPartToDelete] = useState(null)
+  const [historyPart, setHistoryPart] = useState(null)
 
   // Fetch all data
   const fetchData = useCallback(async () => {
@@ -2431,8 +2434,17 @@ export default function Armory({ profile }) {
                         )}
                       </div>
                       
-                      {canWrite && (
-                        <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setHistoryPart(part)}
+                          className="p-2 text-gray-400 hover:text-cyan-300 hover:bg-cyan-900/20 rounded transition-colors"
+                          title="Job history & run rates"
+                        >
+                          <History size={18} />
+                        </button>
+                        {canWrite && (
+                        <>
                           {part.part_type === 'assembly' && (
                             <button
                               onClick={() => openBOMModal(part)}
@@ -2487,8 +2499,9 @@ export default function Armory({ profile }) {
                               </button>
                             )
                           })()}
-                        </div>
-                      )}
+                        </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -5363,6 +5376,11 @@ export default function Armory({ profile }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Part History Modal */}
+      {historyPart && (
+        <PartHistoryModal part={historyPart} onClose={() => setHistoryPart(null)} />
       )}
 
       {/* Delete Part Confirmation Modal */}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
-import { getOpenCOLinesForPart } from '../lib/customerOrders'
+import { getOpenCOLinesForPart, allocateStockRequests } from '../lib/customerOrders'
 import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
 import { FEATURES } from '../config'
 import { fetchExplodedBom, submitNestedTree } from '../lib/nestedAssembly'
@@ -132,7 +132,7 @@ function ProductCombobox({ value, onChange, assemblies, allowManufactured }) {
   )
 }
 
-export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile, preselectedPartId = null, preselectedCoLines = [] }) {
+export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profile, preselectedPartId = null, preselectedCoLines = [], preselectedStockRequests = [] }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const modalContentRef = useRef(null)
@@ -332,25 +332,27 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   // Waits for the assemblies list to load (the part_type lookup needs it).
   useEffect(() => {
     if (!isOpen) return
-    if (!preselectedPartId || preselectedCoLines.length === 0) return
+    if (!preselectedPartId || (preselectedCoLines.length === 0 && preselectedStockRequests.length === 0)) return
     if (loadingAssemblies || assemblies.length === 0) return
 
     const part = assemblies.find(a => a.id === preselectedPartId)
     if (!part) return
 
     const totalRemaining = preselectedCoLines.reduce((s, l) => s + l.remaining, 0)
+    // D-STKREQ-01: warehouse stock requests seed the stock column, not the order column.
+    const totalStockRequested = preselectedStockRequests.reduce((s, r) => s + (r.remaining || 0), 0)
     const isAutoJobType = part.part_type === 'finished_good' || part.part_type === 'manufactured'
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedAssemblies([{
       assemblyId: preselectedPartId,
       orderQuantity: totalRemaining,
-      additionalForStock: 0,
+      additionalForStock: totalStockRequested,
       jobs: isAutoJobType ? [{
         componentId: part.id,
         partNumber: part.part_number,
         description: part.description,
-        quantity: totalRemaining,
+        quantity: totalRemaining + totalStockRequested,
         quantityCustomized: false,
         isFinishedGood: part.part_type === 'finished_good',
         isManufactured: part.part_type === 'manufactured',
@@ -372,7 +374,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
         setNestedTreeByIndex({ 0: { loading: false, nodes, error } })
       )
     }
-  }, [isOpen, preselectedPartId, preselectedCoLines, assemblies, loadingAssemblies, fetchComponentRouting])
+  }, [isOpen, preselectedPartId, preselectedCoLines, preselectedStockRequests, assemblies, loadingAssemblies, fetchComponentRouting])
 
   const addAssembly = () => {
     setSelectedAssemblies(prev => [{ assemblyId: '', orderQuantity: 1, additionalForStock: 0, jobs: [] }, ...prev])
@@ -910,6 +912,23 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
       .eq('id', workOrder.id)
     if (woUpdErr) console.error('Error setting derived WO header fields:', woUpdErr)
 
+    // D-STKREQ-01: mark the consumed warehouse stock requests as allocated to this WO.
+    // Raises if any request went stale (no longer open) — surface it, don't swallow it,
+    // because the WO now exists and April needs to know the pool didn't update.
+    if (preselectedStockRequests.length > 0) {
+      try {
+        await allocateStockRequests(
+          supabase,
+          preselectedStockRequests.map(r => r.stock_request_id),
+          workOrder.id
+        )
+      } catch (srErr) {
+        setError(`Work order ${woNumber} was created, but linking stock requests failed: ${srErr.message}. Link them manually or cancel the duplicates in the Stock Requests tab.`)
+        onSuccess?.()
+        return
+      }
+    }
+
     onSuccess?.()
     onClose()
   }
@@ -1316,6 +1335,11 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   <span className="font-mono">{assemblies.find(a => a.id === preselectedPartId)?.part_number}</span>
                                   <span className="text-gray-400"> — {assemblies.find(a => a.id === preselectedPartId)?.description}</span>
                                   <span className="ml-2 text-xs text-purple-300">(from demand selection)</span>
+                                  {preselectedStockRequests.length > 0 && (
+                                    <div className="text-[11px] text-amber-300 mt-1">
+                                      Includes {preselectedStockRequests.reduce((s, r) => s + (r.remaining || 0), 0).toLocaleString()} pcs from {preselectedStockRequests.length} warehouse stock request{preselectedStockRequests.length !== 1 ? 's' : ''} — pre-filled in the stock column.
+                                    </div>
+                                  )}
                                 </div>
                               ) : (
                                 <ProductCombobox

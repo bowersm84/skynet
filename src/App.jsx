@@ -206,7 +206,10 @@ function MainApp() {
   // Check if user can access the Armory module (any role with at least one visible Armory tab)
   // Sub-tab visibility is enforced inside Armory.jsx itself
   const canAccessArmory = hasRole(profile, 'admin', 'compliance', 'finishing', 'machinist', 'scheduler', 'customer_service', 'president', 'viewer', 'purchaser')
-  const canAccessCustomerOrders = ['admin', 'scheduler', 'customer_service', 'president', 'viewer'].includes(profile?.role) || profile?.is_salesperson === true
+  // D-STKREQ-01: assembly gets read-only access so the warehouse can raise stock
+  // requests from the same page April works demand in. Migrated to hasRole()
+  // (multi-role aware) per D-MROLE-02's "migrate opportunistically".
+  const canAccessCustomerOrders = hasRole(profile, 'admin', 'scheduler', 'customer_service', 'president', 'viewer', 'assembly') || profile?.is_salesperson === true
 
   // Cert Repository — visible to ALL authenticated roles (read-only for most;
   // write actions gated to admin/compliance inside the page). SKY64 + SKY67.

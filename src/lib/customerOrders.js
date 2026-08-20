@@ -274,3 +274,104 @@ export async function getAllOpenCOLines(supabase) {
     })
     .filter(line => line.remaining > 0)
 }
+
+// ─── Stock Requests (D-STKREQ-01) ─────────────────────────────────────────
+// Warehouse-originated demand for finished goods. Not a CO: no Fishbowl SO,
+// never ships, excluded from sales reporting. Open rows flow into the Demand
+// tab alongside CO lines and are consumed as work_orders.stock_quantity.
+
+export const STOCK_REQUEST_STATUS_LABELS = {
+  open: 'Open',
+  allocated: 'Allocated',
+  complete: 'Complete',
+  cancelled: 'Cancelled',
+}
+
+export const STOCK_REQUEST_STATUS_COLORS = {
+  open: 'bg-amber-900/40 text-amber-300',
+  allocated: 'bg-purple-900/40 text-purple-300',
+  complete: 'bg-green-900/40 text-green-300',
+  cancelled: 'bg-red-900/40 text-red-300',
+}
+
+// Synthetic line-id prefix so stock requests can share the Demand tab's
+// selection Set with real CO line ids without colliding.
+export const STOCK_REQUEST_LINE_PREFIX = 'sr:'
+export const isStockRequestLineId = (id) => typeof id === 'string' && id.startsWith(STOCK_REQUEST_LINE_PREFIX)
+
+// All stock requests (any status) for the Stock Requests tab.
+export async function getStockRequests(supabase) {
+  const { data, error } = await supabase
+    .from('stock_requests')
+    .select(`
+      id, part_id, quantity_requested, priority, reason, status,
+      work_order_id, created_at, allocated_at, completed_at, cancelled_at, cancel_reason,
+      requested_by,
+      part:parts(id, part_number, description, is_active),
+      requester:profiles!stock_requests_requested_by_fkey(id, full_name),
+      work_order:work_orders(id, wo_number, status)
+    `)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data || []
+}
+
+// Open stock requests shaped like Demand-tab lines (same field names as
+// getAllOpenCOLines output) so DemandView can merge them into part groups.
+export async function getOpenStockRequestLines(supabase) {
+  const { data, error } = await supabase
+    .from('stock_requests')
+    .select(`
+      id, part_id, quantity_requested, priority, reason, created_at,
+      part:parts(id, part_number, description, is_active),
+      requester:profiles!stock_requests_requested_by_fkey(full_name)
+    `)
+    .eq('status', 'open')
+  if (error) throw error
+  return (data || []).map(r => ({
+    line_id: `${STOCK_REQUEST_LINE_PREFIX}${r.id}`,
+    stock_request_id: r.id,
+    is_stock_request: true,
+    line_number: null,
+    part_id: r.part_id,
+    part_number: r.part?.part_number,
+    part_description: r.part?.description,
+    part_is_active: r.part?.is_active !== false,
+    components_needed: null,
+    co_id: null,
+    co_number: 'STOCK',
+    customer_name: r.requester?.full_name ? `Warehouse — ${r.requester.full_name}` : 'Warehouse',
+    po_number: null,
+    quantity_ordered: r.quantity_requested,
+    quantity_fulfilled: 0,
+    quantity_allocated: 0,
+    remaining: r.quantity_requested,
+    due_date: null,
+    entry_date: r.created_at,
+    priority: r.priority,
+    reason: r.reason,
+  }))
+}
+
+export async function createStockRequest(supabase, { partId, quantity, priority, reason }) {
+  const { data, error } = await supabase.rpc('create_stock_request', {
+    p_part_id: partId,
+    p_quantity: quantity,
+    p_priority: priority || 'normal',
+    p_reason: reason,
+  })
+  if (error) throw error
+  return data
+}
+
+export async function cancelStockRequest(supabase, id, reason) {
+  const { error } = await supabase.rpc('cancel_stock_request', { p_id: id, p_reason: reason || null })
+  if (error) throw error
+}
+
+export async function allocateStockRequests(supabase, ids, workOrderId) {
+  if (!ids || ids.length === 0) return 0
+  const { data, error } = await supabase.rpc('allocate_stock_requests', { p_ids: ids, p_work_order_id: workOrderId })
+  if (error) throw error
+  return data
+}

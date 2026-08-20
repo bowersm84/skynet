@@ -2877,3 +2877,19 @@ Open follow-up: the D-RPT-10 job-efficiency view (report_job_efficiency) and its
 ## D-PARTHIST-03 — Amendment to D-PARTHIST-02: Derived Rate Denominator (Aug 19, 2026)
 
 D-PARTHIST-02 describes effectiveTimePerUnit as "the identical calculation Kiosk.jsx performs at completion." Precise: identical to the completion path (Kiosk.jsx:3592-3620), which divides by finishingTotal and writes that same value as good_pieces in the same update — denominator and good_pieces are one variable. Not identical to the admin-edit path (Kiosk.jsx:3799-3805), which divides by good + bad. No practical divergence: the admin edit writes a non-NULL time_per_unit whenever its guard passes, so rows it has touched never reach the derived fallback, which fires only on NULL time_per_unit. Denominator held at good_pieces — it matches the completion path and the computePartsPerDaySuggestion weighting basis, so changing it to good + bad would introduce drift from the shared helper. Raised by CC during D-PARTHIST-02 verification.
+
+### D-JOBMERGE-18 — Documents attachable from the merged-ack card (2026-08-19)
+**What:** The "Merged — awaiting pre-production acknowledgment" section in
+Compliance Review gains an Add Document action, reusing AddJobDocumentModal
+(typed picker + opt-in save-to-part) rather than a second upload path. An
+attached-document count renders on the card once one or more documents exist.
+**Scope:** The document attaches to the MEMBER job, not the host. The member
+keeps its own work order, customer, and cert path after a merge; the host is
+resolved for display only. A document on the host would not follow the member's
+paperwork.
+**Not a gate:** Acknowledge remains independent of whether a document is
+attached. D-JOBMERGE-13 defines this section as informational and explicitly
+does not block allocation; requiring a document would change that contract.
+Revisit if compliance wants the merge itself to carry a documentation
+obligation.
+**No schema change:** job_documents already carries every field used.

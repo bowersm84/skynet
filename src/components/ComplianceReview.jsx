@@ -116,6 +116,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   // D-JOBMERGE-13: members merged while still awaiting pre-production review.
   const [mergedAwaitingAck, setMergedAwaitingAck] = useState([])
   const [ackingMemberId, setAckingMemberId] = useState(null)
+  // D-JOBMERGE-13 doc attach: { [memberJobId]: count } so the card can confirm
+  // an upload landed. Counted, not listed — the card is a worklist, and the
+  // documents themselves are reviewable on the job in the normal surfaces.
+  const [mergedDocCounts, setMergedDocCounts] = useState({})
   const [acknowledgingPaperworkId, setAcknowledgingPaperworkId] = useState(null)
   // Shape: { [jobId]: [sends sorted by sent_at] }
 
@@ -279,7 +283,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       .select(`
         id, job_number, quantity, merged_into_job_id,
         work_order:work_orders(wo_number, customer),
-        component:parts!component_id(part_number, description)
+        component:parts!component_id(id, part_number, description)
       `)
       .eq('merge_requires_compliance_ack', true)
       .order('job_number', { ascending: true })
@@ -298,6 +302,24 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       ...r,
       host_job_number: hostById[r.merged_into_job_id] || null,
     })))
+
+    // Attached-document counts for these member jobs. Separate query rather
+    // than a nested aggregate: Supabase does not reliably return data nested
+    // more than two levels deep in a single select.
+    const memberIds = rows.map(r => r.id)
+    const counts = {}
+    if (memberIds.length > 0) {
+      const { data: docs, error: docErr } = await supabase
+        .from('job_documents')
+        .select('id, job_id')
+        .in('job_id', memberIds)
+      if (docErr) {
+        console.error('Error loading merged-member document counts:', docErr)
+      } else {
+        for (const d of (docs || [])) counts[d.job_id] = (counts[d.job_id] || 0) + 1
+      }
+    }
+    setMergedDocCounts(counts)
   }
 
   const handleAckMergedMember = async (member) => {
@@ -2727,6 +2749,20 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                     Merged into <span className="text-cyan-300 font-mono">{m.host_job_number || '—'}</span> before its pre-production review.
                   </p>
                   <div className="flex items-center justify-end gap-2 mt-2">
+                    {mergedDocCounts[m.id] > 0 && (
+                      <span className="text-gray-400 text-[11px] inline-flex items-center gap-1 mr-auto">
+                        <FileText size={11} />
+                        {mergedDocCounts[m.id]} document{mergedDocCounts[m.id] === 1 ? '' : 's'} attached
+                      </span>
+                    )}
+                    {canWrite && (
+                      <button
+                        onClick={() => setAdditionalDocFor({ jobId: m.id, partId: m.component?.id || null })}
+                        className="bg-gray-700 hover:bg-gray-600 text-gray-100 text-xs font-semibold px-3 py-1 rounded inline-flex items-center gap-1"
+                      >
+                        <Upload size={12} />Add Document
+                      </button>
+                    )}
                     {canWrite && (
                       <button
                         disabled={busy}
@@ -3983,6 +4019,8 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
             const fresh = await fetchJobDetails(jobId)
             setJobDetails(prev => ({ ...prev, [jobId]: fresh }))
           }
+          // The merged-awaiting-ack card reads its own count map, not jobDetails.
+          await fetchMergedAwaitingAck()
           onUpdate?.()
         }}
       />

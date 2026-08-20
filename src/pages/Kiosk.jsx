@@ -2805,6 +2805,27 @@ export default function Kiosk() {
       if (existingWithLot) {
         const existingLotNorm = existingWithLot.lot_number.trim().toLowerCase()
         if (newLot.toLowerCase() !== existingLotNorm) {
+          // D-LOT-02: before a PLN is minted, nothing downstream carries the lot — a typo
+          // and a physical change are the same trivial edit. Correct silently and let the
+          // add continue; the RPC still writes the material_lot_corrected audit entry.
+          if (!activeJob.production_lot_number) {
+            try {
+              const { error: silentErr } = await supabase.rpc('correct_job_material_lot', {
+                p_job_id: activeJob.id,
+                p_new_lot: newLot,
+                p_operator_id: operator.id,
+                p_reason: 'Pre-production lot correction (silent; no PLN minted yet)'
+              })
+              if (silentErr) throw silentErr
+              setToastMessage(`Lot updated to ${newLot}`)
+              // Fall through: the add below re-fetches job_materials fresh, so it sees
+              // the corrected lot and accumulates bars onto it.
+            } catch (silentCorrErr) {
+              console.error('Silent lot correction failed:', silentCorrErr)
+              alert('Could not update the lot: ' + silentCorrErr.message)
+              return
+            }
+          } else {
           setLotMismatchModal({ existingLot: existingWithLot.lot_number.trim(), newLot })
           // Log the mismatch attempt (fire-and-forget)
           supabase.from('audit_logs').insert({
@@ -2815,6 +2836,7 @@ export default function Kiosk() {
             details: { existing_lot: existingWithLot.lot_number.trim(), attempted_lot: newLot, job_number: activeJob.job_number }
           }).then()
           return // BLOCK the add
+          }
         }
       }
     }
@@ -3046,7 +3068,8 @@ export default function Kiosk() {
     if (activeJob?.production_lot_number) {
       alert(
         'This job already has a production lot number, so the material row cannot be removed.\n\n' +
-        'If the lot number is wrong, use Correct Lot on the material row.\n' +
+        'If the lot number is wrong: open Add Material, enter the correct lot, and you will be ' +
+        'offered the correction.\n' +
         'If the bars actually changed, use Material Lot Finished — Switch Lot.'
       )
       return
@@ -6483,28 +6506,50 @@ export default function Kiosk() {
 
               <div className="bg-gray-800 rounded-lg p-4">
                 <p className="text-gray-300 text-sm font-medium mb-2">Which of these happened?</p>
-                <p className="text-gray-400 text-sm">
-                  If the lot was typed wrong, correcting it updates the production lot number
-                  and everything already sent to finishing.
-                </p>
-                <p className="text-gray-400 text-sm mt-2">
-                  If the bars really did change, the job splits so each lot keeps its own
-                  production lot number.
-                </p>
+                {jobLoads.length <= 1 ? (
+                  <>
+                    <p className="text-gray-400 text-sm">
+                      If the lot was typed wrong, correcting it updates the production lot number
+                      and everything already sent to finishing.
+                    </p>
+                    <p className="text-gray-400 text-sm mt-2">
+                      If the bars really did change, the job splits so each lot keeps its own
+                      production lot number.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-gray-400 text-sm">
+                      This job has {jobLoads.length} recorded material loads on Lot{' '}
+                      <span className="text-white font-mono">{lotMismatchModal.existingLot}</span>
+                      {jobLoads[0]?.staged_at && (
+                        <> since {new Date(jobLoads[0].staged_at).toLocaleDateString()}</>
+                      )}. Bars have been drawn against it repeatedly, so a typo correction is no
+                      longer offered here.
+                    </p>
+                    <p className="text-gray-400 text-sm mt-2">
+                      If the bars really did change, use the switch below — the job splits so each
+                      lot keeps its own production lot number. If this genuinely is a data-entry
+                      error, an admin can apply a forced correction.
+                    </p>
+                  </>
+                )}
               </div>
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800">
               <div className="space-y-2">
-                <button
-                  onClick={handleCorrectLot}
-                  disabled={lotCorrecting}
-                  className="w-full py-3 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg transition-colors font-semibold"
-                >
-                  {lotCorrecting
-                    ? 'Correcting…'
-                    : `I typed the wrong lot — it is ${lotMismatchModal.newLot}`}
-                </button>
+                {jobLoads.length <= 1 && (
+                  <button
+                    onClick={handleCorrectLot}
+                    disabled={lotCorrecting}
+                    className="w-full py-3 bg-gray-800 border border-blue-600/60 hover:bg-blue-900/30 disabled:opacity-50 text-blue-300 rounded-lg transition-colors font-semibold"
+                  >
+                    {lotCorrecting
+                      ? 'Correcting…'
+                      : `I typed the wrong lot — it is ${lotMismatchModal.newLot}`}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setLotChangeNewLot(lotMismatchModal.newLot)
@@ -6512,7 +6557,7 @@ export default function Kiosk() {
                     handleOpenLotChange()
                   }}
                   disabled={lotCorrecting}
-                  className="w-full py-3 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white rounded-lg transition-colors font-semibold"
+                  className="w-full py-3 bg-gray-800 border border-amber-600/60 hover:bg-amber-900/30 disabled:opacity-50 text-amber-300 rounded-lg transition-colors font-semibold"
                 >
                   Lot {lotMismatchModal.existingLot} is finished — switching bars
                 </button>

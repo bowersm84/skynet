@@ -432,13 +432,33 @@ export default function MaterialKiosk() {
       if (existing) {
         const existingLot = (existing.lot_number || '').trim()
         if (existingLot && newLot && !lotAllowed(existingLot, newLot)) {
-          setLotMismatch({ existingLot, newLot, jobId: stageJob.id, hasPln: !!stageJob.production_lot_number })
-          supabase.from('audit_logs').insert({
-            event_type: 'lot_mismatch', job_id: stageJob.id, machine_id: selectedMachine?.id || null,
-            operator_id: operator.id,
-            details: { existing_lot: existingLot, attempted_lot: newLot, job_number: stageJob.job_number, source: 'material_kiosk' },
-          }).then(() => {}, () => {})
-          setStaging(false); return
+          if (!stageJob.production_lot_number) {
+            // D-LOT-02: pre-PLN — nothing downstream carries the lot yet. Correct
+            // silently (the RPC still writes the material_lot_corrected audit entry)
+            // and let staging continue.
+            const { error: silentErr } = await supabase.rpc('correct_job_material_lot', {
+              p_job_id: stageJob.id,
+              p_new_lot: newLot,
+              p_operator_id: operator.id,
+              p_reason: 'Pre-production lot correction (silent; staged at rack)'
+            })
+            if (silentErr) {
+              showToast('Could not update the lot: ' + (silentErr.message || 'unknown error'), 'error')
+              setStaging(false); return
+            }
+            // The DB row now carries newLot; patch the stale local copy so the
+            // write-once update below does not resurrect the old value.
+            existing.lot_number = newLot
+            showToast(`Lot updated to ${newLot}`)
+          } else {
+            setLotMismatch({ existingLot, newLot, jobId: stageJob.id })
+            supabase.from('audit_logs').insert({
+              event_type: 'lot_mismatch', job_id: stageJob.id, machine_id: selectedMachine?.id || null,
+              operator_id: operator.id,
+              details: { existing_lot: existingLot, attempted_lot: newLot, job_number: stageJob.job_number, source: 'material_kiosk' },
+            }).then(() => {}, () => {})
+            setStaging(false); return
+          }
         }
         const { error } = await supabase.from('job_materials').update({
           bars_loaded: (existing.bars_loaded || 0) + addBars,
@@ -1039,13 +1059,21 @@ export default function MaterialKiosk() {
             <div className="flex items-center gap-2 text-amber-400 mb-3"><AlertTriangle size={20} /> <h3 className="font-semibold">Lot mismatch</h3></div>
             <p className="text-gray-300 text-sm">This job is carrying lot <span className="font-mono text-white">{lotMismatch.existingLot}</span>, and you staged <span className="font-mono text-white">{lotMismatch.newLot}</span>.</p>
             <div className="space-y-2 mt-4">
-              <button
-                onClick={handleCorrectLot}
-                disabled={lotCorrecting}
-                className="w-full h-11 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg transition-colors font-medium"
-              >
-                {lotCorrecting ? 'Correcting…' : `${lotMismatch.existingLot} was typed wrong — it is ${lotMismatch.newLot}`}
-              </button>
+              {(stageJob?._loads?.length || 0) <= 1 ? (
+                <button
+                  onClick={handleCorrectLot}
+                  disabled={lotCorrecting}
+                  className="w-full h-11 bg-gray-800 border border-blue-600/60 hover:bg-blue-900/30 disabled:opacity-50 text-blue-300 rounded-lg transition-colors font-medium"
+                >
+                  {lotCorrecting ? 'Correcting…' : `${lotMismatch.existingLot} was typed wrong — it is ${lotMismatch.newLot}`}
+                </button>
+              ) : (
+                <p className="text-gray-400 text-xs px-1">
+                  This job has {stageJob._loads.length} recorded loads on lot {lotMismatch.existingLot},
+                  so a typo correction is no longer offered. If this is genuinely a data-entry error,
+                  an admin can apply a forced correction.
+                </p>
+              )}
               <p className="text-gray-500 text-xs px-1">
                 If the bars on the machine actually changed, that has to be done at the machine
                 kiosk with Material Lot Finished — Switch Lot, so the pieces already cut stay

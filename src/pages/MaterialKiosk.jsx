@@ -87,6 +87,7 @@ export default function MaterialKiosk() {
   })
   const [staging, setStaging] = useState(false)
   const [lotMismatch, setLotMismatch] = useState(null)
+  const [lotCorrecting, setLotCorrecting] = useState(false)
 
   // --- Finalize / Return (finalize mode) ---
   const [finRows, setFinRows] = useState([])      // recent job_materials rows + job
@@ -280,6 +281,7 @@ export default function MaterialKiosk() {
         .from('jobs')
         .select(`
           id, job_number, status, quantity, scheduled_start, assigned_machine_id,
+          production_lot_number,
           work_order:work_orders(wo_number, customer, priority, order_type),
           component:parts!component_id(id, part_number, description)
         `)
@@ -430,7 +432,7 @@ export default function MaterialKiosk() {
       if (existing) {
         const existingLot = (existing.lot_number || '').trim()
         if (existingLot && newLot && !lotAllowed(existingLot, newLot)) {
-          setLotMismatch({ existingLot, newLot })
+          setLotMismatch({ existingLot, newLot, jobId: stageJob.id, hasPln: !!stageJob.production_lot_number })
           supabase.from('audit_logs').insert({
             event_type: 'lot_mismatch', job_id: stageJob.id, machine_id: selectedMachine?.id || null,
             operator_id: operator.id,
@@ -525,6 +527,31 @@ export default function MaterialKiosk() {
       console.error('Error staging material:', err)
       showToast('Failed to stage: ' + (err.message || 'unknown error'), 'error')
     } finally { setStaging(false) }
+  }
+
+  // D-LOT-01: mis-keyed lot correction from the rack. Same RPC as the machine kiosk —
+  // it rewrites the PLN's lot segment and every downstream copy atomically.
+  const handleCorrectLot = async () => {
+    if (!lotMismatch?.jobId) return
+    setLotCorrecting(true)
+    try {
+      const { data, error } = await supabase.rpc('correct_job_material_lot', {
+        p_job_id: lotMismatch.jobId,
+        p_new_lot: lotMismatch.newLot,
+        p_operator_id: operator.id,
+        p_reason: 'Mis-keyed lot; corrected at material rack'
+      })
+      if (error) throw error
+      const newPln = data?.new_pln
+      setLotMismatch(null)
+      showToast(newPln ? `Lot corrected — production lot is now ${newPln}` : 'Lot corrected')
+      loadFinalizeRows()
+    } catch (err) {
+      console.error('Lot correction failed:', err)
+      showToast('Could not correct the lot: ' + (err.message || 'unknown error'), 'error')
+    } finally {
+      setLotCorrecting(false)
+    }
   }
 
   // ---------- Finalize / Reconcile ----------
@@ -1005,13 +1032,27 @@ export default function MaterialKiosk() {
         </div>
       )}
 
-      {/* Lot mismatch */}
+      {/* Lot mismatch — D-LOT-01: correctable, not a dead end */}
       {lotMismatch && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-6 z-30">
           <div className="bg-gray-900 border border-amber-700 rounded-2xl w-full max-w-sm p-5">
             <div className="flex items-center gap-2 text-amber-400 mb-3"><AlertTriangle size={20} /> <h3 className="font-semibold">Lot mismatch</h3></div>
-            <p className="text-gray-300 text-sm">This job already has lot <span className="font-mono text-white">{lotMismatch.existingLot}</span>. A job can only carry one raw-material lot, so <span className="font-mono text-white">{lotMismatch.newLot}</span> can't be added.</p>
-            <button onClick={() => setLotMismatch(null)} className="w-full h-11 mt-4 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">OK</button>
+            <p className="text-gray-300 text-sm">This job is carrying lot <span className="font-mono text-white">{lotMismatch.existingLot}</span>, and you staged <span className="font-mono text-white">{lotMismatch.newLot}</span>.</p>
+            <div className="space-y-2 mt-4">
+              <button
+                onClick={handleCorrectLot}
+                disabled={lotCorrecting}
+                className="w-full h-11 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg transition-colors font-medium"
+              >
+                {lotCorrecting ? 'Correcting…' : `${lotMismatch.existingLot} was typed wrong — it is ${lotMismatch.newLot}`}
+              </button>
+              <p className="text-gray-500 text-xs px-1">
+                If the bars on the machine actually changed, that has to be done at the machine
+                kiosk with Material Lot Finished — Switch Lot, so the pieces already cut stay
+                tied to {lotMismatch.existingLot}.
+              </p>
+              <button onClick={() => setLotMismatch(null)} disabled={lotCorrecting} className="w-full h-11 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded-lg transition-colors">Cancel</button>
+            </div>
           </div>
         </div>
       )}

@@ -208,6 +208,7 @@ export default function Kiosk() {
   const [jobMaterials, setJobMaterials] = useState([]) // Materials loaded for current job
   const [jobLoads, setJobLoads] = useState([]) // Per-load history (append-only display log) for current job
   const [lotMismatchModal, setLotMismatchModal] = useState(null) // { existingLot, newLot }
+  const [lotCorrecting, setLotCorrecting] = useState(false)
   const [inventoryStock, setInventoryStock] = useState([]) // Available stock rows for dropdown grouping
   const [materialsMaster, setMaterialsMaster] = useState([]) // materials master (type+size) for material_master_id resolution
 
@@ -3006,7 +3007,50 @@ export default function Kiosk() {
     }
   }
 
+  // D-LOT-01: the machinist mis-keyed the lot — the bars never changed. The RPC rewrites
+  // job_materials, the PLN's lot segment (date and sequence preserved), every finishing
+  // send that copied either value, and re-points the inventory charge at the correct
+  // receipt. Atomic and audited server-side.
+  const handleCorrectLot = async () => {
+    if (!activeJob || !lotMismatchModal) return
+    setLotCorrecting(true)
+    try {
+      const { data, error } = await supabase.rpc('correct_job_material_lot', {
+        p_job_id: activeJob.id,
+        p_new_lot: lotMismatchModal.newLot,
+        p_operator_id: operator.id,
+        p_reason: 'Mis-keyed at production start; corrected at machine kiosk'
+      })
+      if (error) throw error
+      setLotMismatchModal(null)
+      await loadJobMaterials(activeJob.id)
+      await loadJobs()
+      const newPln = data?.new_pln
+      setToastMessage(
+        newPln
+          ? `Lot corrected to ${lotMismatchModal.newLot} — production lot is now ${newPln}`
+          : `Lot corrected to ${lotMismatchModal.newLot}`
+      )
+    } catch (err) {
+      console.error('Lot correction failed:', err)
+      alert('Could not correct the lot: ' + err.message)
+    } finally {
+      setLotCorrecting(false)
+    }
+  }
+
   const handleRemoveMaterial = async (materialId) => {
+    // D-LOT-01: once a PLN is minted it embeds this row's lot. Deleting the row here is
+    // what stranded J-000188's PLN on a mis-keyed lot for two days. Correction is the
+    // supported path; it keeps every downstream copy in step.
+    if (activeJob?.production_lot_number) {
+      alert(
+        'This job already has a production lot number, so the material row cannot be removed.\n\n' +
+        'If the lot number is wrong, use Correct Lot on the material row.\n' +
+        'If the bars actually changed, use Material Lot Finished — Switch Lot.'
+      )
+      return
+    }
     try {
       const { error } = await supabase.from('job_materials').delete().eq('id', materialId)
       if (error) throw error
@@ -6438,22 +6482,48 @@ export default function Kiosk() {
               </div>
 
               <div className="bg-gray-800 rounded-lg p-4">
-                <p className="text-gray-300 text-sm font-medium mb-2">A single job cannot mix material lots.</p>
-                <p className="text-gray-400 text-sm">To use a different lot:</p>
-                <ol className="text-gray-400 text-sm mt-1 space-y-1 list-decimal list-inside">
-                  <li>Complete the current job with a partial quantity</li>
-                  <li>A new job will be created for the remaining quantity with the new lot</li>
-                </ol>
+                <p className="text-gray-300 text-sm font-medium mb-2">Which of these happened?</p>
+                <p className="text-gray-400 text-sm">
+                  If the lot was typed wrong, correcting it updates the production lot number
+                  and everything already sent to finishing.
+                </p>
+                <p className="text-gray-400 text-sm mt-2">
+                  If the bars really did change, the job splits so each lot keeps its own
+                  production lot number.
+                </p>
               </div>
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800">
-              <button
-                onClick={() => setLotMismatchModal(null)}
-                className="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors font-semibold"
-              >
-                OK
-              </button>
+              <div className="space-y-2">
+                <button
+                  onClick={handleCorrectLot}
+                  disabled={lotCorrecting}
+                  className="w-full py-3 bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg transition-colors font-semibold"
+                >
+                  {lotCorrecting
+                    ? 'Correcting…'
+                    : `I typed the wrong lot — it is ${lotMismatchModal.newLot}`}
+                </button>
+                <button
+                  onClick={() => {
+                    setLotChangeNewLot(lotMismatchModal.newLot)
+                    setLotMismatchModal(null)
+                    handleOpenLotChange()
+                  }}
+                  disabled={lotCorrecting}
+                  className="w-full py-3 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white rounded-lg transition-colors font-semibold"
+                >
+                  Lot {lotMismatchModal.existingLot} is finished — switching bars
+                </button>
+                <button
+                  onClick={() => setLotMismatchModal(null)}
+                  disabled={lotCorrecting}
+                  className="w-full py-3 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         </div>

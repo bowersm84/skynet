@@ -2914,3 +2914,30 @@ That same pre-PLN property drives the second change: a differing lot entered bef
 The warehouse (Assembly role, signed-in PCs) needed a way to ask for a build of a stock part they'd run out of. Modeling the warehouse as a customer was rejected: customer_orders requires a Fishbowl SO (co_number is CO-<customerId>-<fishbowlId>), feeds v_sales_weekly_report_v3 / v_sales_mts_production / report_open_demand and weekly Fishbowl reconciliation, and its lifecycle ends in shipment. A stock request never ships and is not a sale. Instead, stock_requests is a separate table (part, qty, priority, mandatory reason, status open → allocated → complete / cancelled, nullable work_order_id) whose open rows are merged into the Demand tab as amber STOCK lines beside CO lines, grouped by part, so April sees customer demand and warehouse demand for the same part on one row and builds one WO. Consumption reuses the existing stock model: selected requests pre-fill additionalForStock (→ work_orders.stock_quantity), zero CO lines still derives order_type='make_to_stock', and allocate_stock_requests links the rows after the WO exists. Lifecycle follows the WO via a status trigger: complete/shipped/closed closes allocated requests; cancelled returns them to open (mirrors the CO-allocation release semantics). Reason is mandatory at both layers — the modal blocks submit and create_stock_request raises on a blank — because the database doesn't trust the form (same discipline as kit_assign_and_log). Roles: create/cancel admin+assembly (requester may cancel own while open), allocate admin+scheduler, all via SECURITY DEFINER RPCs with NULL-uid SQL-Editor passthrough; table has SELECT-only RLS and no direct writes. Assembly gained read-only access to the Customer Orders page (canAccessCustomerOrders migrated to hasRole per D-MROLE-02) so the button lives where demand lives; CAN_EDIT_ROLES unchanged, so assembly sees no CO write controls. April may still edit the stock qty in Create WO after the request pre-fills it; the request is allocated regardless (informational semantics, per D-JOBMERGE-13). Deferred: finished-goods min-stock rules that auto-raise a request (the D-REPLEN-01 analogue), and surfacing allocated-request quantity on the WO detail. Migration: Docs/migrations/2026-08-20_stock_requests.sql (TEST 2026-08-20).
 
 **Implementation notes (deviations from the round brief, both narrow):** (1) DemandView memoizes the CO-line and stock-request splits rather than filtering inline in the CreateWorkOrderModal props. The modal's demand-prefill effect depends on both arrays, so a fresh array identity on every DemandView render would re-run the effect and reset selectedAssemblies — wiping any quantity April had already edited in the open modal. The existing preselectedCoLines was memoized for exactly this reason. (2) The allocate-failure branch in CreateWorkOrderModal sets the modal's error banner and then calls onSuccess?.(), which unmounts the modal in DemandView — so that message is not actually reachable by the user today. The stale-request case is still safe (the RPC raises rather than double-allocating, and the WO is already committed), but making the warning visible needs the parent's setActionStatus, i.e. threading a warning argument through onSuccess. Left as specified; tracked here rather than silently redesigning the shared modal's callback contract.
+
+### D-JOBMERGE-19 — Run surfaces show combined targets; order surfaces unchanged (2026-08-19)
+**What:** Production Display active rows and Mainframe MachineCard tiles now
+compute their denominator as jobs.quantity + SUM(active job_merge_allocations
+.requested_qty), matching the Kiosk's getRunTarget semantics. Merged rows get
+a cyan denominator + explanatory tooltip. The Production Display dropdown
+gains a "Combined run" table (host + members with WO/customer/qty) above the
+CO allocation table, lazy-loaded on expand for hosts only.
+**Principle:** order surfaces (WO rows, CO tables, member job rows) keep
+per-job/per-order quantities; run-progress surfaces show the combined target.
+The numerator on these surfaces was already combined — all production and
+finishing for a merged run lands on the host job — so the mismatched
+denominator overflowed the bar and misstated pacing.
+**Data path:** bulk ids-only allocation queries mirroring each surface's
+existing rollup pattern (two-level nesting rule); no schema change, no RPC
+change. MachineCard falls back run_target ?? quantity so un-enriched callers
+degrade to prior behavior.
+**Known remaining (deliberately out of scope):**
+1. ScheduleJobModal duration math uses job.quantity (lines ~111/~711) — a host
+   scheduled BEFORE a merge keeps its pre-merge runtime estimate; scheduled_end
+   and Uncle Bob pacing understate the combined run. Needs its own round:
+   touching duration interacts with D-SCHED-13/14 and proposal staleness.
+2. Whether merge_job_into_host should extend host estimated_minutes/
+   scheduled_end server-side at merge time — same round as (1).
+3. PresidentsBridge assembly ratios divide through-finishing by component
+   job.quantity; a merge-host component job transiently inflates the ratio
+   until member shares allocate back post-compliance. Revisit if observed.

@@ -175,12 +175,14 @@ export default function MachineCard({ machine, jobs, getPriorityColor, ongoingDo
                 )}
               </span>
               <div className="flex items-center gap-2">
-                {!isMaintenanceActive && activeJob.quantity > 0 && (
+                {!isMaintenanceActive && (activeJob.run_target ?? activeJob.quantity) > 0 && (
                   <span
-                    className="text-[11px] font-mono text-gray-300 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded"
-                    title="Parts accepted from finishing / Job quantity"
+                    className={`text-[11px] font-mono px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded ${activeJob.merge_member_count > 0 ? 'text-cyan-300' : 'text-gray-300'}`}
+                    title={activeJob.merge_member_count > 0
+                      ? 'Parts accepted from finishing / Combined run target (incl. merged member jobs)'
+                      : 'Parts accepted from finishing / Job quantity'}
                   >
-                    Finished: {activeJob.finished_qty || 0}/{activeJob.quantity}
+                    Finished: {activeJob.finished_qty || 0}/{activeJob.run_target ?? activeJob.quantity}
                   </span>
                 )}
                 {!isMaintenanceActive && (

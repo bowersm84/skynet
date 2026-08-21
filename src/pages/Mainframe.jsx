@@ -194,7 +194,29 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
             finishedByJob[row.job_id] = (finishedByJob[row.job_id] || 0) + (row.compliance_good_qty || 0)
           })
         }
-        setJobs(jobsData.map(j => ({ ...j, finished_qty: finishedByJob[j.id] || 0 })))
+        // D-JOBMERGE: combined-run targets for MachineCard's Finished: X/Y.
+        // Finishing lands on the host job, so finished_qty is combined —
+        // the denominator must include active member claims.
+        const mergeQtyByHost = {}
+        const mergeCountByHost = {}
+        if (jobsData.length > 0) {
+          const { data: allocData, error: allocErr } = await supabase
+            .from('job_merge_allocations')
+            .select('host_job_id, requested_qty')
+            .eq('is_active', true)
+            .in('host_job_id', jobsData.map(j => j.id))
+          if (allocErr) console.error('❌ Error fetching merge allocations:', allocErr)
+          ;(allocData || []).forEach(row => {
+            mergeQtyByHost[row.host_job_id] = (mergeQtyByHost[row.host_job_id] || 0) + (row.requested_qty || 0)
+            mergeCountByHost[row.host_job_id] = (mergeCountByHost[row.host_job_id] || 0) + 1
+          })
+        }
+        setJobs(jobsData.map(j => ({
+          ...j,
+          finished_qty: finishedByJob[j.id] || 0,
+          run_target: (j.quantity || 0) + (mergeQtyByHost[j.id] || 0),
+          merge_member_count: mergeCountByHost[j.id] || 0,
+        })))
       }
 
       // NEW: Fetch ongoing downtimes (end_time IS NULL)

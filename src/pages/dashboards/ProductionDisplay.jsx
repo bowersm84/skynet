@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase'
 import { deriveMachineStatus } from '../../lib/machineStatus'
 import { Power, ChevronRight, ChevronDown, Loader2 } from 'lucide-react'
 import { fetchCOAllocationsForTraveler } from '../../lib/traveler'
+import { fetchActiveMembers } from '../../lib/jobMerge'
 
 // ---- Date helpers (module-level, pure, local timezone) ----
 // Skybolt is closed Sat/Sun. "Last business day" walks backward from today
@@ -396,6 +397,28 @@ export default function ProductionDisplay() {
       }
     }
 
+    // D-JOBMERGE: combined-run targets. All production for a merged run is
+    // logged on the HOST job, so `finished` above is already combined —
+    // the target must include active member claims or the bar overflows.
+    // jobs.quantity is never mutated by a merge (D-JOBMERGE-01).
+    const memberQtyByHost = {}
+    const memberCountByHost = {}
+    if (activeJobIds.length > 0) {
+      const { data: allocRows, error: e3 } = await supabase
+        .from('job_merge_allocations')
+        .select('host_job_id, requested_qty')
+        .eq('is_active', true)
+        .in('host_job_id', activeJobIds)
+      if (e3) {
+        console.error('loadActiveJobs/merge allocations error:', e3)
+      } else {
+        for (const r of (allocRows || [])) {
+          memberQtyByHost[r.host_job_id] = (memberQtyByHost[r.host_job_id] || 0) + (r.requested_qty || 0)
+          memberCountByHost[r.host_job_id] = (memberCountByHost[r.host_job_id] || 0) + 1
+        }
+      }
+    }
+
     const now = Date.now()
 
     // BEHIND = scheduled_end is in the past (before today's midnight). The
@@ -409,7 +432,9 @@ export default function ProductionDisplay() {
     const enriched = list.map(j => {
       const missed = (j.missed_production_entries || []).reduce((a, e) => a + (e.quantity || 0), 0)
       const finished = (finishingByJob[j.id] || 0) + missed
-      const targetQty = j.quantity ?? 0
+      const mergedMemberQty = memberQtyByHost[j.id] || 0
+      const mergedMemberCount = memberCountByHost[j.id] || 0
+      const targetQty = (j.quantity ?? 0) + mergedMemberQty
       let elapsedMs = 0
 
       if (j.status === 'in_setup' && j.setup_start) {
@@ -429,7 +454,7 @@ export default function ProductionDisplay() {
         ? Math.round(finished * 86400000 / elapsedMs)
         : null
 
-      return { ...j, finished, targetQty, trafficLight, elapsedMs, currentPartsPerDay }
+      return { ...j, finished, targetQty, mergedMemberQty, mergedMemberCount, trafficLight, elapsedMs, currentPartsPerDay }
     })
 
     // UP NEXT enrichment. For each active row, find the next queued job on
@@ -838,6 +863,8 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
   const [coExpanded, setCoExpanded] = useState(false)
   const [coRows, setCoRows] = useState(null) // null = not yet loaded
   const [coLoading, setCoLoading] = useState(false)
+  // Combined-run members — lazy-loaded on first expand, hosts only
+  const [memberRows, setMemberRows] = useState(null) // null = not yet loaded
   const isStock = job.work_order?.order_type === 'make_to_stock'
 
   const toggleCO = async () => {
@@ -853,6 +880,15 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
         setCoRows([])
       } finally {
         setCoLoading(false)
+      }
+    }
+    if (next && memberRows === null && job.mergedMemberCount > 0) {
+      try {
+        const rows = await fetchActiveMembers(job.id)
+        setMemberRows(rows || [])
+      } catch (e) {
+        console.error('Failed to load combined-run members:', e)
+        setMemberRows([])
       }
     }
   }
@@ -926,7 +962,15 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
           )}
         </div>
         <div className="text-gray-300 text-sm font-mono mt-0.5">
-          {(job.finished || 0).toLocaleString()} / {(job.targetQty || 0).toLocaleString()}
+          {(job.finished || 0).toLocaleString()} /{' '}
+          <span
+            className={job.mergedMemberCount > 0 ? 'text-cyan-300' : ''}
+            title={job.mergedMemberCount > 0
+              ? `Combined run target — ${(job.quantity || 0).toLocaleString()} own + ${(job.mergedMemberQty || 0).toLocaleString()} merged across ${job.mergedMemberCount} member job${job.mergedMemberCount === 1 ? '' : 's'}`
+              : undefined}
+          >
+            {(job.targetQty || 0).toLocaleString()}
+          </span>
           {job.currentPartsPerDay != null && (
             <span className="text-gray-500 text-xs ml-2">≈ {job.currentPartsPerDay.toLocaleString()}/day</span>
           )}
@@ -1025,6 +1069,36 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
       </div>
       {coExpanded && (
         <div className="px-3 pb-3 pt-1 border-t border-gray-800/60">
+          {job.mergedMemberCount > 0 && (
+            <div className="mb-1">
+              <div className="text-cyan-300 uppercase tracking-wider text-[10px] font-mono font-medium pt-1">
+                Combined run · target {(job.targetQty || 0).toLocaleString()}
+              </div>
+              <table className="w-full text-xs font-mono mt-1">
+                <tbody>
+                  <tr className="text-gray-400 border-t border-gray-800/50">
+                    <td className="py-1 pr-3">{job.job_number}</td>
+                    <td className="py-1 pr-3">{job.work_order?.wo_number || '—'}</td>
+                    <td className="py-1 pr-3 text-gray-500">host</td>
+                    <td className="py-1 text-right">{(job.quantity || 0).toLocaleString()}</td>
+                  </tr>
+                  {(memberRows || []).map((m, i) => (
+                    <tr key={i} className="text-gray-300 border-t border-gray-800/50">
+                      <td className="py-1 pr-3 text-blue-400">{m.job_number || '—'}</td>
+                      <td className="py-1 pr-3">{m.wo_number || '—'}</td>
+                      <td className="py-1 pr-3 truncate">{m.customer || '—'}</td>
+                      <td className="py-1 text-right">{(m.requested_qty || 0).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                  {memberRows === null && (
+                    <tr className="text-gray-600 border-t border-gray-800/50">
+                      <td className="py-1" colSpan={4}>Loading members…</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
           {coLoading ? (
             <div className="flex items-center gap-2 text-gray-500 text-xs font-mono py-2">
               <Loader2 size={12} className="animate-spin" /> Loading customer order…

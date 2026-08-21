@@ -347,6 +347,8 @@ export default function ScheduleJobModal({
               setInsertionIndex={setInsertionIndex}
               minInsertionIndex={minInsertionIndex}
               fmtDateTime={fmtDateTime}
+              fmtDueShort={fmtDueShort}
+              newJobDue={job?.work_order?.due_date || null}
             />
           )}
           {step === 3 && (
@@ -648,7 +650,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
 
 // ─────────── Step 2: Position picker ───────────
 
-function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minInsertionIndex, fmtDateTime }) {
+function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minInsertionIndex, fmtDateTime, fmtDueShort, newJobDue }) {
   if (!machine) return <p className="text-gray-500">No machine selected.</p>
 
   if (queue.length === 0) {
@@ -703,6 +705,42 @@ function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minI
                   {fmtDateTime(q.scheduled_start)} → {fmtDateTime(q.scheduled_end)}
                 </span>
               </div>
+              {/* D-SCHED-21: the due date is the fact that decides the slot.
+                  Amber = this queued job is due AFTER the one being scheduled
+                  (candidate to slot ahead of). Red = this queued job already
+                  finishes past its own due date. due_date is a DATE column;
+                  compare against end of day, matching the late-schedule check. */}
+              {(() => {
+                const qDue = q.work_order?.due_date || null
+                const qLate = !!qDue && !!q.scheduled_end &&
+                  new Date(q.scheduled_end) > new Date(qDue + 'T23:59:59')
+                const dueAfterNew = !!qDue && !!newJobDue && qDue > newJobDue
+                const chipClass = qLate
+                  ? 'bg-red-900/40 text-red-300 border-red-800/60'
+                  : dueAfterNew
+                    ? 'bg-amber-900/40 text-amber-300 border-amber-700/60'
+                    : 'bg-gray-800 text-gray-400 border-gray-700'
+                const chipTitle = qLate
+                  ? 'Already scheduled to finish after its due date'
+                  : dueAfterNew
+                    ? 'Due later than the job you are scheduling'
+                    : qDue ? 'Due on or before the job you are scheduling' : 'No customer due date'
+                return (
+                  <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs">
+                    <span
+                      className={`px-1.5 py-0.5 rounded border font-medium ${chipClass}`}
+                      title={chipTitle}
+                    >
+                      Due {fmtDueShort(qDue)}
+                    </span>
+                    {q.work_order?.customer && (
+                      <span className="text-gray-500 truncate max-w-[260px]" title={q.work_order.customer}>
+                        {q.work_order.customer}
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
             </div>
             {slotAfterAllowed && (
               <InsertionSlot

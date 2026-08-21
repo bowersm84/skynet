@@ -56,6 +56,18 @@ export function getRunTarget(job, activeAllocations = []) {
   return (job?.quantity || 0) + memberQty
 }
 
+// D-SCHED-16: a saved schedule no longer matches the job when the run target
+// moved after scheduling (merge, unmerge, or split landed without a
+// reschedule). Derived from jobs.schedule_qty_basis — written by trigger on
+// every scheduled_end change — never a flag to clear. Null basis (legacy rows
+// scheduled before the column existed and never re-saved) is treated as NOT
+// stale to avoid a wall of false alarms on day one.
+export function isScheduleStale(job, activeAllocations = []) {
+  if (!job?.scheduled_end) return false
+  if (job.schedule_qty_basis == null) return false
+  return getRunTarget(job, activeAllocations) !== job.schedule_qty_basis
+}
+
 // D-JOBMERGE-04: a printed traveler no longer matches the job when a merge or
 // unmerge landed after the last print AND after any compliance acknowledgment.
 // Staleness is derived from three timestamps — never a flag to clear.

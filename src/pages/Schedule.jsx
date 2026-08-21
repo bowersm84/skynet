@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchMergeHostCandidates, mergeJobIntoHost, unmergeJob, isMemberEligible, getRunTarget } from '../lib/jobMerge'
+import { fetchMergeHostCandidates, mergeJobIntoHost, unmergeJob, isMemberEligible, getRunTarget, isScheduleStale } from '../lib/jobMerge'
 import { 
   ArrowLeft, 
   ChevronLeft, 
@@ -273,6 +273,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [endDateHistoryRuns, setEndDateHistoryRuns] = useState([])
   const [endDateSaving, setEndDateSaving] = useState(false)
   const [endDateError, setEndDateError] = useState(null)
+  // D-SCHED-16: live run rate from accepted finishing — { rate, pieces, elapsedMs }
+  const [endDateLiveRate, setEndDateLiveRate] = useState(null)
 
   // SKY57 — schedule change requests review queue
   const [changeRequests, setChangeRequests] = useState([])
@@ -321,6 +323,10 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const weekStart = weekDates[0]
   const weekEnd = new Date(weekDates[weekDates.length - 1])
   weekEnd.setHours(23, 59, 59, 999)
+
+  // D-SCHED-16: scheduled jobs whose recorded qty basis no longer matches the
+  // current run target — a merge/unmerge/split landed after scheduling.
+  const staleScheduled = allScheduledJobs.filter(j => isScheduleStale(j, mergeAllocs[j.id] || []))
 
   // Hours for zoomed day view
   const dayHours = Array.from({ length: 24 }, (_, i) => i)
@@ -560,15 +566,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     const { data, error } = await supabase
       .from('jobs')
       .select(`
-        id,
-        job_number,
-        status,
-        quantity,
-        component_id,
-        scheduled_start,
-        scheduled_end,
-        estimated_minutes,
-        assigned_machine_id,
+        *,
         work_order:work_orders(
           id, wo_number, customer, priority, due_date, has_cancelled_allocation
         ),
@@ -1167,7 +1165,33 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     // D-SCHED-13: reset and load throughput history for the parts/day calculator
     setEndDatePartsPerDay('')
     setEndDateHistoryRuns([])
+    setEndDateLiveRate(null)
     fetchPartThroughputRuns(supabase, job.component_id, job.id).then(setEndDateHistoryRuns)
+    // D-SCHED-16: live run rate from accepted finishing (D-SCHED-14 gates:
+    // ≥1h elapsed, >0 pieces). Prefill the recommendation ONLY when the
+    // schedule is stale — a non-stale open must not move anything.
+    ;(async () => {
+      if (!job.production_start) return
+      const { data: accRows, error: accErr } = await supabase
+        .from('finishing_sends')
+        .select('compliance_good_qty')
+        .eq('job_id', job.id)
+        .eq('compliance_outcome', 'accepted')
+      if (accErr) { console.error('Live-rate fetch failed:', accErr); return }
+      const pieces = (accRows || []).reduce((s, r) => s + (r.compliance_good_qty || 0), 0)
+      const elapsedMs = Date.now() - new Date(job.production_start).getTime()
+      if (pieces <= 0 || elapsedMs < 3600000) return
+      const rate = Math.max(1, Math.round(pieces * 86400000 / elapsedMs))
+      setEndDateLiveRate({ rate, pieces, elapsedMs })
+      const members = mergeAllocs[job.id] || []
+      if (isScheduleStale(job, members) && job.scheduled_start) {
+        setEndDatePartsPerDay(String(rate))
+        const mins = partsPerDayToMinutes(getRunTarget(job, members), rate)
+        if (mins !== null) {
+          setEndDateEditValue(toLocalDatetimeInput(new Date(new Date(job.scheduled_start).getTime() + mins * 60000)))
+        }
+      }
+    })()
   }
 
   const handleSaveEndDate = async () => {
@@ -2229,6 +2253,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           {(mergeAllocs[job.id]?.length > 0) && (
             <Layers size={10} className="text-cyan-300 flex-shrink-0 ml-0.5" title={`Combined run · ${mergeAllocs[job.id].length + 1} orders`} />
           )}
+          {isScheduleStale(job, mergeAllocs[job.id] || []) && (
+            <AlertTriangle size={10} className="text-amber-400 flex-shrink-0 ml-0.5" title="Run target changed since scheduling — adjust the end date" />
+          )}
           {job.requires_attendance && (
             <User size={10} className="text-white/70 flex-shrink-0 ml-0.5" />
           )}
@@ -2386,9 +2413,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               >
                 <CalendarClock size={16} />
                 <span className="hidden sm:inline">Messages</span>
-                {(changeRequests.length + lotSplitAcks.length) > 0 && (
+                {(changeRequests.length + lotSplitAcks.length + staleScheduled.length) > 0 && (
                   <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-blue-600 text-white text-[10px] font-bold rounded-full">
-                    {changeRequests.length + lotSplitAcks.length}
+                    {changeRequests.length + lotSplitAcks.length + staleScheduled.length}
                   </span>
                 )}
               </button>
@@ -2403,6 +2430,31 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       <X size={16} />
                     </button>
                   </div>
+                  {staleScheduled.length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-amber-400 text-[11px] uppercase tracking-wider mb-1.5">Run target changed ({staleScheduled.length})</p>
+                      <div className="space-y-1">
+                        {staleScheduled.map(sj => (
+                          <div key={sj.id} className="bg-gray-800/60 border border-amber-800/50 rounded p-2 text-xs flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="text-skynet-accent font-mono">{sj.component?.part_number || sj.job_number}</span>
+                              <span className="text-gray-500 font-mono ml-2">{sj.job_number}</span>
+                              <span className="text-gray-500 ml-2">{sj.assigned_machine?.code || ''}</span>
+                              <div className="text-gray-400 mt-0.5">
+                                Scheduled for <span className="font-mono">{(sj.schedule_qty_basis || 0).toLocaleString()}</span> · run target now <span className="font-mono text-amber-300">{getRunTarget(sj, mergeAllocs[sj.id] || []).toLocaleString()}</span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => { setShowChangeRequests(false); handleOpenEndDateEdit(sj) }}
+                              className="shrink-0 px-2 py-1 bg-amber-700/60 hover:bg-amber-600/60 text-amber-100 rounded font-semibold"
+                            >
+                              Adjust End Date
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <p className="text-gray-400 text-[11px] uppercase tracking-wider mb-1.5">Change Requests</p>
                   {changeRequests.length === 0 ? (
                     <p className="text-gray-500 text-sm italic py-4 text-center">No open requests</p>
@@ -3798,6 +3850,17 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         const isLate = validEnd && !!job.work_order?.due_date && newEnd > new Date(job.work_order.due_date + 'T23:59:59')
         // D-SCHED-13: history-based parts/day suggestion for this job's machine
         const ppdSuggestion = computePartsPerDaySuggestion(endDateHistoryRuns, job.assigned_machine_id)
+        // D-SCHED-16: run-target-aware math + one-click rate application
+        const modalMembers = mergeAllocs[job.id] || []
+        const modalRunTarget = getRunTarget(job, modalMembers)
+        const scheduleStale = isScheduleStale(job, modalMembers)
+        const applyPpdRate = (rate) => {
+          setEndDatePartsPerDay(String(rate))
+          const mins = partsPerDayToMinutes(modalRunTarget, rate)
+          if (mins !== null && start) {
+            setEndDateEditValue(toLocalDatetimeInput(new Date(start.getTime() + mins * 60000)))
+          }
+        }
         const dueShort = job.work_order?.due_date
           ? new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
           : '—'
@@ -3818,6 +3881,16 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                 Start, machine, and queue position stay fixed — only the end moves. Downstream jobs on this machine shift to match.
               </p>
 
+              {scheduleStale && (
+                <div className="mb-4 bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm flex items-start gap-2">
+                  <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    Run target changed since this schedule was saved: {(job.schedule_qty_basis || 0).toLocaleString()} → {modalRunTarget.toLocaleString()}.
+                    {endDateLiveRate ? ' Recommended end pre-filled from the current run rate — review and save, or adjust.' : ' Set a new end below.'}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-2 mb-4 text-sm">
                 <div className="flex items-center justify-between">
                   <span className="text-gray-500">Start (locked)</span>
@@ -3833,7 +3906,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       onChange={(e) => {
                         const v = e.target.value
                         setEndDatePartsPerDay(v)
-                        const mins = partsPerDayToMinutes(job.quantity, v)
+                        const mins = partsPerDayToMinutes(modalRunTarget, v)
                         if (mins !== null && start) {
                           setEndDateEditValue(toLocalDatetimeInput(new Date(start.getTime() + mins * 60000)))
                         }
@@ -3841,11 +3914,18 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       placeholder="—"
                       className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:outline-none focus:border-skynet-accent"
                     />
-                    <span className="text-gray-500 text-xs">parts / 24h day → sets end from locked start (qty {(job.quantity || 0).toLocaleString()}, +10% buffer)</span>
+                    <span className="text-gray-500 text-xs">parts / 24h day → sets end from locked start (qty {modalRunTarget.toLocaleString()}{modalMembers.length > 0 ? ` incl. ${modalMembers.length} merged` : ''}, +10% buffer)</span>
                   </div>
+                  {endDateLiveRate && (
+                    <p className="text-gray-400 text-xs mt-1 flex items-center gap-2">
+                      <span>Current run: ≈ {endDateLiveRate.rate.toLocaleString()}/day ({endDateLiveRate.pieces.toLocaleString()} pcs accepted over {formatDurationDH(Math.round(endDateLiveRate.elapsedMs / 60000))})</span>
+                      <button type="button" onClick={() => applyPpdRate(endDateLiveRate.rate)} className="px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200 rounded">Use</button>
+                    </p>
+                  )}
                   {ppdSuggestion && (
-                    <p className="text-gray-500 text-xs mt-1">
-                      History: ≈ {ppdSuggestion.rate.toLocaleString()}/day from {ppdSuggestion.runCount} completed run{ppdSuggestion.runCount === 1 ? '' : 's'}{ppdSuggestion.machineSpecific ? ' on this machine' : ' (all machines)'}
+                    <p className="text-gray-500 text-xs mt-1 flex items-center gap-2">
+                      <span>History: ≈ {ppdSuggestion.rate.toLocaleString()}/day from {ppdSuggestion.runCount} completed run{ppdSuggestion.runCount === 1 ? '' : 's'}{ppdSuggestion.machineSpecific ? ' on this machine' : ' (all machines)'}</span>
+                      <button type="button" onClick={() => applyPpdRate(ppdSuggestion.rate)} className="px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200 rounded">Use</button>
                     </p>
                   )}
                 </div>
@@ -4197,6 +4277,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       {scheduleClickJob && canEdit && (
         <ScheduleJobModal
           isOpen={!!scheduleClickJob}
+          members={mergeAllocs[scheduleClickJob?.id] || []}
           onClose={() => {
             setScheduleClickJob(null)
             setScheduleClickEditMode(false)

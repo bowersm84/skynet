@@ -2941,3 +2941,49 @@ degrade to prior behavior.
 3. PresidentsBridge assembly ratios divide through-finishing by component
    job.quantity; a merge-host component job transiently inflates the ratio
    until member shares allocate back post-compliance. Revisit if observed.
+
+### D-SCHED-16 — Stale-schedule detection via schedule_qty_basis (2026-08-19)
+**Problem:** merges (and unmerges/splits) change a run target without any
+prompt to revisit the host's end date; estimates understate combined runs,
+mis-feeding BEHIND flags and Uncle Bob.
+**Mechanism:** jobs.schedule_qty_basis records the run target each schedule
+was computed from, written by a BEFORE INSERT/UPDATE trigger whenever
+scheduled_end changes — covering both cascade RPCs, resizes, and Uncle Bob
+applies with zero client writes. Staleness is DERIVED (basis ≠ current run
+target on a scheduled job), never a flag to clear, per D-JOBMERGE-04's
+precedent. Null basis (legacy, never re-saved) reads as not stale.
+**Scheduler flow:** amber badge on stale bars; "Run target changed" section
+in the Command page Messages drawer; one click opens Adjust End Date with the
+recommendation pre-filled from the live run rate (accepted finishing over
+elapsed production time, D-SCHED-14 gates: ≥1h, >0 pcs), falling back to
+D-SCHED-13 history. Non-stale opens never auto-move anything. Both rate
+sources now carry one-click Use buttons. Saving through the normal cascade
+path records the new basis and the alert self-extinguishes.
+**Also closed:** ScheduleJobModal duration math now uses getRunTarget
+(D-JOBMERGE-19 known-remaining #1); whether the merge RPC should extend host
+estimates server-side (#2) is RESOLVED by this decision: it should not — the
+best estimate input (live rate) doesn't exist at merge time, and the
+alert-and-review flow keeps the scheduler in charge.
+**Deliberately informational:** staleness blocks nothing — the run is
+physically underway; the cost of ignoring it is a wrong estimate, which is
+what the worklist nags about.
+**Numbering:** issued as D-SCHED-16; the round brief said D-SCHED-15, which
+was already taken by Scheduling onto DOWN Machines (2026-08-19). Code comments
+in this round cite D-SCHED-16 to match.
+**Implementation notes (two deviations from the round brief, both narrow):**
+(1) The brief asserted the scheduled-jobs fetch used select('*') so
+schedule_qty_basis would arrive for free. That holds for the week-window
+fetch (which feeds the grid bars and the bar-click modal) but NOT for
+loadAllScheduledJobs, which used an explicit column list — and that is the
+array the stale worklist filters. Left alone, the Messages section and its
+badge would have been permanently empty and worklist-opened modals would
+never compute a live rate. That select now uses `*` plus its existing joins,
+matching the week-window fetch's convention in the same file: naming the new
+column explicitly would have hard-failed the whole list-view query (PostgREST
+400) on any database where the migration had not yet been applied, turning a
+dormant feature into a broken page. With `*`, a pre-migration database simply
+yields a null basis, which reads as not-stale by design. (2) Edit 2.4's target line lives in Step3Duration, a
+sibling component that does not receive the new members prop, so members is
+threaded through from ScheduleJobModal; as written the label would have
+thrown ReferenceError on Step 3 render (esbuild does not catch this — only
+lint/runtime does).

@@ -9,7 +9,7 @@ import {
   formatDurationDH, applySchedule,
   fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes
 } from '../lib/scheduling'
-import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible } from '../lib/jobMerge'
+import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible, getRunTarget } from '../lib/jobMerge'
 
 export default function ScheduleJobModal({
   isOpen,
@@ -20,6 +20,7 @@ export default function ScheduleJobModal({
   partMachineDurations,
   scheduledJobs,
   profile,
+  members = [],
   editMode = false,
   defaults = null,
   onReturnToQueue = null
@@ -108,7 +109,7 @@ export default function ScheduleJobModal({
 
   // D-SCHED-10: parts/day → duration (+10% buffer, rounded up to the hour)
   const applyPartsPerDay = (value) => {
-    const total = partsPerDayToMinutes(job?.quantity, value)
+    const total = partsPerDayToMinutes(getRunTarget(job, members), value)
     if (total === null) return
     setDurationDays(Math.floor(total / (24 * 60)))
     setDurationHours(Math.floor((total % (24 * 60)) / 60))
@@ -361,6 +362,7 @@ export default function ScheduleJobModal({
               isMachineSwapRevert={isMachineSwapRevert}
               isLateSchedule={isLateSchedule}
               dueDateDisplay={fmtDueShort(job.work_order?.due_date)}
+              members={members}
             />
           )}
         </div>
@@ -649,7 +651,8 @@ function Step3Duration({
   durationDays, setDurationDays, durationHours, setDurationHours,
   totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert,
   isLateSchedule, dueDateDisplay,
-  partsPerDay, setPartsPerDay, applyPartsPerDay, suggestedPartsPerDay
+  partsPerDay, setPartsPerDay, applyPartsPerDay, suggestedPartsPerDay,
+  members = []
 }) {
   const beforeJob = queue[insertionIndex - 1]
   const afterJob = queue[insertionIndex]
@@ -708,7 +711,7 @@ function Step3Duration({
           )}
         </div>
         <p className="text-gray-500 text-xs mt-1">
-          Duration = qty {(job.quantity || 0).toLocaleString()} ÷ parts/day, +10% buffer, rounded up to the whole hour. Estimate — adjust below if needed.
+          Duration = qty {getRunTarget(job, members).toLocaleString()}{members.length > 0 ? ` (incl. ${members.length} merged)` : ''} ÷ parts/day, +10% buffer, rounded up to the whole hour. Estimate — adjust below if needed.
         </p>
       </div>
 

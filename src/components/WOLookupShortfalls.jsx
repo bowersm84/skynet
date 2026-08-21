@@ -4,7 +4,7 @@ import {
   AlertTriangle, Loader2, CheckCircle, Package,
   ChevronDown, ChevronUp, Check, Cpu, RotateCcw
 } from 'lucide-react'
-import { getWOFulfillmentSummary } from '../lib/woFulfillment'
+import { getWOFulfillmentSummary, getWOCustomerExposure } from '../lib/woFulfillment'
 import AllocationResolutionModal from './AllocationResolutionModal'
 
 const PRIORITY_RANK = { critical: 0, high: 1, normal: 2, low: 3 }
@@ -34,12 +34,38 @@ function renderPriorityPill(priority) {
   )
 }
 
-// One-line CO impact summary like "2 of 3 CO lines short by 391".
+// One-line CO summary. D-SHORT-07: the per-line `remaining` figure is
+// ordered − fulfilled, i.e. what is AWAITING FULFILLMENT, not what the customer
+// is short. Fulfillment only posts at pending_tco (D-SHORT-05), so an open
+// shortfall always shows its full order outstanding. Labelled accordingly; the
+// exposure figure beside it is the number that means "customer is short".
 function buildImpactSummary(rows) {
   if (!rows || rows.length === 0) return 'No CO allocations on this WO'
-  const short = rows.filter(r => r.remaining > 0)
-  const totalShort = short.reduce((acc, r) => acc + r.remaining, 0)
-  return `${short.length} of ${rows.length} CO lines short by ${totalShort}`
+  const outstanding = rows.filter(r => r.remaining > 0)
+  if (outstanding.length === 0) return `${rows.length} CO line${rows.length !== 1 ? 's' : ''} · fully fulfilled`
+  const total = outstanding.reduce((acc, r) => acc + r.remaining, 0)
+  return `${outstanding.length} of ${rows.length} CO line${rows.length !== 1 ? 's' : ''} · ${total.toLocaleString()} awaiting fulfillment`
+}
+
+// Exposure chip shown next to Target/Produced. Null exposure (load failure)
+// renders as an explicit unknown rather than a false all-clear.
+function renderExposure(exp) {
+  if (!exp) return null
+  if (exp.exposure === null) {
+    return <span className="text-gray-500">Customer exposure: —</span>
+  }
+  if (exp.exposure === 0) {
+    return (
+      <span className="text-emerald-300 font-medium" title={`${exp.totalAllocated.toLocaleString()} allocated vs ${exp.projectedProduction.toLocaleString()} ${exp.isProjection ? 'projected' : 'produced'}`}>
+        No customer exposure
+      </span>
+    )
+  }
+  return (
+    <span className="text-red-300 font-medium" title={`${exp.totalAllocated.toLocaleString()} allocated vs ${exp.projectedProduction.toLocaleString()} ${exp.isProjection ? 'projected' : 'produced'}`}>
+      Customer short by {exp.exposure.toLocaleString()}{exp.isProjection ? ' (projected)' : ''}
+    </span>
+  )
 }
 
 /**
@@ -51,6 +77,7 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
   const [loading, setLoading] = useState(true)
   const [rows, setRows] = useState([])
   const [fulfillmentCache, setFulfillmentCache] = useState({}) // woId -> rows
+  const [exposureCache, setExposureCache] = useState({}) // woId -> exposure summary (D-SHORT-07)
   const [stockVariancesOpen, setStockVariancesOpen] = useState(false)
   const autoExpandedRef = useRef(false) // one-shot guard for the auto-expand below
   const [expandedRows, setExpandedRows] = useState({}) // shortfall row id -> bool
@@ -84,10 +111,17 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
       // the per-card detail table + modal). De-duplicate WO ids.
       const woIds = Array.from(new Set((data || []).map(r => r.work_order_id))).filter(Boolean)
       const next = {}
+      const nextExposure = {}
       await Promise.all(woIds.map(async woId => {
-        next[woId] = await getWOFulfillmentSummary(woId)
+        const [ful, exp] = await Promise.all([
+          getWOFulfillmentSummary(woId),
+          getWOCustomerExposure(woId),
+        ])
+        next[woId] = ful
+        nextExposure[woId] = exp
       }))
       setFulfillmentCache(prev => ({ ...prev, ...next }))
+      setExposureCache(prev => ({ ...prev, ...nextExposure }))
     } catch (err) {
       console.error('Failed to load shortfalls:', err)
     } finally {
@@ -232,7 +266,7 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
               <th className="text-left font-medium px-2 py-1">Line</th>
               <th className="text-right font-medium px-2 py-1">Ordered</th>
               <th className="text-right font-medium px-2 py-1">Fulfilled</th>
-              <th className="text-right font-medium px-2 py-1">Remaining</th>
+              <th className="text-right font-medium px-2 py-1">Awaiting</th>
               <th className="text-left font-medium px-2 py-1">Due</th>
               <th className="text-left font-medium px-2 py-1">Priority</th>
             </tr>
@@ -307,6 +341,8 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
                   const ful = fulfillmentCache[row.work_order_id]
                   const isExpanded = !!expandedRows[row.id]
                   const machineName = row.job?.assigned_machine?.name
+                  // D-SHORT-07: exposure is WO-level, read straight from the cache
+                  // in renderExposure below.
                   return (
                     <div key={row.id} className="bg-red-950/20 border border-red-800/50 rounded-lg p-3">
                       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -354,7 +390,9 @@ export default function WOLookupShortfalls({ profile, onNavigateToWO, onResolved
                           <div className="text-xs flex items-center gap-3 flex-wrap text-gray-400">
                             <span>Target: <span className="text-gray-200">{row.job_quantity}</span></span>
                             <span>Produced: <span className="text-gray-200">{row.produced_quantity}</span></span>
-                            <span className="text-red-300 font-medium">Short by {row.shortfall_quantity}</span>
+                            <span className="text-gray-300">Short by <span className="text-gray-200">{row.shortfall_quantity}</span></span>
+                            <span className="text-gray-600">·</span>
+                            {renderExposure(exposureCache[row.work_order_id])}
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-2">

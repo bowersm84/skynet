@@ -1,30 +1,16 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { X, Loader2, Printer, History, AlertTriangle } from 'lucide-react'
-import { computePartsPerDaySuggestion } from '../lib/scheduling'
+import { computePartsPerDaySuggestion, effectiveTimePerUnit } from '../lib/scheduling'
+import { PRODUCTION_DONE_STATUSES, IN_FLIGHT_STATUSES, EXCLUDED_STATUSES } from '../lib/jobs'
 
 // Most-recent jobs fetched per part. Exact count is still reported so the UI
 // and print output can flag truncation.
 const JOB_FETCH_LIMIT = 300
 
-// Machining finishes at manufacturing_complete. A job then walks finishing,
-// post-mfg review, outsourcing, assembly, and TCO before it ever reaches
-// 'complete', so production history must key off the former — gating on
-// 'complete' hides months of real runs. Mirrors fetchPartThroughputRuns in
-// lib/scheduling.js, which never filtered on status at all.
-const PRODUCTION_DONE_STATUSES = [
-  'manufacturing_complete', 'pending_passivation', 'in_passivation',
-  'pending_post_manufacturing', 'ready_for_outsourcing', 'at_external_vendor',
-  'ready_for_assembly', 'in_assembly', 'pending_tco', 'complete', 'incomplete'
-]
-
-// Still on, or headed for, a machine.
-const IN_FLIGHT_STATUSES = [
-  'pending_compliance', 'ready', 'assigned', 'in_setup', 'in_progress'
-]
-
-// Never counted in totals or rates; shown in the table with a badge.
-const EXCLUDED_STATUSES = ['cancelled', 'merged']
+// Production-history status basis and the minutes-per-piece helper are shared
+// with the scheduler's machine picker (D-SCHED-19) — see lib/jobs.js and
+// lib/scheduling.js. Do not redefine them here.
 
 const STATUS_BADGES = {
   complete: 'bg-green-900/50 text-green-300 border-green-700/50',
@@ -50,19 +36,6 @@ const piecesFor = (j) => {
   return good > 0 ? good : (j.quantity || 0)
 }
 
-// Minutes per piece for a run. Prefers the value recorded at completion; falls
-// back to the identical calculation the kiosk performs (production_start →
-// actual_end ÷ pieces) for rows that predate that write or were closed by a
-// path that left it null. Derived values are labelled in the UI and print.
-const effectiveTimePerUnit = (j) => {
-  const recorded = Number(j.time_per_unit)
-  if (recorded > 0) return { tpu: recorded, derived: false }
-  const pieces = j.good_pieces || 0
-  if (!j.production_start || !j.actual_end || pieces <= 0) return null
-  const minutes = (new Date(j.actual_end) - new Date(j.production_start)) / 60000
-  if (!(minutes > 0)) return null
-  return { tpu: minutes / pieces, derived: true }
-}
 
 // Per-run parts/day for display. Summary rates use the shared D-SCHED-13
 // weighted basis instead of averaging these.

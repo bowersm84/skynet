@@ -1,3 +1,5 @@
+import { PRODUCTION_DONE_STATUSES } from './jobs'
+
 // Order-based queue scheduling helpers — single source of truth for how
 // scheduled_start/scheduled_end propagate when a job is inserted, moved, or
 // has its duration changed. Used by ScheduleJobModal (Batch B) and the
@@ -330,6 +332,66 @@ export async function applyEndDateChange({ supabase, job, newEnd, cascadeChanges
 // History source is jobs.time_per_unit (minutes/piece, production_start →
 // actual_end, written at completion). Used by ScheduleJobModal Step 3 and the
 // Adjust End Date modal so both compute identical suggestions.
+
+// ─────────── D-SCHED-19: per-machine part history for the machine picker ───────────
+// Broader than fetchPartThroughputRuns: a completed run proves the machine can
+// make the part even when it yields no rate, so runs with no usable time_per_unit
+// still count toward capability. Same production-done basis as the Armory Part
+// History modal (D-PARTHIST-02), imported from lib/jobs.js so the two agree.
+
+// Minutes per piece for a run. Prefers the value recorded at completion; falls
+// back to the calculation the kiosk performs (production_start → actual_end ÷
+// good_pieces) for rows that predate that write or were closed by a path that
+// left it null. Lifted from PartHistoryModal so both surfaces share it.
+export function effectiveTimePerUnit(job) {
+  const recorded = Number(job?.time_per_unit)
+  if (recorded > 0) return { tpu: recorded, derived: false }
+  const pieces = job?.good_pieces || 0
+  if (!job?.production_start || !job?.actual_end || pieces <= 0) return null
+  const minutes = (new Date(job.actual_end) - new Date(job.production_start)) / 60000
+  if (!(minutes > 0)) return null
+  return { tpu: minutes / pieces, derived: true }
+}
+
+// Returns { [machineId]: { runs, pieces, rate, derived, lastRun } } for every
+// machine that has produced this part. rate is piece-weighted parts/day on the
+// same basis as computePartsPerDaySuggestion; null when no run on that machine
+// yields a usable time/unit.
+export async function fetchPartMachineHistory(supabase, componentId, excludeJobId) {
+  if (!componentId) return {}
+  const { data } = await supabase
+    .from('jobs')
+    .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end, production_start, status')
+    .eq('component_id', componentId)
+    .order('created_at', { ascending: false })
+    .limit(300)
+
+  const byMachine = {}
+  for (const j of data || []) {
+    if (!j.assigned_machine_id || j.id === excludeJobId) continue
+    if (!PRODUCTION_DONE_STATUSES.includes(j.status)) continue
+    const m = byMachine[j.assigned_machine_id] || (byMachine[j.assigned_machine_id] = {
+      runs: 0, pieces: 0, ratedPieces: 0, ratedMinutes: 0, derived: 0, lastRun: null
+    })
+    m.runs += 1
+    const pieces = (j.good_pieces > 0 ? j.good_pieces : j.quantity) || 0
+    m.pieces += pieces
+    const eff = effectiveTimePerUnit(j)
+    if (eff && pieces > 0) {
+      m.ratedPieces += pieces
+      m.ratedMinutes += pieces * eff.tpu
+      if (eff.derived) m.derived += 1
+    }
+    const end = j.actual_end ? new Date(j.actual_end) : null
+    if (end && (!m.lastRun || end > m.lastRun)) m.lastRun = end
+  }
+  for (const m of Object.values(byMachine)) {
+    m.rate = m.ratedMinutes > 0
+      ? Math.max(1, Math.round(m.ratedPieces / (m.ratedMinutes / (24 * 60))))
+      : null
+  }
+  return byMachine
+}
 
 export async function fetchPartThroughputRuns(supabase, componentId, excludeJobId) {
   if (!componentId) return []

@@ -2,12 +2,13 @@ import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   X, Loader2, AlertTriangle, ArrowLeft, ArrowRight, Star,
-  CheckCircle, Calendar as CalendarIcon, RotateCcw, Layers
+  CheckCircle, Calendar as CalendarIcon, RotateCcw, Layers, History
 } from 'lucide-react'
 import {
   getMachineQueue, isJobRunning, buildPropagatedQueue,
   formatDurationDH, applySchedule,
-  fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes
+  fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes,
+  fetchPartMachineHistory
 } from '../lib/scheduling'
 import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible, getRunTarget } from '../lib/jobMerge'
 
@@ -33,6 +34,7 @@ export default function ScheduleJobModal({
   // D-SCHED-10: parts/day duration calculator
   const [partsPerDay, setPartsPerDay] = useState('')
   const [historyRuns, setHistoryRuns] = useState([])
+  const [partMachineHistory, setPartMachineHistory] = useState({})
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
 
@@ -69,10 +71,14 @@ export default function ScheduleJobModal({
   // D-SCHED-10: completed runs for this part prove real throughput.
   // time_per_unit = minutes/piece from production_start → actual_end (written at completion).
   useEffect(() => {
-    if (!isOpen || !job?.component_id) { setHistoryRuns([]); return }
+    if (!isOpen || !job?.component_id) { setHistoryRuns([]); setPartMachineHistory({}); return }
     let cancelled = false
     fetchPartThroughputRuns(supabase, job.component_id, job?.id).then(runs => {
       if (!cancelled) setHistoryRuns(runs)
+    })
+    // D-SCHED-19: which machines have actually made this part, and how fast.
+    fetchPartMachineHistory(supabase, job.component_id, job?.id).then(byMachine => {
+      if (!cancelled) setPartMachineHistory(byMachine)
     })
     return () => { cancelled = true }
   }, [isOpen, job?.component_id, job?.id])
@@ -140,10 +146,11 @@ export default function ScheduleJobModal({
           runningJob,
           isPreferred,
           queueDepth: queue.length,
-          lastEnd: lastJob?.scheduled_end ? new Date(lastJob.scheduled_end) : null
+          lastEnd: lastJob?.scheduled_end ? new Date(lastJob.scheduled_end) : null,
+          partHistory: partMachineHistory[m.id] || null
         }
       })
-  }, [machines, scheduledJobs, job?.component_id, job?.id, partMachineDurations, editMode])
+  }, [machines, scheduledJobs, job?.component_id, job?.id, partMachineDurations, partMachineHistory, editMode])
 
   const selectedMachine = availableMachines.find(m => m.id === selectedMachineId)
 
@@ -485,7 +492,14 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
 
   return (
     <div>
-      <p className="text-gray-400 text-sm mb-4">Choose a machine for this job.</p>
+      <p className="text-gray-400 text-sm mb-4">
+        Choose a machine for this job.
+        {availableMachines.some(m => m.partHistory) && (
+          <span className="text-cyan-300/90">
+            {' '}Machines that have run this part before are marked.
+          </span>
+        )}
+      </p>
       {grouped.map((loc, li) => (
         <div key={loc.name} className={li > 0 ? 'mt-5' : ''}>
           <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold border-b border-gray-800 pb-1.5 mb-2">
@@ -521,6 +535,11 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                               <Star size={10} /> Preferred
                             </span>
                           )}
+                          {m.partHistory && (
+                            <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 border border-cyan-700/50 rounded">
+                              <History size={10} /> Ran this part
+                            </span>
+                          )}
                           {isDown && (
                             <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 border border-red-700 rounded">
                               DOWN — schedulable
@@ -540,6 +559,13 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                         <div className="text-xs text-gray-500 mt-1">
                           Last queued: {m.lastJob.component?.part_number || m.lastJob.job_number}
                           {m.lastEnd && ` · ends ${m.lastEnd.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`}
+                        </div>
+                      )}
+                      {m.partHistory && (
+                        <div className="text-xs text-cyan-300/90 mt-1">
+                          Ran this part: {m.partHistory.runs} run{m.partHistory.runs === 1 ? '' : 's'}
+                          {m.partHistory.rate != null && ` · ${m.partHistory.rate.toLocaleString()}/day`}
+                          {m.partHistory.lastRun && ` · last ${m.partHistory.lastRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
                         </div>
                       )}
                     </button>

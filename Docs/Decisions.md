@@ -2987,3 +2987,32 @@ sibling component that does not receive the new members prop, so members is
 threaded through from ScheduleJobModal; as written the label would have
 thrown ReferenceError on Step 3 render (esbuild does not catch this — only
 lint/runtime does).
+
+### D-SCHED-17 — Kiosk shows scheduled end; machinist change requests (2026-08-19)
+**What:** The Kiosk Active Job header now leads with the job's scheduled end
+(customer due date remains as a secondary line). For non-maintenance jobs the
+date is tappable and opens a Request End-Date Change modal: requested end +
+optional reason, inserted into schedule_change_requests with source='kiosk'
+and the signed-in operator as requested_by. The scheduler's existing SKY57
+Messages drawer picks it up with no scheduler-side changes — the table's
+source CHECK already permitted 'kiosk'; only the kiosk half was unbuilt.
+**Guards:** one open request per job (header shows "Change requested → date";
+the modal shows the open request instead of allowing a duplicate). Production
+jobs request rather than write — a direct scheduled_end write from the kiosk
+would bypass the downstream cascade. Maintenance jobs keep their existing
+direct Extend Duration flow, unchanged, by design.
+**Relation to D-SCHED-16:** when the scheduler applies a request through the
+normal end-date path, the schedule_qty_basis trigger records the new basis —
+the two features compose without either knowing about the other.
+**Numbering:** issued as D-SCHED-17; the round brief said D-SCHED-16, which
+this log had already assigned to stale-schedule detection. The brief's
+"Relation to D-SCHED-15" line was likewise retargeted to D-SCHED-16, since
+schedule_qty_basis landed under that number and D-SCHED-15 is Scheduling onto
+DOWN Machines.
+**Open at time of writing — RLS:** unverified from the repo, as the schema
+dump captures no policies. The kiosk clears expired JWTs and falls back to
+anon, so it is likely writing as the anon role, while schedule_change_requests
+was built for the scheduler's authenticated production-meeting flow. If the
+insert is refused, the table needs an INSERT policy covering whatever role the
+kiosk runs as, modelled on the policies already permitting kiosk writes to
+audit_logs, machine_downtime_logs, finishing_sends, and kiosk_sessions.

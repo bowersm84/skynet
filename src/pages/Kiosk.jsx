@@ -146,6 +146,12 @@ export default function Kiosk() {
   
   // Maintenance-specific state
   const [showExtendModal, setShowExtendModal] = useState(false)
+  // SKY57 kiosk side — machinist end-date change request
+  const [showEndRequestModal, setShowEndRequestModal] = useState(false)
+  const [endRequestValue, setEndRequestValue] = useState('')
+  const [endRequestNote, setEndRequestNote] = useState('')
+  const [endRequestSaving, setEndRequestSaving] = useState(false)
+  const [openEndRequest, setOpenEndRequest] = useState(null) // existing open request for the active job
   const [extendDuration, setExtendDuration] = useState({ hours: 0, minutes: 30 })
   const [maintenanceCompletionNotes, setMaintenanceCompletionNotes] = useState('')
   const [secondaryCompletionForm, setSecondaryCompletionForm] = useState({
@@ -3322,6 +3328,60 @@ export default function Kiosk() {
     }
   }
 
+  // SKY57 kiosk side — is there already an open change request for this job?
+  // Drives the "requested" state on the header and prevents duplicates.
+  useEffect(() => {
+    let cancelled = false
+    if (!activeJob?.id) { setOpenEndRequest(null); return }
+    supabase
+      .from('schedule_change_requests')
+      .select('id, requested_end, note, created_at')
+      .eq('job_id', activeJob.id)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) { console.error('Open change-request check failed:', error); return }
+        setOpenEndRequest((data || [])[0] || null)
+      })
+    return () => { cancelled = true }
+  }, [activeJob?.id])
+
+  const handleOpenEndRequest = () => {
+    if (!activeJob?.scheduled_end) return
+    setEndRequestValue(formatDateTimeLocal(new Date(activeJob.scheduled_end)))
+    setEndRequestNote('')
+    setShowEndRequestModal(true)
+  }
+
+  const handleSubmitEndRequest = async () => {
+    if (!activeJob || !endRequestValue) return
+    const requested = new Date(endRequestValue)
+    if (isNaN(requested.getTime())) { alert('Enter a valid date and time.'); return }
+    setEndRequestSaving(true)
+    try {
+      const { error } = await supabase
+        .from('schedule_change_requests')
+        .insert({
+          job_id: activeJob.id,
+          current_end: activeJob.scheduled_end || null,
+          requested_end: requested.toISOString(),
+          note: endRequestNote.trim() || null,
+          source: 'kiosk',
+          requested_by: operator?.id || null,
+        })
+      if (error) throw error
+      setOpenEndRequest({ requested_end: requested.toISOString(), note: endRequestNote.trim() || null, created_at: new Date().toISOString() })
+      setShowEndRequestModal(false)
+    } catch (err) {
+      console.error('End-date request failed:', err)
+      alert('Failed to send the request: ' + err.message)
+    } finally {
+      setEndRequestSaving(false)
+    }
+  }
+
   // Extend maintenance duration
   const handleExtendDuration = async () => {
     if (!activeJob) return
@@ -4821,8 +4881,23 @@ export default function Kiosk() {
                       })()}
                     </div>
                     <div className="text-right">
-                      <p className="text-sm text-gray-500">Due</p>
-                      <p className="text-white font-medium">{formatDate(activeJob.work_order?.due_date)}</p>
+                      <p className="text-sm text-gray-500">Sched End</p>
+                      {activeJob.scheduled_end && !isMaintenance(activeJob) ? (
+                        <button
+                          type="button"
+                          onClick={handleOpenEndRequest}
+                          title="Request an end-date change — goes to the scheduler"
+                          className="text-white font-medium underline decoration-dotted underline-offset-4 hover:text-skynet-accent transition-colors"
+                        >
+                          {formatDate(activeJob.scheduled_end)}
+                        </button>
+                      ) : (
+                        <p className="text-white font-medium">{activeJob.scheduled_end ? formatDate(activeJob.scheduled_end) : '—'}</p>
+                      )}
+                      {openEndRequest && (
+                        <p className="text-amber-400 text-xs mt-0.5">Change requested → {formatDate(openEndRequest.requested_end)}</p>
+                      )}
+                      <p className="text-gray-500 text-xs mt-0.5">Customer due {formatDate(activeJob.work_order?.due_date)}</p>
                     </div>
                   </div>
 
@@ -7464,6 +7539,66 @@ export default function Kiosk() {
       )}
 
       {/* Extend Duration Modal */}
+      {showEndRequestModal && activeJob && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 rounded-lg border border-gray-700 max-w-md w-full shadow-xl">
+            <div className="p-6 border-b border-blue-700 bg-blue-900/20">
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <Clock className="text-blue-500" size={24} />
+                Request End-Date Change
+              </h2>
+              <p className="text-gray-500 text-sm">{activeJob.job_number} · goes to the scheduler for review</p>
+            </div>
+            <div className="p-6 space-y-4">
+              {openEndRequest ? (
+                <div className="bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm">
+                  A request is already open for this job: → {formatDate(openEndRequest.requested_end)}{openEndRequest.note ? ` — "${openEndRequest.note}"` : ''}. The scheduler will review it; no duplicate needed.
+                </div>
+              ) : (
+                <>
+                  <p className="text-gray-300 text-sm">
+                    Current scheduled end: <span className="text-white font-medium">{formatDateTime(activeJob.scheduled_end)}</span>
+                  </p>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">Requested end</label>
+                    <input
+                      type="datetime-local"
+                      value={endRequestValue}
+                      onChange={(e) => setEndRequestValue(e.target.value)}
+                      className="w-full px-3 py-3 bg-gray-800 border border-gray-700 rounded text-white text-lg focus:outline-none focus:border-skynet-accent"
+                      style={{ colorScheme: 'dark' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-400 text-sm mb-1">Reason (optional)</label>
+                    <textarea
+                      value={endRequestNote}
+                      onChange={(e) => setEndRequestNote(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. tooling change cost a shift, material delay…"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="p-4 border-t border-gray-800 flex items-center justify-end gap-2">
+              <button onClick={() => setShowEndRequestModal(false)} className="px-4 py-2 text-gray-400 hover:text-white transition-colors">
+                {openEndRequest ? 'Close' : 'Cancel'}
+              </button>
+              {!openEndRequest && (
+                <button
+                  onClick={handleSubmitEndRequest}
+                  disabled={endRequestSaving || !endRequestValue}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold rounded"
+                >
+                  {endRequestSaving ? 'Sending…' : 'Send Request'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {showExtendModal && activeJob && isMaintenance(activeJob) && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
           <div className={`bg-gray-900 border rounded-lg w-full max-w-sm ${

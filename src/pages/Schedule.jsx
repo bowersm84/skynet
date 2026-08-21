@@ -442,22 +442,21 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         setScheduledJobs(scheduledData || [])
       }
 
-      // D-JOBMERGE-02: active merge allocations for every job on the board —
-      // drives host badges, run targets, and the combined-run panel. Member
+      // D-JOBMERGE-02 / D-SCHED-16 fix: ALL active merge allocations,
+      // deliberately unfiltered. This map serves consumers with different
+      // scopes — grid bars (visible week) but also the stale-schedule
+      // worklist and Adjust End Date modal (allScheduledJobs, unwindowed).
+      // Filtering to visible-week ids made getRunTarget silently degrade to
+      // bare quantity for off-window hosts via the `|| []` fallback,
+      // producing false "run target changed" alerts. Active merges are
+      // occasional (tens of rows), so the unfiltered fetch is cheap. Member
       // details come from a second query (nesting past two levels is
       // unreliable in a single select — merge client-side instead).
-      const boardIds = [
-        ...(unassignedData || []).map(j => j.id),
-        ...(scheduledData || []).map(j => j.id)
-      ]
-      if (boardIds.length === 0) {
-        setMergeAllocs({})
-      } else {
+      {
         const { data: allocRows, error: allocError } = await supabase
           .from('job_merge_allocations')
           .select('id, host_job_id, member_job_id, requested_qty')
           .eq('is_active', true)
-          .in('host_job_id', boardIds)
         if (allocError) {
           console.error('Error fetching merge allocations:', allocError)
           setMergeAllocs({})

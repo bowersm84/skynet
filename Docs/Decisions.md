@@ -3016,3 +3016,25 @@ was built for the scheduler's authenticated production-meeting flow. If the
 insert is refused, the table needs an INSERT policy covering whatever role the
 kiosk runs as, modelled on the policies already permitting kiosk writes to
 audit_logs, machine_downtime_logs, finishing_sends, and kiosk_sessions.
+
+### D-SCHED-18 — mergeAllocs is scope-complete, not window-scoped (2026-08-20)
+**Bug:** false "Run target changed" alerts for merged hosts scheduled outside
+the visible week (J-000142: displayed 3,507 → 2,000; true state 3,507 →
+3,507, not stale). mergeAllocs was fetched for visible-week boardIds, but
+D-SCHED-16's staleScheduled derives from allScheduledJobs (unwindowed);
+missing map entries degraded getRunTarget to bare quantity via the `|| []`
+fallback.
+**Fix:** the active-allocation fetch is now unfiltered — one complete map for
+every consumer (bars, popup, Adjust End Date modal, ScheduleJobModal members,
+worklist). Cheap: active merges are tens of rows.
+**Lesson (recurring class):** `|| []` / `|| 0` fallbacks convert MISSING data
+into EMPTY data silently — third instance (Sales Dashboard views, merged run
+targets on Production Display, now this). When a derived computation spans a
+wider scope than the data fetch that feeds it, the fallback manufactures a
+wrong-but-plausible answer instead of an error. Check scope alignment when
+wiring any map keyed by job id.
+**Numbering:** issued as D-SCHED-18; the round brief said D-SCHED-17, which
+this log had already assigned to the Kiosk scheduled-end / change-request
+round. The brief also referred to stale detection as D-SCHED-15; that number
+is Scheduling onto DOWN Machines, so both this entry and the new code comment
+cite D-SCHED-16, where schedule_qty_basis actually landed.

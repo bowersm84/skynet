@@ -1382,6 +1382,10 @@ function DemandView({ profile, setActionStatus }) {
     const result = Array.from(byPart.entries()).map(([partId, partLines]) => {
       const totalDemand = partLines.reduce((s, l) => s + l.remaining, 0)
       const dueDates = partLines.map(l => l.due_date).filter(Boolean).sort()
+      // D-STKREQ-02: split the group's demand so the collapsed row can show how
+      // much of it is warehouse stock rather than customer commitment.
+      const stockLines = partLines.filter(l => l.is_stock_request)
+      const stockDemand = stockLines.reduce((s, l) => s + l.remaining, 0)
       return {
         part_id: partId,
         part_number: partLines[0].part_number,
@@ -1389,6 +1393,10 @@ function DemandView({ profile, setActionStatus }) {
         part_is_active: partLines[0].part_is_active !== false,
         lines: partLines,
         total_demand: totalDemand,
+        stock_demand: stockDemand,
+        co_demand: totalDemand - stockDemand,
+        has_stock: stockLines.length > 0,
+        is_stock_only: stockLines.length === partLines.length,
         line_count: partLines.length,
         earliest_due: dueDates[0] || null,
       }
@@ -1570,12 +1578,15 @@ function DemandView({ profile, setActionStatus }) {
             return (
               <div
                 key={group.part_id}
-                className={`bg-gray-900 border rounded-lg ${
+                className={`bg-gray-900 border rounded-lg transition-shadow ${
                   isWarned
                     ? 'border-amber-600'
                     : isLockedOut
                       ? 'border-gray-800 opacity-60'
-                      : 'border-gray-800'
+                      : group.has_stock
+                        // D-STKREQ-02: warehouse demand in this group.
+                        ? 'border-amber-700/60 shadow-[0_0_16px_-4px_rgba(245,158,11,0.45)]'
+                        : 'border-gray-800'
                 }`}
               >
                 <div
@@ -1599,6 +1610,20 @@ function DemandView({ profile, setActionStatus }) {
                       <span className="font-mono font-semibold text-purple-200 truncate">
                         {group.part_number}
                       </span>
+                      {group.has_stock && (
+                        <span
+                          className="flex-shrink-0 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50 font-semibold"
+                          title={
+                            group.is_stock_only
+                              ? 'Warehouse stock request — no customer order behind this demand'
+                              : `${group.co_demand.toLocaleString()} pcs customer demand + ${group.stock_demand.toLocaleString()} pcs warehouse stock request`
+                          }
+                        >
+                          {group.is_stock_only
+                            ? 'STOCK'
+                            : `+${group.stock_demand.toLocaleString()} STOCK`}
+                        </span>
+                      )}
                       {group.part_is_active === false && (
                         <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded border border-amber-700/50">
                           Awaiting Activation

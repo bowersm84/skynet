@@ -1324,6 +1324,11 @@ const PRIORITY_BADGE = {
 }
 
 function DemandView({ profile, setActionStatus }) {
+  // D-DEMAND-01: WO creation from demand uses the same grant as Mainframe's
+  // New Work Order button (canEditSchedule, D-SCHED-11) — primary role only,
+  // deliberately, so the two surfaces can never diverge. customer_service and
+  // read-only roles keep the tab for demand visibility but cannot create.
+  const canCreateWO = ['admin', 'scheduler'].includes(profile?.role)
   const [lines, setLines] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -1751,20 +1756,22 @@ function DemandView({ profile, setActionStatus }) {
             >
               Clear
             </button>
-            <button
-              onClick={() => setShowCreateWO(true)}
-              disabled={selectedGroupInactive}
-              title={selectedGroupInactive ? 'Cannot create a work order for an inactive product. Activate the part in Armory first.' : undefined}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Plus size={16} /> Create Work Order
-            </button>
+            {canCreateWO && (
+              <button
+                onClick={() => setShowCreateWO(true)}
+                disabled={selectedGroupInactive}
+                title={selectedGroupInactive ? 'Cannot create a work order for an inactive product. Activate the part in Armory first.' : undefined}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Plus size={16} /> Create Work Order
+              </button>
+            )}
           </div>
         </div>
         )
       })()}
 
-      {showCreateWO && (
+      {showCreateWO && canCreateWO && (
         <CreateWorkOrderModal
           isOpen={showCreateWO}
           onClose={() => setShowCreateWO(false)}

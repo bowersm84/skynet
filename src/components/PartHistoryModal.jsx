@@ -231,7 +231,7 @@ export default function PartHistoryModal({ part, onClose }) {
       </table>
       <p style="font-size:11px; color:#64748b; margin-top:6px;">
         ~ rate derived from production start → completion because time/unit was not recorded on the run.
-        ${summary.noRateCount > 0 ? `${summary.noRateCount} completed run${summary.noRateCount === 1 ? '' : 's'} carry no rate at all (no production start recorded).` : ''}
+        ${summary.noRateCount === 1 ? '1 completed run carries no rate at all (no production start recorded).' : summary.noRateCount > 1 ? `${summary.noRateCount} completed runs carry no rate at all (no production start recorded).` : ''}
       </p>`
 
     const html = `<!DOCTYPE html>
@@ -370,8 +370,9 @@ export default function PartHistoryModal({ part, onClose }) {
                 <p className="text-gray-500 text-xs">
                   {summary.noRateCount > 0 && (
                     <>
-                      {summary.noRateCount} completed run{summary.noRateCount === 1 ? '' : 's'} carry no rate
-                      (no production start recorded) — these can be repaired from the kiosk job-history admin edit.
+                      {summary.noRateCount === 1
+                        ? '1 completed run carries no rate (no production start recorded) — it can be repaired from the kiosk job-history admin edit.'
+                        : `${summary.noRateCount} completed runs carry no rate (no production start recorded) — they can be repaired from the kiosk job-history admin edit.`}
                     </>
                   )}
                   {summary.noRateCount > 0 && summary.excludedCount > 0 && ' '}

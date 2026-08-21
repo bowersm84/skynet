@@ -447,10 +447,90 @@ export default function ScheduleJobModal({
 
 // ─────────── Step 1: Machine picker ───────────
 
+function MachinePickCard({ m, selected, onSelect, showPlacement }) {
+  const isDown = m.status === 'down' || m.status === 'offline'
+  return (
+    <button
+      onClick={() => onSelect(m.id)}
+      className={`w-full text-left p-3 rounded-lg border transition-all cursor-pointer ${
+        selected
+          ? 'bg-skynet-accent/10 border-skynet-accent'
+          : isDown
+            ? 'bg-red-950/20 border-red-800 hover:border-red-600'
+            : 'bg-gray-800 border-gray-700 hover:border-gray-600'
+      }`}
+    >
+      <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-white font-medium">{m.name}</span>
+          <span className="text-gray-500 text-xs font-mono">{m.code}</span>
+          {m.isPreferred && (
+            <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 bg-yellow-900/40 text-yellow-300 border border-yellow-700/50 rounded">
+              <Star size={10} /> Preferred
+            </span>
+          )}
+          {isDown && (
+            <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 border border-red-700 rounded">
+              DOWN — schedulable
+            </span>
+          )}
+        </div>
+        <span className="text-gray-500 text-xs">
+          {m.queueDepth === 0 ? 'Empty' : `${m.queueDepth} in queue`}
+        </span>
+      </div>
+      {showPlacement && (
+        <div className="text-[11px] text-gray-500 mb-1">
+          {m.location?.name || 'Unknown Location'} · {m.machine_type || 'Other'}
+        </div>
+      )}
+      {m.partHistory && (
+        <div className="text-xs text-cyan-300/90 mt-1">
+          Ran this part: {m.partHistory.runs} run{m.partHistory.runs === 1 ? '' : 's'}
+          {m.partHistory.rate != null && ` · ${m.partHistory.rate.toLocaleString()}/day`}
+          {m.partHistory.lastRun && ` · last ${m.partHistory.lastRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
+        </div>
+      )}
+      {m.runningJob && (
+        <div className="text-xs text-gray-400 mt-1">
+          <span className="text-green-400 font-bold">RUNNING</span> {m.runningJob.component?.part_number || m.runningJob.job_number}
+        </div>
+      )}
+      {m.lastJob && m.lastJob.id !== m.runningJob?.id && (
+        <div className="text-xs text-gray-500 mt-1">
+          Last queued: {m.lastJob.component?.part_number || m.lastJob.job_number}
+          {m.lastEnd && ` · ends ${m.lastEnd.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`}
+        </div>
+      )}
+    </button>
+  )
+}
+
 function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachineId }) {
+  // Machines with proven runs on this part lead the list in their own section.
+  // Run history outranks the master-data Preferred star in the scheduler's
+  // capability hierarchy, so it should not be something the scheduler has to
+  // scroll for. Proven machines are moved rather than duplicated; each card
+  // carries its location and brand inline so pulling it out of the grouped
+  // list below does not lose that context.
+  const proven = useMemo(() => {
+    return availableMachines
+      .filter(m => m.partHistory)
+      .sort((a, b) => {
+        const ra = a.partHistory.rate ?? -1
+        const rb = b.partHistory.rate ?? -1
+        if (ra !== rb) return rb - ra
+        if (a.partHistory.runs !== b.partHistory.runs) return b.partHistory.runs - a.partHistory.runs
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      })
+  }, [availableMachines])
+
+  const provenIds = useMemo(() => new Set(proven.map(m => m.id)), [proven])
+
   const grouped = useMemo(() => {
     const byLocation = {}
     for (const m of availableMachines) {
+      if (provenIds.has(m.id)) continue
       const locName = m.location?.name || 'Unknown Location'
       const brand = m.machine_type || 'Other'
       if (!byLocation[locName]) byLocation[locName] = {}
@@ -484,7 +564,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
         machines: byLocation[loc][b]
       }))
     }))
-  }, [availableMachines])
+  }, [availableMachines, provenIds])
 
   if (availableMachines.length === 0) {
     return <p className="text-gray-500 italic">No production machines available.</p>
@@ -492,14 +572,52 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
 
   return (
     <div>
-      <p className="text-gray-400 text-sm mb-4">
+      <p className="text-gray-400 text-sm mb-3">
         Choose a machine for this job.
-        {availableMachines.some(m => m.partHistory) && (
+        {proven.length > 0 && (
           <span className="text-cyan-300/90">
-            {' '}Machines that have run this part before are marked.
+            {' '}Machines that have run this part are listed first.
           </span>
         )}
       </p>
+
+      {proven.length === 0 && (
+        <p className="text-gray-500 text-xs mb-4">
+          No machine has produced this part since SkyNet went live in April 2026. Earlier runs
+          exist only on paper, so an absent history is not evidence a machine cannot make it —
+          the Preferred star reflects master-data capability.
+        </p>
+      )}
+
+      {proven.length > 0 && (
+        <div className="mb-5">
+          <div className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-cyan-300/80 font-semibold border-b border-cyan-900/50 pb-1.5 mb-2">
+            <History size={12} />
+            Has run this part
+            <span className="text-gray-500 normal-case tracking-normal font-normal">
+              ({proven.length} machine{proven.length === 1 ? '' : 's'})
+            </span>
+          </div>
+          <div className="space-y-2">
+            {proven.map(m => (
+              <MachinePickCard
+                key={m.id}
+                m={m}
+                selected={m.id === selectedMachineId}
+                onSelect={setSelectedMachineId}
+                showPlacement
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {proven.length > 0 && grouped.length > 0 && (
+        <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-3">
+          Other machines
+        </div>
+      )}
+
       {grouped.map((loc, li) => (
         <div key={loc.name} className={li > 0 ? 'mt-5' : ''}>
           <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold border-b border-gray-800 pb-1.5 mb-2">
@@ -511,66 +629,14 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                 {brand.name}
               </div>
               <div className="space-y-2">
-                {brand.machines.map(m => {
-                  const isDown = m.status === 'down' || m.status === 'offline'
-                  const selected = m.id === selectedMachineId
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => setSelectedMachineId(m.id)}
-                      className={`w-full text-left p-3 rounded-lg border transition-all cursor-pointer ${
-                        selected
-                          ? 'bg-skynet-accent/10 border-skynet-accent'
-                          : isDown
-                            ? 'bg-red-950/20 border-red-800 hover:border-red-600'
-                            : 'bg-gray-800 border-gray-700 hover:border-gray-600'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-white font-medium">{m.name}</span>
-                          <span className="text-gray-500 text-xs font-mono">{m.code}</span>
-                          {m.isPreferred && (
-                            <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 bg-yellow-900/40 text-yellow-300 border border-yellow-700/50 rounded">
-                              <Star size={10} /> Preferred
-                            </span>
-                          )}
-                          {m.partHistory && (
-                            <span className="flex items-center gap-1 text-xs px-1.5 py-0.5 bg-cyan-900/40 text-cyan-300 border border-cyan-700/50 rounded">
-                              <History size={10} /> Ran this part
-                            </span>
-                          )}
-                          {isDown && (
-                            <span className="text-xs px-1.5 py-0.5 bg-red-900/40 text-red-300 border border-red-700 rounded">
-                              DOWN — schedulable
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-gray-500 text-xs">
-                          {m.queueDepth === 0 ? 'Empty' : `${m.queueDepth} in queue`}
-                        </span>
-                      </div>
-                      {m.runningJob && (
-                        <div className="text-xs text-gray-400 mt-1">
-                          <span className="text-green-400 font-bold">RUNNING</span> {m.runningJob.component?.part_number || m.runningJob.job_number}
-                        </div>
-                      )}
-                      {m.lastJob && m.lastJob.id !== m.runningJob?.id && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          Last queued: {m.lastJob.component?.part_number || m.lastJob.job_number}
-                          {m.lastEnd && ` · ends ${m.lastEnd.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`}
-                        </div>
-                      )}
-                      {m.partHistory && (
-                        <div className="text-xs text-cyan-300/90 mt-1">
-                          Ran this part: {m.partHistory.runs} run{m.partHistory.runs === 1 ? '' : 's'}
-                          {m.partHistory.rate != null && ` · ${m.partHistory.rate.toLocaleString()}/day`}
-                          {m.partHistory.lastRun && ` · last ${m.partHistory.lastRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
-                        </div>
-                      )}
-                    </button>
-                  )
-                })}
+                {brand.machines.map(m => (
+                  <MachinePickCard
+                    key={m.id}
+                    m={m}
+                    selected={m.id === selectedMachineId}
+                    onSelect={setSelectedMachineId}
+                  />
+                ))}
               </div>
             </div>
           ))}

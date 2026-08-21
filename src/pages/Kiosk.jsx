@@ -32,7 +32,9 @@ import {
   Timer,
   Beaker,
   ExternalLink,
-  Repeat
+  Repeat,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
@@ -264,6 +266,8 @@ export default function Kiosk() {
   // Machine DOWN/Ready state (for orphaned downtimes)
   const [orphanedDowntimes, setOrphanedDowntimes] = useState([])
   const [showMachineReadyModal, setShowMachineReadyModal] = useState(false)
+  // D-DOWN-01: banner starts collapsed so it never crowds the job panel.
+  const [downBannerExpanded, setDownBannerExpanded] = useState(false)
   const [machineReadyNotes, setMachineReadyNotes] = useState('')
   const [clearingDowntime, setClearingDowntime] = useState(false)
 
@@ -780,8 +784,23 @@ export default function Kiosk() {
 
       if (error) throw error
       
+      // D-DOWN-01: machines.status, open downtime rows, and active unplanned
+      // maintenance jobs are three independent DOWN signals. Closing downtimes
+      // must not clear the machine flag while maintenance is still open — that
+      // mismatch is how a machine ends up reading 'available' while the board
+      // still shows DOWN. Check for live unplanned maintenance first.
+      const { data: liveMaint, error: maintErr } = await supabase
+        .from('jobs')
+        .select('id, work_order:work_orders(maintenance_type)')
+        .eq('assigned_machine_id', machine.id)
+        .in('status', ['pending_compliance', 'ready', 'assigned', 'in_setup', 'in_progress'])
+      if (maintErr) console.error('Error checking maintenance state:', maintErr)
+      const hasOpenUnplannedMaintenance = (liveMaint || []).some(
+        j => j.work_order?.maintenance_type === 'unplanned'
+      )
+
       // Also reset machine status if it was set to 'down'
-      if (machine.status === 'down') {
+      if (machine.status === 'down' && !hasOpenUnplannedMaintenance) {
         await supabase
           .from('machines')
           .update({ 
@@ -792,6 +811,10 @@ export default function Kiosk() {
           .eq('id', machine.id)
       }
       
+      if (machine.status === 'down' && hasOpenUnplannedMaintenance) {
+        alert('Downtime records closed. The machine stays DOWN because an unplanned maintenance job is still open — complete that job to return it to service.')
+      }
+
       // Refresh data
       await loadOrphanedDowntimes()
       await loadMachine()
@@ -4485,6 +4508,66 @@ export default function Kiosk() {
                 )}
               </div>
 
+              {/* D-DOWN-01 — Machine DOWN strip. Renders whenever the machine has
+                  open downtime rows, INCLUDING while a job is active (the old
+                  Machine Ready control lived in the no-active-job branch only,
+                  which stranded machines permanently). Deliberately slim and
+                  collapsed: the job panel below stays fully visible. */}
+              {orphanedDowntimes.length > 0 && (
+                <div className="border-b border-red-800/60 bg-red-950/40">
+                  <div className="px-4 py-2.5 flex items-center gap-3">
+                    <AlertTriangle size={16} className="text-red-400 flex-shrink-0" />
+                    <div className="flex-1 min-w-0 flex items-baseline gap-2">
+                      <span className="text-red-300 font-semibold text-sm flex-shrink-0">
+                        MACHINE DOWN
+                      </span>
+                      <span className="text-gray-400 text-sm truncate">
+                        {orphanedDowntimes[0]?.reason}
+                        {orphanedDowntimes.length > 1 && ` (+${orphanedDowntimes.length - 1} more)`}
+                        {orphanedDowntimes[0]?.start_time && ` · since ${formatDateTime(orphanedDowntimes[0].start_time)}`}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setDownBannerExpanded(v => !v)}
+                      className="flex-shrink-0 text-xs text-gray-400 hover:text-white flex items-center gap-1 px-2 py-1 rounded hover:bg-red-900/40 transition-colors"
+                    >
+                      Details
+                      {downBannerExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    </button>
+                    {canOperate && (
+                      <button
+                        onClick={() => setShowMachineReadyModal(true)}
+                        className="flex-shrink-0 px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-semibold rounded transition-colors flex items-center gap-1.5"
+                      >
+                        <CheckCircle size={14} />
+                        Machine Ready
+                      </button>
+                    )}
+                  </div>
+
+                  {downBannerExpanded && (
+                    <div className="px-4 pb-3 pt-1 border-t border-red-900/40 space-y-2">
+                      {orphanedDowntimes.map(dt => (
+                        <div key={dt.id} className="text-xs">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-red-300 font-medium">{dt.reason}</span>
+                            <span className="text-gray-500 flex-shrink-0">
+                              {formatDateTime(dt.start_time)}
+                            </span>
+                          </div>
+                          {dt.notes && <p className="text-gray-500 mt-0.5">{dt.notes}</p>}
+                        </div>
+                      ))}
+                      {isViewOnly && (
+                        <p className="text-gray-500 pt-1">
+                          Waiting for an operator to clear this status.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {activeJob ? (
                 secondaryConfig ? (
                   /* Secondary Operation Active Panel (Finishing/Paint) */
@@ -6423,6 +6506,24 @@ export default function Kiosk() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {/* D-DOWN-01: Complete Job reviews ongoing downtimes; this path never
+                  did, which stranded open rows on the machine. Informational only —
+                  a job may legitimately move on while the machine is still down. */}
+              {orphanedDowntimes.length > 0 && (
+                <div className="bg-red-900/30 border border-red-800 rounded-lg p-3">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="text-red-400 flex-shrink-0 mt-0.5" size={16} />
+                    <div className="text-sm">
+                      <p className="text-red-300 font-medium">
+                        This machine has {orphanedDowntimes.length} open downtime record{orphanedDowntimes.length > 1 ? 's' : ''}.
+                      </p>
+                      <p className="text-gray-400 text-xs mt-1">
+                        Sending this job to finishing will not close {orphanedDowntimes.length > 1 ? 'them' : 'it'}. The machine stays DOWN until cleared with Machine Ready.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
               {finishingSends.length > 0 && (() => {
                 const rollup = getFinishingSendsRollup(finishingSends)
                 return (

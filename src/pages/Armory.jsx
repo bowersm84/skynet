@@ -3336,16 +3336,15 @@ export default function Armory({ profile }) {
                             <td className="px-4 py-2 text-gray-500 font-mono">{r.lot_number || '—'}</td>
                             <td className="px-4 py-2 text-gray-500">{r.vendor}</td>
                             <td className="px-4 py-2 text-right text-gray-400">{r.received_bars}</td>
-                            <td className="px-4 py-2 text-right text-gray-400">{r.used_bars}</td>
-                            <td className={`px-4 py-2 text-right font-mono ${r.available_bars < 0 ? 'text-red-400 font-semibold' : 'text-gray-300'}`}>
-                              {r.available_bars.toFixed(1)}
-                            </td>
+                            {/* Availability is a property of the shelf, not of a receipt: bars are
+                                indistinguishable once racked, and per-receipt balances only mislead
+                                (a lot with stock on hand can show a negative receipt behind it).
+                                Receipt lines carry what is actually receipt-specific — when it
+                                landed, on what PO, how many bars, what it cost. */}
+                            <td className="px-4 py-2" colSpan={3}></td>
                             <td className="px-4 py-2 text-right font-mono text-gray-500">
-                              {`${Math.round(r.available_inches).toLocaleString()}"`}
-                            </td>
-                            <td className="px-4 py-2 text-right font-mono text-gray-500">
-                              {r.price_per_bar != null && r.available_bars > 0
-                                ? `$${(r.available_bars * r.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              {r.price_per_bar != null && r.received_bars > 0
+                                ? `$${(r.received_bars * r.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                                 : '—'}
                             </td>
                             <td className="px-4 py-2 text-center">
@@ -4061,11 +4060,44 @@ export default function Armory({ profile }) {
               || (a.lot_number || '').localeCompare(b.lot_number || '')
             )
           })()
+          // Cycle counts are taken per shelf: the counter reports how many bars of
+          // a length are sitting on the rack for a lot, not how they split across
+          // receipts — nobody re-bundles steel to match a receiving history. One
+          // input per length bucket, distributed across the receipts behind it.
+          const bucketKey = (g, len) => `bucket::${g.key}::${len}`
+          const bucketSystem = (bucket) =>
+            bucket.reduce((s, r) => s + Math.round(r.available_bars || 0), 0)
+          // FIFO consumes oldest first, so whatever is physically left came from the
+          // most recent deliveries: fill newest first, capped at what each receipt
+          // actually received, remainder riding on the newest. A negative older
+          // receipt lands on zero and is trued up as a side effect of the count.
+          const distributeCount = (bucket, counted) => {
+            const ordered = [...bucket].sort(
+              (a, b) => new Date(b.received_at || 0) - new Date(a.received_at || 0))
+            let left = Math.max(0, Math.round(counted))
+            const out = ordered.map(r => {
+              const cap = Math.max(0, Math.round(Number(r.received_bars ?? 0)))
+              const take = Math.min(left, cap)
+              left -= take
+              return { material_receiving_id: r.id, counted_bars: take }
+            })
+            if (left > 0 && out.length > 0) out[0].counted_bars += left
+            return out
+          }
           // Adjustments to existing receipts (counted differs from system).
           const existingAdjItems = countGroups.flatMap(g =>
-            [...g.four, ...g.twelve]
-              .filter(r => { const v = countInputs[r.id]; return v !== undefined && v !== '' && Number(v) !== Math.round(r.available_bars) })
-              .map(r => ({ material_receiving_id: r.id, counted_bars: Number(countInputs[r.id]) }))
+            [{ bucket: g.four, len: 48 }, { bucket: g.twelve, len: 144 }]
+              .filter(({ bucket }) => bucket.length > 0)
+              .flatMap(({ bucket, len }) => {
+                const v = countInputs[bucketKey(g, len)]
+                if (v === undefined || v === '') return []
+                const counted = Number(v)
+                if (!Number.isFinite(counted) || counted === bucketSystem(bucket)) return []
+                return distributeCount(bucket, counted).filter(item => {
+                  const r = bucket.find(x => x.id === item.material_receiving_id)
+                  return item.counted_bars !== Math.round(r?.available_bars ?? 0)
+                })
+              })
           )
           // New-length discoveries: a length with no receipt that got a count > 0.
           const newLengthEntries = countGroups.flatMap(g =>
@@ -4259,15 +4291,27 @@ export default function Armory({ profile }) {
                           </thead>
                           <tbody className="divide-y divide-gray-700">
                             {countGroups.map((g) => {
-                              const existingInput = (r) => {
-                                const sys = Math.round(r.available_bars)
-                                const v = countInputs[r.id]
+                              const bucketInput = (bucket, lenInches) => {
+                                const key = bucketKey(g, lenInches)
+                                const sys = bucketSystem(bucket)
+                                const v = countInputs[key]
                                 const hasVal = v !== undefined && v !== ''
                                 const delta = hasVal ? Number(v) - sys : null
                                 return (
-                                  <div key={r.id} className="flex items-center gap-2 justify-end">
+                                  <div className="flex items-center gap-2 justify-end">
                                     <span className="text-xs text-gray-500 font-mono">{sys}</span>
-                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [r.id]: e.target.value }))} placeholder={String(sys)} className="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="1"
+                                      value={v ?? ''}
+                                      onChange={e => setCountInputs(m => ({ ...m, [key]: e.target.value }))}
+                                      placeholder={String(sys)}
+                                      title={bucket.length > 1
+                                        ? `${bucket.length} receipts behind this shelf position — the count is spread across them, newest first`
+                                        : undefined}
+                                      className="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent"
+                                    />
                                     {delta != null && delta !== 0 && <span className={`text-xs font-mono ${delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta > 0 ? `+${delta}` : delta}</span>}
                                   </div>
                                 )
@@ -4284,7 +4328,7 @@ export default function Armory({ profile }) {
                               }
                               const lenCell = (bucket, lenInches) => (
                                 bucket.length > 0
-                                  ? <div className="space-y-1">{bucket.map(existingInput)}</div>
+                                  ? bucketInput(bucket, lenInches)
                                   : newInput(lenInches)
                               )
                               return (

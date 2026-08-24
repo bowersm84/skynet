@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet, Inbox } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
@@ -14,13 +14,14 @@ import Finishing from './pages/Finishing'
 import KitKiosk from './pages/KitKiosk'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
+import OrderQueue from './pages/OrderQueue'
 import CertRepository from './pages/CertRepository'
 import Reports from './pages/Reports'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
 import SalesDashboard from './pages/dashboards/SalesDashboard'
-import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole } from './lib/roles'
+import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole, canAccessOrderQueue } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -210,6 +211,9 @@ function MainApp() {
   // requests from the same page April works demand in. Migrated to hasRole()
   // (multi-role aware) per D-MROLE-02's "migrate opportunistically".
   const canAccessCustomerOrders = hasRole(profile, 'admin', 'scheduler', 'customer_service', 'president', 'viewer', 'assembly') || profile?.is_salesperson === true
+  // FB1 (D-FB-13): Order Queue — Fishbowl SOs awaiting disposition. Read set is broad
+  // (CS sees everything); acting is order_processor/admin, enforced inside the page and the RPCs.
+  const canAccessOrderQueueFlag = canAccessOrderQueue(profile)
 
   // Cert Repository — visible to ALL authenticated roles (read-only for most;
   // write actions gated to admin/compliance inside the page). SKY64 + SKY67.
@@ -241,11 +245,12 @@ function MainApp() {
     const blocked =
       (currentPage === 'schedule' && !canAccessSchedule) ||
       (currentPage === 'customer_orders' && !canAccessCustomerOrders) ||
+      (currentPage === 'order_queue' && !canAccessOrderQueueFlag) ||
       (currentPage === 'armory' && !canAccessArmory) ||
       (currentPage === 'certs' && !canAccessCerts) ||
       (currentPage === 'reports' && !canAccessReports)
     if (blocked) setCurrentPage('mainframe')
-  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessArmory, canAccessCerts, canAccessReports])
+  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessOrderQueueFlag, canAccessArmory, canAccessCerts, canAccessReports])
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
   const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
@@ -256,6 +261,7 @@ function MainApp() {
       case 'schedule': return 'Command'
       case 'armory': return 'Armory'
       case 'customer_orders': return 'Customer Orders'
+      case 'order_queue': return 'Order Queue'
       case 'certs': return 'Cert Repository'
       case 'reports': return 'Reports'
       default: return 'Mainframe'
@@ -366,6 +372,17 @@ function MainApp() {
               >
                 <ShoppingCart size={18} />
                 <span className="text-sm font-medium">Customer Orders</span>
+              </button>
+            )}
+
+            {/* Order Queue — Fishbowl SOs awaiting disposition (FB1). Read roles per canAccessOrderQueue. */}
+            {currentPage === 'mainframe' && canAccessOrderQueueFlag && (
+              <button
+                onClick={() => setCurrentPage('order_queue')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <Inbox size={18} />
+                <span className="text-sm font-medium">Order Queue</span>
               </button>
             )}
 
@@ -502,6 +519,9 @@ function MainApp() {
             navPayload={navPayload}
             onNavPayloadConsumed={() => setNavPayload(null)}
           />
+        )}
+        {currentPage === 'order_queue' && canAccessOrderQueueFlag && (
+          <OrderQueue profile={profile} onNavigate={handleNavigate} />
         )}
         {currentPage === 'certs' && canAccessCerts && (
           <CertRepository profile={profile} />

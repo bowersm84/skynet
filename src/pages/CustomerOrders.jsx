@@ -116,6 +116,13 @@ export default function CustomerOrders({
   // Deep link in from the notifications bell: land on My Orders with the CO
   // number pre-searched. Consume-once, same contract Mainframe uses (D-NAV-01).
   useEffect(() => {
+    // FB1: the Order Queue lands here with the CO number pre-searched on the Orders tab.
+    if (navPayload?.coSearch) {
+      setCoTab('orders')
+      setSearchQuery(navPayload.coSearch)
+      onNavPayloadConsumed?.()
+      return
+    }
     if (!navPayload?.myOrdersCO) return
     if (profile?.is_salesperson === true) {
       setCoTab('my_orders')

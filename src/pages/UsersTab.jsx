@@ -15,6 +15,12 @@ const ROLE_OPTIONS = [
   { value: 'viewer', label: 'Viewer (read-only)' },
 ]
 
+// Additional-only roles: never a primary role (profiles.role CHECK does not include them),
+// only ever added to profiles.roles[]. FB1 / D-FB-13.
+const ADDON_ONLY_ROLE_OPTIONS = [
+  { value: 'order_processor', label: 'Order Processor (Order Queue → CO)' },
+]
+
 // Additional-roles multi-select. Lists every role except the chosen primary;
 // writes an array of role keys to form.roles (persisted via manage-users -> profiles.roles).
 function AdditionalRolesPicker({ primaryRole, value, onChange }) {
@@ -22,7 +28,7 @@ function AdditionalRolesPicker({ primaryRole, value, onChange }) {
     if (value.includes(role)) onChange(value.filter(r => r !== role))
     else onChange([...value, role])
   }
-  const options = ROLE_OPTIONS.filter(r => r.value !== primaryRole)
+  const options = [...ROLE_OPTIONS, ...ADDON_ONLY_ROLE_OPTIONS].filter(r => r.value !== primaryRole)
   return (
     <div>
       <label className="block text-sm text-gray-400 mb-1">Additional Roles</label>

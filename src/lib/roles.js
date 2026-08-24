@@ -49,3 +49,18 @@ export const REPORT_EXPORT_ROLES = ['admin', 'president', 'scheduler']
 export function canExportReports(profile) {
   return hasRole(profile, ...REPORT_EXPORT_ROLES)
 }
+
+// Order Queue (FB1, D-FB-13). Read: broad visibility — Customer Service sees every
+// Fishbowl order; act (disposition, Create CO, exception ack): admin or the
+// `order_processor` ADDITIONAL role (profiles.roles[], assigned in Armory → Users).
+// `integration` is the bridge's service-account role; it has no UI.
+export const ORDER_QUEUE_READ_ROLES = ['admin', 'customer_service', 'scheduler', 'president', 'viewer', 'assembly', 'order_processor']
+
+export function canAccessOrderQueue(profile) {
+  if (!profile) return false
+  return hasRole(profile, ...ORDER_QUEUE_READ_ROLES) || profile.is_salesperson === true
+}
+
+export function canActOnOrderQueue(profile) {
+  return hasRole(profile, 'admin', 'order_processor') && !isReadOnlyRole(profile?.role)
+}

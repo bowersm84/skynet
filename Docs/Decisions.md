@@ -3124,3 +3124,65 @@ The 4 ft / 12 ft split, new-length discovery inputs, the blanks table, and the a
 Note: the printed count sheet was already per-shelf — one system total and one write-in box per length bucket per lot. The screen form was the outlier, so this change makes the two agree rather than introducing a new convention.
 
 **Numbering:** issued as D-INV-04; the round brief said D-INV-03, which the immediately preceding round in this log had taken for One Inventory Line per Lot per Shelf (Aug 24, 2026) — itself a renumber from that brief's D-INV-02. D-INV-03 was the highest in use, so this round takes 04. No correction was needed in the code: this round's comments carry no D-### citation, following the D-SCHED-20 precedent. Second consecutive D-INV round to hit this, and the sixth across the log (see D-SCHED-16 through -21); briefs are still being written against a stale view of the numbering.
+
+## Fishbowl Bridge — Round FB1 (2026-08-24)
+
+### D-FB-01 — Transport: on-prem read-only bridge, outbound only (2026-08-24)
+Fishbowl Advanced 25.9 is on-prem (192.168.1.251:2456, embedded Jetty). A Node bridge on the Fishbowl server polls the REST API (`/api/login`, `/api/data-query`, `/api/logout` only) and pushes to Supabase over outbound HTTPS. Supabase never reaches into the plant; Fishbowl is read-only for this round. Bridge code lives in `tools/fishbowl-bridge/` (own package.json, outside the Vite build, `.env` git-ignored).
+
+### D-FB-02 — Change feed is the Hibernate Envers audit (2026-08-24)
+`revinfo` (384,669 revisions, live) + `soitem_aud` / `so_aud` give an ordered change log. The bridge tails `revinfo.id` (cursor `fb_sync_state.last_rev`) every 20 s, collects the SO ids touched in the window, refetches each SO in full and diffs — `REVTYPE` is never interpreted because Fishbowl re-saves every line on SO save. A 200-revision overlap is re-read each cycle (idempotent) to cover out-of-order commits; a 15-min reconciliation sweep of open SOs by `dateLastModified` is the safety net. Only the last chunk of a window carries `rev_to`, so the cursor cannot pass un-ingested work.
+
+### D-FB-04 / D-FB-05 — Fingerprints and removals (2026-08-24)
+Fingerprint = md5 of the substantive Fishbowl JSON minus `dateLastModified`; a re-save with no content change bumps `last_synced_at` only. Lines missing from a refetched SO get `removed_at`; SOs missing from Fishbowl get `removed_at`. Nothing is hard-deleted.
+
+### D-FB-06 — Ownership split (2026-08-24)
+Fishbowl-owned columns are written only by `fb_ingest_delta`. SkyNet-owned columns (`part_id`, `kit_sku_id`, `resolution`, `disposition*`, `customer_order_line_id`, `customer_order_id`) are set by ingest only on first sight of a row; re-sync never overrides a human disposition.
+
+### D-FB-07 — Bridge identity (2026-08-24)
+Supabase Auth user `fishbowl-bridge@skybolt.com`, profile "Fishbowl Bridge", primary role `integration` (new value in the profiles role CHECK), signing in with email/password over the anon key. Every `fb_*` RPC is SECURITY DEFINER behind `_fb_gate(text[])` (NULL-uid SQL-Editor passthrough, `user_has_role(uid, VARIADIC roles)` otherwise, anon revoked). No service-role key on the plant network.
+
+### D-FB-08 / D-FB-09 — Resolution and auto-disposition (2026-08-24)
+Part key is Fishbowl `part.num` via `product.partId` (98.4% equal to `productNum`; 110 parts carry several products), case-insensitive; fallback `productNum`. Kit lines (type 80) resolve to `kit_skus.part_number`. Unresolved `SK`/`ZG`/`QL` → `unlisted_skybolt` + `pending`; other unresolved → `unlisted`; non-product line types → `ignore`; resolved purchased parts → `purchased`; everything else `pending` for Ashley. Match analysis: 94% of SkyNet parts exist in Fishbowl; 4,398 active Skybolt-prefixed Fishbowl products are not in SkyNet (SkyNet holds the routed subset by design), so an unresolved Skybolt line is the normal case, not an exception.
+
+### D-FB-10 — Due date (2026-08-24)
+`effective_due_date = COALESCE("Remaining Parts Ship Date" (customfield id 30, from soitem.customFields JSON), dateScheduledFulfillment::date in America/New_York)`. Fishbowl defaults `dateScheduledFulfillment` to the creation timestamp; a user-entered date lands at midnight, so `due_date_is_default = true` flags lines where no real date was ever entered.
+
+### D-FB-11 — Estimates never enter SkyNet (2026-08-24)
+Only Issued (20) and In Progress (25) SOs are inserted. The bridge's affected-SO query excludes `statusId = 10` and `fb_ingest_delta` skips unseen non-open SOs; an Estimate that is later Issued enters at that moment (same `so.id`). Once mirrored, every later status keeps syncing (60/70 close, 80/85/90 dead + exceptions for linked CO lines).
+
+### D-FB-12 — Quantities on Fishbowl-sourced CO lines (2026-08-24)
+`customer_order_lines.quantity_ordered` keeps its meaning (what SkyNet must produce) and is set to Fishbowl `qtyToFulfill` at conversion. Three informational columns — `fb_qty_ordered`, `fb_qty_fulfilled`, `fb_qty_to_fulfill` — are kept live by ingest so the CO row reads Ordered / Shipped (FB) / To fulfill. Demand math (`getEffectiveQty`, allocations) untouched. (`fb_convert_to_co` ships in Batch B.)
+
+### D-FB-13 — `order_processor` additional role (2026-08-24)
+New additional role `order_processor` in `profiles.roles[]` (unconstrained per D-MROLE-02). Disposition, Create CO and exception ack: `order_processor` or `admin` (Ashley = assembly + order_processor). Customer Service and the other read roles see the full queue with no write controls. UsersTab ROLE_OPTIONS gains the value in Batch B.
+
+### D-FB-14 / D-FB-15 / D-FB-16 — Propagation to linked CO lines (2026-08-24)
+Auto-applied with an event: a `qtyOrdered` change (Δ added to `quantity_ordered`; a decrease only when the new value ≥ active allocations + `quantity_fulfilled`), due-date change, customer PO change. Fishbowl fulfillment movements are never propagated into `quantity_ordered` (SkyNet posts its own fulfillment at allocation; mirroring the shipment would double-count) — they only refresh the `fb_qty_*` columns. Line removed / line status 70/75 / SO status 80/85/90 / qty below allocations → `fb_sync_events.requires_ack`; no automatic cancel in v1 (deep link to the existing cancel flow). Line status 50 / SO status 60 → informational "Shipped in Fishbowl".
+
+### D-FB-17 — Backfill = open orders only (2026-08-24)
+`statusId IN (20, 25)` at backfill time (~140 SOs). History stays in Fishbowl until a later round needs it. `fb_link_existing_cos()` then links the manual COs by `fishbowl_order_id = so.num` (line match by `part_id`, exact-qty then line-order tie-break) and reports ambiguous / unmatched.
+
+### D-FB-18 — RLS (2026-08-24)
+Six `fb_*` tables: SELECT for `authenticated`, no direct write policies; writes only via the `fb_*` RPCs (stock_requests precedent). `v_fb_order_queue` is `security_invoker`.
+
+### D-FB-20 — Inventory snapshot deferred to Batch C (2026-08-24)
+`fb_part_inventory` and `fb_users` exist from Batch A; their pollers and `fb_upsert_*` RPCs land in Batch C once `qtyinventorytotals` / `sysuser` column names are confirmed. Migration: Docs/migrations/2026-08-25_fishbowl_bridge_a.sql (TEST 2026-08-24).
+
+### FB1 Batch A closeout — field findings (2026-08-24)
+Backfill on TEST: 144 open SOs / 1,732 lines, parity exact (count + Σid). Live: new Issued SO in < 30 s; Remaining Parts Ship Date drives `effective_due_date` (stored by Fishbowl as `"2026-09-04 00:00:00"`); Estimate edits correctly never arrive. Linkage: 42 manual COs / 55 lines linked. Findings the bridge surfaced on day one: `SK2500-55W` was a typo in SkyNet's parts master (renamed to `SK2500-5SW` on TEST — repeat on PROD at cutover); CO-5596-18014 #2 says AC48 where Fishbowl says AC58 (April to check the customer PO); SO 16311 lines 9–10 carry year-206 dates in Fishbowl; 9 open SkyNet COs are already Fulfilled/Closed Short in Fishbowl (one since Dec 2025), one CO points at an Estimate (17995), one at a non-existent SO number (17873) — cleanup list for April, recomputed on PROD. Resolution mix of open lines: 874 resolved parts pending, 375 hardware auto, 201 non-product, 70/72 kits resolved, 101 (6%) unlisted Skybolt parts — R-06 closed. Plan path correction: the plan lives at Docs/Implementation_Plans/FB1_Implementation_Plan.md (D-FB-01's cite is superseded).
+
+### D-FB-21 — `covered` disposition (2026-08-24)
+A Fishbowl line whose demand is already represented by an existing CO line (a hand-keyed CO line that aggregates several SO lines — CO-7480-17982 line 1 = FB lines 2 + 25) is marked `covered`, never converted. Set by hand only. Added to the fb_sales_order_lines disposition CHECK and to v_fb_order_queue as covered_lines.
+
+### D-FB-22 — Linker tie-break (2026-08-24)
+fb_link_existing_cos v2 orders candidates by exact quantity match, then matching due date, then line order. Motivated by CO-1081-15019 (two identical 5,000-piece lines, May and November): line order alone paired the November CO line with the May SO line. Relinked by hand on TEST.
+
+### D-FB-23 — Re-resolution (2026-08-24)
+`fb_reresolve_lines()` matches unresolved open lines (`part_id IS NULL`, types 10/12) against `parts.part_number` and unresolved kit headers against `kit_skus.part_number`; a resolved purchased part auto-dispositions `purchased`, an auto-`unlisted` line becomes `pending`, human dispositions are untouched. The Order Queue calls it on mount for acting roles, so a part added in the Armory lights up its SO lines on the next visit. Gate: order_processor / admin / integration.
+
+### D-FB-24 — Suspect dates (2026-08-24)
+`effective_due_date` outside 2000–2100 flags the SO (`v_fb_order_queue.suspect_dates`, red chip on the card and the line). Fishbowl has real year-206 dates (SO 16311); the fix belongs in Fishbowl, the queue just refuses to hide it.
+
+### D-FB-25 — Batch B shape (2026-08-24)
+Order Queue page: Queue tab (any `pending` line) / All Open; search + salesperson filter; SO cards roll up v_fb_order_queue; lines load on expand. Bulk actions per SO: Ship from stock / Purchase / Covered / Ignore / Back to pending (`fb_set_disposition`) and Create CO (`fb_convert_to_co`: find-or-create the CO by `fishbowl_order_id`, `quantity_ordered = qtyToFulfill`, due = effective date, priority mapped from Fishbowl, `created_by = auth.uid()`, salesperson by username, fb_qty_* seeded). CustomerOrders accepts a `coSearch` nav payload so the queue deep-links to the CO it just made. UsersTab lists `order_processor` under Additional Roles only. Exceptions / Recent Changes tabs, the CO-page FB chips and the users/inventory pollers are Batch C. Migration: Docs/migrations/2026-08-25_fishbowl_bridge_b.sql (TEST 2026-08-24).

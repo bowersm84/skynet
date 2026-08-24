@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl, deleteDocument } from '../lib/s3'
 import {
@@ -228,6 +228,13 @@ export default function Armory({ profile }) {
   const [countMaterial, setCountMaterial] = useState('')
   const [countSize, setCountSize] = useState('')
   const [countInputs, setCountInputs] = useState({})           // { material_receiving_id: '12' }
+  // Inventory lines holding more than one receipt, expanded to show them.
+  const [expandedInvGroups, setExpandedInvGroups] = useState(() => new Set())
+  const toggleInvGroup = (id) => setExpandedInvGroups(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
   const [countReason, setCountReason] = useState('')
   const [countSubmitting, setCountSubmitting] = useState(false)
   const [countResult, setCountResult] = useState(null)
@@ -2063,6 +2070,23 @@ export default function Armory({ profile }) {
     }
   }
 
+  // Group-level rack move: every receipt behind the line shifts together. They
+  // share a rack by definition of the grouping key, so moving the line moves the
+  // physical lot.
+  const handleAssignRackGroup = async (receivingIds, newRack) => {
+    try {
+      const { error } = await supabase
+        .from('material_receiving')
+        .update({ rack: newRack || null })
+        .in('id', receivingIds)
+      if (error) throw error
+      setAssigningRack(null)
+      await loadInventory()
+    } catch (err) {
+      console.error('Failed to assign rack:', err)
+    }
+  }
+
   const handleAssignRack = async (receivingId, newRack) => {
     try {
       await supabase
@@ -2111,6 +2135,78 @@ export default function Armory({ profile }) {
         || cmpSize(a.bar_size, b.bar_size)
         || (a.lot_number || '').localeCompare(b.lot_number || '')
     })
+
+  // D-INV-03: one inventory line per (rack, material, size, length, lot). Separate
+  // receipts for the same lot on the same shelf are the same physical stock and
+  // read as duplicates. Bar length stays in the key deliberately — 48" and 144"
+  // bars of one lot are not interchangeable at the machine. Receipts are NOT
+  // merged in the database: each keeps its own PO, vendor, price, and cert, and
+  // stays reachable through the expander.
+  const groupedInventoryRows = (() => {
+    const groups = new Map()
+    for (const r of filteredInventoryRows) {
+      const key = [
+        r.rack ?? '__staging__', r.material_type, r.bar_size,
+        r.bar_length_inches ?? '__nolen__', r.lot_number ?? '__nolot__'
+      ].join('|||')
+      let g = groups.get(key)
+      if (!g) {
+        g = {
+          id: key,
+          rack: r.rack,
+          material_type: r.material_type,
+          bar_size: r.bar_size,
+          bar_length_inches: r.bar_length_inches,
+          lot_number: r.lot_number,
+          _vendors: new Set(),
+          received_bars: 0,
+          used_bars: 0,
+          available_bars: 0,
+          available_inches: 0,
+          est_value: 0,
+          doc_count: 0,
+          has_negative: false,
+          _receipts: []
+        }
+        groups.set(key, g)
+      }
+      g._vendors.add(r.vendor || '\u2014')
+      g.received_bars    += Number(r.received_bars ?? 0)
+      g.used_bars        += Number(r.used_bars ?? 0)
+      g.available_bars   += Number(r.available_bars ?? 0)
+      g.available_inches += Number(r.available_inches ?? 0)
+      // Value basis unchanged from the per-receipt view: only positive balances
+      // carry value, so a negative receipt never subtracts from the group.
+      if (r.price_per_bar != null && r.available_bars > 0) {
+        g.est_value += r.available_bars * r.price_per_bar
+      }
+      g.doc_count += materialDocCounts[r.id] || 0
+      // Netting can hide a negative receipt inside a positive group. Keep the
+      // signal (D-INV-01) so the summary strip and the row can both surface it.
+      if (Number(r.available_bars ?? 0) < 0) g.has_negative = true
+      g._receipts.push(r)
+    }
+    const out = [...groups.values()]
+    for (const g of out) {
+      g.vendor = g._vendors.size === 1 ? [...g._vendors][0] : `${g._vendors.size} vendors`
+      delete g._vendors
+      g._receipts.sort((x, y) => new Date(x.received_at || 0) - new Date(y.received_at || 0))
+    }
+    // Re-sort on group totals: sorting the receipts first would order a group by
+    // whichever receipt happened to land first.
+    return out.sort((x, y) => {
+      const dir = invSortDir === 'desc' ? -1 : 1
+      let primary = 0
+      if (invSortKey === 'available_bars') primary = (x.available_bars ?? 0) - (y.available_bars ?? 0)
+      else if (invSortKey === 'bar_size') primary = cmpSize(x.bar_size, y.bar_size)
+      else if (invSortKey === 'lot_number') primary = (x.lot_number || '').localeCompare(y.lot_number || '')
+      else primary = (x.material_type || '').localeCompare(y.material_type || '')
+      if (primary !== 0) return primary * dir
+      return (x.material_type || '').localeCompare(y.material_type || '')
+        || cmpSize(x.bar_size, y.bar_size)
+        || (x.lot_number || '').localeCompare(y.lot_number || '')
+    })
+  })()
 
   // Replenishment: total available bars per material+size across ALL lots
   // (thresholds are vendor-agnostic), the active min per group, and below-min count.
@@ -3039,11 +3135,13 @@ export default function Armory({ profile }) {
 
             {/* Summary strip */}
             {(() => {
-              const totalLots = filteredInventoryRows.length
-              const stagingCount = filteredInventoryRows.filter(r => r.rack === null).length
-              const lowCount = filteredInventoryRows.filter(r => r.available_bars > 0 && r.available_bars <= LOW_STOCK_BAR_THRESHOLD).length
-              const outCount = filteredInventoryRows.filter(r => r.available_bars === 0).length
-              const negCount = filteredInventoryRows.filter(r => r.available_bars < 0).length
+              const totalLots = groupedInventoryRows.length
+              const stagingCount = groupedInventoryRows.filter(r => r.rack === null).length
+              const lowCount = groupedInventoryRows.filter(r => r.available_bars > 0 && r.available_bars <= LOW_STOCK_BAR_THRESHOLD).length
+              const outCount = groupedInventoryRows.filter(r => r.available_bars === 0).length
+              // A group whose receipts net positive can still contain a negative
+              // one. Count those too, or grouping silently retires the signal.
+              const negCount = groupedInventoryRows.filter(r => r.available_bars < 0 || r.has_negative).length
               // Net available bars across the filtered lots. Negatives are included
               // deliberately: the subtotal must reconcile with the forecast's ON HAND,
               // which nets them too (D-INV-01).
@@ -3076,7 +3174,7 @@ export default function Armory({ profile }) {
             })()}
 
             {/* Lot-level table (By Lot view) */}
-            {invViewMode === 'lot' && (filteredInventoryRows.length === 0 ? (
+            {invViewMode === 'lot' && (groupedInventoryRows.length === 0 ? (
               <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
                 <BarChart2 size={48} className="mx-auto text-gray-600 mb-3" />
                 <p className="text-gray-400">No inventory records found.</p>
@@ -3122,15 +3220,18 @@ export default function Armory({ profile }) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-700">
-                    {filteredInventoryRows.map(row => {
-                      const isOut = row.available_bars === 0
-                      const isLow = row.available_bars > 0 && row.available_bars <= LOW_STOCK_BAR_THRESHOLD
-                      const isNeg = row.available_bars < 0
-                      const isStaging = row.rack === null
-                      const hasBarLength = row.bar_length_inches > 0
+                    {groupedInventoryRows.map(group => {
+                      const isOut = group.available_bars === 0
+                      const isLow = group.available_bars > 0 && group.available_bars <= LOW_STOCK_BAR_THRESHOLD
+                      const isNeg = group.available_bars < 0
+                      const isStaging = group.rack === null
+                      const hasBarLength = group.bar_length_inches > 0
+                      const multi = group._receipts.length > 1
+                      const expanded = expandedInvGroups.has(group.id)
+                      const only = group._receipts[0]
                       return (
+                        <Fragment key={group.id}>
                         <tr
-                          key={row.id}
                           className={`transition-colors ${
                             isOut ? 'bg-red-900/40' : isLow ? 'bg-amber-900/40' : 'bg-gray-900 hover:bg-gray-800'
                           } ${isStaging ? 'border-l-2 border-l-amber-600' : ''}`}
@@ -3139,42 +3240,65 @@ export default function Armory({ profile }) {
                             {isStaging ? (
                               <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>
                             ) : (
-                              <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack}</span>
+                              <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{group.rack}</span>
                             )}
                           </td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.bar_size}</td>
-                          <td className={`px-4 py-3 font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
-                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.received_bars}</td>
-                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.used_bars}</td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.material_type}</td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.bar_size}</td>
+                          <td className={`px-4 py-3 font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
+                            <span className="inline-flex items-center gap-1.5">
+                              {group.lot_number || '—'}
+                              {multi && (
+                                <button
+                                  onClick={() => toggleInvGroup(group.id)}
+                                  className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-300 hover:text-white rounded font-sans"
+                                  title={`${group._receipts.length} receipts on this shelf — show them`}
+                                >
+                                  {group._receipts.length} receipts
+                                  {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                                </button>
+                              )}
+                            </span>
+                          </td>
+                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.vendor}</td>
+                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.received_bars}</td>
+                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.used_bars}</td>
                           <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
-                            {hasBarLength ? row.available_bars.toFixed(1) : '—'}
+                            <span className="inline-flex items-center gap-1 justify-end">
+                              {group.has_negative && !isNeg && (
+                                <AlertTriangle
+                                  size={12}
+                                  className="text-red-400"
+                                  title="One of the receipts behind this line is negative — expand to see which"
+                                />
+                              )}
+                              {hasBarLength ? group.available_bars.toFixed(1) : '—'}
+                            </span>
                           </td>
                           <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
-                            {hasBarLength ? `${Math.round(row.available_inches).toLocaleString()}"` : '—'}
+                            {hasBarLength ? `${Math.round(group.available_inches).toLocaleString()}"` : '—'}
                           </td>
                           <td className="px-4 py-3 text-right font-mono text-gray-300">
-                            {row.price_per_bar != null && row.available_bars > 0
-                              ? `$${(row.available_bars * row.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                            {group.est_value > 0
+                              ? `$${group.est_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                               : '—'}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <button
-                              onClick={() => openLotDocs(row)}
-                              className={`inline-flex items-center gap-1 hover:text-skynet-accent ${materialDocCounts[row.id] > 0 ? 'text-skynet-accent' : 'text-gray-600'}`}
-                              title="Lot documents"
+                              onClick={() => (multi ? toggleInvGroup(group.id) : openLotDocs(only))}
+                              className={`inline-flex items-center gap-1 hover:text-skynet-accent ${group.doc_count > 0 ? 'text-skynet-accent' : 'text-gray-600'}`}
+                              title={multi ? 'Certs live on each receipt — expand to open them' : 'Lot documents'}
                             >
                               <Paperclip size={14} />
-                              <span className="text-xs">{materialDocCounts[row.id] || 0}</span>
+                              <span className="text-xs">{group.doc_count}</span>
                             </button>
                           </td>
                           <td className="px-4 py-3 text-center">
-                            {assigningRack === row.id ? (
+                            {assigningRack === group.id ? (
                               <div className="flex items-center gap-1 justify-center">
                                 <select
-                                  value={row.rack || ''}
-                                  onChange={e => handleAssignRack(row.id, e.target.value)}
+                                  value={group.rack || ''}
+                                  onChange={e => handleAssignRackGroup(group._receipts.map(r => r.id), e.target.value)}
                                   className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs focus:outline-none"
                                 >
                                   <option value="">Staging</option>
@@ -3193,14 +3317,51 @@ export default function Armory({ profile }) {
                               </div>
                             ) : (
                               <button
-                                onClick={() => setAssigningRack(row.id)}
+                                onClick={() => setAssigningRack(group.id)}
                                 className="text-xs px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+                                title={multi ? `Move all ${group._receipts.length} receipts to another rack` : 'Assign rack'}
                               >
                                 <Edit2 size={12} />
                               </button>
                             )}
                           </td>
                         </tr>
+                        {multi && expanded && group._receipts.map(r => (
+                          <tr key={r.id} className="bg-gray-950/60 text-xs">
+                            <td className="px-4 py-2"></td>
+                            <td className="px-4 py-2 text-gray-500" colSpan={2}>
+                              Received {r.received_at ? new Date(r.received_at).toLocaleDateString() : '—'}
+                              {r.po_number ? ` · PO ${r.po_number}` : ''}
+                            </td>
+                            <td className="px-4 py-2 text-gray-500 font-mono">{r.lot_number || '—'}</td>
+                            <td className="px-4 py-2 text-gray-500">{r.vendor}</td>
+                            <td className="px-4 py-2 text-right text-gray-400">{r.received_bars}</td>
+                            <td className="px-4 py-2 text-right text-gray-400">{r.used_bars}</td>
+                            <td className={`px-4 py-2 text-right font-mono ${r.available_bars < 0 ? 'text-red-400 font-semibold' : 'text-gray-300'}`}>
+                              {r.available_bars.toFixed(1)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-gray-500">
+                              {`${Math.round(r.available_inches).toLocaleString()}"`}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-gray-500">
+                              {r.price_per_bar != null && r.available_bars > 0
+                                ? `$${(r.available_bars * r.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-center">
+                              <button
+                                onClick={() => openLotDocs(r)}
+                                className={`inline-flex items-center gap-1 hover:text-skynet-accent ${materialDocCounts[r.id] > 0 ? 'text-skynet-accent' : 'text-gray-600'}`}
+                                title="Receipt documents"
+                              >
+                                <Paperclip size={12} />
+                                <span>{materialDocCounts[r.id] || 0}</span>
+                              </button>
+                            </td>
+                            <td className="px-4 py-2"></td>
+                          </tr>
+                        ))}
+                        </Fragment>
                       )
                     })}
                   </tbody>

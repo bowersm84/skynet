@@ -579,7 +579,11 @@ export default function Armory({ profile }) {
     try {
       const { data, error } = await supabase
         .from('inventory_adjustment_requests')
-        .select('*, requester:requested_by(full_name), reviewer:reviewed_by(full_name)')
+        // D-INV-05: bar length is not on the adjustment row — join it from the
+        // source receipt so 144" and 48" lines of the same lot are tellable
+        // apart. Read-time join rather than a denormalized column so historical
+        // sessions gain the length too.
+        .select('*, requester:requested_by(full_name), reviewer:reviewed_by(full_name), receipt:material_receiving_id(bar_length_inches, rack, category)')
         .order('requested_at', { ascending: false })
       if (error) throw error
       setAdjustments(data || [])
@@ -4441,7 +4445,7 @@ export default function Armory({ profile }) {
                                     <thead className="bg-gray-800 text-gray-400 uppercase text-xs">
                                       <tr>
                                         <th className="px-3 py-2 text-left">Material</th>
-                                        <th className="px-3 py-2 text-left">Size</th>
+                                        <th className="px-3 py-2 text-left">Size / Length</th>
                                         <th className="px-3 py-2 text-left">Lot #</th>
                                         <th className="px-3 py-2 text-right">System</th>
                                         <th className="px-3 py-2 text-right">Counted</th>
@@ -4455,7 +4459,15 @@ export default function Armory({ profile }) {
                                       {s.lines.map(l => (
                                         <tr key={l.id} className="bg-gray-900">
                                           <td className="px-3 py-2 text-gray-300">{l.material_type || '—'}</td>
-                                          <td className="px-3 py-2 text-gray-300">{l.bar_size || '—'}</td>
+                                          <td className="px-3 py-2 text-gray-300">
+                                            {l.bar_size || '—'}
+                                            {/* D-INV-05: length disambiguates same-lot rows (144" vs 48"). */}
+                                            {l.receipt?.bar_length_inches != null && (
+                                              <span className="ml-1.5 text-xs px-1.5 py-0.5 rounded bg-sky-900/40 text-sky-300 border border-sky-800/60 font-mono">
+                                                {Number(l.receipt.bar_length_inches)}"
+                                              </span>
+                                            )}
+                                          </td>
                                           <td className="px-3 py-2 font-mono text-gray-300">{l.lot_number || '—'}</td>
                                           <td className="px-3 py-2 text-right font-mono text-gray-400">{Number(l.system_bars_at_count)}</td>
                                           <td className="px-3 py-2 text-right font-mono text-gray-200">{Number(l.counted_bars)}</td>

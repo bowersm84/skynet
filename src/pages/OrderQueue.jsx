@@ -137,9 +137,14 @@ export default function OrderQueue({ profile, onNavigate }) {
     setConvertTarget(null)
     if (!order) return
     const skipped = Array.isArray(result?.skipped) ? result.skipped.length : 0
+    const created = Number(result?.lines_created || 0)
+    const added = Number(result?.lines_added || 0)
+    const parts = []
+    if (created) parts.push(`${created} new line${created === 1 ? '' : 's'}`)
+    if (added) parts.push(`added to ${added} existing line${added === 1 ? '' : 's'}`)
     setActionStatus({
       type: 'success',
-      message: `${result?.created ? 'Created' : 'Appended to'} ${result?.co_number}: ${result?.lines_created} line${result?.lines_created === 1 ? '' : 's'}${skipped ? ` (${skipped} skipped)` : ''}.`,
+      message: `${result?.created ? 'Created' : 'Updated'} ${result?.co_number}: ${parts.join(', ') || 'no change'}${skipped ? ` (${skipped} skipped)` : ''}.`,
       coNumber: result?.co_number,
     })
     setSelectionFor(order.fb_so_id, new Set())

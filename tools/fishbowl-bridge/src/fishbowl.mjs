@@ -11,6 +11,13 @@ export class FishbowlError extends Error {
   }
 }
 
+// Fishbowl occasionally emits a description byte that is not valid UTF-8 (a cp1252 ® for example).
+// Decode strictly first; if that fails, fall back to latin1 so the character survives instead of becoming U+FFFD.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true })
+function decodeBody(buf) {
+  try { return strictUtf8.decode(buf) } catch { return buf.toString('latin1') }
+}
+
 export class Fishbowl {
   constructor(cfg, log) {
     this.cfg = cfg
@@ -23,10 +30,9 @@ export class Fishbowl {
     return new Promise((resolve, reject) => {
       if (body !== undefined) headers['Content-Length'] = Buffer.byteLength(body)
       const req = http.request({ host, port, method, path, headers, timeout: timeoutMs }, (res) => {
-        let data = ''
-        res.setEncoding('utf8')
-        res.on('data', (c) => { data += c })
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }))
+        const chunks = []
+        res.on('data', (c) => { chunks.push(c) })
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: decodeBody(Buffer.concat(chunks)) }))
       })
       req.on('timeout', () => req.destroy(new Error(`Fishbowl request timed out after ${timeoutMs} ms (${method} ${path})`)))
       req.on('error', reject)

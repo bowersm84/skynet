@@ -31,6 +31,9 @@ export const q = {
     WHERE i.soId IN (${idList(ids)})
     ORDER BY i.soId, i.soLineItem`,
 
+  // Kit definitions for the kit products on a batch of SOs (D-FB-29). kitItemTypeId 10 = product component.
+  kitItems: (productIds) => `SELECT kitProductId, productId, kitItemTypeId FROM kititem WHERE kitProductId IN (${idList(productIds)})`,
+
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',
   statusOf: (ids) => `SELECT id, statusId, dateLastModified FROM so WHERE id IN (${idList(ids)})`,

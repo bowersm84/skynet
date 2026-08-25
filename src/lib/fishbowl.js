@@ -43,6 +43,7 @@ export const DISPOSITION_LABELS = {
   stock: 'Ship from stock',
   purchased: 'Purchase',
   covered: 'Covered by CO',
+  assembly: 'Assembly',
   kit_header: 'Kit',
   ignore: 'Ignore',
   unlisted: 'Not produced',
@@ -53,6 +54,7 @@ export const DISPOSITION_COLORS = {
   stock: 'bg-green-900/40 text-green-300 border-green-800',
   purchased: 'bg-blue-900/40 text-blue-300 border-blue-800',
   covered: 'bg-gray-800 text-gray-300 border-gray-600',
+  assembly: 'bg-cyan-900/40 text-cyan-300 border-cyan-800',
   kit_header: 'bg-gray-800 text-gray-400 border-gray-700',
   ignore: 'bg-gray-800 text-gray-500 border-gray-700',
   unlisted: 'bg-gray-800 text-gray-500 border-gray-700',
@@ -61,6 +63,7 @@ export const DISPOSITION_COLORS = {
 export const MANUAL_DISPOSITIONS = [
   { value: 'stock', label: 'Ship from stock' },
   { value: 'purchased', label: 'Purchase' },
+  { value: 'assembly', label: 'Assembly' },
   { value: 'covered', label: 'Covered by existing CO' },
   { value: 'ignore', label: 'Ignore' },
   { value: 'pending', label: 'Back to pending' },
@@ -110,6 +113,14 @@ export function formatDateTime(ts) {
   return dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
+// Fishbowl header dates (dateCreated / dateIssued) are midnight-local timestamps; show the local calendar day.
+export function formatTsDateShort(ts) {
+  if (!ts) return '—'
+  const dt = new Date(ts)
+  if (Number.isNaN(dt.getTime())) return String(ts)
+  return `${dt.getMonth() + 1}/${dt.getDate()}/${String(dt.getFullYear()).slice(-2)}`
+}
+
 // ── Bridge freshness (heartbeat every ~20 s; amber > 2 min, red > 10 min) ───
 export function formatAge(sec) {
   if (sec === null || sec === undefined) return '—'
@@ -151,6 +162,7 @@ export function convertBlocker(line) {
   if (line.customer_order_line_id) return 'already linked to a CO line'
   if (!PRODUCT_LINE_TYPES.includes(line.type_id)) return 'not a product line'
   if (!line.part_id) return 'part not in SkyNet'
+  if (line.part && line.part.is_active === false) return 'part inactive in SkyNet — reactivate in Armory'
   if (FB_CLOSED_LINE_STATUSES.includes(line.status_id)) return 'closed in Fishbowl'
   if (coQtyForLine(line) <= 0) return 'nothing left to fulfill'
   return null
@@ -158,6 +170,46 @@ export function convertBlocker(line) {
 
 export function displayPartNumber(line) {
   return line.part?.part_number || line.part_num || line.product_num || '—'
+}
+
+// Kit structure for display (D-FB-29): children sit under their kit header, labelled 1a, 1b …
+// Returns [{ line, depth, label, childCount }] in render order.
+export function buildKitTree(lines) {
+  const byParent = new Map()
+  for (const l of lines) {
+    if (l.parent_fb_soitem_id) {
+      if (!byParent.has(l.parent_fb_soitem_id)) byParent.set(l.parent_fb_soitem_id, [])
+      byParent.get(l.parent_fb_soitem_id).push(l)
+    }
+  }
+  const ids = new Set(lines.map((l) => l.fb_soitem_id))
+  const out = []
+  for (const l of lines) {
+    if (l.parent_fb_soitem_id && ids.has(l.parent_fb_soitem_id)) continue // rendered under its header
+    const children = byParent.get(l.fb_soitem_id) || []
+    out.push({ line: l, depth: 0, label: String(l.line_number), childCount: children.length })
+    children.forEach((c, i) => {
+      out.push({ line: c, depth: 1, label: `${l.line_number}${String.fromCharCode(97 + (i % 26))}${i >= 26 ? Math.floor(i / 26) : ''}`, childCount: 0 })
+    })
+  }
+  return out
+}
+
+// One CO line per part (D-FB-26): what a conversion of these lines would produce.
+export function groupLinesByPart(lines) {
+  const groups = new Map()
+  for (const l of lines) {
+    const key = l.part_id || `nopart:${l.fb_soitem_id}`
+    if (!groups.has(key)) {
+      groups.set(key, { key, part_id: l.part_id, part_number: displayPartNumber(l), lines: [], qty: 0, due: null, hasDefaultDate: false })
+    }
+    const g = groups.get(key)
+    g.lines.push(l)
+    g.qty += coQtyForLine(l)
+    if (l.effective_due_date && (!g.due || l.effective_due_date < g.due)) g.due = l.effective_due_date
+    if (l.due_date_is_default) g.hasDefaultDate = true
+  }
+  return [...groups.values()]
 }
 
 // ── Data access ────────────────────────────────────────────────────────────
@@ -172,7 +224,7 @@ export async function getQueueOrders() {
     .from('v_fb_order_queue')
     .select('*')
     .in('status_id', OPEN_SO_STATUSES)
-    .order('earliest_due', { ascending: true, nullsFirst: false })
+    .order('fb_date_created', { ascending: true, nullsFirst: false })
     .order('so_number', { ascending: true })
   if (error) throw error
   return data || []
@@ -182,7 +234,7 @@ const LINE_SELECT = `
   fb_soitem_id, fb_so_id, line_number, type_id, status_id, product_num, part_num, description,
   qty_ordered, qty_fulfilled, qty_to_fulfill, effective_due_date, due_date_is_default, remaining_parts_ship_date,
   customer_part_num, rev_level, resolution, disposition, disposition_at, disposition_note,
-  part_id, kit_sku_id, customer_order_line_id, removed_at,
+  part_id, kit_sku_id, customer_order_line_id, removed_at, parent_fb_soitem_id,
   part:parts(part_number, part_type, is_active),
   kit:kit_skus(part_number),
   co_line:customer_order_lines(line_number, status, quantity_ordered, customer_order:customer_orders(co_number)),
@@ -209,8 +261,23 @@ export async function setDisposition(lineIds, disposition, note) {
   return data
 }
 
-export async function convertToCO(fbSoId, lineIds) {
-  const { data, error } = await supabase.rpc('fb_convert_to_co', { p_fb_so_id: fbSoId, p_line_ids: lineIds })
+// components: { [part_id]: 'Components Needed text' } — required by the RPC for every NEW CO line (D-FB-27).
+export async function convertToCO(fbSoId, lineIds, components = {}) {
+  const { data, error } = await supabase.rpc('fb_convert_to_co', {
+    p_fb_so_id: fbSoId, p_line_ids: lineIds, p_components: components,
+  })
+  if (error) throw error
+  return data
+}
+
+// The CO a conversion would append to, with its open lines, so the modal can say "adds to line #n".
+export async function getCOSummary(customerOrderId) {
+  if (!customerOrderId) return null
+  const { data, error } = await supabase
+    .from('customer_orders')
+    .select('id, co_number, status, po_number, created_at, customer_order_lines(id, line_number, part_id, status, quantity_ordered, components_needed)')
+    .eq('id', customerOrderId)
+    .maybeSingle()
   if (error) throw error
   return data
 }

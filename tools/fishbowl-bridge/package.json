@@ -1,10 +1,12 @@
 {
   "name": "skynet-fishbowl-bridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Fishbowl -> SkyNet sales order bridge (read-only against Fishbowl)",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node src/index.mjs",
     "once": "node src/index.mjs --once",

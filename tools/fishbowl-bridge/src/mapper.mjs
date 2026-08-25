@@ -90,7 +90,35 @@ export function mapLine(r) {
     note: r.note ?? null,
     customFields: jsonObj(r.customFields),
     dateLastModified: ts(r.dateLastModified),
+    parentId: null, // set by tagKitChildren() in sync.mjs (D-FB-29)
   }
+}
+
+// D-FB-29: Fishbowl explodes a kit into its header line (typeId 80) followed by component lines with
+// no parent link. Using the kit definition (kititem), tag each component that follows a kit header and
+// belongs to that kit's product set until the set is used up or the next kit header starts.
+// kitDefs: Map(kitProductId -> Map(componentProductId -> count)). Mutates line.parentId; returns tagged count.
+export function tagKitChildren(lines, kitDefs) {
+  let tagged = 0
+  let current = null
+  let expected = null
+  const sorted = [...lines].sort((a, b) => (a.soLineItem ?? 0) - (b.soLineItem ?? 0))
+  for (const l of sorted) {
+    if (l.typeId === 80) {
+      current = l
+      const def = kitDefs.get(l.productId)
+      expected = def ? new Map(def) : new Map()
+      continue
+    }
+    if (!current || !expected || !(l.typeId === 10 || l.typeId === 12)) continue
+    const left = expected.get(l.productId) || 0
+    if (left > 0) {
+      l.parentId = current.id
+      expected.set(l.productId, left - 1)
+      tagged++
+    }
+  }
+  return tagged
 }
 
 // Groups header + line rows into the orders[] array the RPC consumes. revById: Map(soId -> {rev, userId, ts})

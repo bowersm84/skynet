@@ -4,7 +4,7 @@ import {
   FB_SO_STATUS, FB_SO_STATUS_COLORS, FB_LINE_STATUS, FB_LINE_TYPE, FB_PRIORITY, FB_PRIORITY_COLORS,
   DISPOSITION_LABELS, DISPOSITION_COLORS, RESOLUTION_LABELS, RESOLUTION_COLORS, MANUAL_DISPOSITIONS,
   PRODUCT_LINE_TYPES, formatDate, formatDateShort, formatDateTime, isSuspectDate, isSelectableLine, convertBlocker,
-  coQtyForLine, displayPartNumber,
+  coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort,
 } from '../../lib/fishbowl'
 
 function Chip({ className = '', children, title }) {
@@ -35,10 +35,11 @@ export default function SOCard({
     [lines, selected],
   )
   const convertibleSelected = selectedLines.filter((l) => !convertBlocker(l))
+  // D-FB-29: kit components render indented under their kit header, labelled 1a, 1b …
+  const tree = useMemo(() => buildKitTree(lines || []), [lines])
   const allSelected = selectableLines.length > 0 && selectableLines.every((l) => selected.has(l.fb_soitem_id))
 
   const suspect = order.suspect_dates
-  const dueClass = suspect ? 'text-red-300' : order.earliest_due && order.earliest_due < new Date().toISOString().slice(0, 10) ? 'text-amber-300' : 'text-gray-200'
 
   return (
     <div className={`bg-gray-900 rounded-lg border ${order.pending_lines > 0 ? 'border-amber-900/60' : 'border-gray-800'} overflow-hidden`}>
@@ -60,9 +61,8 @@ export default function SOCard({
         {order.priority_id && order.priority_id !== 30 && (
           <span className={`text-xs ${FB_PRIORITY_COLORS[order.priority_id] || 'text-gray-500'}`}>{FB_PRIORITY[order.priority_id]}</span>
         )}
-        <span className={`font-mono text-xs w-20 text-right flex-shrink-0 ${dueClass}`} title="Earliest effective due date">
-          {formatDateShort(order.earliest_due)}
-          {order.has_default_dates && <span className="text-amber-400" title="Some lines have no real date entered">*</span>}
+        <span className="font-mono text-xs flex-shrink-0 text-gray-400 whitespace-nowrap" title="Date the sales order was entered in Fishbowl">
+          <span className="text-gray-600 mr-1">Entered</span>{formatTsDateShort(order.fb_date_created)}
         </span>
         <div className="flex items-center gap-1 flex-shrink-0">
           {suspect && <Chip className="bg-red-900/40 text-red-300 border-red-800" title="A line carries an impossible year — fix it in Fishbowl"><AlertTriangle size={11} /></Chip>}
@@ -71,6 +71,7 @@ export default function SOCard({
           <CountChip n={order.stock_lines} label="stock" className={DISPOSITION_COLORS.stock} />
           <CountChip n={order.purchased_lines} label="buy" className={DISPOSITION_COLORS.purchased} />
           <CountChip n={order.covered_lines} label="covered" className={DISPOSITION_COLORS.covered} />
+          <CountChip n={order.assembly_lines} label="assy" className={DISPOSITION_COLORS.assembly} />
           {order.open_exceptions > 0 && (
             <Chip className="bg-red-900/40 text-red-300 border-red-800">{order.open_exceptions} exception{order.open_exceptions === 1 ? '' : 's'}</Chip>
           )}
@@ -124,7 +125,7 @@ export default function SOCard({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {lines.map((l) => {
+                  {tree.map(({ line: l, depth, label, childCount }) => {
                     const isProduct = PRODUCT_LINE_TYPES.includes(l.type_id)
                     const selectable = isSelectableLine(l)
                     const muted = !isProduct && l.type_id !== 80
@@ -143,11 +144,12 @@ export default function SOCard({
                             )}
                           </td>
                         )}
-                        <td className="px-2 py-2 font-mono text-xs text-gray-500">{l.line_number}</td>
+                        <td className={`px-2 py-2 font-mono text-xs ${depth ? 'text-gray-600 text-right' : 'text-gray-500'}`}>{label}</td>
                         <td className="px-2 py-2">
-                          <div className="flex items-center gap-2 flex-wrap">
+                          <div className={`flex items-center gap-2 flex-wrap ${depth ? 'pl-6 border-l border-gray-800' : ''}`}>
                             <span className={`font-mono ${muted ? '' : 'text-gray-200'}`}>{displayPartNumber(l)}</span>
                             {l.type_id === 80 && <Chip className="bg-gray-800 text-purple-300 border-purple-900">Kit</Chip>}
+                            {l.type_id === 80 && childCount > 0 && <span className="text-xs text-gray-500">{childCount} component{childCount === 1 ? '' : 's'}</span>}
                             {l.type_id === 12 && <Chip className="bg-gray-800 text-gray-400 border-gray-700">Drop ship</Chip>}
                             {muted && <span className="text-xs">{FB_LINE_TYPE[l.type_id] || l.type_id}</span>}
                             {!muted && l.resolution && RESOLUTION_LABELS[l.resolution] && (

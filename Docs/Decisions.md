@@ -3190,3 +3190,27 @@ Order Queue page: Queue tab (any `pending` line) / All Open; search + salesperso
 ## D-INV-05 — Bar length on the inventory adjustment review screen (Aug 25, 2026)
 
 The adjustment review table rendered material, size, and lot but not bar length, so a session touching both the 144" bar and the 48" stub of one lot produced two visually identical rows — observed in PROD on lot 2629, where a -1 on the 144" and a +2 on the 48" were indistinguishable on the screen whose only job is verifying a count. inventory_adjustment_requests carries material_type, bar_size, and lot_number but not bar_length_inches; the length lives on material_receiving via material_receiving_id. Fixed with a read-time join in loadAdjustments and a length chip appended to the Size cell, rather than denormalizing a column onto the adjustment row: the join repairs historical sessions as well as new ones, and bar_length_inches never changes after receipt creation, so the join is stable. Blanks (category='blank') carry no length and render the size alone. Paired with D-INV-04, which stops create_count_discovery_receipt cloning the reference receipt's price_per_bar verbatim onto a shorter discovered length.
+
+### FB1 Batch B closeout (2026-08-25)
+Order Queue walkthrough on TEST: 148 open orders; bulk dispositions, Create CO (new header CO-7259-1496501 from SO 14965-01), append to an existing manual CO (CO-17140-17042), read-only for customer_service, Fishbowl date edit on a converted line propagated to the CO line. Walkthrough asks folded into C1 below. Fishbowl column checks done: `sysuser` (id, userName, firstName, lastName, activeFlag — never userPwd/mfaSecret), `qtyinventorytotals` (PARTID, LOCATIONGROUPID, QTYONHAND, QTYALLOCATED, QTYNOTAVAILABLE, QTYNOTAVAILABLETOPICK, QTYDROPSHIP, QTYONORDER — one row per part per location group), `kititem` (kitProductId, productId, kitItemTypeId, defaultQty, sortOrder …).
+
+### D-FB-26 — One CO line per part; add to an open CO line for the same part (2026-08-25)
+Fishbowl explodes every kit into its own component lines, so like parts recur across kits on one SO. `fb_convert_to_co` v2 groups the selected lines by `part_id`: quantities summed (Fishbowl qtyToFulfill each), earliest effective due date, notes listing every source Fishbowl line; if the target CO already has an open line (not_started/in_progress) for that part, the quantity is added to it and the note appended instead of creating a second line. All source Fishbowl lines link to the one CO line (many-to-one); the CO line's `fb_qty_*` columns are the sums over its linked lines, recomputed by ingest on every change and on removal. A Fishbowl qtyOrdered change on any one linked line still flows to the shared CO line (D-FB-14 is additive).
+
+### D-FB-27 — Components Needed is mandatory for new CO lines (2026-08-25)
+`fb_convert_to_co(p_fb_so_id, p_line_ids, p_components jsonb)` — `p_components` is `{part_id: text}`; a blank value for a part that needs a NEW CO line raises. When adding to an existing line the text is optional and appended to the line's `components_needed`. The old 2-argument signature was dropped so PostgREST sees one function.
+
+### D-FB-28 — `assembly` disposition (2026-08-25)
+Added to the disposition CHECK, `fb_set_disposition`, the action bar and the header rollup (`assembly_lines`). A chip only until the Assembly module round, when it becomes the hand-off into assembly.
+
+### D-FB-29 — Kit children tagged from Fishbowl `kititem` (2026-08-25)
+`soitem` carries no parent link. The bridge loads `kititem` (kitItemTypeId 10) for the kit products on each batch of SOs and tags each component line that follows a kit header, belongs to that kit's product set and has not already been claimed, until the set is used up or the next kit header starts (`tagKitChildren`, mapper.mjs). Sent as `parentId`; stored as `fb_sales_order_lines.parent_fb_soitem_id`. The queue renders children indented under the header, labelled 1a, 1b …, header shows "n components". Cosmetic only — conversion combines by part regardless. A re-run of the backfill tags the already-mirrored open orders.
+
+### D-FB-30 — Inactive parts refused (2026-08-25)
+A resolved part with `is_active = false` cannot become a CO line (skip reason "part inactive in SkyNet — reactivate in Armory"), matching the normal CO window's Pending-Master-Data rule. Seen on SO 14965-01 (SK-O18S, SK-R4GS, SK-R4TS).
+
+### D-FB-31 — Fishbowl response decoding (2026-08-25)
+Fishbowl can emit a description byte that is not valid UTF-8 (a cp1252 ®: "Diamondhead�"). The bridge decodes responses strictly as UTF-8 and falls back to latin1 per response. Bridge v1.1.0. Migration: Docs/migrations/2026-08-26_fishbowl_bridge_c1.sql (TEST 2026-08-25).
+
+### D-FB-32 — Queue header shows the Fishbowl entered date (2026-08-25)
+The SO card header shows "Entered <date>" (`so.dateCreated`, local calendar day) and the list sorts oldest-entered first. Fishbowl's header Date Scheduled is not surfaced — Matt: "only interested in the item dates"; each line keeps its effective due date, default-date `*` and Remaining-Parts `R` flags. Create CO placeholder reads "what needs to be produced".

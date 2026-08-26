@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
+import SyncStatusBanner from '../components/orderqueue/SyncStatusBanner'
+import { getSyncState, getMirrorLinks, FB_SO_STATUS, FB_LINE_STATUS } from '../lib/fishbowl'
 import {
   Plus,
   Search,
@@ -152,6 +154,24 @@ export default function CustomerOrders({
     }
   }, [expandedAllocLineId, allocCache])
 
+  // FB1 (Batch C2): Fishbowl mirror links for the FB chips, and the bridge heartbeat for the banner.
+  const [fbLinks, setFbLinks] = useState({ bySo: {}, byLine: {} })
+  const [fbSyncState, setFbSyncState] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const [links, state] = await Promise.all([getMirrorLinks(), getSyncState()])
+        if (!cancelled) { setFbLinks(links); setFbSyncState(state) }
+      } catch (e) {
+        console.warn('Fishbowl mirror read failed:', e?.message || e)
+      }
+    }
+    load()
+    const t = setInterval(load, 60000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [])
+
   const loadOrders = useCallback(async () => {
     setLoading(true)
     try {
@@ -180,6 +200,7 @@ export default function CustomerOrders({
         .select(`
           id, customer_order_id, line_number, quantity_ordered, quantity_fulfilled,
           due_date, priority, status, notes, components_needed, cancel_reason, fulfilled_at,
+          fb_qty_ordered, fb_qty_fulfilled, fb_qty_to_fulfill,
           part_id,
           parts ( id, part_number, description, is_active )
         `)
@@ -421,6 +442,8 @@ export default function CustomerOrders({
         </div>
       )}
 
+      {!embedded && <SyncStatusBanner state={fbSyncState} compact />}
+
       {/* Tab strip */}
       <div className="flex items-center gap-1 border-b border-gray-800 mb-4">
         <button
@@ -576,6 +599,8 @@ export default function CustomerOrders({
                   <CORow
                     key={co.id}
                     co={co}
+                    fbSo={fbLinks.bySo[co.id]}
+                    fbLines={fbLinks.byLine}
                     expanded={isExpanded}
                     onToggle={() => toggleExpand(co.id)}
                     canEdit={canEdit}
@@ -763,6 +788,8 @@ export default function CustomerOrders({
 
 function CORow({
   co,
+  fbSo,
+  fbLines,
   expanded,
   onToggle,
   canEdit,
@@ -794,7 +821,21 @@ function CORow({
             className={`text-gray-500 transition-transform ${expanded ? 'rotate-90' : ''}`}
           />
         </td>
-        <td className="px-4 py-3 text-purple-300 font-mono text-sm">{co.co_number}</td>
+        <td className="px-4 py-3 text-purple-300 font-mono text-sm whitespace-nowrap">
+          {co.co_number}
+          {fbSo && (
+            <span
+              className={`ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] border align-middle ${
+                fbSo.status_id === 20 || fbSo.status_id === 25
+                  ? 'bg-blue-900/40 text-blue-300 border-blue-800'
+                  : fbSo.status_id >= 80 ? 'bg-red-900/40 text-red-300 border-red-800' : 'bg-green-900/40 text-green-300 border-green-800'
+              }`}
+              title={`Fishbowl SO ${fbSo.so_number} · ${FB_SO_STATUS[fbSo.status_id] || fbSo.status_id} · live via the bridge`}
+            >
+              FB {FB_SO_STATUS[fbSo.status_id] || fbSo.status_id}
+            </span>
+          )}
+        </td>
         <td className="px-4 py-3 text-gray-200 text-sm">
           {co.customers?.name || <span className="text-gray-600">—</span>}
           {co.customers?.customer_id && (
@@ -911,6 +952,16 @@ function CORow({
                             </td>
                             <td className="px-2 py-2 text-right text-gray-200 font-mono text-xs whitespace-nowrap">
                               {l.quantity_ordered}
+                              {l.fb_qty_ordered !== null && l.fb_qty_ordered !== undefined && (
+                                <div className="text-[10px] text-gray-500" title="Fishbowl, live: ordered · shipped · to fulfill">
+                                  FB {Number(l.fb_qty_ordered).toLocaleString()} · {Number(l.fb_qty_fulfilled || 0).toLocaleString()} · {Number(l.fb_qty_to_fulfill ?? 0).toLocaleString()}
+                                </div>
+                              )}
+                              {(fbLines?.[l.id] || []).some((f) => f.status_id === 50 || f.status_id === 60) && (
+                                <div className="text-[10px] text-green-400" title={`Fishbowl line status: ${(fbLines[l.id] || []).map((f) => FB_LINE_STATUS[f.status_id] || f.status_id).join(', ')}`}>
+                                  Shipped in Fishbowl
+                                </div>
+                              )}
                             </td>
                             <td className="px-2 py-2 text-right text-gray-300 font-mono text-xs whitespace-nowrap">
                               {l.allocated}

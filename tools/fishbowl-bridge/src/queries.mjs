@@ -1,5 +1,5 @@
 // queries.mjs — every Fishbowl SQL statement the bridge runs, in one place. All read-only.
-// Column names verified against Fishbowl 25.9 (Docs/FB1_Implementation_Plan.md §7.6). Do not guess new ones.
+// Column names verified against Fishbowl 25.9 (Docs/Implementation_Plans/FB1_Implementation_Plan.md §7.6). Do not guess new ones.
 
 const idList = (ids) => ids.map((n) => Number(n)).filter(Number.isFinite).join(',')
 
@@ -33,6 +33,15 @@ export const q = {
 
   // Kit definitions for the kit products on a batch of SOs (D-FB-29). kitItemTypeId 10 = product component.
   kitItems: (productIds) => `SELECT kitProductId, productId, kitItemTypeId FROM kititem WHERE kitProductId IN (${idList(productIds)})`,
+
+  // Users (daily): names only — never userPwd / mfaSecret (D-FB-34).
+  users: 'SELECT id, userName, firstName, lastName, activeFlag FROM sysuser',
+
+  // Inventory snapshot per part per location group for the parts on open SO lines (D-FB-33).
+  inventory: (partIds) => `SELECT q.PARTID AS partId, p.num AS partNum, q.LOCATIONGROUPID AS locationGroupId,
+      q.QTYONHAND AS qtyOnHand, q.QTYALLOCATED AS qtyAllocated, q.QTYNOTAVAILABLE AS qtyNotAvailable, q.QTYONORDER AS qtyOnOrder
+    FROM qtyinventorytotals q JOIN part p ON p.id = q.PARTID
+    WHERE q.PARTID IN (${idList(partIds)})`,
 
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',

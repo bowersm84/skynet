@@ -12,6 +12,10 @@ Design: `Docs/Implementation_Plans/FB1_Implementation_Plan.md`. Decisions: `Docs
   The RPC upserts by fingerprint, marks lines missing from the payload as removed, writes `fb_sync_events`, and
   advances the cursor only when the last chunk of a window lands.
 - Every `RECONCILE_MS` (15 min): compare Fishbowl's open SOs with the mirror's open SOs and refetch any that differ.
+- Every `INVENTORY_MS` (5 min): on-hand / allocated / available per part for every part on an open SO line, from
+  `qtyinventorytotals` summed per location group; `AVAILABLE_LOCATION_GROUPS` decides which groups count as
+  available (default Main + Warehouse). Shown as the "Avail" column in the Order Queue.
+- Every `USERS_MS` (daily): Fishbowl user names (never password hashes or MFA secrets) so events say who changed what.
 - Every cycle: `fb_heartbeat` (the Order Queue banner reads it).
 
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)

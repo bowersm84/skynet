@@ -5,7 +5,7 @@ import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
 import { q } from './queries.mjs'
-import { ts } from './mapper.mjs'
+import { ts, chunk } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
 
 const log = makeLogger(config.logDir)
@@ -15,8 +15,56 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let lastRev = null          // in-memory copy of fb_sync_state.last_rev
 let lastReconcileAt = 0
+let lastInventoryAt = 0
+let lastUsersAt = 0
 let stopping = false
 let failures = 0
+
+// D-FB-34: Fishbowl user list (names only) so events can say who changed an order.
+async function syncUsers() {
+  const rows = await fb.query(q.users)
+  const n = await sky.upsertUsers(rows.map((r) => ({
+    id: r.id, userName: r.userName, firstName: r.firstName, lastName: r.lastName, activeFlag: r.activeFlag,
+  })))
+  log.info(`users: ${rows.length} read, ${n} upserted`)
+  return n
+}
+
+// D-FB-33: inventory snapshot for the parts on open SO lines. qtyinventorytotals is per location group;
+// "available" sums only the configured groups (default Main + Warehouse) and every group is kept for the tooltip.
+async function syncInventory() {
+  const partIds = await sky.openPartIds()
+  if (partIds.length === 0) return 0
+  const avail = new Set(config.availableLocationGroups)
+  const byPart = new Map()
+  for (const ids of chunk(partIds, 300)) {
+    const rows = await fb.query(q.inventory(ids))
+    for (const r of rows) {
+      const partId = Number(r.partId)
+      const lg = Number(r.locationGroupId)
+      const onHand = Number(r.qtyOnHand) || 0
+      const allocated = Number(r.qtyAllocated) || 0
+      const notAvailable = Number(r.qtyNotAvailable) || 0
+      const onOrder = Number(r.qtyOnOrder) || 0
+      if (!byPart.has(partId)) {
+        byPart.set(partId, { partId, partNum: r.partNum, onHand: 0, allocated: 0, notAvailable: 0, onOrder: 0, available: 0, byLocation: {} })
+      }
+      const p = byPart.get(partId)
+      p.onHand += onHand
+      p.allocated += allocated
+      p.notAvailable += notAvailable
+      p.onOrder += onOrder
+      if (avail.has(lg)) p.available += onHand - allocated - notAvailable
+      p.byLocation[lg] = { onHand, allocated, notAvailable, onOrder }
+    }
+  }
+  let total = 0
+  for (const rows of chunk([...byPart.values()], 500)) {
+    total += Number(await sky.upsertInventory(rows)) || 0
+  }
+  log.info(`inventory: ${partIds.length} part(s) on open SOs, ${byPart.size} found in Fishbowl, ${total} upserted`)
+  return total
+}
 
 async function tail() {
   const [{ maxRev }] = await fb.query(q.maxRev)
@@ -74,6 +122,14 @@ async function cycle() {
     if (once || Date.now() - lastReconcileAt >= config.reconcileMs) {
       reconciled = await reconcile()
       lastReconcileAt = Date.now()
+    }
+    if (once || Date.now() - lastUsersAt >= config.usersMs) {
+      await syncUsers()
+      lastUsersAt = Date.now()
+    }
+    if (once || Date.now() - lastInventoryAt >= config.inventoryMs) {
+      await syncInventory()
+      lastInventoryAt = Date.now()
     }
     return { ...t, reconciled }
   })

@@ -3,18 +3,22 @@ import { Search, RefreshCw, Loader2, X } from 'lucide-react'
 import SOCard from '../components/orderqueue/SOCard'
 import ConvertToCOModal from '../components/orderqueue/ConvertToCOModal'
 import SyncStatusBanner from '../components/orderqueue/SyncStatusBanner'
+import ExceptionsTab from '../components/orderqueue/ExceptionsTab'
+import RecentChangesTab from '../components/orderqueue/RecentChangesTab'
 import { canActOnOrderQueue } from '../lib/roles'
 import {
-  getSyncState, getQueueOrders, getQueueLines, setDisposition, reresolveLines, DISPOSITION_LABELS,
+  getSyncState, getQueueOrders, getQueueLines, getInventoryFor, getOpenExceptions, getRecentEvents,
+  setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS,
 } from '../lib/fishbowl'
 
-// OrderQueue — FB1 Batch B. Every Issued / In Progress Fishbowl sales order, mirrored live by the
-// bridge, waiting for a per-line call: ship from stock, purchase, covered, ignore — or Create CO,
-// which drops the line into Customer Orders → Demand exactly like a hand-keyed CO (D-FB-12/13).
+// OrderQueue — FB1. Every Issued / In Progress Fishbowl sales order, mirrored live by the bridge,
+// waiting for a per-line call: ship from stock, purchase, assembly, covered, ignore — or Create CO,
+// which drops the line into Customer Orders → Demand exactly like a hand-keyed CO (D-FB-12/13/26).
+// Exceptions (D-FB-15) and the change feed (fb_sync_events) live on their own tabs.
 export default function OrderQueue({ profile, onNavigate }) {
   const canAct = canActOnOrderQueue(profile)
 
-  const [tab, setTab] = useState('queue') // 'queue' | 'all'
+  const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes'
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
@@ -23,11 +27,17 @@ export default function OrderQueue({ profile, onNavigate }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [linesBySo, setLinesBySo] = useState({})        // { [fb_so_id]: lines[] }
   const [linesLoading, setLinesLoading] = useState({})  // { [fb_so_id]: true }
+  const [inventory, setInventory] = useState({})        // { [PART_NUM]: fb_part_inventory row }
   const [selected, setSelected] = useState({})          // { [fb_so_id]: Set(fb_soitem_id) }
   const [busySo, setBusySo] = useState(null)
   const [actionStatus, setActionStatus] = useState(null)
   const [syncState, setSyncState] = useState(null)
   const [convertTarget, setConvertTarget] = useState(null) // { order, lines }
+  const [exceptions, setExceptions] = useState([])
+  const [exceptionsLoading, setExceptionsLoading] = useState(false)
+  const [events, setEvents] = useState([])
+  const [eventsLoading, setEventsLoading] = useState(false)
+  const [ackingId, setAckingId] = useState(null)
   const reresolvedRef = useRef(false)
 
   const loadOrders = useCallback(async () => {
@@ -48,6 +58,16 @@ export default function OrderQueue({ profile, onNavigate }) {
     try {
       const rows = await getQueueLines(fbSoId)
       setLinesBySo((prev) => ({ ...prev, [fbSoId]: rows }))
+      // D-FB-33: Fishbowl on-hand for the parts on these lines
+      const partNums = rows.map((l) => (l.part_num || l.product_num || '').toUpperCase()).filter(Boolean)
+      try {
+        const inv = await getInventoryFor(partNums)
+        const upper = {}
+        for (const [k, v] of Object.entries(inv)) upper[k.toUpperCase()] = v
+        setInventory((prev) => ({ ...prev, ...upper }))
+      } catch (e) {
+        console.warn('inventory snapshot read failed:', e?.message || e)
+      }
     } catch (e) {
       console.error('Order Queue lines load failed:', e)
       setActionStatus({ type: 'error', message: `Could not load lines for SO: ${e?.message || e}` })
@@ -64,6 +84,28 @@ export default function OrderQueue({ profile, onNavigate }) {
     }
   }, [])
 
+  const loadExceptions = useCallback(async () => {
+    setExceptionsLoading(true)
+    try {
+      setExceptions(await getOpenExceptions())
+    } catch (e) {
+      setActionStatus({ type: 'error', message: `Could not load exceptions: ${e?.message || e}` })
+    } finally {
+      setExceptionsLoading(false)
+    }
+  }, [])
+
+  const loadEvents = useCallback(async () => {
+    setEventsLoading(true)
+    try {
+      setEvents(await getRecentEvents(200))
+    } catch (e) {
+      setActionStatus({ type: 'error', message: `Could not load changes: ${e?.message || e}` })
+    } finally {
+      setEventsLoading(false)
+    }
+  }, [])
+
   // Initial load. Acting roles first sweep unresolved lines against the parts master
   // (D-FB-23) so a part added in the Armory since the last visit lights up its SO lines.
   useEffect(() => {
@@ -74,17 +116,27 @@ export default function OrderQueue({ profile, onNavigate }) {
         try { await reresolveLines() } catch (e) { console.warn('fb_reresolve_lines skipped:', e?.message || e) }
       }
       if (!cancelled) {
-        await Promise.all([loadOrders(), refreshSync()])
+        await Promise.all([loadOrders(), refreshSync(), loadExceptions()])
       }
     })()
     const t = setInterval(refreshSync, 30000)
     return () => { cancelled = true; clearInterval(t) }
-  }, [canAct, loadOrders, refreshSync])
+  }, [canAct, loadOrders, refreshSync, loadExceptions])
+
+  // Tab-specific loads
+  useEffect(() => {
+    if (tab === 'exceptions') loadExceptions()
+    if (tab === 'changes') loadEvents()
+  }, [tab, loadExceptions, loadEvents])
 
   const refreshAll = useCallback(async () => {
     setLoading(true)
-    await Promise.all([loadOrders(), refreshSync(), ...[...expanded].map((id) => loadLines(id))])
-  }, [loadOrders, refreshSync, loadLines, expanded])
+    await Promise.all([
+      loadOrders(), refreshSync(), loadExceptions(),
+      ...(tab === 'changes' ? [loadEvents()] : []),
+      ...[...expanded].map((id) => loadLines(id)),
+    ])
+  }, [loadOrders, refreshSync, loadExceptions, loadEvents, loadLines, expanded, tab])
 
   const toggleExpanded = useCallback((fbSoId) => {
     setExpanded((prev) => {
@@ -151,6 +203,19 @@ export default function OrderQueue({ profile, onNavigate }) {
     await Promise.all([loadLines(order.fb_so_id), loadOrders()])
   }
 
+  const handleAck = async (eventId) => {
+    setAckingId(eventId)
+    try {
+      await ackEvent(eventId)
+      setExceptions((prev) => prev.filter((e) => e.id !== eventId))
+      await loadOrders()
+    } catch (e) {
+      setActionStatus({ type: 'error', message: e?.message || String(e) })
+    } finally {
+      setAckingId(null)
+    }
+  }
+
   const openCO = (coNumber) => onNavigate?.('customer_orders', { coSearch: coNumber })
 
   const salesmen = useMemo(
@@ -171,6 +236,7 @@ export default function OrderQueue({ profile, onNavigate }) {
 
   const queueCount = orders.filter((o) => o.pending_lines > 0).length
   const pendingLines = orders.reduce((s, o) => s + (o.pending_lines || 0), 0)
+  const listTab = tab === 'queue' || tab === 'all'
 
   const tabClass = (t) => `px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
     tab === t ? 'border-amber-400 text-amber-300' : 'border-transparent text-gray-400 hover:text-white'
@@ -223,65 +289,84 @@ export default function OrderQueue({ profile, onNavigate }) {
         <button onClick={() => setTab('all')} className={tabClass('all')}>
           All Open <span className="ml-1 text-xs text-gray-500">{orders.length}</span>
         </button>
+        <button onClick={() => setTab('exceptions')} className={tabClass('exceptions')}>
+          Exceptions <span className={`ml-1 text-xs ${exceptions.length ? 'text-red-300' : 'text-gray-500'}`}>{exceptions.length}</span>
+        </button>
+        <button onClick={() => setTab('changes')} className={tabClass('changes')}>
+          Recent Changes
+        </button>
         <span className="ml-auto text-xs text-gray-600 pr-2">{pendingLines.toLocaleString()} pending line{pendingLines === 1 ? '' : 's'}</span>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 mb-4">
-        <div className="relative flex-1 min-w-[240px] max-w-md">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="SO #, customer, PO, CO #"
-            className="w-full pl-9 pr-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
-          />
-        </div>
-        <select
-          value={salesmanFilter}
-          onChange={(e) => setSalesmanFilter(e.target.value)}
-          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
-        >
-          <option value="all">All salespeople</option>
-          {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <span className="text-xs text-gray-600">
-          Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date
-        </span>
-      </div>
-
-      {loading && orders.length === 0 ? (
-        <div className="text-center py-16 bg-gray-900 rounded-lg border border-gray-800 text-gray-400 flex items-center justify-center gap-2">
-          <Loader2 size={16} className="animate-spin" /> Loading Fishbowl orders...
-        </div>
-      ) : loadError ? (
-        <div className="text-center py-12 bg-red-900/20 rounded-lg border border-red-900 text-red-300 text-sm">{loadError}</div>
-      ) : visible.length === 0 ? (
-        <div className="text-center py-12 bg-gray-900 rounded-lg border border-gray-800 text-gray-500">
-          {tab === 'queue' ? 'Nothing pending — every open order line has a disposition.' : 'No open Fishbowl orders match.'}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {visible.map((o) => (
-            <SOCard
-              key={o.fb_so_id}
-              order={o}
-              lines={linesBySo[o.fb_so_id] || null}
-              linesLoading={!!linesLoading[o.fb_so_id]}
-              expanded={expanded.has(o.fb_so_id)}
-              onToggle={() => toggleExpanded(o.fb_so_id)}
-              selected={selectionFor(o.fb_so_id)}
-              onToggleLine={(lineId) => toggleLine(o.fb_so_id, lineId)}
-              onSelectAll={(ids) => setSelectionFor(o.fb_so_id, new Set(ids))}
-              onClearSelection={() => setSelectionFor(o.fb_so_id, new Set())}
-              canAct={canAct}
-              busy={busySo === o.fb_so_id}
-              onBulkDisposition={(d) => handleBulkDisposition(o, d)}
-              onConvert={() => openConvert(o)}
-              onOpenCO={openCO}
+      {/* Filters (list tabs only) */}
+      {listTab && (
+        <div className="flex flex-wrap items-center gap-3 mb-4">
+          <div className="relative flex-1 min-w-[240px] max-w-md">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="SO #, customer, PO, CO #"
+              className="w-full pl-9 pr-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
             />
-          ))}
+          </div>
+          <select
+            value={salesmanFilter}
+            onChange={(e) => setSalesmanFilter(e.target.value)}
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+          >
+            <option value="all">All salespeople</option>
+            {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <span className="text-xs text-gray-600">
+            Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship
+          </span>
         </div>
+      )}
+
+      {tab === 'exceptions' && (
+        <ExceptionsTab events={exceptions} loading={exceptionsLoading} canAct={canAct} ackingId={ackingId} onAck={handleAck} onOpenCO={openCO} />
+      )}
+
+      {tab === 'changes' && (
+        <RecentChangesTab events={events} loading={eventsLoading} onOpenCO={openCO} />
+      )}
+
+      {listTab && (
+        loading && orders.length === 0 ? (
+          <div className="text-center py-16 bg-gray-900 rounded-lg border border-gray-800 text-gray-400 flex items-center justify-center gap-2">
+            <Loader2 size={16} className="animate-spin" /> Loading Fishbowl orders...
+          </div>
+        ) : loadError ? (
+          <div className="text-center py-12 bg-red-900/20 rounded-lg border border-red-900 text-red-300 text-sm">{loadError}</div>
+        ) : visible.length === 0 ? (
+          <div className="text-center py-12 bg-gray-900 rounded-lg border border-gray-800 text-gray-500">
+            {tab === 'queue' ? 'Nothing pending — every open order line has a disposition.' : 'No open Fishbowl orders match.'}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visible.map((o) => (
+              <SOCard
+                key={o.fb_so_id}
+                order={o}
+                lines={linesBySo[o.fb_so_id] || null}
+                linesLoading={!!linesLoading[o.fb_so_id]}
+                expanded={expanded.has(o.fb_so_id)}
+                onToggle={() => toggleExpanded(o.fb_so_id)}
+                selected={selectionFor(o.fb_so_id)}
+                onToggleLine={(lineId) => toggleLine(o.fb_so_id, lineId)}
+                onSelectAll={(ids) => setSelectionFor(o.fb_so_id, new Set(ids))}
+                onClearSelection={() => setSelectionFor(o.fb_so_id, new Set())}
+                canAct={canAct}
+                busy={busySo === o.fb_so_id}
+                onBulkDisposition={(d) => handleBulkDisposition(o, d)}
+                onConvert={() => openConvert(o)}
+                onOpenCO={openCO}
+                inventory={inventory}
+              />
+            ))}
+          </div>
+        )
       )}
 
       {convertTarget && (

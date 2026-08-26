@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { X, Plus, Trash2, ChevronDown, Search, Loader2 } from 'lucide-react'
 import { formatCONumber } from '../lib/customerOrders'
 import { loadActiveSalespeople } from '../lib/salespeople'
+import { findMirrorSO } from '../lib/fishbowl'
 
 // Customer combobox — searchable picker over public.customers (active only).
 // Same UX pattern as ProductCombobox in CreateWorkOrderModal.jsx; duplicated
@@ -232,6 +233,20 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
   const [customerId, setCustomerId] = useState(null)
   const [salespersonId, setSalespersonId] = useState('')
   const [fishbowlOrderId, setFishbowlOrderId] = useState('')
+  // FB1: if this Fishbowl SO is already mirrored, say so — converting it in the Order Queue keeps the CO tied to Fishbowl.
+  const [fbMirror, setFbMirror] = useState(null)
+  const fbKey = fishbowlOrderId.replace(/[^A-Z0-9]/gi, '').toUpperCase()
+  useEffect(() => {
+    if (!fbKey) return undefined
+    let cancelled = false
+    const t = setTimeout(async () => {
+      try {
+        const so = await findMirrorSO(fbKey)
+        if (!cancelled) setFbMirror(so)
+      } catch { /* hint only */ }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [fbKey])
   const [poNumber, setPoNumber] = useState('')
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState([newLine()])
@@ -460,6 +475,12 @@ export default function CreateCustomerOrderModal({ isOpen, onClose, onSuccess, p
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white font-mono focus:outline-none focus:border-skynet-accent"
                     placeholder="ABC123"
                   />
+                  {fbMirror && fbKey && fbMirror.so_number === fbKey && (
+                    <p className="mt-1 text-xs text-amber-300">
+                      SO {fbMirror.so_number} ({fbMirror.customer_name}) is in the Order Queue
+                      {fbMirror.linked_co_number ? ` and already linked to ${fbMirror.linked_co_number}` : ''} — converting it there keeps the CO tied to Fishbowl.
+                    </p>
+                  )}
                 </div>
 
                 <div>

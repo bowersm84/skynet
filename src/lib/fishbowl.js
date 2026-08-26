@@ -32,6 +32,57 @@ export const FB_PRIORITY_COLORS = {
   10: 'text-red-300', 20: 'text-amber-300', 30: 'text-gray-400', 40: 'text-gray-500', 50: 'text-gray-600',
 }
 
+export const FB_LOCATION_GROUPS = {
+  1: 'Main', 2: 'Skybolt1', 3: 'Skybolt2', 4: 'Skybolt', 5: 'Skybolt>2', 6: 'Warehouse', 7: 'Material', 8: 'Manufacturing',
+}
+
+export const EVENT_LABELS = {
+  so_created: 'SO issued',
+  so_changed: 'SO changed',
+  so_status_changed: 'SO status',
+  so_removed: 'SO deleted in Fishbowl',
+  line_added: 'Line added',
+  line_changed: 'Line changed',
+  line_status_changed: 'Line status',
+  line_removed: 'Line removed',
+}
+export const EVENT_COLORS = {
+  so_created: 'bg-blue-900/40 text-blue-300 border-blue-800',
+  so_changed: 'bg-gray-800 text-gray-300 border-gray-700',
+  so_status_changed: 'bg-cyan-900/40 text-cyan-300 border-cyan-800',
+  so_removed: 'bg-red-900/40 text-red-300 border-red-800',
+  line_added: 'bg-green-900/40 text-green-300 border-green-800',
+  line_changed: 'bg-gray-800 text-gray-300 border-gray-700',
+  line_status_changed: 'bg-cyan-900/40 text-cyan-300 border-cyan-800',
+  line_removed: 'bg-red-900/40 text-red-300 border-red-800',
+}
+const CHANGE_FIELD_LABELS = {
+  status_id: 'status', qty_ordered: 'ordered', qty_fulfilled: 'shipped', qty_to_fulfill: 'to fulfill',
+  effective_due_date: 'due', remaining_parts_ship_date: 'Remaining Parts Ship Date', product_num: 'product',
+  customer_po: 'PO', priority_id: 'priority', salesman: 'salesperson', customer_name: 'customer', note: 'note',
+  so_number: 'SO', reappeared: 'reappeared', disposition: 'disposition',
+}
+
+// "ordered 800 → 1,000 · due 8/24/26 → 9/4/26" from an fb_sync_events.changes object.
+export function summarizeChanges(changes, eventType) {
+  if (!changes || typeof changes !== 'object') return ''
+  const fmt = (field, v) => {
+    if (v === null || v === undefined || v === '') return '—'
+    if (field === 'status_id') return eventType?.startsWith('line') ? (FB_LINE_STATUS[v] || v) : (FB_SO_STATUS[v] || v)
+    if (field === 'priority_id') return FB_PRIORITY[v] || v
+    if (field === 'effective_due_date' || field === 'remaining_parts_ship_date') return formatDateShort(v)
+    if (['so_number', 'product_num', 'customer_po', 'salesman', 'customer_name', 'note', 'disposition'].includes(field)) return String(v)
+    if (typeof v === 'number') return v.toLocaleString()
+    if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v)) return Number(v).toLocaleString()
+    return String(v)
+  }
+  return Object.entries(changes).map(([field, val]) => {
+    const label = CHANGE_FIELD_LABELS[field] || field
+    if (val && typeof val === 'object' && ('old' in val || 'new' in val)) return `${label} ${fmt(field, val.old)} → ${fmt(field, val.new)}`
+    return `${label} ${fmt(field, val)}`
+  }).join(' · ')
+}
+
 export const PRODUCT_LINE_TYPES = [10, 12]
 export const FB_CLOSED_LINE_STATUSES = [50, 60, 70, 75, 95]
 export const OPEN_SO_STATUSES = [20, 25]
@@ -144,15 +195,22 @@ export function syncFreshness(state, nowMs = Date.now()) {
 }
 
 // ── Line predicates ────────────────────────────────────────────────────────
+// Remaining demand = ordered − shipped (D-FB-36). Fishbowl's qtyToFulfill is the NEXT fulfillment quantity and
+// keeps its last value after a line is fully shipped, so it cannot be used as "remaining".
 export function coQtyForLine(line) {
-  const q = line.qty_to_fulfill ?? (Number(line.qty_ordered || 0) - Number(line.qty_fulfilled || 0))
-  return Math.round(Number(q) || 0)
+  return Math.max(Math.round(Number(line.qty_ordered || 0) - Number(line.qty_fulfilled || 0)), 0)
+}
+
+// Fulfilled / Closed Short / Voided / Cancelled / Historical in Fishbowl — nothing left to decide.
+export function isClosedLine(line) {
+  return FB_CLOSED_LINE_STATUSES.includes(line?.status_id)
 }
 
 // Lines a human can disposition: product or kit lines, still present, not already turned into a CO line.
 export function isSelectableLine(line) {
   if (!line || line.removed_at) return false
   if (line.customer_order_line_id) return false
+  if (isClosedLine(line)) return false
   return PRODUCT_LINE_TYPES.includes(line.type_id) || line.type_id === 80
 }
 
@@ -291,4 +349,74 @@ export async function reresolveLines() {
 export async function ackEvent(eventId) {
   const { error } = await supabase.rpc('fb_ack_event', { p_event_id: eventId })
   if (error) throw error
+}
+
+// ── Inventory snapshot (D-FB-33) ───────────────────────────────────────────
+export async function getInventoryFor(partNums) {
+  const keys = [...new Set((partNums || []).filter(Boolean))]
+  if (keys.length === 0) return {}
+  const out = {}
+  for (let i = 0; i < keys.length; i += 200) {
+    const { data, error } = await supabase.from('fb_part_inventory').select('*').in('part_num', keys.slice(i, i + 200))
+    if (error) throw error
+    for (const r of data || []) out[r.part_num] = r
+  }
+  return out
+}
+
+// ── Events: exceptions + recent changes (v_fb_recent_changes) ──────────────
+export async function getOpenExceptions() {
+  const { data, error } = await supabase
+    .from('v_fb_recent_changes')
+    .select('*')
+    .eq('requires_ack', true)
+    .is('acknowledged_at', null)
+    .order('created_at', { ascending: false })
+    .limit(200)
+  if (error) throw error
+  return data || []
+}
+
+export async function getRecentEvents(limit = 200) {
+  const { data, error } = await supabase
+    .from('v_fb_recent_changes')
+    .select('*')
+    .order('id', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return data || []
+}
+
+// ── Customer Orders tie-in ─────────────────────────────────────────────────
+// Mirror rows keyed by SkyNet CO id and CO line id, for the FB chips on the Customer Orders page.
+export async function getMirrorLinks() {
+  const [sos, lines] = await Promise.all([
+    supabase.from('fb_sales_orders').select('fb_so_id, so_number, status_id, customer_order_id, fb_date_last_modified')
+      .not('customer_order_id', 'is', null).is('removed_at', null),
+    supabase.from('fb_sales_order_lines').select('fb_soitem_id, line_number, status_id, qty_ordered, qty_fulfilled, qty_to_fulfill, customer_order_line_id')
+      .not('customer_order_line_id', 'is', null).is('removed_at', null),
+  ])
+  if (sos.error) throw sos.error
+  if (lines.error) throw lines.error
+  const bySo = {}
+  for (const r of sos.data || []) bySo[r.customer_order_id] = r
+  const byLine = {}
+  for (const r of lines.data || []) {
+    if (!byLine[r.customer_order_line_id]) byLine[r.customer_order_line_id] = []
+    byLine[r.customer_order_line_id].push(r)
+  }
+  return { bySo, byLine }
+}
+
+// The mirror SO for a Fishbowl order number typed into the Create CO modal (alphanumeric match like formatCONumber).
+export async function findMirrorSO(orderNumber) {
+  const key = String(orderNumber || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+  if (!key) return null
+  const { data, error } = await supabase
+    .from('v_fb_order_queue')
+    .select('fb_so_id, so_number, status_id, customer_name, pending_lines, production_lines, linked_co_number')
+    .eq('so_number', key)
+    .maybeSingle()
+  if (error) throw error
+  return data
 }

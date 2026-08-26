@@ -5,7 +5,7 @@
 Implementation Plan v1.1 · August 24, 2026 (v1.0 signed off same day; v1.1 folds in Matt's six answers)
 
 **Owner:** Matt Bowers
-**Status:** Signed off. Batch A issued Aug 24: migration `Docs/migrations/2026-08-25_fishbowl_bridge_a.sql` + bridge CC prompt (`tools/fishbowl-bridge/`). Users/inventory pollers deferred to Batch C pending the `sysuser` / `qtyinventorytotals` column check.
+**Status:** Batch A complete on TEST (Aug 24): migration `2026-08-25_fishbowl_bridge_a.sql`, bridge running from Matt's PC, backfill 144 SOs / 1,732 lines, parity exact, live tests T-05/06/08 passed, 42 manual COs linked. Batch B issued Aug 24: migration `2026-08-25_fishbowl_bridge_b.sql` + Order Queue CC prompt. Users/inventory pollers deferred to Batch C pending the `sysuser` / `qtyinventorytotals` column check.
 
 ---
 
@@ -86,7 +86,9 @@ Customer Orders (v2.8, Sprint 5) mirror Fishbowl SOs by hand: CS types the Fishb
 - Three informational columns on `customer_order_lines` — `fb_qty_ordered`, `fb_qty_fulfilled`, `fb_qty_to_fulfill` (numeric, kept live by ingest) — so a Fishbowl-sourced CO line shows Ordered / Shipped-in-Fishbowl / To-fulfill side by side (D-FB-12).
 - Spec bump to **v4.4**; Decisions.md entries D-FB-01…; cheat-sheet additions for bridge operations.
 
-### 4.2 Out of scope (deferred, in the order they should follow)
+### 4.2 Out of scope
+
+- **Pricing round (future, Matt Aug 25):** `unit_price` / `total_price` are already mirrored on every line; surfacing them is its own round. (deferred, in the order they should follow)
 
 - **Auto stock-vs-production** disposition rules using the inventory snapshot — v1 shows available qty next to the line; Ashley decides. Rules come once her calls are observable in `fb_sync_events`/dispositions.
 - **Purchasing Forecast** — BOM mirror (`bom`/`bomitem`) + PO mirror (`po`/`poitem`) + explosion of open-SO demand. Next round; the mirror tables here are its input.
@@ -429,11 +431,23 @@ Every prompt opens with `BEFORE STARTING: Read Docs/Decisions.md and Docs/FB1_Im
 
 ### 10.2 Batch B — Order Queue page (≈ 1.5 days)
 
-1. CC prompt: `lib/fishbowl.js`, `OrderQueue.jsx`, `orderqueue/*`, `roles.js`, `App.jsx` nav + guard.
-2. Migration block: `fb_set_disposition`, `fb_convert_to_co`, `fb_ack_event`.
-3. Quick test: Ashley-role login → queue renders → bulk Mark Stock → Create CO from two production lines → CO appears in Customer Orders Demand with `fishbowl_order_id` and correct due/priority → Create CO again on the same lines is a no-op.
+1. Migration `Docs/migrations/2026-08-25_fishbowl_bridge_b.sql` (shipped Aug 24): `covered` disposition, `fb_set_disposition`, `fb_convert_to_co`, `fb_ack_event`, `fb_reresolve_lines`, `fb_link_existing_cos` v2 (due-date tie-break), `v_fb_order_queue` v2 (`covered_lines`, `actionable_lines`, `suspect_dates`).
+2. CC prompt (shipped Aug 24): `lib/fishbowl.js`, `pages/OrderQueue.jsx`, `components/orderqueue/{SOCard,ConvertToCOModal,SyncStatusBanner}.jsx` (LineRow folded into SOCard), `roles.js` (`canAccessOrderQueue`, `canActOnOrderQueue`), `App.jsx` nav + guard + mount, `UsersTab.jsx` additional-only `order_processor`, `CustomerOrders.jsx` `coSearch` deep link, bridge `.env` hardening + README path, Decisions D-FB-21…25.
+3. Quick test: admin and Ashley (assembly + order_processor) → queue renders, banner green → bulk Ship from stock / Back to pending → Create CO from two resolved lines → CO in Customer Orders (Orders tab pre-searched) and Demand → same lines no longer selectable → customer_service sees everything with no controls → Fishbowl qty edit on a converted line updates the CO line (T-16).
 
-### 10.3 Batch C — Change propagation, exceptions, CO tie-in (≈ 1 day)
+### 10.3a Batch C1 — Queue refinements from the Batch B walkthrough (≈ ½ day, shipped Aug 25)
+
+1. Migration `Docs/migrations/2026-08-26_fishbowl_bridge_c1.sql`: `parent_fb_soitem_id`, `assembly` disposition, `fb_set_disposition` v2, `fb_convert_to_co` v2 (one CO line per part, add-to-existing, mandatory Components Needed, inactive parts refused), `fb_ingest_delta` v2 (kit parent, RPSD in the diff, `fb_qty_*` sums), queue view v3 (`assembly_lines`).
+2. CC prompt: `lib/fishbowl.js` (kit tree, part groups, CO summary), `SOCard.jsx` (indented 1a/1b children, assembly chip), `ConvertToCOModal.jsx` rewrite, `OrderQueue.jsx` message; bridge v1.1.0 (kititem tagging, latin1 fallback). Decisions D-FB-26…31.
+3. Matt: restart the bridge, `npm run backfill` once (tags kits, repairs ® descriptions).
+
+### 10.3b Batch C2 — Exceptions, change feed, inventory, CO tie-in (≈ 1 day, shipped Aug 26)
+
+1. Migration `Docs/migrations/2026-08-26_fishbowl_bridge_c2.sql`: `fb_upsert_users`, `fb_upsert_inventory`, inventory columns (`qty_not_available`, `by_location`, `part_id`), `fb_sync_state.last_users_at`, `v_fb_recent_changes`.
+2. CC prompt: Order Queue Exceptions + Recent Changes tabs, Avail column (D-FB-33), Customer Orders FB chips / per-line Fishbowl quantities / "Shipped in Fishbowl" / sync banner, Create CO modal mirror hint; bridge v1.2.0 users (daily) + inventory (5 min) pollers with `AVAILABLE_LOCATION_GROUPS` (default Main + Warehouse). Decisions D-FB-33…35.
+3. Matt: restart the bridge (`npm start`) — the first cycle runs both pollers.
+
+(previous C2 outline follows for reference)
 
 1. Migration block: `fb_upsert_users`, `fb_upsert_inventory` (after the `sysuser` / `qtyinventorytotals` column check: `SELECT * FROM sysuser LIMIT 3`, `SELECT * FROM qtyinventorytotals LIMIT 3` in the Data module).
 2. CC prompt: users (daily) + inventory (5 min, parts on open SO lines) pollers in the bridge; Exceptions + Recent Changes tabs; `CustomerOrders.jsx` chips + banner; `CreateCustomerOrderModal.jsx` hint.

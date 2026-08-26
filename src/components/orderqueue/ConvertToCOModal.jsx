@@ -3,7 +3,7 @@ import { X, Loader2, AlertTriangle } from 'lucide-react'
 import { formatCONumber, CO_STATUS_LABELS } from '../../lib/customerOrders'
 import {
   FB_PRIORITY, convertBlocker, convertToCO, displayPartNumber, formatDateShort, formatDateTime, groupLinesByPart,
-  getCOSummary, isSuspectDate,
+  getCOSummary, isSuspectDate, coQtyForLine,
 } from '../../lib/fishbowl'
 
 const PRIORITY_FROM_FB = { 10: 'critical', 20: 'high', 30: 'normal', 40: 'low', 50: 'low' }
@@ -140,7 +140,7 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
                         due {formatDateShort(g.due)}{g.hasDefaultDate && <span className="text-amber-400" title="No real date entered in Fishbowl">*</span>}
                       </span>
                       <span className="text-xs text-gray-500">
-                        from FB line{g.lines.length === 1 ? '' : 's'} {g.lines.map((l) => `#${l.line_number} (${Number(l.qty_to_fulfill ?? l.qty_ordered).toLocaleString()})`).join(', ')}
+                        from FB line{g.lines.length === 1 ? '' : 's'} {g.lines.map((l) => `#${l.line_number} (${coQtyForLine(l).toLocaleString()})`).join(', ')}
                       </span>
                       <span className={`ml-auto text-xs px-2 py-0.5 rounded border ${g.existing ? 'bg-gray-800 text-gray-300 border-gray-600' : 'bg-green-900/40 text-green-300 border-green-800'}`}>
                         {g.existing ? `adds to line #${g.existing.line_number} (${Number(g.existing.quantity_ordered).toLocaleString()} → ${(Number(g.existing.quantity_ordered) + g.qty).toLocaleString()})` : 'new CO line'}

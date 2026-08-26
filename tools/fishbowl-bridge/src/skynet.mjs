@@ -75,6 +75,31 @@ export class SkyNet {
 
   linkExistingCOs() { return this.rpc('fb_link_existing_cos', {}) }
 
+  upsertUsers(rows) { return this.rpc('fb_upsert_users', { p_rows: rows }) }
+
+  upsertInventory(rows) { return this.rpc('fb_upsert_inventory', { p_rows: rows }) }
+
+  // Distinct Fishbowl part ids on product lines of open SOs (paged: PostgREST caps a request at 1000 rows).
+  async openPartIds() {
+    await this.ensureSignedIn()
+    const ids = new Set()
+    const page = 1000
+    for (let from = 0; ; from += page) {
+      const { data, error } = await this.client
+        .from('fb_sales_order_lines')
+        .select('fb_part_id, fb_sales_orders!inner(status_id)')
+        .is('removed_at', null)
+        .not('fb_part_id', 'is', null)
+        .in('type_id', [10, 12])
+        .in('fb_sales_orders.status_id', [20, 25])
+        .range(from, from + page - 1)
+      if (error) throw new Error(`fb_sales_order_lines part read failed: ${error.message}`)
+      for (const r of data || []) if (r.fb_part_id) ids.add(Number(r.fb_part_id))
+      if (!data || data.length < page) break
+    }
+    return [...ids]
+  }
+
   async openMirrorSos() {
     await this.ensureSignedIn()
     const { data, error } = await this.client

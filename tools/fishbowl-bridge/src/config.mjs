@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.1.0',
+  version: '1.2.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -57,6 +57,11 @@ export const config = {
   },
   pollMs: num('POLL_MS', 20000),
   reconcileMs: num('RECONCILE_MS', 900000),
+  inventoryMs: num('INVENTORY_MS', 300000),
+  usersMs: num('USERS_MS', 86400000),
+  // Fishbowl location groups whose stock counts as "available to ship" (D-FB-33). Default Main (1) + Warehouse (6).
+  availableLocationGroups: String(process.env.AVAILABLE_LOCATION_GROUPS || '1,6')
+    .split(',').map((x) => Number(x.trim())).filter(Number.isFinite),
   overlapRevs: num('OVERLAP_REVS', 200),
   chunk: num('CHUNK', 50),
   logDir: resolve(ROOT, 'logs'),

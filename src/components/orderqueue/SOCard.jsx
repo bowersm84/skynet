@@ -4,7 +4,7 @@ import {
   FB_SO_STATUS, FB_SO_STATUS_COLORS, FB_LINE_STATUS, FB_LINE_TYPE, FB_PRIORITY, FB_PRIORITY_COLORS,
   DISPOSITION_LABELS, DISPOSITION_COLORS, RESOLUTION_LABELS, RESOLUTION_COLORS, MANUAL_DISPOSITIONS,
   PRODUCT_LINE_TYPES, formatDate, formatDateShort, formatDateTime, isSuspectDate, isSelectableLine, convertBlocker,
-  coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort,
+  coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort, FB_LOCATION_GROUPS, isClosedLine,
 } from '../../lib/fishbowl'
 
 function Chip({ className = '', children, title }) {
@@ -22,12 +22,34 @@ function CountChip({ n, label, className }) {
 
 const fmtQty = (v) => (v === null || v === undefined ? '—' : Number(v).toLocaleString())
 
+// D-FB-33: Fishbowl on-hand snapshot for a line's part. Green when available covers what is left to
+// fulfill, amber when short, grey when Fishbowl has no record. Tooltip breaks it down by location group.
+function AvailCell({ line, inv, isProduct }) {
+  if (!isProduct) return <td className="px-2 py-2" />
+  if (!inv) return <td className="px-2 py-2 text-right font-mono text-xs text-gray-600" title="No Fishbowl inventory record for this part">—</td>
+  const need = coQtyForLine(line)
+  const avail = Number(inv.qty_available ?? 0)
+  const tone = avail >= need && need > 0 ? 'text-green-300' : avail > 0 ? 'text-amber-300' : 'text-gray-500'
+  const byLoc = Object.entries(inv.by_location || {})
+    .map(([lg, v]) => `${FB_LOCATION_GROUPS[lg] || `LG ${lg}`}: ${Number(v.onHand || 0).toLocaleString()} on hand, ${Number(v.allocated || 0).toLocaleString()} allocated`)
+    .join('\n')
+  const title = `Available ${avail.toLocaleString()} (on hand ${Number(inv.qty_on_hand || 0).toLocaleString()} − allocated ${Number(inv.qty_allocated || 0).toLocaleString()} − not available ${Number(inv.qty_not_available || 0).toLocaleString()}; available location groups only)`
+    + (inv.qty_on_order ? `\nOn order ${Number(inv.qty_on_order).toLocaleString()}` : '')
+    + (byLoc ? `\n\n${byLoc}` : '')
+    + (inv.snapshot_at ? `\n\nsnapshot ${formatDateTime(inv.snapshot_at)}` : '')
+  return (
+    <td className={`px-2 py-2 text-right font-mono text-xs ${tone}`} title={title}>
+      {avail.toLocaleString()}
+    </td>
+  )
+}
+
 // SOCard — one Fishbowl sales order in the Order Queue.
 // `order` is a v_fb_order_queue row; `lines` are fb_sales_order_lines for it (null until expanded).
 export default function SOCard({
   order, lines, linesLoading, expanded, onToggle,
   selected, onToggleLine, onSelectAll, onClearSelection,
-  canAct, busy, onBulkDisposition, onConvert, onOpenCO,
+  canAct, busy, onBulkDisposition, onConvert, onOpenCO, inventory = {},
 }) {
   const selectableLines = useMemo(() => (lines || []).filter(isSelectableLine), [lines])
   const selectedLines = useMemo(
@@ -72,6 +94,7 @@ export default function SOCard({
           <CountChip n={order.purchased_lines} label="buy" className={DISPOSITION_COLORS.purchased} />
           <CountChip n={order.covered_lines} label="covered" className={DISPOSITION_COLORS.covered} />
           <CountChip n={order.assembly_lines} label="assy" className={DISPOSITION_COLORS.assembly} />
+          <CountChip n={order.shipped_lines} label="shipped" className="bg-green-900/20 text-green-400 border-green-900" />
           {order.open_exceptions > 0 && (
             <Chip className="bg-red-900/40 text-red-300 border-red-800">{order.open_exceptions} exception{order.open_exceptions === 1 ? '' : 's'}</Chip>
           )}
@@ -118,7 +141,8 @@ export default function SOCard({
                     <th className="px-2 py-2 text-left hidden xl:table-cell">Description</th>
                     <th className="px-2 py-2 text-right">Ordered</th>
                     <th className="px-2 py-2 text-right">Shipped</th>
-                    <th className="px-2 py-2 text-right">To fulfill</th>
+                    <th className="px-2 py-2 text-right" title="Ordered − shipped">Remaining</th>
+                    <th className="px-2 py-2 text-right" title="Fishbowl available to ship (configured location groups), refreshed every 5 min">Avail</th>
                     <th className="px-2 py-2 text-left">Due</th>
                     <th className="px-2 py-2 text-left">FB status</th>
                     <th className="px-2 py-2 text-left">Disposition</th>
@@ -164,6 +188,7 @@ export default function SOCard({
                         <td className="px-2 py-2 text-right font-mono text-xs">{fmtQty(l.qty_ordered)}</td>
                         <td className="px-2 py-2 text-right font-mono text-xs text-gray-400">{fmtQty(l.qty_fulfilled)}</td>
                         <td className={`px-2 py-2 text-right font-mono text-xs ${isProduct ? 'text-gray-200' : ''}`}>{isProduct ? fmtQty(coQtyForLine(l)) : ''}</td>
+                        <AvailCell line={l} inv={inventory[(l.part_num || l.product_num || '').toUpperCase()]} isProduct={isProduct} />
                         <td className={`px-2 py-2 font-mono text-xs whitespace-nowrap ${isSuspectDate(l.effective_due_date) ? 'text-red-300' : ''}`} title={l.remaining_parts_ship_date ? `Remaining Parts Ship Date ${formatDate(l.remaining_parts_ship_date)}` : 'Date Scheduled'}>
                           {isProduct || l.type_id === 80 ? formatDateShort(l.effective_due_date) : ''}
                           {l.due_date_is_default && (isProduct || l.type_id === 80) && <span className="text-amber-400" title="No real date entered in Fishbowl">*</span>}
@@ -172,10 +197,17 @@ export default function SOCard({
                         <td className="px-2 py-2 text-xs whitespace-nowrap">{FB_LINE_STATUS[l.status_id] || l.status_id}</td>
                         <td className="px-2 py-2">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <Chip className={DISPOSITION_COLORS[l.disposition] || DISPOSITION_COLORS.ignore}
-                              title={[l.disposition_by_profile?.full_name, l.disposition_at ? formatDateTime(l.disposition_at) : null, l.disposition_note].filter(Boolean).join(' · ')}>
-                              {DISPOSITION_LABELS[l.disposition] || l.disposition}
-                            </Chip>
+                            {isClosedLine(l) && !l.customer_order_line_id && l.disposition === 'pending' ? (
+                              <Chip className={l.status_id === 50 || l.status_id === 60 ? 'bg-green-900/40 text-green-300 border-green-800' : 'bg-red-900/40 text-red-300 border-red-800'}
+                                title="Closed in Fishbowl — nothing left to decide">
+                                {FB_LINE_STATUS[l.status_id] || l.status_id}
+                              </Chip>
+                            ) : (
+                              <Chip className={DISPOSITION_COLORS[l.disposition] || DISPOSITION_COLORS.ignore}
+                                title={[l.disposition_by_profile?.full_name, l.disposition_at ? formatDateTime(l.disposition_at) : null, l.disposition_note].filter(Boolean).join(' · ')}>
+                                {DISPOSITION_LABELS[l.disposition] || l.disposition}
+                              </Chip>
+                            )}
                             {coNumber && (
                               <span
                                 role="link"

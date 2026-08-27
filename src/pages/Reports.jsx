@@ -236,7 +236,7 @@ export default function Reports({ profile }) {
                 Preview capped at {PREVIEW_CAP} rows — the CSV download contains all {displayRows.length.toLocaleString()} rows.
               </p>
             )}
-            <div className="overflow-auto max-h-[60vh]">
+            <div className="overflow-auto max-h-[60vh] pb-4">
               <table className="text-xs w-full">
                 <thead className="sticky top-0 bg-gray-800">
                   <tr>

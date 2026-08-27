@@ -29,6 +29,7 @@ import WOLookupShortfalls from '../components/WOLookupShortfalls'
 import { isReadOnlyRole, hasRole } from '../lib/roles'
 import FulfillmentAdjustModal from '../components/FulfillmentAdjustModal'
 import { getEffectiveQty } from '../lib/effectiveQty'
+import { countOpenIssues } from '../lib/paperworkIssues'
 
 export default function Mainframe({ user, profile, canCreateWorkOrders = false, navPayload = null, onNavPayloadConsumed = null }) {
   const canWrite = !isReadOnlyRole(profile?.role)
@@ -67,6 +68,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
   const [lotChangePaperworkCount, setLotChangePaperworkCount] = useState(0)
   // D-JOBMERGE-15: merged members awaiting pre-production acknowledgment.
   const [mergedAckPendingCount, setMergedAckPendingCount] = useState(0)
+  // D-PAPERWORK-01: open paperwork issues awaiting compliance acknowledgement.
+  const [paperworkIssueCount, setPaperworkIssueCount] = useState(0)
   const [outsourcedCount, setOutsourcedCount] = useState(0)
   
   // Auto-refresh state
@@ -276,6 +279,14 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         .select('id', { count: 'exact', head: true })
         .eq('merge_requires_compliance_ack', true)
       setMergedAckPendingCount(mergedAckCount || 0)
+
+      // D-PAPERWORK-01: open paperwork issues are compliance work too. A failure
+      // here must never break the Mainframe load.
+      try {
+        setPaperworkIssueCount(await countOpenIssues())
+      } catch (err) {
+        console.error('Error counting paperwork issues:', err)
+      }
 
       // Fetch for assembly-ready work orders
       // An assembly is ready when ALL its linked jobs have status ready_for_assembly
@@ -1824,9 +1835,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         <StatCard
           id="compliance"
           label="Pending Compliance"
-          value={pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount}
+          value={pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount + paperworkIssueCount}
           colorClass="text-purple-400"
-          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
+          borderClass={(pendingComplianceJobs.length + pendingBatchComplianceCount + lotChangePaperworkCount + mergedAckPendingCount + paperworkIssueCount) > 0 ? 'border-purple-800' : 'border-gray-800'}
           onClick={setSelectedView}
         />
         <StatCard

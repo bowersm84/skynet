@@ -10,6 +10,7 @@ import { isReadOnlyRole } from '../lib/roles'
 import { batchRequiresChemicals } from '../lib/routing'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
+import { fetchOpenIssues, ackPaperworkIssue } from '../lib/paperworkIssues'
 import DeferredDocsWidget from './DeferredDocsWidget'
 import AddJobDocumentModal from './AddJobDocumentModal'
 import { 
@@ -36,7 +37,8 @@ import {
   Flag,
   Package,
   AlertTriangle,
-  ExternalLink
+  ExternalLink,
+  FileWarning
 } from 'lucide-react'
 
 
@@ -121,6 +123,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   // documents themselves are reviewable on the job in the normal surfaces.
   const [mergedDocCounts, setMergedDocCounts] = useState({})
   const [acknowledgingPaperworkId, setAcknowledgingPaperworkId] = useState(null)
+  // Paperwork issues flagged from the Kiosk (D-PAPERWORK-01) — acknowledged here.
+  const [paperworkIssues, setPaperworkIssues] = useState([])
+  const [ackingIssueId, setAckingIssueId] = useState(null)
+  const [issueAckNotes, setIssueAckNotes] = useState({})
   // Shape: { [jobId]: [sends sorted by sent_at] }
 
   const fetchBatchDetails = async (send) => {
@@ -227,6 +233,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     fetchRecentlyApprovedBatches()
     fetchLotChangePaperwork()
     fetchMergedAwaitingAck()
+    fetchPaperworkIssues()
 
     const sub = supabase
       .channel('compliance-finishing-sends')
@@ -246,9 +253,19 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       }, () => fetchLotChangePaperwork())
       .subscribe()
 
+    const issuesSub = supabase
+      .channel('compliance-paperwork-issues')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'paperwork_issues'
+      }, () => fetchPaperworkIssues())
+      .subscribe()
+
     return () => {
       supabase.removeChannel(sub)
       supabase.removeChannel(splitsSub)
+      supabase.removeChannel(issuesSub)
     }
   }, [])
 
@@ -270,6 +287,29 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       .order('split_at', { ascending: true })
     if (error) { console.error('Error loading lot-change paperwork:', error); return }
     setLotChangePaperwork(data || [])
+  }
+
+  // Open paperwork issues (D-PAPERWORK-01). Informational — nothing on the job
+  // changes; acknowledging records that compliance looked and took it to R&D.
+  const fetchPaperworkIssues = async () => {
+    try {
+      setPaperworkIssues(await fetchOpenIssues())
+    } catch (error) {
+      console.error('Error loading paperwork issues:', error)
+    }
+  }
+
+  const handleAckPaperworkIssue = async (item) => {
+    setAckingIssueId(item.id)
+    try {
+      await ackPaperworkIssue(item.id, issueAckNotes[item.id] || null)
+      setIssueAckNotes(prev => { const next = { ...prev }; delete next[item.id]; return next })
+      await fetchPaperworkIssues()
+    } catch (e) {
+      alert(`Could not acknowledge the paperwork issue: ${e.message}`)
+    } finally {
+      setAckingIssueId(null)
+    }
   }
 
   // D-JOBMERGE-13: members that merged while still pending_compliance. The
@@ -2639,6 +2679,68 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     <div className="space-y-4">
       {/* Deferred-documents widget — self-hides when count = 0 */}
       <DeferredDocsWidget refreshKey={jobs} onNavigateToWO={onNavigateToWO} />
+
+      {/* Paperwork Issues (D-PAPERWORK-01) — machinists flag a job's paperwork from the
+          Kiosk; compliance acknowledges here and passes drawing fixes to R&D.
+          Informational — nothing on the job changes. Self-hides when empty. */}
+      {paperworkIssues.length > 0 && (
+        <div className="border border-orange-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 bg-orange-900/20 border-b border-orange-800 flex items-center gap-2">
+            <FileWarning size={16} className="text-orange-400" />
+            <h3 className="text-white font-semibold text-sm">Paperwork Issues ({paperworkIssues.length})</h3>
+            <span className="text-orange-300/70 text-xs ml-auto">Flagged at the Kiosk — not a gate</span>
+          </div>
+          <div className="p-3 space-y-2">
+            {paperworkIssues.map(item => {
+              const busy = ackingIssueId === item.id
+              const job = item.job
+              return (
+                <div key={item.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      {job?.work_order_id ? (
+                        <button onClick={() => onNavigateToWO?.(job.work_order_id)} className="text-white font-mono text-sm font-semibold hover:text-skynet-accent transition-colors inline-flex items-center gap-1">
+                          {job?.job_number || '—'}<ExternalLink size={12} />
+                        </button>
+                      ) : (
+                        <span className="text-white font-mono text-sm font-semibold">{job?.job_number || '—'}</span>
+                      )}
+                      {job?.component?.part_number && (
+                        <span className="text-skynet-accent text-xs font-mono truncate">{job.component.part_number}</span>
+                      )}
+                      {item.document_label && (
+                        <span className="text-gray-300 text-xs truncate">{item.document_label}</span>
+                      )}
+                    </div>
+                    <span className="text-gray-500 text-xs shrink-0">
+                      {item.logger?.full_name || 'Unknown'}{item.machine?.code ? ` · ${item.machine.code}` : ''} · {new Date(item.logged_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <p className="text-gray-200 text-sm mt-2 whitespace-pre-wrap">{item.description}</p>
+                  {canWrite && (
+                    <div className="flex items-center gap-2 mt-2">
+                      <input
+                        type="text"
+                        value={issueAckNotes[item.id] || ''}
+                        onChange={(e) => setIssueAckNotes(prev => ({ ...prev, [item.id]: e.target.value }))}
+                        placeholder="Note (optional) — what was found, handed to R&amp;D"
+                        className="flex-1 px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-xs focus:outline-none focus:border-skynet-accent"
+                      />
+                      <button
+                        disabled={busy}
+                        onClick={() => handleAckPaperworkIssue(item)}
+                        className="bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded inline-flex items-center gap-1"
+                      >
+                        {busy ? 'Saving…' : <><CheckCircle size={12} />Acknowledge</>}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Lot-Change Paperwork — non-blocking heads-up worklist. The hard cert check
           stays at Job B's normal post-mfg review; this just lets compliance get ahead

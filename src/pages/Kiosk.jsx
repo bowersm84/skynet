@@ -34,13 +34,15 @@ import {
   ExternalLink,
   Repeat,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  FileWarning
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
+import { logPaperworkIssue, fetchOpenIssuesForJob, MIN_DESCRIPTION } from '../lib/paperworkIssues'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
@@ -262,6 +264,12 @@ export default function Kiosk() {
   const [viewingDoc, setViewingDoc] = useState(null)
   const [selectedJobDocuments, setSelectedJobDocuments] = useState([])
   const [loadingSelectedJobDocs, setLoadingSelectedJobDocs] = useState(false)
+
+  // Paperwork issues (D-PAPERWORK-01): open flags on the active job + the log modal.
+  const [paperworkIssues, setPaperworkIssues] = useState([])
+  const [showPaperworkIssueModal, setShowPaperworkIssueModal] = useState(false)
+  const [paperworkIssueForm, setPaperworkIssueForm] = useState({ job_document_id: '', description: '' })
+  const [loggingPaperworkIssue, setLoggingPaperworkIssue] = useState(false)
   
   // Machine DOWN/Ready state (for orphaned downtimes)
   const [orphanedDowntimes, setOrphanedDowntimes] = useState([])
@@ -701,9 +709,11 @@ export default function Kiosk() {
     if (activeJob) {
       buildActivityLog(activeJob)
       loadJobDocuments(activeJob.id)
+      loadPaperworkIssues(activeJob.id)
     } else {
       setJobActivities([])
       setJobDocuments([])
+      setPaperworkIssues([])
     }
   }, [activeJob?.id, activeJob?.status, activeJob?.setup_start, activeJob?.production_start, activeJob?.actual_end])
 
@@ -1402,6 +1412,44 @@ export default function Kiosk() {
       console.error('Error loading job documents:', err)
     } finally {
       setLoadingDocs(false)
+    }
+  }
+
+  // Open paperwork issues on the active job (D-PAPERWORK-01) — shown under the
+  // documents so a flag isn't logged twice. Never fails the kiosk.
+  const loadPaperworkIssues = async (jobId) => {
+    try {
+      setPaperworkIssues(await fetchOpenIssuesForJob(jobId))
+    } catch (err) {
+      console.error('Error loading paperwork issues:', err)
+    }
+  }
+
+  const openPaperworkIssueModal = () => {
+    setPaperworkIssueForm({ job_document_id: '', description: '' })
+    setShowPaperworkIssueModal(true)
+  }
+
+  const handleLogPaperworkIssue = async () => {
+    const description = paperworkIssueForm.description.trim()
+    if (description.length < MIN_DESCRIPTION) {
+      alert(`Describe the issue in at least ${MIN_DESCRIPTION} characters`)
+      return
+    }
+    setLoggingPaperworkIssue(true)
+    try {
+      await logPaperworkIssue({
+        jobId: activeJob.id,
+        description,
+        jobDocumentId: paperworkIssueForm.job_document_id || null,
+        machineId: machine?.id || null,
+      })
+      setShowPaperworkIssueModal(false)
+      await loadPaperworkIssues(activeJob.id)
+    } catch (err) {
+      alert(`Could not log the paperwork issue: ${err.message}`)
+    } finally {
+      setLoggingPaperworkIssue(false)
     }
   }
 
@@ -5296,6 +5344,30 @@ export default function Kiosk() {
                             ))}
                           </>
                         )}
+
+                        {/* Paperwork issues (D-PAPERWORK-01): open flags on this job, then the flag button. */}
+                        {paperworkIssues.length > 0 && (
+                          <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 px-3 py-2 space-y-1.5">
+                            {paperworkIssues.map(issue => (
+                              <div key={issue.id} className="flex items-start gap-2 text-xs">
+                                <FileWarning size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                                <div className="min-w-0">
+                                  <p className="text-amber-200">
+                                    Issue logged{issue.document_label ? ` — ${issue.document_label}` : ''} · {issue.logger?.full_name || 'Unknown'}, {new Date(issue.logged_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · awaiting compliance
+                                  </p>
+                                  <p className="text-amber-200/70 truncate">{issue.description}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          onClick={openPaperworkIssueModal}
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-amber-900/30 hover:bg-amber-900/50 border border-amber-700/50 rounded-lg text-amber-300 text-sm font-medium transition-colors"
+                        >
+                          <FileWarning size={16} />
+                          Flag a Paperwork Issue
+                        </button>
                       </div>
                     </div>
                   )}
@@ -8389,6 +8461,63 @@ export default function Kiosk() {
               <button onClick={handleLogDowntime} disabled={actionLoading || !downtimeForm.reason || !downtimeForm.start_time} className="flex-1 py-3 bg-red-600 hover:bg-red-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
                 {actionLoading ? <Loader2 size={20} className="animate-spin" /> : <PauseCircle size={20} />}
                 Log Downtime
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Paperwork Issue Modal (D-PAPERWORK-01) — the description is mandatory */}
+      {showPaperworkIssueModal && activeJob && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-white flex items-center gap-2"><FileWarning className="text-amber-400" size={24} />Flag a Paperwork Issue</h2>
+                <p className="text-gray-500 text-sm">{activeJob.job_number} — Compliance reviews it and passes the fix to R&amp;D</p>
+              </div>
+              <button onClick={() => setShowPaperworkIssueModal(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">Which document?</label>
+                <select
+                  value={paperworkIssueForm.job_document_id}
+                  onChange={(e) => setPaperworkIssueForm({ ...paperworkIssueForm, job_document_id: e.target.value })}
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-amber-500 focus:outline-none"
+                >
+                  <option value="">General — not one document</option>
+                  {jobDocuments.map(doc => (
+                    <option key={doc.id} value={doc.id}>
+                      {doc.file_name || 'Unnamed document'}{doc.document_type?.name ? ` (${doc.document_type.name})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-2">What is wrong? *</label>
+                <textarea
+                  value={paperworkIssueForm.description}
+                  onChange={(e) => setPaperworkIssueForm({ ...paperworkIssueForm, description: e.target.value })}
+                  rows={4}
+                  autoFocus
+                  placeholder="e.g. Drawing shows .250 dia, production sheet says .312"
+                  className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white focus:border-amber-500 focus:outline-none resize-none"
+                />
+                <p className="text-gray-500 text-xs mt-1">At least {MIN_DESCRIPTION} characters. Say which document and what does not match.</p>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3">
+              <button onClick={() => setShowPaperworkIssueModal(false)} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors">Cancel</button>
+              <button
+                onClick={handleLogPaperworkIssue}
+                disabled={loggingPaperworkIssue || paperworkIssueForm.description.trim().length < MIN_DESCRIPTION}
+                className="flex-1 py-3 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {loggingPaperworkIssue ? <Loader2 size={20} className="animate-spin" /> : <FileWarning size={20} />}
+                Log Issue
               </button>
             </div>
           </div>

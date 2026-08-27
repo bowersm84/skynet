@@ -7,10 +7,11 @@ import BarForecastTable from './BarForecastTable'
 import BlanksSection from './BlanksSection'
 import ExceptionsPanel from './ExceptionsPanel'
 
-const EMPTY = { bars: [], barParts: [], blankDemand: [], blankOnhand: [], exceptions: [] }
+const EMPTY = { bars: [], barParts: [], blankDemand: [], blankOnhand: [], exceptions: [], materialHistory: [], partHistory: [] }
 
 export default function RMForecastSection({ profile, materialTypes = [], barSizes = [] }) {
-  // The five RPCs are role-gated to admin/scheduler/purchaser/compliance/
+  // The seven RPCs (five forecast + two D-RMF-08 purchase-flag reads) are
+  // role-gated to admin/scheduler/purchaser/compliance/
   // machinist (D-RMF-06, multi-role aware) and raise 'Not authorized'
   // otherwise — mirror that here so the section is hidden entirely rather
   // than erroring for everyone else.
@@ -101,15 +102,17 @@ export default function RMForecastSection({ profile, materialTypes = [], barSize
     setError('')
     setGated(false)
     try {
-      const [bars, barParts, blankDemand, blankOnhand, exceptions] = await Promise.all([
+      const [bars, barParts, blankDemand, blankOnhand, exceptions, materialHistory, partHistory] = await Promise.all([
         supabase.rpc('forecast_rm_bars'),
         supabase.rpc('forecast_rm_bar_parts'),
         supabase.rpc('forecast_blank_demand'),
         supabase.rpc('forecast_blank_onhand'),
         supabase.rpc('forecast_rm_exceptions'),
+        supabase.rpc('forecast_rm_material_history'),
+        supabase.rpc('forecast_rm_part_history'),
       ])
 
-      const firstError = [bars, barParts, blankDemand, blankOnhand, exceptions]
+      const firstError = [bars, barParts, blankDemand, blankOnhand, exceptions, materialHistory, partHistory]
         .map(r => r.error)
         .find(Boolean)
       if (firstError) {
@@ -127,6 +130,8 @@ export default function RMForecastSection({ profile, materialTypes = [], barSize
         blankDemand: blankDemand.data || [],
         blankOnhand: blankOnhand.data || [],
         exceptions: exceptions.data || [],
+        materialHistory: materialHistory.data || [],
+        partHistory: partHistory.data || [],
       })
 
       // Existing dimension rows drive three things: prefill for the editors, the
@@ -298,6 +303,8 @@ export default function RMForecastSection({ profile, materialTypes = [], barSize
             <BarForecastTable
               bars={data.bars}
               barParts={data.barParts}
+              materialHistory={data.materialHistory}
+              partHistory={data.partHistory}
               dimsByPart={dimsByPart}
               lockContext={lockContext}
               materialOptions={materialOptions}

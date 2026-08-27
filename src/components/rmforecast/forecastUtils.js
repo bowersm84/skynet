@@ -189,3 +189,59 @@ export function neededFor(neededMap, onhandRow) {
   const key = `${onhandRow?.stud_series}|${onhandRow?.stud_length}`
   return neededMap.get(key) ?? null
 }
+
+// ── Purchase-check flags (D-RMF-08) ─────────────────────────────────────────
+// Advisory only: they tell the purchaser to verify a drawing's material callout
+// before buying bar. Nothing here feeds the forecast math.
+
+// Receiving history is keyed on material name (case-insensitive, trimmed) plus
+// the numeric bar size, so a receipt logged as '0.500 dia' matches a forecast
+// group bucketed on '0.500"'. forecast_rm_material_history() returns
+// material_key / bar_size_num already normalized the same way.
+export function materialHistoryKey(materialType, barSize) {
+  const n = numericOf(barSize)
+  return `${String(materialType ?? '').trim().toLowerCase()}|${n == null ? '' : n}`
+}
+
+export function indexMaterialHistory(rows) {
+  const map = new Map()
+  for (const r of rows || []) {
+    const n = r.bar_size_num == null ? null : Number(r.bar_size_num)
+    map.set(`${r.material_key}|${n == null ? '' : n}`, r)
+  }
+  return map
+}
+
+export function materialHistoryFor(index, materialType, barSize) {
+  return index.get(materialHistoryKey(materialType, barSize)) || null
+}
+
+// 'never' = no bar receipt on record for this material + size; null otherwise.
+// A "none on hand" state was dropped on first look — the shortfall chip and the
+// On hand figure already say it (D-RMF-08 amendment).
+export function materialFlag(history) {
+  return history ? null : 'never'
+}
+
+export function indexPartHistory(rows) {
+  const map = new Map()
+  for (const r of rows || []) map.set(r.part_number, r)
+  return map
+}
+
+// A part is a first run when forecast_rm_part_history says so. Parts missing
+// from the history are never flagged — absence of data is not a first run.
+export function isFirstRun(partHistory, partNumber) {
+  const h = partHistory?.get(partNumber)
+  return !!h && h.first_run === true
+}
+
+// Distinct first-run part numbers among the drill-down rows of one group.
+export function firstRunPartsFor(group, barParts, partHistory) {
+  const seen = new Set()
+  for (const p of barParts || []) {
+    if (groupKey(p.material_type, p.bar_size) !== group.key) continue
+    if (isFirstRun(partHistory, p.part_number)) seen.add(p.part_number)
+  }
+  return [...seen].sort()
+}

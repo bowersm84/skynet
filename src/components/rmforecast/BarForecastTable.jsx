@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, AlertTriangle, Package, Lock, Pencil } from 'lucide-react'
+import { ChevronDown, ChevronRight, AlertTriangle, Package, Lock, Pencil, ShieldAlert, Sprout } from 'lucide-react'
 import MachinesCell from './MachinesCell'
 import { usePartDimensionEditor } from './usePartDimensionEditor'
 import { PartDimensionEditorModal } from './PartDimensionEditor'
@@ -12,6 +12,12 @@ import {
   fmtInt,
   fmtBars,
   isFullyStaged,
+  indexMaterialHistory,
+  materialHistoryFor,
+  materialFlag,
+  indexPartHistory,
+  isFirstRun,
+  firstRunPartsFor,
 } from './forecastUtils'
 
 // Basis badges. Weekly rows key off has_estimates; part rows off basis.
@@ -28,6 +34,40 @@ function BasisBadge({ basis }) {
     <span className="text-xs px-2 py-0.5 rounded bg-amber-900/50 text-amber-300 whitespace-nowrap">Estimated</span>
   ) : (
     <span className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300 whitespace-nowrap">Actuals</span>
+  )
+}
+
+// Purchase-check flags (D-RMF-08). Advisory only — they never change the math.
+// Group header: the material + size has never been received as bar stock, which
+// is where a wrong drawing callout surfaces, so the purchaser verifies before
+// buying. ("None on hand" was dropped on first look — the shortfall chip and the
+// On hand figure already say it.)
+function MaterialFlagBadge({ group, history }) {
+  if (materialFlag(history) !== 'never') return null
+  return (
+    <span
+      title={`No bar receipt on record for ${group.material_type || '—'} ${group.bar_size || '—'}. Verify the material callout on the drawing before purchasing.`}
+      className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-orange-900/60 text-orange-300 whitespace-nowrap cursor-help"
+    >
+      <ShieldAlert size={12} />
+      Never received
+    </span>
+  )
+}
+
+// Group header roll-up of the first-run parts inside the group.
+function FirstRunBadge({ parts }) {
+  if (!parts || parts.length === 0) return null
+  const one = parts.length === 1
+  const title = `First-time run${one ? '' : 's'}: ${parts.join(', ')} — no prior job for ${one ? 'this part' : 'these parts'} has finished manufacturing. Verify material and bar size against the drawing before purchasing.`
+  return (
+    <span
+      title={title}
+      className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-violet-900/60 text-violet-300 whitespace-nowrap cursor-help"
+    >
+      <Sprout size={12} />
+      {one ? 'First run' : `${parts.length} first runs`}
+    </span>
   )
 }
 
@@ -70,7 +110,7 @@ function lockTooltip(lock) {
 // A part inside a week's drill-down. Owns its own correction modal so the
 // editor is scoped to exactly the part whose row was clicked.
 function PartRow({
-  part, dims, lock, materialOptions, barSizeOptions, canCorrect, profile, onCorrected,
+  part, dims, lock, firstRun = false, materialOptions, barSizeOptions, canCorrect, profile, onCorrected,
 }) {
   const [open, setOpen] = useState(false)
 
@@ -109,6 +149,15 @@ function PartRow({
               >
                 <Lock size={10} />
                 Verified
+              </span>
+            )}
+            {firstRun && (
+              <span
+                title="No prior job for this part has finished manufacturing. Verify the material and bar size against the drawing before purchasing."
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-violet-900/50 text-violet-300 cursor-help"
+              >
+                <Sprout size={10} />
+                First run
               </span>
             )}
           </span>
@@ -158,6 +207,8 @@ export default function BarForecastTable({
   barParts,
   dimsByPart = {},
   lockContext = {},
+  materialHistory = [],
+  partHistory = [],
   materialOptions = [],
   barSizeOptions = [],
   canCorrect = false,
@@ -166,6 +217,8 @@ export default function BarForecastTable({
 }) {
   const groups = buildBarGroups(bars)
   const partIndex = indexBarParts(barParts)
+  const historyIndex = indexMaterialHistory(materialHistory)
+  const partHistoryIndex = indexPartHistory(partHistory)
 
   // Groups that run short open expanded — the shortfall is the reason to look.
   const [expandedGroups, setExpandedGroups] = useState(
@@ -220,6 +273,11 @@ export default function BarForecastTable({
                       {group.firstShortfall}
                     </span>
                   )}
+                  <MaterialFlagBadge
+                    group={group}
+                    history={materialHistoryFor(historyIndex, group.material_type, group.bar_size)}
+                  />
+                  <FirstRunBadge parts={firstRunPartsFor(group, barParts, partHistoryIndex)} />
                   {group.hasEstimates && <EstimateBadge hasEstimates />}
                 </div>
               </div>
@@ -304,6 +362,7 @@ export default function BarForecastTable({
                                         part={p}
                                         dims={dimsByPart[p.part_number]}
                                         lock={lockContext[p.part_number] || null}
+                                        firstRun={isFirstRun(partHistoryIndex, p.part_number)}
                                         materialOptions={materialOptions}
                                         barSizeOptions={barSizeOptions}
                                         canCorrect={canCorrect}

@@ -42,6 +42,7 @@ import { getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
+import { fetchOrdersVsStock, ordersVsStockStatus } from '../lib/ordersVsStock'
 import { logPaperworkIssue, fetchOpenIssuesForJob, MIN_DESCRIPTION } from '../lib/paperworkIssues'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
@@ -112,6 +113,33 @@ export default function Kiosk() {
     return () => { cancelled = true }
   }, [activeJob?.id])
   const activeRunTarget = activeJob ? getRunTarget(activeJob, activeJobMembers) : 0
+
+  // D-OVS-01: orders vs. stock for the active run (host WO + member WOs).
+  // Collapsed by default; the header still carries the verdict.
+  const [ordersVsStock, setOrdersVsStock] = useState(null)
+  const [ovsExpanded, setOvsExpanded] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    if (!activeJob?.id) {
+      setOrdersVsStock(null)
+      setOvsExpanded(false)
+      return () => { cancelled = true }
+    }
+    fetchOrdersVsStock({
+      jobId: activeJob.id,
+      jobNumber: activeJob.job_number,
+      workOrderId: activeJob.work_order?.id || activeJob.work_order_id || null,
+      woNumber: activeJob.work_order?.wo_number || null,
+      target: activeRunTarget,
+      members: activeJobMembers,
+    })
+      .then(s => { if (!cancelled) setOrdersVsStock(s) })
+      .catch(err => {
+        console.error('Orders vs stock load failed:', err)
+        if (!cancelled) setOrdersVsStock(null)
+      })
+    return () => { cancelled = true }
+  }, [activeJob?.id, activeRunTarget, activeJobMembers])
   const [selectedJob, setSelectedJob] = useState(null)
   
   // Action states
@@ -5043,6 +5071,103 @@ export default function Kiosk() {
                       <span className="text-gray-500 text-sm">Scheduled: <span className="text-white">{formatTime(activeJob.scheduled_start)}</span></span>
                     </div>
                   </div>
+
+                  {/* Orders vs. Stock (D-OVS-01) — display only. Made = pieces sent to
+                      finishing, the machinist's leading count. */}
+                  {ordersVsStock && !isMaintenance(activeJob) && (() => {
+                    const made = getFinishingSendsRollup(finishingSends).totalSent
+                    const s = ordersVsStockStatus(ordersVsStock, made)
+                    const inStock = s.phase === 'stock'
+                    const combined = activeJobMembers.length > 0
+                    const pctMade = ordersVsStock.target > 0 ? Math.min(100, (made / ordersVsStock.target) * 100) : 0
+                    const pctOrders = ordersVsStock.target > 0 ? Math.min(100, (ordersVsStock.ordersOnRun / ordersVsStock.target) * 100) : 0
+                    let verdict = ordersVsStock.ordersGross > 0
+                      ? 'Orders already covered by other jobs of this WO — this run is stock'
+                      : 'Stock run — no customer order linked'
+                    if (s.phase === 'orders') {
+                      verdict = `${s.toOrders.toLocaleString()} more for orders${ordersVsStock.stock > 0 ? ` · then ${ordersVsStock.stock.toLocaleString()} stock` : ''}`
+                    } else if (inStock) {
+                      verdict = ordersVsStock.stock > 0
+                        ? `Orders covered — making stock (${s.stockMade.toLocaleString()} of ${ordersVsStock.stock.toLocaleString()})`
+                        : 'Orders covered — no stock on this run'
+                    }
+                    return (
+                      <div className={`rounded-lg p-4 mb-4 border ${inStock ? 'bg-emerald-950/30 border-emerald-800' : 'bg-gray-800/50 border-gray-700/60'}`}>
+                        <button
+                          type="button"
+                          onClick={() => setOvsExpanded(v => !v)}
+                          aria-expanded={ovsExpanded}
+                          className="w-full flex items-center gap-3 text-left"
+                        >
+                          {ovsExpanded ? <ChevronUp size={18} className="text-gray-500 flex-shrink-0" /> : <ChevronDown size={18} className="text-gray-500 flex-shrink-0" />}
+                          <Layers size={18} className={inStock ? 'text-emerald-400' : 'text-skynet-accent'} />
+                          <span className="text-white font-medium">Orders vs. Stock</span>
+                          <span className={`ml-auto text-sm font-medium text-right ${inStock ? 'text-emerald-300' : s.phase === 'orders' ? 'text-amber-300' : 'text-gray-400'}`}>
+                            {verdict}
+                          </span>
+                        </button>
+                        {ovsExpanded && (
+                          <div className="mt-3 ml-7 space-y-3">
+                            <p className="text-sm text-gray-400">
+                              Target <span className="text-white">{ordersVsStock.target.toLocaleString()}</span>
+                              {' = '}Orders <span className="text-white">{ordersVsStock.ordersOnRun.toLocaleString()}</span>
+                              {' + '}Stock <span className="text-white">{ordersVsStock.stock.toLocaleString()}</span>
+                              {ordersVsStock.madeElsewhere > 0 && (
+                                <span className="text-gray-500"> · {ordersVsStock.madeElsewhere.toLocaleString()} already made on {ordersVsStock.siblingJobs} other job{ordersVsStock.siblingJobs === 1 ? '' : 's'} of this WO, so orders are shown net of that</span>
+                              )}
+                            </p>
+                            <div>
+                              <div className="relative h-2.5 bg-gray-700 rounded-full overflow-hidden">
+                                <div className={`h-full ${inStock ? 'bg-emerald-500' : 'bg-skynet-accent'}`} style={{ width: `${pctMade}%` }} />
+                                {ordersVsStock.ordersOnRun > 0 && ordersVsStock.ordersOnRun < ordersVsStock.target && (
+                                  <div className="absolute top-0 bottom-0 w-0.5 bg-white/80" style={{ left: `${pctOrders}%` }} title="Orders are covered here — everything past this line is stock" />
+                                )}
+                              </div>
+                              <div className="flex items-center justify-between text-xs text-gray-500 mt-1">
+                                <span>{made.toLocaleString()} made (sent to finishing)</span>
+                                {ordersVsStock.ordersOnRun > 0 && <span>orders end at {ordersVsStock.ordersOnRun.toLocaleString()}</span>}
+                                <span>{ordersVsStock.target.toLocaleString()} target</span>
+                              </div>
+                            </div>
+                            {ordersVsStock.lines.length > 0 ? (
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="text-gray-500 text-xs uppercase tracking-wider text-left">
+                                    <th className="py-1 pr-3 font-medium">Customer</th>
+                                    <th className="py-1 pr-3 font-medium">CO #</th>
+                                    <th className="py-1 pr-3 font-medium">Line</th>
+                                    {combined && <th className="py-1 pr-3 font-medium">Job</th>}
+                                    <th className="py-1 pr-3 font-medium text-right">Qty</th>
+                                    <th className="py-1 font-medium">Due</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {ordersVsStock.lines.map((l, i) => (
+                                    <tr key={i} className="border-t border-gray-700/60 text-gray-300">
+                                      <td className="py-1.5 pr-3">{l.customer || '—'}</td>
+                                      <td className="py-1.5 pr-3 font-mono text-blue-400">{l.co_number || '—'}</td>
+                                      <td className="py-1.5 pr-3">{l.line_number ?? '—'}</td>
+                                      {combined && <td className="py-1.5 pr-3 font-mono text-xs text-gray-400">{l.job_number || '—'}</td>}
+                                      <td className="py-1.5 pr-3 text-right font-mono">{l.quantity_allocated.toLocaleString()}</td>
+                                      <td className="py-1.5">{l.due_date ? formatDate(l.due_date) : '—'}</td>
+                                    </tr>
+                                  ))}
+                                  <tr className="border-t border-gray-600 text-gray-400">
+                                    <td className="py-1.5 pr-3" colSpan={combined ? 4 : 3}>Stock — kept for future orders</td>
+                                    <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{ordersVsStock.stock.toLocaleString()}</td>
+                                    <td className="py-1.5">—</td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            ) : (
+                              <p className="text-gray-500 text-sm">No customer order is linked to this work order — the whole run is stock.</p>
+                            )}
+                            <p className="text-gray-600 text-xs">Made counts pieces sent to finishing; the compliance-accepted count lags behind it.</p>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
 
                   {/* Tooling Display - Always show */}
                   <div className="bg-gray-800/50 rounded-lg p-4 mb-4">

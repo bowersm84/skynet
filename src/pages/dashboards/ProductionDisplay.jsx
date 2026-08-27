@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { deriveMachineStatus } from '../../lib/machineStatus'
-import { Power, ChevronRight, ChevronDown, Loader2 } from 'lucide-react'
-import { fetchCOAllocationsForTraveler } from '../../lib/traveler'
+import { Power, ChevronRight, ChevronDown } from 'lucide-react'
 import { fetchActiveMembers } from '../../lib/jobMerge'
+import { fetchOrdersVsStockBatch, ordersVsStockStatus } from '../../lib/ordersVsStock'
 
 // ---- Date helpers (module-level, pure, local timezone) ----
 // Skybolt is closed Sat/Sun. "Last business day" walks backward from today
@@ -403,10 +403,11 @@ export default function ProductionDisplay() {
     // jobs.quantity is never mutated by a merge (D-JOBMERGE-01).
     const memberQtyByHost = {}
     const memberCountByHost = {}
+    const memberIdsByHost = {}
     if (activeJobIds.length > 0) {
       const { data: allocRows, error: e3 } = await supabase
         .from('job_merge_allocations')
-        .select('host_job_id, requested_qty')
+        .select('host_job_id, member_job_id, requested_qty')
         .eq('is_active', true)
         .in('host_job_id', activeJobIds)
       if (e3) {
@@ -415,8 +416,26 @@ export default function ProductionDisplay() {
         for (const r of (allocRows || [])) {
           memberQtyByHost[r.host_job_id] = (memberQtyByHost[r.host_job_id] || 0) + (r.requested_qty || 0)
           memberCountByHost[r.host_job_id] = (memberCountByHost[r.host_job_id] || 0) + 1
+          if (!memberIdsByHost[r.host_job_id]) memberIdsByHost[r.host_job_id] = []
+          memberIdsByHost[r.host_job_id].push(r.member_job_id)
         }
       }
+    }
+
+    // D-OVS-01: orders vs. stock per run (host WO + member WOs), three queries
+    // for the whole board. A failure leaves ovs null — the row shows no verdict.
+    let ovsByJob = {}
+    try {
+      ovsByJob = await fetchOrdersVsStockBatch(list.map(j => ({
+        jobId: j.id,
+        jobNumber: j.job_number,
+        workOrderId: j.work_order?.id || null,
+        woNumber: j.work_order?.wo_number || null,
+        target: (j.quantity ?? 0) + (memberQtyByHost[j.id] || 0),
+        memberJobIds: memberIdsByHost[j.id] || [],
+      })))
+    } catch (e) {
+      console.error('loadActiveJobs/orders vs stock error:', e)
     }
 
     const now = Date.now()
@@ -454,7 +473,7 @@ export default function ProductionDisplay() {
         ? Math.round(finished * 86400000 / elapsedMs)
         : null
 
-      return { ...j, finished, targetQty, mergedMemberQty, mergedMemberCount, trafficLight, elapsedMs, currentPartsPerDay }
+      return { ...j, finished, targetQty, mergedMemberQty, mergedMemberCount, trafficLight, elapsedMs, currentPartsPerDay, ovs: ovsByJob[j.id] || null }
     })
 
     // UP NEXT enrichment. For each active row, find the next queued job on
@@ -859,10 +878,11 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
   const [pickerValue, setPickerValue] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [justRequested, setJustRequested] = useState(false)
-  // Customer-order dropdown — lazy-loaded on first expand
+  // Customer-order dropdown. Allocation lines ride in with the row (job.ovs,
+  // D-OVS-01); only the combined-run members are lazy-loaded on first expand.
   const [coExpanded, setCoExpanded] = useState(false)
-  const [coRows, setCoRows] = useState(null) // null = not yet loaded
-  const [coLoading, setCoLoading] = useState(false)
+  const ovs = job.ovs || null
+  const ovsStatus = ovs ? ordersVsStockStatus(ovs, job.finished || 0) : null
   // Combined-run members — lazy-loaded on first expand, hosts only
   const [memberRows, setMemberRows] = useState(null) // null = not yet loaded
   const isStock = job.work_order?.order_type === 'make_to_stock'
@@ -870,18 +890,6 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
   const toggleCO = async () => {
     const next = !coExpanded
     setCoExpanded(next)
-    if (next && coRows === null && !coLoading && !isStock) {
-      setCoLoading(true)
-      try {
-        const rows = await fetchCOAllocationsForTraveler(supabase, job.work_order?.id)
-        setCoRows(rows || [])
-      } catch (e) {
-        console.error('Failed to load CO allocations:', e)
-        setCoRows([])
-      } finally {
-        setCoLoading(false)
-      }
-    }
     if (next && memberRows === null && job.mergedMemberCount > 0) {
       try {
         const rows = await fetchActiveMembers(job.id)
@@ -955,6 +963,14 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
       <div className="text-right shrink-0 min-w-[120px]">
         <div className="flex items-center justify-end gap-2">
           <span className={`text-xs font-mono font-semibold ${statusColor}`}>{statusLabel}</span>
+          {ovsStatus?.phase === 'stock' && ovsStatus.stock > 0 && (
+            <span
+              className="bg-emerald-900/60 text-emerald-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded"
+              title={`Orders covered at ${ovsStatus.ordersOnRun.toLocaleString()} — ${ovsStatus.stockMade.toLocaleString()} of ${ovsStatus.stock.toLocaleString()} stock finished`}
+            >
+              Stock
+            </span>
+          )}
           {isBehind && (
             <span className="bg-red-900/60 text-red-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded">
               Behind
@@ -975,8 +991,15 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
             <span className="text-gray-500 text-xs ml-2">≈ {job.currentPartsPerDay.toLocaleString()}/day</span>
           )}
         </div>
-        <div className="w-full bg-gray-800 rounded-full h-1 mt-1 overflow-hidden">
-          <div className="h-full bg-blue-500" style={{ width: `${progressPct}%` }} />
+        <div className="relative w-full bg-gray-800 rounded-full h-1 mt-1">
+          <div className="h-full bg-blue-500 rounded-full" style={{ width: `${progressPct}%` }} />
+          {ovs && ovs.ordersOnRun > 0 && ovs.ordersOnRun < job.targetQty && (
+            <div
+              className="absolute -top-0.5 -bottom-0.5 w-0.5 bg-white/80 rounded-sm"
+              style={{ left: `${Math.min(100, (ovs.ordersOnRun / job.targetQty) * 100)}%` }}
+              title={`Orders end at ${ovs.ordersOnRun.toLocaleString()} — past this line is stock`}
+            />
+          )}
         </div>
       </div>
       <div className="text-right shrink-0 min-w-[80px]">
@@ -1099,44 +1122,77 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
               </table>
             </div>
           )}
-          {coLoading ? (
-            <div className="flex items-center gap-2 text-gray-500 text-xs font-mono py-2">
-              <Loader2 size={12} className="animate-spin" /> Loading customer order…
-            </div>
-          ) : isStock ? (
-            <div className="text-gray-500 text-xs font-mono py-2">Stock order — no customer allocation.</div>
-          ) : !coRows || coRows.length === 0 ? (
-            <div className="text-gray-500 text-xs font-mono py-2">No customer order linked (stock/forecast).</div>
+          {!ovs ? (
+            <div className="text-gray-500 text-xs font-mono py-2">Orders vs. stock unavailable.</div>
           ) : (
-            <table className="w-full text-xs font-mono mt-1">
-              <thead>
-                <tr className="text-gray-500 uppercase tracking-wider text-[10px] text-left">
-                  <th className="py-1 pr-3 font-medium">Customer</th>
-                  <th className="py-1 pr-3 font-medium">CO #</th>
-                  <th className="py-1 pr-3 font-medium">Line</th>
-                  <th className="py-1 pr-3 font-medium text-right">Qty Allocated</th>
-                  <th className="py-1 font-medium">Due</th>
-                </tr>
-              </thead>
-              <tbody>
-                {coRows.map((a, i) => {
-                  const line = a.customer_order_line
-                  const co = line?.customer_order
-                  const due = line?.due_date
-                    ? new Date(line.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-                    : '—'
-                  return (
-                    <tr key={i} className="text-gray-300 border-t border-gray-800/50">
-                      <td className="py-1 pr-3">{co?.customer?.name || '—'}</td>
-                      <td className="py-1 pr-3 text-blue-400">{co?.co_number || '—'}</td>
-                      <td className="py-1 pr-3">{line?.line_number ?? '—'}</td>
-                      <td className="py-1 pr-3 text-right">{(a.quantity_allocated || 0).toLocaleString()}</td>
-                      <td className="py-1">{due}</td>
+            <>
+              <div className="flex items-center gap-3 flex-wrap text-xs font-mono py-1.5">
+                <span className="text-gray-500 uppercase tracking-wider text-[10px]">Orders vs. stock</span>
+                <span className="text-gray-300">Orders {ovs.ordersOnRun.toLocaleString()}</span>
+                <span className="text-gray-600">+</span>
+                <span className="text-gray-300">Stock {ovs.stock.toLocaleString()}</span>
+                <span className="text-gray-600">=</span>
+                <span className="text-gray-300">Target {ovs.target.toLocaleString()}</span>
+                {ovsStatus?.phase === 'orders' && (
+                  <span className="text-amber-300 ml-auto">
+                    {ovsStatus.toOrders.toLocaleString()} more for orders{ovs.stock > 0 ? ` · then ${ovs.stock.toLocaleString()} stock` : ''}
+                  </span>
+                )}
+                {ovsStatus?.phase === 'stock' && (
+                  <span className="text-emerald-300 ml-auto">
+                    Orders covered{ovs.stock > 0 ? ` — ${ovsStatus.stockMade.toLocaleString()} of ${ovs.stock.toLocaleString()} stock finished` : ''}
+                  </span>
+                )}
+                {ovsStatus?.phase === 'no_orders' && (
+                  <span className="text-gray-500 ml-auto">
+                    {ovs.ordersGross > 0
+                      ? 'Orders already covered by other jobs of this WO — this run is stock.'
+                      : isStock ? 'Stock order — no customer allocation.' : 'No customer order linked (stock/forecast).'}
+                  </span>
+                )}
+                {ovs.madeElsewhere > 0 && (
+                  <span className="text-gray-500 w-full">
+                    {ovs.madeElsewhere.toLocaleString()} already made on {ovs.siblingJobs} other job{ovs.siblingJobs === 1 ? '' : 's'} of the same WO — orders shown net of that.
+                  </span>
+                )}
+              </div>
+              {ovs.lines.length > 0 && (
+                <table className="w-full text-xs font-mono mt-1">
+                  <thead>
+                    <tr className="text-gray-500 uppercase tracking-wider text-[10px] text-left">
+                      <th className="py-1 pr-3 font-medium">Customer</th>
+                      <th className="py-1 pr-3 font-medium">CO #</th>
+                      <th className="py-1 pr-3 font-medium">Line</th>
+                      {job.mergedMemberCount > 0 && <th className="py-1 pr-3 font-medium">Job</th>}
+                      <th className="py-1 pr-3 font-medium text-right">Qty Allocated</th>
+                      <th className="py-1 font-medium">Due</th>
                     </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {ovs.lines.map((l, i) => {
+                      const due = l.due_date
+                        ? new Date(l.due_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                        : '—'
+                      return (
+                        <tr key={i} className="text-gray-300 border-t border-gray-800/50">
+                          <td className="py-1 pr-3">{l.customer || '—'}</td>
+                          <td className="py-1 pr-3 text-blue-400">{l.co_number || '—'}</td>
+                          <td className="py-1 pr-3">{l.line_number ?? '—'}</td>
+                          {job.mergedMemberCount > 0 && <td className="py-1 pr-3 text-gray-400">{l.job_number || '—'}</td>}
+                          <td className="py-1 pr-3 text-right">{l.quantity_allocated.toLocaleString()}</td>
+                          <td className="py-1">{due}</td>
+                        </tr>
+                      )
+                    })}
+                    <tr className="text-gray-400 border-t border-gray-700">
+                      <td className="py-1 pr-3" colSpan={job.mergedMemberCount > 0 ? 4 : 3}>Stock — kept for future orders</td>
+                      <td className="py-1 pr-3 text-right text-gray-300">{ovs.stock.toLocaleString()}</td>
+                      <td className="py-1">—</td>
+                    </tr>
+                  </tbody>
+                </table>
+              )}
+            </>
           )}
         </div>
       )}

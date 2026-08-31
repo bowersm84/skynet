@@ -1475,7 +1475,13 @@ export default function Finishing() {
   // job_materials lot → jobs.blank_lot_number (Bolt Master jobs write no
   // job_materials row, D-BLANK-07) → the last batch's lot. Editable if wrong.
   const openLateModal = (j) => {
-    const matLot = [...(j.job_materials || [])]
+    // job_materials.job_id carries a UNIQUE constraint, so PostgREST embeds it
+    // one-to-one — a single object, not an array. Normalised here so the lookup
+    // works either way (and still picks the newest if that ever becomes to-many).
+    const mats = Array.isArray(j.job_materials)
+      ? j.job_materials
+      : (j.job_materials ? [j.job_materials] : [])
+    const matLot = mats
       .filter(m => m.lot_number)
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]?.lot_number
     const lastSendLot = [...(j.finishing_sends || [])]

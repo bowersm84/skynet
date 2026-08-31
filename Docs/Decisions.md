@@ -3257,3 +3257,5 @@ Spec v4.4 (§3.1 roles, §5.27 Fishbowl Bridge & Order Queue, §10.8 schema, §1
 **Files:** src/lib/ordersVsStock.js (new), src/pages/Kiosk.jsx, src/pages/dashboards/ProductionDisplay.jsx.
 
 **Amendment (2026-08-27):** The Production Display's row bar carries the same orders-line tick as the Kiosk bar (white, 2px proud of the bar, at ordersOnRun / targetQty), so the crossover is visible on the board without expanding the row. Tick hidden when the run has no orders or is entirely orders.
+
+**Amendment (2026-08-31, Command module):** The job detail modal carries an orders-vs-stock bar — track split into orders | stock, pieces sent to finishing filled over it, white tick at the orders line, verdict text — from fetchOrdersVsStock + a Σ finishing_sends.quantity read, lazy per selected job. The list view's row click now opens that modal instead of the Reschedule flow directly (Reschedule remains one click away via the modal's Edit button); loadAllScheduledJobs gained the machine join and order_type/maintenance_type so the modal renders identically from either view.

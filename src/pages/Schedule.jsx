@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { fetchMergeHostCandidates, mergeJobIntoHost, unmergeJob, isMemberEligible, getRunTarget, isScheduleStale } from '../lib/jobMerge'
+import { fetchOrdersVsStock, ordersVsStockStatus } from '../lib/ordersVsStock'
 import { 
   ArrowLeft, 
   ChevronLeft, 
@@ -188,6 +189,39 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
   // D-JOBMERGE-02: active merge allocations keyed by host job id
   const [mergeAllocs, setMergeAllocs] = useState({})
+
+  // D-OVS-01 in the job modal: orders vs. stock for the selected run, plus
+  // pieces sent to finishing (the Kiosk's "made"). Lazy, one job at a time;
+  // a failure leaves the bar off, never the modal.
+  const [selectedOvs, setSelectedOvs] = useState(null)
+  const [selectedSent, setSelectedSent] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    setSelectedOvs(null)
+    setSelectedSent(0)
+    if (!selectedJob?.id || selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance') {
+      return () => { cancelled = true }
+    }
+    const members = mergeAllocs[selectedJob.id] || []
+    Promise.all([
+      fetchOrdersVsStock({
+        jobId: selectedJob.id,
+        jobNumber: selectedJob.job_number,
+        workOrderId: selectedJob.work_order?.id || selectedJob.work_order_id || null,
+        woNumber: selectedJob.work_order?.wo_number || null,
+        target: getRunTarget(selectedJob, members),
+        members,
+      }),
+      supabase.from('finishing_sends').select('quantity').eq('job_id', selectedJob.id),
+    ])
+      .then(([ovs, sends]) => {
+        if (cancelled) return
+        setSelectedOvs(ovs)
+        setSelectedSent((sends?.data || []).reduce((s, r) => s + (r.quantity || 0), 0))
+      })
+      .catch(err => console.error('Job modal orders vs stock failed:', err))
+    return () => { cancelled = true }
+  }, [selectedJob?.id, mergeAllocs])
   
   // Drag and drop state
   const [draggedJob, setDraggedJob] = useState(null)
@@ -567,11 +601,12 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       .select(`
         *,
         work_order:work_orders(
-          id, wo_number, customer, priority, due_date, has_cancelled_allocation
+          id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation
         ),
         component:parts!component_id(
           id, part_number, description
-        )
+        ),
+        assigned_machine:machines(id, name, code)
       `)
       .not('assigned_machine_id', 'is', null)
       .not('scheduled_start', 'is', null)
@@ -3485,11 +3520,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                           handleDragEnd(e)
                                           setListDropTarget(null)
                                         }}
-                                        onClick={() => {
-                                          if (!canEdit) return
-                                          setScheduleClickJob(job)
-                                          setScheduleClickEditMode(true)
-                                        }}
+                                        onClick={() => setSelectedJob(job)}
                                         className={`flex items-center gap-3 px-4 py-3 hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-b-0 ${
                                           isBeingDragged
                                             ? 'opacity-40 cursor-grabbing'
@@ -3654,6 +3685,44 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                   </p>
                 </div>
               </div>
+
+              {/* D-OVS-01: target split into orders | stock (the track), pieces sent to
+                  finishing filled over it, white tick at the orders line. */}
+              {selectedOvs && !(selectedJob.is_maintenance || selectedJob.work_order?.order_type === 'maintenance') && (() => {
+                const s = ordersVsStockStatus(selectedOvs, selectedSent)
+                const t = selectedOvs.target || 0
+                const pctSent = t > 0 ? Math.min(100, (selectedSent / t) * 100) : 0
+                const pctOrders = t > 0 ? Math.min(100, (selectedOvs.ordersOnRun / t) * 100) : 0
+                const inStock = s.phase === 'stock'
+                let verdict = selectedOvs.ordersGross > 0 ? 'Orders covered by other jobs of this WO' : 'Stock run — no customer order'
+                if (s.phase === 'orders') {
+                  verdict = `${s.toOrders.toLocaleString()} more for orders${selectedOvs.stock > 0 ? ` · then ${selectedOvs.stock.toLocaleString()} stock` : ''}`
+                } else if (inStock) {
+                  verdict = selectedOvs.stock > 0
+                    ? `Orders covered — ${s.stockMade.toLocaleString()} of ${selectedOvs.stock.toLocaleString()} stock`
+                    : 'Orders covered'
+                }
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-gray-500">Orders vs. Stock</span>
+                      <span className={`text-right ${inStock ? 'text-emerald-300' : s.phase === 'orders' ? 'text-amber-300' : 'text-gray-400'}`}>{verdict}</span>
+                    </div>
+                    <div className="relative h-2.5 w-full rounded-full overflow-hidden flex">
+                      <div className="h-full bg-blue-900/70" style={{ width: `${pctOrders}%` }} title={`Orders ${selectedOvs.ordersOnRun.toLocaleString()}`} />
+                      <div className="h-full bg-gray-700 flex-1" title={`Stock ${selectedOvs.stock.toLocaleString()}`} />
+                      <div className={`absolute left-0 top-0 h-full opacity-90 ${inStock ? 'bg-emerald-500' : 'bg-skynet-accent'}`} style={{ width: `${pctSent}%` }} />
+                      {selectedOvs.ordersOnRun > 0 && selectedOvs.ordersOnRun < t && (
+                        <div className="absolute top-0 bottom-0 w-0.5 bg-white/90" style={{ left: `${pctOrders}%` }} title="Orders end here — past this line is stock" />
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>{selectedSent.toLocaleString()} sent to finishing</span>
+                      <span>Orders {selectedOvs.ordersOnRun.toLocaleString()} · Stock {selectedOvs.stock.toLocaleString()} · Target {t.toLocaleString()}</span>
+                    </div>
+                  </div>
+                )
+              })()}
 
               <div className="grid grid-cols-2 gap-4">
                 <div>

@@ -23,6 +23,8 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
+  History,
   Minimize2,
   Maximize2,
   ArrowRight,
@@ -179,6 +181,18 @@ export default function Finishing() {
   const [pickupNotes, setPickupNotes] = useState('')
   const [pickupSubmitting, setPickupSubmitting] = useState(false)
   const [pickupCompleting, setPickupCompleting] = useState(null) // job id being completed
+
+  // Late Parts (D-LATEBATCH-01): jobs that finished manufacturing in the last
+  // 5 days. Parts that turn up after Complete go through as a new batch here.
+  const [lateJobs, setLateJobs] = useState([])
+  const [lateExpanded, setLateExpanded] = useState(false)
+  const [showLateModal, setShowLateModal] = useState(false)
+  const [lateModalJob, setLateModalJob] = useState(null)
+  const [lateQty, setLateQty] = useState('')
+  const [latePLN, setLatePLN] = useState('')
+  const [lateMaterialLot, setLateMaterialLot] = useState('')
+  const [lateNotes, setLateNotes] = useState('')
+  const [lateSubmitting, setLateSubmitting] = useState(false)
 
   // Queue search
   const [queueSearch, setQueueSearch] = useState('')
@@ -657,6 +671,40 @@ export default function Finishing() {
         })
 
         setPickupJobs(filtered)
+      }
+
+      // Late Parts (D-LATEBATCH-01): manufacturing finished within 5 days and the
+      // job is at manufacturing_complete, pending_tco, or ready_for_assembly —
+      // the three states a late batch can safely re-enter from. Complete (TCO
+      // closed) is out: custody has transferred; makeup pieces ride a re-queue.
+      const lateSince = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      const { data: lateData, error: lateError } = await supabase
+        .from('jobs')
+        .select(`
+          id, job_number, quantity, status, good_pieces, actual_end,
+          production_lot_number, blank_lot_number,
+          work_order:work_orders(id, wo_number, customer),
+          component:parts!component_id(part_number, description),
+          assigned_machine:machines!assigned_machine_id(id, name, code),
+          finishing_sends(id, quantity, compliance_status, material_lot_number, sent_at),
+          job_materials(lot_number, created_at)
+        `)
+        .eq('is_standalone_finishing', false)
+        .eq('is_maintenance', false)
+        .in('status', ['manufacturing_complete', 'pending_tco', 'ready_for_assembly'])
+        .gte('actual_end', lateSince)
+        .order('actual_end', { ascending: false })
+      if (lateError) {
+        console.error('Error loading late-parts jobs:', lateError)
+        setLateJobs([])
+      } else {
+        setLateJobs((lateData || []).map(j => {
+          const sends = j.finishing_sends || []
+          const sentQty = sends
+            .filter(s => s.compliance_status !== 'rejected')
+            .reduce((sum, s) => sum + (s.quantity || 0), 0)
+          return { ...j, _sentQty: sentQty, _batchCount: sends.length }
+        }))
       }
 
       // Build batch labels (A, B, C...) for jobs with multiple sends
@@ -1420,6 +1468,116 @@ export default function Finishing() {
       alert('Failed to advance stage: ' + err.message)
     } finally {
       setActionLoading(false)
+    }
+  }
+
+  // D-LATEBATCH-01: pre-fill the late-batch modal. Material lot: newest
+  // job_materials lot → jobs.blank_lot_number (Bolt Master jobs write no
+  // job_materials row, D-BLANK-07) → the last batch's lot. Editable if wrong.
+  const openLateModal = (j) => {
+    const matLot = [...(j.job_materials || [])]
+      .filter(m => m.lot_number)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]?.lot_number
+    const lastSendLot = [...(j.finishing_sends || [])]
+      .sort((a, b) => new Date(b.sent_at) - new Date(a.sent_at))[0]?.material_lot_number
+    setLateModalJob(j)
+    setLateQty('')
+    setLatePLN(j.production_lot_number || '')
+    setLateMaterialLot(matLot || j.blank_lot_number || lastSendLot || '')
+    setLateNotes('')
+    setShowLateModal(true)
+  }
+
+  // D-LATEBATCH-01: a normal finishing batch for parts that turned up after the
+  // job completed manufacturing. Same write path as handleManualPickupSubmit,
+  // then the job goes back to manufacturing_complete — the only status from
+  // which the existing compliance approval advances it again (canAdvance).
+  const handleLateBatchSubmit = async () => {
+    if (!lateModalJob) return
+    const qty = parseInt(lateQty)
+    if (!qty || isNaN(qty) || qty <= 0) {
+      alert('Enter a valid quantity (must be > 0).')
+      return
+    }
+    const pln = latePLN.trim()
+    if (!pln) {
+      alert('Production Lot # is required.')
+      return
+    }
+    const materialLot = lateMaterialLot.trim()
+    if (!materialLot) {
+      alert('Material Lot # is required.')
+      return
+    }
+
+    setLateSubmitting(true)
+    try {
+      const now = new Date().toISOString()
+      const priorStatus = lateModalJob.status
+      const batchLabel = String.fromCharCode(65 + (lateModalJob.finishing_sends?.length || 0))
+
+      const { error: sendError } = await supabase
+        .from('finishing_sends')
+        .insert({
+          job_id: lateModalJob.id,
+          machine_id: lateModalJob.assigned_machine?.id || null,
+          sent_by: operator.id,
+          quantity: qty,
+          production_lot_number: pln,
+          material_lot_number: materialLot,
+          status: 'pending_finishing',
+          notes: lateNotes.trim() || 'Late parts — found after job completion',
+          is_partial_send: true,
+          sent_at: now,
+        })
+      if (sendError) throw sendError
+
+      // good_pieces is the pieces-off-the-machine count; the late parts came
+      // off the machine, so it is re-derived to include them (D-DATA-02
+      // precedent — those fixes set it to the new send total). The status
+      // revert rides the same write. If compliance later rejects this batch
+      // the count overstates by it, exactly as the D-DATA-02 fixes accepted.
+      const goodBefore = lateModalJob.good_pieces || 0
+      const jobUpdate = { good_pieces: goodBefore + qty, updated_at: now }
+      if (priorStatus !== 'manufacturing_complete') jobUpdate.status = 'manufacturing_complete'
+      let statusProblem = null
+      const { error: jobError } = await supabase
+        .from('jobs')
+        .update(jobUpdate)
+        .eq('id', lateModalJob.id)
+      if (jobError) statusProblem = jobError.message
+
+      supabase.from('audit_logs').insert({
+        event_type: 'late_finishing_batch_created',
+        job_id: lateModalJob.id,
+        machine_id: lateModalJob.assigned_machine?.id || null,
+        operator_id: operator.id,
+        details: {
+          batch: batchLabel,
+          quantity: qty,
+          prior_status: priorStatus,
+          production_lot_number: pln,
+          material_lot_number: materialLot,
+          status_reverted: !statusProblem && priorStatus !== 'manufacturing_complete',
+          good_pieces_before: goodBefore,
+          good_pieces_after: statusProblem ? goodBefore : goodBefore + qty,
+        },
+      }).then(() => {}, (e) => console.error('audit_logs insert failed (non-blocking):', e))
+
+      setShowLateModal(false)
+      setLateModalJob(null)
+      await loadData()
+
+      if (statusProblem) {
+        alert(`Batch ${batchLabel} was created (${qty} pcs) but the job record could not be updated (status back to Manufacturing Complete, pieces count +${qty}): ${statusProblem}. Tell Matt before this job is TCO'd.`)
+      } else {
+        alert(`Batch ${batchLabel} created — ${qty} pcs. It is in the Incoming Queue; the job returns to Pending TCO once compliance approves it.`)
+      }
+    } catch (err) {
+      console.error('Late batch failed:', err)
+      alert('Failed to create the late batch: ' + err.message)
+    } finally {
+      setLateSubmitting(false)
     }
   }
 
@@ -2613,6 +2771,64 @@ export default function Finishing() {
               )}
             </div>
 
+            {/* Late Parts (D-LATEBATCH-01) — jobs that finished manufacturing in the
+                last 5 days. A late batch re-enters the normal pipeline; the job drops
+                back to Manufacturing Complete until compliance approves it. */}
+            {lateJobs.length > 0 && (
+              <div className="bg-gray-900 rounded-lg border border-violet-900/40 p-6 mt-6 mb-6">
+                <button
+                  type="button"
+                  onClick={() => setLateExpanded(v => !v)}
+                  aria-expanded={lateExpanded}
+                  className="w-full flex items-center gap-2 text-left"
+                >
+                  <History size={18} className="text-violet-400" />
+                  <h2 className="text-white font-semibold">Late Parts</h2>
+                  <span className="text-gray-500 text-sm">completed in the last 5 days</span>
+                  <span className="ml-auto text-gray-500 text-sm">{lateJobs.length} job{lateJobs.length === 1 ? '' : 's'}</span>
+                  {lateExpanded ? <ChevronUp size={16} className="text-gray-500" /> : <ChevronDown size={16} className="text-gray-500" />}
+                </button>
+                {lateExpanded && (
+                  <div className="mt-4 space-y-2 max-h-96 overflow-y-auto">
+                    {lateJobs.map(j => (
+                      <div key={j.id} className="bg-gray-800 rounded border border-gray-700 p-3 flex items-center gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-white font-mono text-sm">{j.component?.part_number || j.job_number}</span>
+                            <span className="text-gray-600">·</span>
+                            <span className="text-cyan-400 font-mono text-sm">{j.job_number}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              j.status === 'pending_tco'
+                                ? 'bg-amber-900/40 text-amber-300'
+                                : j.status === 'ready_for_assembly'
+                                  ? 'bg-purple-900/40 text-purple-300'
+                                  : 'bg-gray-700 text-gray-300'
+                            }`}>
+                              {j.status === 'pending_tco' ? 'Pending TCO' : j.status === 'ready_for_assembly' ? 'Ready for Assembly' : 'Mfg Complete'}
+                            </span>
+                          </div>
+                          <div className="text-gray-500 text-xs mt-1 truncate">{j.component?.description}</div>
+                          <div className="text-gray-600 text-xs mt-1 flex items-center gap-3 flex-wrap">
+                            <span>{j.assigned_machine?.name || '—'}</span>
+                            <span>WO {j.work_order?.wo_number || '—'}</span>
+                            <span>{j._batchCount} batch{j._batchCount === 1 ? '' : 'es'} · <span className="text-gray-400">{j._sentQty}</span> sent</span>
+                            <span>Counted at Complete <span className="text-gray-400">{j.good_pieces ?? '—'}</span></span>
+                            <span>Completed {j.actual_end ? new Date(j.actual_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => openLateModal(j)}
+                          className="px-3 py-1.5 bg-violet-700 hover:bg-violet-600 text-white text-xs font-medium rounded flex-shrink-0"
+                        >
+                          + Late Batch
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Recent Completions */}
             <div className="bg-gray-900 rounded-lg border border-gray-800 mt-4">
               <div
@@ -2678,6 +2894,118 @@ export default function Finishing() {
           )}
         </div>
       </main>
+
+      {/* Late Batch modal (D-LATEBATCH-01) */}
+      {showLateModal && lateModalJob && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 rounded-lg border border-violet-800 max-w-lg w-full">
+            <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-white font-semibold">Late Batch — parts found after Complete</h3>
+                <p className="text-gray-500 text-xs mt-1 font-mono">
+                  {lateModalJob.job_number} · {lateModalJob.component?.part_number} · Batch {String.fromCharCode(65 + (lateModalJob.finishing_sends?.length || 0))}
+                </p>
+              </div>
+              <button
+                onClick={() => { setShowLateModal(false); setLateModalJob(null) }}
+                className="text-gray-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="bg-gray-800 rounded p-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Counted at Complete</span>
+                  <span className="text-white font-mono">
+                    {lateModalJob.good_pieces ?? '—'}
+                    {parseInt(lateQty) > 0 && (
+                      <span className="text-violet-300"> → {(lateModalJob.good_pieces || 0) + parseInt(lateQty)}</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Sent so far ({lateModalJob._batchCount} batch{lateModalJob._batchCount === 1 ? '' : 'es'})</span>
+                  <span className="text-white font-mono">{lateModalJob._sentQty}</span>
+                </div>
+                <div className="flex justify-between border-t border-gray-700 mt-2 pt-2">
+                  <span className="text-violet-300">Job status now</span>
+                  <span className="text-violet-300 font-mono">{lateModalJob.status.replace(/_/g, ' ')}</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  Production Lot # <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={latePLN}
+                  onChange={(e) => setLatePLN(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-violet-500 focus:outline-none"
+                />
+                <p className="text-gray-600 text-xs mt-1">Auto-filled from the job — change only if the traveler shows a different PLN.</p>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  Material Lot # <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={lateMaterialLot}
+                  onChange={(e) => setLateMaterialLot(e.target.value)}
+                  placeholder="From the paper traveler"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-violet-500 focus:outline-none"
+                />
+                <p className="text-gray-600 text-xs mt-1">
+                  {lateMaterialLot ? 'Auto-filled from this job\'s material — change only if these parts came from a different lot.' : 'No lot on record for this job — enter the lot from the traveler.'}
+                </p>
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">
+                  Quantity in this batch <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={lateQty}
+                  onChange={(e) => setLateQty(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-violet-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">Notes</label>
+                <input
+                  type="text"
+                  value={lateNotes}
+                  onChange={(e) => setLateNotes(e.target.value)}
+                  placeholder="Late parts — found after job completion"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-violet-500 focus:outline-none"
+                />
+              </div>
+              <p className="text-gray-500 text-xs">
+                The batch goes into the Incoming Queue like any other. The job returns to Manufacturing Complete now and back to {lateModalJob.status === 'ready_for_assembly' ? 'Ready for Assembly' : 'Pending TCO'} once compliance approves this batch.
+              </p>
+            </div>
+            <div className="p-6 border-t border-gray-800 flex gap-3">
+              <button
+                onClick={() => { setShowLateModal(false); setLateModalJob(null) }}
+                className="flex-1 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLateBatchSubmit}
+                disabled={lateSubmitting || !lateQty || !latePLN.trim() || !lateMaterialLot.trim()}
+                className="flex-1 py-2 bg-violet-700 hover:bg-violet-600 disabled:bg-gray-700 disabled:text-gray-500 text-white font-medium rounded flex items-center justify-center gap-2"
+              >
+                {lateSubmitting ? <Loader2 size={16} className="animate-spin" /> : <History size={16} />}
+                Create Batch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Manual Pickup — Send Batch modal */}
       {showPickupModal && pickupModalJob && (

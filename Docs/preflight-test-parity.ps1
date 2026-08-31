@@ -131,7 +131,7 @@ foreach ($c in $candidates) {
   $parts = $c -split '\|'
   $tbl = $parts[0]; $col = $parts[1]
   $n = (Q $prod "select count(distinct $col) from $tbl where $col is not null;").Trim()
-  if ([int]$n -gt 1) { [void]$mustExclude.Add("$tbl ($col: $n distinct users on PROD)") }
+  if ([int]$n -gt 1) { [void]$mustExclude.Add("$tbl (${col}: $n distinct users on PROD)") }
   else               { [void]$notes.Add("E: $tbl.$col - $n distinct user(s) on PROD; no collision yet, but latent.") }
 }
 if ($mustExclude.Count -gt 0) {

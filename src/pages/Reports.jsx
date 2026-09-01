@@ -3,6 +3,7 @@ import { FileSpreadsheet, ArrowLeft, Download, AlertTriangle, Info, Play } from 
 import { canExportReports } from '../lib/roles'
 import { supabase } from '../lib/supabase'
 import ReportAdvisorPanel from '../components/ReportAdvisorPanel'
+import PartHistoryReport from '../components/reports/PartHistoryReport'
 import { fetchReports, runReport, toCsv, downloadCsv, reportFilename, summarize } from '../lib/reports'
 
 const PREVIEW_CAP = 200
@@ -60,6 +61,14 @@ export default function Reports({ profile }) {
   }, [profile])
 
   const openReport = useCallback(async (report) => {
+    if (report.report_kind === 'part_history') {
+      // D-RPT-13: interactive report — the component runs its own query.
+      setActive(report)
+      setRows(null)
+      setRunError(null)
+      setRunning(false)
+      return
+    }
     setActive(report)
     setRows(null)
     setRunError(null)
@@ -113,6 +122,17 @@ export default function Reports({ profile }) {
     const filtered = filterText.trim() !== ''
     const name = reportFilename(active.slug).replace(/\.csv$/, filtered ? '_filtered.csv' : '.csv')
     downloadCsv(toCsv(displayRows, active.columns), name)
+  }
+
+  // D-RPT-13: interactive reports render their own view.
+  if (active && active.report_kind === 'part_history') {
+    return (
+      <PartHistoryReport
+        report={active}
+        profile={profile}
+        onBack={() => { setActive(null); setRows(null); setRunError(null) }}
+      />
+    )
   }
 
   // ------------------------------ result view ------------------------------

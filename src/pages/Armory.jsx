@@ -44,6 +44,10 @@ import { userRoles, hasRole, canWriteMasterData, canReceive } from '../lib/roles
 
 // Lots at or below this many available bars render as low stock (amber).
 const LOW_STOCK_BAR_THRESHOLD = 5
+// Blank types (every lot of one series/material/length netted) below these many
+// pieces render low (amber, < 5,000) or critical (red, < 3,000). D-BLANK-INV-UI-02.
+const BLANK_LOW_THRESHOLD = 5000
+const BLANK_CRITICAL_THRESHOLD = 3000
 
 export default function Armory({ profile }) {
   const canWrite = canWriteMasterData(profile)
@@ -517,13 +521,16 @@ export default function Armory({ profile }) {
       if (recvIds.length > 0) {
         const { data: cats } = await supabase
           .from('material_receiving')
-          .select('id, category')
+          .select('id, category, blank_type_id')
           .in('id', recvIds)
         const catById = {}
-        for (const c of (cats || [])) catById[c.id] = c.category
-        for (const r of rows) r.category = catById[r.id] || 'bar'
+        for (const c of (cats || [])) catById[c.id] = c
+        for (const r of rows) {
+          r.category = catById[r.id]?.category || 'bar'
+          r.blank_type_id = catById[r.id]?.blank_type_id || null
+        }
       } else {
-        for (const r of rows) r.category = 'bar'
+        for (const r of rows) { r.category = 'bar'; r.blank_type_id = null }
       }
       setInventoryRows(rows)
     } catch (err) {
@@ -2115,6 +2122,24 @@ export default function Armory({ profile }) {
   }
 
   const blankInventoryRows = inventoryRows.filter(r => (r.category || 'bar') === 'blank')
+  // Blank type totals: every lot of one catalog type (series/material/length) netted,
+  // keyed by blank_type_id with a material_type|bar_size fallback for pre-catalog rows.
+  // Low/critical shading is judged on the type total, not the lot row: a purchase
+  // decision is per type, and a kiosk stub (0 received, N used) pairs with its later
+  // formal receipt into one correct net. Computed over ALL blank rows so the filters
+  // never change a row's shading. D-BLANK-INV-UI-02.
+  const blankTypeKey = (r) => r.blank_type_id || `${r.material_type || ''}|${r.bar_size || ''}`
+  const blankTypeTotals = blankInventoryRows.reduce((acc, r) => {
+    const k = blankTypeKey(r)
+    const t = acc[k] || (acc[k] = { available: 0, lots: 0 })
+    t.available += Number(r.available_bars ?? 0)
+    t.lots += 1
+    return acc
+  }, {})
+  const blankTypeLevel = (key) => {
+    const avail = blankTypeTotals[key]?.available ?? 0
+    return avail < BLANK_CRITICAL_THRESHOLD ? 'critical' : avail < BLANK_LOW_THRESHOLD ? 'low' : null
+  }
   const filteredInventoryRows = inventoryRows
     .filter(r => (r.category || 'bar') === 'bar')
     .filter(r => {
@@ -3490,6 +3515,9 @@ export default function Armory({ profile }) {
                 return (p || cmpSize(a.bar_size, b.bar_size) || (a.lot_number || '').localeCompare(b.lot_number || '')) * dir
               })
               const totalAvail = rows.reduce((s, r) => s + (r.available_bars || 0), 0)
+              const typeKeysShown = [...new Set(rows.map(blankTypeKey))]
+              const lowTypes = typeKeysShown.filter(k => blankTypeLevel(k) === 'low').length
+              const criticalTypes = typeKeysShown.filter(k => blankTypeLevel(k) === 'critical').length
               const totalRecv = rows.reduce((s, r) => s + (r.received_bars || 0), 0)
               const totalUsed = rows.reduce((s, r) => s + (r.used_bars || 0), 0)
               const totalValue = rows.reduce((s, r) => (
@@ -3522,9 +3550,15 @@ export default function Armory({ profile }) {
                   <div className="flex items-center gap-3 text-xs text-gray-500">
                     <span>{rows.length} Blank Lots</span>
                     <span className="text-gray-700">·</span>
+                    <span className={lowTypes > 0 ? 'text-amber-400' : ''} title={`Blank types with fewer than ${BLANK_LOW_THRESHOLD.toLocaleString()} pieces across all lots`}>{lowTypes} Low</span>
+                    <span className="text-gray-700">·</span>
+                    <span className={criticalTypes > 0 ? 'text-red-400' : ''} title={`Blank types with fewer than ${BLANK_CRITICAL_THRESHOLD.toLocaleString()} pieces across all lots`}>{criticalTypes} Critical</span>
+                    <span className="text-gray-700">·</span>
                     <span>{totalAvail.toLocaleString()} Blanks Available</span>
                     <span className="text-gray-700">·</span>
                     <span>Est. Value ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span className="text-gray-700">·</span>
+                    <span className="text-gray-600">Low &lt; {BLANK_LOW_THRESHOLD.toLocaleString()} · Critical &lt; {BLANK_CRITICAL_THRESHOLD.toLocaleString()} — per blank type, all lots netted</span>
                   </div>
                   {rows.length === 0 ? (
                     <div className="bg-gray-800/30 border border-gray-700 rounded-lg p-12 text-center">
@@ -3552,8 +3586,13 @@ export default function Armory({ profile }) {
                           {rows.map(row => {
                             const isOut = row.available_bars === 0
                             const isNeg = row.available_bars < 0
+                            const typeKey = blankTypeKey(row)
+                            const level = blankTypeLevel(typeKey)
+                            const isCritical = level === 'critical'
+                            const isLow = level === 'low'
+                            const typeTotal = blankTypeTotals[typeKey]
                             return (
-                              <tr key={row.id} className={`transition-colors ${isOut ? 'bg-red-900/40' : 'bg-gray-900 hover:bg-gray-800'}`}>
+                              <tr key={row.id} className={`transition-colors ${isCritical ? 'bg-red-900/40' : isLow ? 'bg-amber-900/40' : 'bg-gray-900 hover:bg-gray-800'}`}>
                                 <td className="px-4 py-3"><span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{row.rack || 'Blank Rack'}</span></td>
                                 <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.vendor}</td>
                                 <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.material_type}</td>
@@ -3561,7 +3600,19 @@ export default function Armory({ profile }) {
                                 <td className={`px-4 py-3 font-mono text-xs ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{row.lot_number || '—'}</td>
                                 <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{(row.received_bars || 0).toLocaleString()}</td>
                                 <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{(row.used_bars || 0).toLocaleString()}</td>
-                                <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : 'text-white'}`}>{(row.available_bars || 0).toLocaleString()}</td>
+                                <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : isCritical ? 'text-red-300' : isLow ? 'text-amber-300' : 'text-white'}`}>
+                                  <span className="inline-flex items-center gap-1.5 justify-end">
+                                    {(row.available_bars || 0).toLocaleString()}
+                                    {typeTotal && typeTotal.lots > 1 && (
+                                      <span
+                                        className="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded font-sans whitespace-nowrap"
+                                        title={`${typeTotal.lots} lots of this blank type — low/critical shading is judged on this total`}
+                                      >
+                                        Σ {typeTotal.available.toLocaleString(undefined, { maximumFractionDigits: 0 })} · {typeTotal.lots} lots
+                                      </span>
+                                    )}
+                                  </span>
+                                </td>
                                 <td className="px-4 py-3 text-right font-mono text-gray-300">{row.price_per_bar != null ? `$${Number(row.price_per_bar).toFixed(4)}` : '—'}</td>
                               </tr>
                             )

@@ -62,6 +62,17 @@ export function getEffectiveQty(job) {
       const own = Math.max(0, sum - (job.merged_out_good || 0))
       return { qty: own + missed, verified: true, hasMissed: missed > 0 }
     }
+    // 2b. Finishing happened and every batch is resolved with none approved —
+    // every batch was rejected, nothing good came through. Never fall back to
+    // good_pieces here: SKY74 sets it to the sum of ALL sends, rejected included.
+    // Scoped to fully resolved batches so in-flight jobs keep the fallback below.
+    // Mirrors job_effective_qty() (2026-09-02).
+    const anyUnresolved = job.finishing_sends.some(
+      s => s.compliance_status == null || s.compliance_status === 'pending_compliance'
+    )
+    if (!anyUnresolved) {
+      return { qty: missed, verified: true, hasMissed: missed > 0 }
+    }
   }
 
   // 3. Machinist's count

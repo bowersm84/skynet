@@ -3285,3 +3285,8 @@ Spec v4.4 (§3.1 roles, §5.27 Fishbowl Bridge & Order Queue, §10.8 schema, §1
 **Files:** src/components/ComplianceReview.jsx, Docs/migrations/2026-09-02_advance_stranded_mfg_complete.sql.
 
 **Amendment (2026-09-02, reject-last):** the reject branch no longer returns early. A rejected batch skips the assembly check-in only, then reaches the same advance gate, allocation call, and refresh as an approval — so rejecting the last unresolved batch on a manufacturing_complete job advances it instead of stranding it. Previously the reverse ordering (reject first, approve last) worked and this one did not.
+
+### D-S8-16 revised — effective quantity: all-rejected batches count as zero (2026-09-02)
+**What:** effectiveQty.js step 2b and job_effective_qty() agree: when a job has finishing batches, all resolved, none approved, the effective quantity is missed entries only — never good_pieces. In-flight jobs (any batch pending) keep the good_pieces fallback. job_effective_qty() also now subtracts merged_out_good on its outsourcing and finishing branches, as the JS already did, so a combined-run host's CO is not credited for members' pieces. The stranded-job sweep (advance_stranded_mfg_complete v2) held all-rejected jobs until this landed; that hold can be lifted after both TEST and PROD carry this function.
+**Why:** With the reject-last amendment a rejected batch can be the last resolution that sends a job to pending_tco, where SKY65 posts fulfillment from job_effective_qty(). Falling through to good_pieces (Σ all sends since SKY74) would have credited customer orders for parts that failed compliance.
+**Files:** Docs/migrations/2026-09-02_job_effective_qty_all_rejected.sql, src/lib/effectiveQty.js.

@@ -51,7 +51,7 @@ export default function ProductionDisplay() {
   })
 
   const [machineGroups, setMachineGroups] = useState({
-    running: [], setup: [], down: [], idle: [], inactive: []
+    running: [], setup: [], down: [], ready: [], idle: [], inactive: []
   })
 
   const [activeJobs, setActiveJobs] = useState([])
@@ -152,10 +152,13 @@ export default function ProductionDisplay() {
 
   // Uses the shared deriveMachineStatus helper (src/lib/machineStatus.js) so
   // Production / Bridge / Mainframe stay aligned on classification. Bucket map:
-  //   Running = derived running + ready + staged  (staged work counts as actively producing)
+  //   Running = derived running + staged  (staged = non-kiosk machine with queued
+  //             work; it never logs a start, so queued work is its producing signal)
   //   Setup   = derived setup
   //   Down    = derived down
-  //   Idle    = derived idle  (truly idle — no queued or active work)
+  //   Ready   = derived ready  (kiosk machine with queued work, nothing started —
+  //             shown in the fourth tile in blue; it is not producing)
+  //   Idle    = derived idle   (truly idle — no queued or active work)
   const loadMachineStatus = useCallback(async () => {
     const { data: machines, error: mErr } = await supabase
       .from('machines')
@@ -187,13 +190,14 @@ export default function ProductionDisplay() {
       jobsByMachine[j.assigned_machine_id].push(j)
     }
 
-    const groups = { running: [], setup: [], down: [], idle: [], inactive: [] }
+    const groups = { running: [], setup: [], down: [], ready: [], idle: [], inactive: [] }
     for (const m of (machines || [])) {
       if (!m.is_active) { groups.inactive.push(m); continue }
       const derived = deriveMachineStatus(m, jobsByMachine[m.id] || [], downtimeByMachine.has(m.id))
       if (derived === 'down') groups.down.push(m)
       else if (derived === 'setup') groups.setup.push(m)
-      else if (derived === 'running' || derived === 'ready' || derived === 'staged') groups.running.push(m)
+      else if (derived === 'running' || derived === 'staged') groups.running.push(m)
+      else if (derived === 'ready') groups.ready.push(m)
       else groups.idle.push(m)
     }
     setMachineGroups(groups)
@@ -611,7 +615,7 @@ export default function ProductionDisplay() {
   const now = new Date()
   const dateLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
   const timeLabel = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-  const totalActive = machineGroups.running.length + machineGroups.setup.length + machineGroups.down.length + machineGroups.idle.length
+  const totalActive = machineGroups.running.length + machineGroups.setup.length + machineGroups.down.length + machineGroups.ready.length + machineGroups.idle.length
 
   return (
     <div className="min-h-screen bg-gray-950 p-6">
@@ -782,7 +786,16 @@ export default function ProductionDisplay() {
             <StatusTile color="green" label="Running" count={machineGroups.running.length} machines={machineGroups.running} />
             <StatusTile color="amber" label="Setup"   count={machineGroups.setup.length}   machines={machineGroups.setup} />
             <StatusTile color="red"   label="Down"    count={machineGroups.down.length}    machines={machineGroups.down} />
-            <StatusTile color="gray"  label="Idle"    count={machineGroups.idle.length}    machines={machineGroups.idle} />
+            <StatusTile
+              color="blue"
+              label="Ready · Idle"
+              count={machineGroups.ready.length + machineGroups.idle.length}
+              sub={`${machineGroups.ready.length} ready · ${machineGroups.idle.length} idle`}
+              machines={[
+                ...machineGroups.ready.map(m => ({ ...m, tone: 'ready' })),
+                ...machineGroups.idle.map(m => ({ ...m, tone: 'idle' })),
+              ]}
+            />
           </div>
 
           {downMachineETAs.length > 0 && (
@@ -844,13 +857,17 @@ export default function ProductionDisplay() {
   )
 }
 
-function StatusTile({ color, label, count, machines }) {
+function StatusTile({ color, label, count, machines, sub }) {
   const colorClass = {
     green: { text: 'text-green-400', border: 'border-green-700', bg: 'bg-green-950/30', dot: 'bg-green-400' },
     amber: { text: 'text-amber-400', border: 'border-amber-700', bg: 'bg-amber-950/30', dot: 'bg-amber-400' },
     red:   { text: 'text-red-400',   border: 'border-red-700',   bg: 'bg-red-950/30',   dot: 'bg-red-400' },
+    blue:  { text: 'text-blue-400',  border: 'border-blue-800',  bg: 'bg-blue-950/30',  dot: 'bg-blue-400' },
     gray:  { text: 'text-gray-400',  border: 'border-gray-700',  bg: 'bg-gray-950/50',  dot: 'bg-gray-500' }
   }[color]
+  // tone: 'ready' (queued work, nothing started) reads blue; 'idle' reads dim;
+  // machines without a tone keep the tile's default text.
+  const toneClass = { ready: 'text-blue-300', idle: 'text-gray-500' }
   return (
     <div className={`rounded-lg border ${colorClass.border} ${colorClass.bg} p-3`}>
       <div className="flex items-center justify-between mb-1">
@@ -860,12 +877,13 @@ function StatusTile({ color, label, count, machines }) {
         </div>
         <span className="text-white font-bold text-lg">{count}</span>
       </div>
+      {sub && <p className="text-gray-500 text-[10px] font-mono -mt-1 mb-1.5">{sub}</p>}
       {machines.length === 0 ? (
         <div className="text-gray-600 font-mono text-sm italic min-h-[2rem]">—</div>
       ) : (
         <div className="grid grid-cols-3 gap-x-2 gap-y-1 text-gray-200 font-mono text-sm min-h-[2rem]">
           {machines.map(m => (
-            <span key={m.id} className="truncate">{m.code}</span>
+            <span key={m.id} className={`truncate ${toneClass[m.tone] || ''}`} title={m.tone === 'ready' ? 'Queued work, nothing started' : m.tone === 'idle' ? 'No queued or active work' : undefined}>{m.code}</span>
           ))}
         </div>
       )}

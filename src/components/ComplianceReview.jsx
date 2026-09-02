@@ -726,21 +726,15 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         .eq('id', send.id)
       if (sendError) throw sendError
 
-      // Short-circuit rejected: do not check in parts, do not advance job
-      if (isReject) {
-        // D-JOBMERGE-09: a rejected batch still RESOLVES it, so this can be
-        // the last resolution on a combined-run host. jobId isn't bound yet
-        // on this path — use the send's parent directly.
-        fireAllocationIfHost(send.job_id)
-        await fetchPendingBatches()
-        await fetchRecentlyApprovedBatches()
-        onUpdate()
-        return
-      }
+      // Rejected: nothing to check in, but the batch is still RESOLVED — it can be
+      // the last unresolved batch on the job (D-S8-16 revised: the job then
+      // advances below) and the last resolution on a combined-run host
+      // (D-JOBMERGE-09: allocation fires at the tail). No early return; only the
+      // check-in is skipped.
 
       // 1b. Create assembly_component_checkins record if job belongs to an assembly
       const woaId = send.job?.work_order_assembly_id
-      if (woaId) {
+      if (!isReject && woaId) {
         const checkinQty = derivedGood ?? send.quantity
         const { error: checkinError } = await supabase
           .from('assembly_component_checkins')
@@ -768,25 +762,22 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         .select('id, quantity, status, compliance_status')
         .eq('job_id', jobId)
 
-      // Only count sends that were NOT rejected toward total
-      const totalSentQty = allSends
-        ?.filter(s => s.compliance_status !== 'rejected')
-        .reduce((sum, s) => sum + (s.quantity || 0), 0) || 0
-      const jobQty = parentJob?.quantity || send.job?.quantity || 0
-      // Effective target = the operator's confirmed good count from
-      // kiosk Complete (jobs.good_pieces). When the operator overrides
-      // below target (the short-job case), the job will never naturally
-      // reach jobQty through finishing — any makeup pieces ride on a
-      // re-queue job, not back through this one. Fall back to jobQty
-      // for in-flight multi-batch jobs where good_pieces is still NULL.
-      const effectiveTarget = (parentJob?.good_pieces != null && parentJob.good_pieces > 0)
-        ? parentJob.good_pieces
-        : jobQty
-      const allQtySent = totalSentQty >= effectiveTarget
+      // D-S8-16 (revised 2026-09-02): the job leaves finishing when every batch is
+      // resolved — approved or rejected — and the operator has explicitly
+      // Completed it. The old quantity comparison (sent ≥ good_pieces) stopped
+      // meaning "all pieces accounted for" once SKY74 made good_pieces the sum
+      // of ALL sends: a rejected batch made the gate unreachable and stranded
+      // the job at manufacturing_complete, and its CO fulfillment (SKY65, on
+      // entry to pending_tco) never posted. Short runs are the shortfall
+      // system's business, not a reason to hold the job here. Mirrors
+      // resolveCompletionStatus on the Complete-Job path.
+      const anyUnresolved = (allSends || []).some(
+        s => s.compliance_status == null || s.compliance_status === 'pending_compliance'
+      )
       // Only an explicit operator Complete (which sets manufacturing_complete) lets
       // a job leave finishing. Approving a batch while the job is still in_progress
       // must NOT advance it — orders overrun target and James keeps sending pieces.
-      const canAdvance = allQtySent && parentJob?.status === 'manufacturing_complete'
+      const canAdvance = !anyUnresolved && parentJob?.status === 'manufacturing_complete'
 
       if (canAdvance) {
         const { data: externalSteps } = await supabase

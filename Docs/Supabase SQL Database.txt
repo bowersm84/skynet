@@ -1576,6 +1576,7 @@ CREATE TABLE public.reports (
   is_active boolean NOT NULL DEFAULT true,
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  report_kind text,
   CONSTRAINT reports_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.report_ai_runs (
@@ -1755,4 +1756,25 @@ CREATE TABLE public.fb_part_inventory (
   part_id uuid,
   CONSTRAINT fb_part_inventory_pkey PRIMARY KEY (part_num),
   CONSTRAINT fb_part_inventory_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id)
+);
+CREATE TABLE public.paperwork_issues (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL,
+  job_document_id uuid,
+  document_label text,
+  machine_id uuid,
+  description text NOT NULL CHECK (length(btrim(description)) >= 10),
+  status text NOT NULL DEFAULT 'open'::text CHECK (status = ANY (ARRAY['open'::text, 'acknowledged'::text])),
+  logged_by uuid NOT NULL,
+  logged_at timestamp with time zone NOT NULL DEFAULT now(),
+  acknowledged_by uuid,
+  acknowledged_at timestamp with time zone,
+  ack_note text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT paperwork_issues_pkey PRIMARY KEY (id),
+  CONSTRAINT paperwork_issues_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES public.machines(id),
+  CONSTRAINT paperwork_issues_logged_by_fkey FOREIGN KEY (logged_by) REFERENCES public.profiles(id),
+  CONSTRAINT paperwork_issues_acknowledged_by_fkey FOREIGN KEY (acknowledged_by) REFERENCES public.profiles(id),
+  CONSTRAINT paperwork_issues_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
+  CONSTRAINT paperwork_issues_job_document_id_fkey FOREIGN KEY (job_document_id) REFERENCES public.job_documents(id)
 );

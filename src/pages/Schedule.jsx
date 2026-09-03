@@ -437,10 +437,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         setUnassignedJobs(unassignedData || [])
       }
 
-      // Fetch jobs scheduled within the visible week, AND any ongoing job
-      // (in_setup / in_progress / pending_passivation / in_passivation) whose
-      // scheduled_start lies before the week — those are still occupying the
-      // machine and need to render on the grid as carryover bars.
+      // Fetch jobs scheduled within the visible week, AND every ongoing job
+      // (in_setup / in_progress / pending_passivation / in_passivation)
+      // unconditionally — an ongoing job is physically occupying a machine
+      // right now wherever its slot lies relative to the window: before it
+      // (carryover) or entirely after it (the floor started early).
       const ongoingList = ONGOING_STATUSES.join(',')
       const weekStartIso = weekStart.toISOString()
       const weekEndIso = weekEnd.toISOString()
@@ -458,11 +459,17 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .or(
           `and(scheduled_start.gte.${weekStartIso},scheduled_start.lte.${weekEndIso}),` +
           `and(scheduled_start.lt.${weekStartIso},scheduled_end.gte.${weekStartIso}),` +
-          `and(scheduled_start.lt.${weekStartIso},scheduled_end.is.null,status.in.(${ongoingList})),` +
-          // D-SCHED-02: overrun carryover — ongoing jobs whose whole slot
-          // predates the window are still occupying machines; fetch them so
-          // the render can extend their bars to "now".
-          `and(scheduled_end.lt.${weekStartIso},status.in.(${ongoingList})),` +
+          // D-SCHED-22: every ongoing job is fetched unconditionally — it is
+          // physically occupying a machine right now, wherever its slot lies
+          // relative to the window. Subsumes the old before-window ongoing
+          // arms (the null-end carryover and the D-SCHED-02 overrun arm) and
+          // closes the early-start gap: a job started ahead of a slot that
+          // lies entirely after the visible week no longer vanishes from the
+          // grid (J-000207 Aug 28; J-000158 / Nexturn 3 Sep 3). The
+          // D-SCHED-06/07 projection anchors its bar at the live setup_start;
+          // on historic windows getLiveSpan is null and an out-of-window raw
+          // slot simply doesn't draw, so past weeks are unchanged.
+          `status.in.(${ongoingList}),` +
           // D-SCHED-03: missed-slot carryover — scheduled-but-never-started
           // jobs whose whole slot predates the window; the render pins them
           // at today's left edge for rescheduling.

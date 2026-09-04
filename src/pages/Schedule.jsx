@@ -318,6 +318,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // Lot-change split acknowledgements (informational, scheduler-side)
   const [lotSplitAcks, setLotSplitAcks] = useState([])
   const [acknowledgingSplitId, setAcknowledgingSplitId] = useState(null)
+  const [ignoringTargetJobId, setIgnoringTargetJobId] = useState(null)
 
   // Global schedule search state
   const [globalSearch, setGlobalSearch] = useState('')
@@ -1339,6 +1340,32 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       alert(`Could not acknowledge: ${e.message}`)
     } finally {
       setAcknowledgingSplitId(null)
+    }
+  }
+
+  // D-SCHED-24: Ignore a run-target notice — stamp run_target_ack_qty/_at/_by
+  // + audit, keep the end date. The ack is qty-anchored (isScheduleStale), so
+  // a further target move re-flags without any state to clear. Non-blocking.
+  const handleIgnoreTargetChange = async (sj) => {
+    const target = getRunTarget(sj, mergeAllocs[sj.id] || [])
+    setIgnoringTargetJobId(sj.id)
+    try {
+      const { error } = await supabase
+        .from('jobs')
+        .update({ run_target_ack_qty: target, run_target_ack_at: new Date().toISOString(), run_target_ack_by: profile?.id })
+        .eq('id', sj.id)
+      if (error) throw error
+      await supabase.from('audit_logs').insert({
+        event_type: 'run_target_change_acknowledged',
+        job_id: sj.id,
+        operator_id: profile?.id || null,
+        details: { job: sj.job_number, schedule_qty_basis: sj.schedule_qty_basis, acknowledged_target: target, scheduled_end_kept: sj.scheduled_end }
+      })
+      await fetchData()
+    } catch (e) {
+      alert(`Could not ignore: ${e.message}`)
+    } finally {
+      setIgnoringTargetJobId(null)
     }
   }
 
@@ -2490,6 +2517,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                               className="shrink-0 px-2 py-1 bg-amber-700/60 hover:bg-amber-600/60 text-amber-100 rounded font-semibold"
                             >
                               Adjust End Date
+                            </button>
+                            <button
+                              onClick={() => handleIgnoreTargetChange(sj)}
+                              disabled={ignoringTargetJobId === sj.id}
+                              className="shrink-0 px-2 py-1 bg-gray-700/70 hover:bg-gray-600/70 text-gray-200 rounded disabled:opacity-50"
+                              title="Keep the current end date. This notice clears; it returns only if the run target changes again."
+                            >
+                              {ignoringTargetJobId === sj.id ? 'Ignoring…' : 'Ignore'}
                             </button>
                           </div>
                         ))}

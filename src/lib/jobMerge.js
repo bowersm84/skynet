@@ -62,10 +62,18 @@ export function getRunTarget(job, activeAllocations = []) {
 // every scheduled_end change — never a flag to clear. Null basis (legacy rows
 // scheduled before the column existed and never re-saved) is treated as NOT
 // stale to avoid a wall of false alarms on day one.
+// D-SCHED-24: an acknowledged target is not stale — the scheduler saw the
+// change and chose to keep the end date (run_target_ack_qty, stamped by the
+// Ignore action in Command's Messages panel). The ack is qty-anchored, so any
+// FURTHER target move mismatches both basis and ack and re-flags on its own —
+// still pure derivation, still never a flag to clear.
 export function isScheduleStale(job, activeAllocations = []) {
   if (!job?.scheduled_end) return false
   if (job.schedule_qty_basis == null) return false
-  return getRunTarget(job, activeAllocations) !== job.schedule_qty_basis
+  const target = getRunTarget(job, activeAllocations)
+  if (target === job.schedule_qty_basis) return false
+  if (job.run_target_ack_qty != null && target === job.run_target_ack_qty) return false
+  return true
 }
 
 // D-JOBMERGE-04: a printed traveler no longer matches the job when a merge or

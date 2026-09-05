@@ -16,17 +16,17 @@ import PriceBooks from '../components/pricing/PriceBooks'
 import { Loader2, Tags, FileText, Layers, Users, BookOpen, LogOut, RefreshCw, AlertTriangle } from 'lucide-react'
 
 const TABS = [
-  { key: 'quote', label: 'Quote Builder', icon: FileText },
   { key: 'catalog', label: 'Catalog', icon: Layers },
   { key: 'customers', label: 'Customers', icon: Users },
   { key: 'books', label: 'Price Books', icon: BookOpen },
+  { key: 'quote', label: 'Quote Builder', icon: FileText },
 ]
 
 export default function Pricing() {
   const navigate = useNavigate()
   const [phase, setPhase] = useState('auth')         // auth | authorized | denied
   const [profile, setProfile] = useState(null)
-  const [tab, setTab] = useState('quote')
+  const [tab, setTab] = useState('catalog')
   const [asOf, setAsOf] = useState(todayIso())
   const [books, setBooks] = useState([])
   const [meta, setMeta] = useState(null)             // rules / ladders / sections of the book in effect on asOf

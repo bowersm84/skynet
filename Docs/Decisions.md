@@ -3464,3 +3464,13 @@ Outbound-only command queue polled by the bridge (D-FB-01 preserved). Qty breaks
 **Fixed in the delivered code — a stale diff survived a book change.** `diffAgainst` / `diffRows` were only ever written by `runDiff`, so switching books (or editing items) left the previous comparison on screen under the new book's name. The round's own walkthrough triggers it: diff Rev 82 against Rev 81, then open the "Rev 83 test" clone and the Diff tab still shows the +15.6% rows where +7.1% is expected. Both are now cleared in `loadBook()`, the single funnel for "the items behind the diff just changed".
 **Deviation:** one `// eslint-disable-next-line react-hooks/set-state-in-effect` on `RuleRow`'s prop-reset effect — the codebase convention, keeping the pricing module at zero problems. (`ItemRow`'s identical pattern is not flagged; the rule is inconsistent about which it catches.) Repo-wide lint unchanged at 35 errors / 38 warnings.
 **Files:** src/components/pricing/PriceBooks.jsx (new), src/lib/pricing.js, src/pages/Pricing.jsx. No SQL — every write goes through the Batch A RPCs.
+
+### D-PRICE-35 — PROD cutover (2026-09-05)
+**What:** The Pricing Portal is live on skynet.skybolt.com/pricing as of 2026-09-05, per the Batch D runbook: Batch A schema + the Rev 81 seed (fingerprints identical to TEST — Rev 81 `4454|e6db5d47…`, Rev 82 `4454|af73b50e…`), then migrations b / b1 / c1 / c1_2 / c2, 198 images in the public bucket, bridge v1.3.0 running on skyserver, and `FEATURES.PRICING_PORTAL` true. The PROD backfill read 20,535 customers, 10,980 products and 70,227 history lines — **all line type 10**, confirming Skybolt writes no drop-ship (12) lines, so the D-PRICE-28 correction from `(10, 30)` to `(10, 12)` costs nothing and the type-30 Discount % rows are gone for good. Rev 82 (every catalog Each × 1.15) is scheduled for 2026-10-01; activation is by date, so the Oct 1 increase needs no deploy and no action.
+**Why:** S11 plan §9 Batch D. The cutover ran 19 days ahead of the Sept 24 target because Batches A through C3 verified clean on TEST.
+**Files:** Docs/Implementation_Plans/S11_Batch_D_PROD_Cutover_Runbook.md.
+
+### D-PRICE-36 — Tab order (2026-09-05)
+**What:** Catalog becomes the first tab and the default landing tab; Quote Builder moves to the far right. Order is now Catalog · Customers · Price Books · Quote Builder.
+**Why:** Matt, first day on PROD — looking a price up in the book is the common errand, and quoting is the occasional one, so the portal should open where the traffic is.
+**Files:** src/pages/Pricing.jsx.

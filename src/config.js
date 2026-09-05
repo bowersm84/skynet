@@ -97,4 +97,16 @@ export const FEATURES = {
    * To change it: edit here, commit, deploy.
    */
   KIT_EXCEPTIONS_SINCE: '2026-08-03',
+
+  /**
+   * Pricing Portal — /pricing (S11, D-PRICE-25). Standalone office-session
+   * route (no PIN, no kiosk JWT): price lookup, catalog, customer tiers and
+   * purchase history, price books. Reads the price_books / price_items schema
+   * seeded in Batch A; the Oct 1 book activates by date regardless of this flag.
+   *
+   * When false: the /pricing route renders a "not enabled" card and the
+   * Dashboards dropdown entry is hidden. Mainframe is unaffected either way.
+   * TEST: true. PROD: flipped at Batch D cutover.
+   */
+  PRICING_PORTAL: true,
 }

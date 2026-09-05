@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
+import { FEATURES } from './config'
 import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet, Inbox } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
@@ -12,6 +13,7 @@ import Kiosk from './pages/Kiosk'
 import MaterialKiosk from './pages/MaterialKiosk'
 import Finishing from './pages/Finishing'
 import KitKiosk from './pages/KitKiosk'
+import Pricing from './pages/Pricing'
 import Armory from './pages/Armory'
 import CustomerOrders from './pages/CustomerOrders'
 import OrderQueue from './pages/OrderQueue'
@@ -21,7 +23,7 @@ import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
 import SalesDashboard from './pages/dashboards/SalesDashboard'
-import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole, canAccessOrderQueue } from './lib/roles'
+import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole, canAccessOrderQueue, canViewPricing } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
@@ -33,6 +35,7 @@ const DASHBOARDS = [
   { label: 'Sales Dashboard', path: '/dashboards/sales' },
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
   { label: "President's Bridge", path: '/bridge' },
+  { label: 'Pricing Portal', path: '/pricing' },
 ]
 
 // Main authenticated app component
@@ -435,6 +438,7 @@ function MainApp() {
                     {DASHBOARDS.filter(db => {
                       if (db.path === '/bridge') return canSeeBridge(profile?.role)
                       if (db.path === '/dashboards/sales') return canViewSalesDashboard(profile)
+                      if (db.path === '/pricing') return FEATURES.PRICING_PORTAL && canViewPricing(profile)
                       return true
                     }).map(db => (
                       <a
@@ -596,6 +600,11 @@ function App() {
             (office session, or kiosk JWT + PIN per entry). Self-gated by
             FEATURES.KIT_STC_REGISTRY inside the page. Deliberately NOT a Mainframe tab. */}
         <Route path="/kits" element={<KitKiosk />} />
+
+        {/* Pricing Portal — office session only (no PIN); self-gated by
+            FEATURES.PRICING_PORTAL and canViewPricing inside the page. Reached
+            from the Dashboards dropdown; deliberately NOT a Mainframe tab. */}
+        <Route path="/pricing" element={<Pricing />} />
 
         {/* Assembly display - TV dashboard, no login required */}
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />

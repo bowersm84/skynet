@@ -64,3 +64,18 @@ export function canAccessOrderQueue(profile) {
 export function canActOnOrderQueue(profile) {
   return hasRole(profile, 'admin', 'order_processor') && !isReadOnlyRole(profile?.role)
 }
+
+// Pricing Portal (S11, D-PRICE-17). View — everything in the portal, tiers included:
+// admin, customer_service (April, Christy, Sawyer, Peyton), president, viewer.
+// Edit (books, items, rules, tiers, exceptions): admin only. Office session only —
+// the page itself bounces kiosk JWTs. Same gate lives server-side in _pricing_gate().
+export const PRICING_VIEW_ROLES = ['admin', 'customer_service', 'president', 'viewer']
+
+export function canViewPricing(profile) {
+  if (!profile) return false
+  return hasRole(profile, ...PRICING_VIEW_ROLES)
+}
+
+export function canEditPricing(profile) {
+  return hasRole(profile, 'admin') && !isReadOnlyRole(profile?.role)
+}

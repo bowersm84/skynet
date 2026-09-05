@@ -79,6 +79,25 @@ export class SkyNet {
 
   upsertInventory(rows) { return this.rpc('fb_upsert_inventory', { p_rows: rows }) }
 
+  // Bridge v1.3 pricing mirrors (D-PRICE-26). Each RPC stamps its own fb_sync_state.last_*_at.
+  upsertCustomers(rows) { return this.rpc('fb_upsert_customers', { p_rows: rows }) }
+
+  upsertProducts(rows) { return this.rpc('fb_upsert_products', { p_rows: rows }) }
+
+  upsertSoHistory(rows, cursor = null) { return this.rpc('fb_upsert_so_history', { p_rows: rows, p_cursor: cursor }) }
+
+  // The pricing pollers' own clocks, read once at start-up. fb_sync_state is SELECT-able by authenticated.
+  async pricingState() {
+    await this.ensureSignedIn()
+    const { data, error } = await this.client
+      .from('fb_sync_state')
+      .select('last_customers_at, last_products_at, last_history_at, history_cursor')
+      .eq('id', 1)
+      .maybeSingle()
+    if (error) throw new Error(`fb_sync_state read failed: ${error.message}`)
+    return data || { last_customers_at: null, last_products_at: null, last_history_at: null, history_cursor: null }
+  }
+
   // Distinct Fishbowl part ids on product lines of open SOs (paged: PostgREST caps a request at 1000 rows).
   async openPartIds() {
     await this.ensureSignedIn()

@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.2.0',
+  version: '1.3.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -62,6 +62,14 @@ export const config = {
   // Fishbowl location groups whose stock counts as "available to ship" (D-FB-33). Default Main (1) + Warehouse (6).
   availableLocationGroups: String(process.env.AVAILABLE_LOCATION_GROUPS || '1,6')
     .split(',').map((x) => Number(x.trim())).filter(Number.isFinite),
+  // Bridge v1.3 pricing mirrors (D-PRICE-26). Customers poll on an interval; products and SO history run
+  // nightly at a local wall-clock time (America/New_York, Fishbowl's own clock).
+  customersMs: num('POLL_CUSTOMERS_SEC', 900) * 1000,
+  productsNightlyAt: process.env.PRODUCTS_NIGHTLY_AT || '02:10',
+  historyNightlyAt: process.env.HISTORY_NIGHTLY_AT || '02:20',
+  historyBackfillFrom: process.env.HISTORY_BACKFILL_FROM || '2023-11-27',
+  historyPage: num('HISTORY_PAGE', 2000),
+  pricingBatch: num('PRICING_BATCH', 500),
   overlapRevs: num('OVERLAP_REVS', 200),
   chunk: num('CHUNK', 50),
   logDir: resolve(ROOT, 'logs'),

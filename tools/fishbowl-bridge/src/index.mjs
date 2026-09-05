@@ -1,12 +1,14 @@
 // index.mjs — SkyNet Fishbowl Bridge. Read-only against Fishbowl; writes to SkyNet only through fb_* RPCs.
-//   node src/index.mjs          run forever (this is what the Windows service runs)
-//   node src/index.mjs --once   one tail + one reconcile pass, then exit (smoke test)
+//   node src/index.mjs             run forever (this is what the Windows service runs)
+//   node src/index.mjs --once      one tail + one reconcile pass, then exit (smoke test)
+//   node src/index.mjs --backfill  one full customers + products + SO history load, then exit (v1.3)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
 import { q } from './queries.mjs'
 import { ts, chunk } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
+import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -17,6 +19,10 @@ let lastRev = null          // in-memory copy of fb_sync_state.last_rev
 let lastReconcileAt = 0
 let lastInventoryAt = 0
 let lastUsersAt = 0
+let lastCustomersRunAt = 0  // in-process interval clock for the customers poller
+let pricing = null          // in-memory copy of fb_sync_state.last_*_at / history_cursor (D-PRICE-26)
+let pricingPausedUntil = 0  // set after a pricing failure so a broken poller cannot hot-loop
+const PRICING_RETRY_MS = 900000
 let stopping = false
 let failures = 0
 
@@ -64,6 +70,52 @@ async function syncInventory() {
   }
   log.info(`inventory: ${partIds.length} part(s) on open SOs, ${byPart.size} found in Fishbowl, ${total} upserted`)
   return total
+}
+
+// D-PRICE-26: the three pricing mirrors. All three run inside the caller's Fishbowl session — no
+// second session is ever opened (D-FB-37) — and each RPC stamps its own fb_sync_state clock, which is
+// mirrored into `pricing` so the schedule survives a restart without re-reading the row every cycle.
+async function pricingCycle({ force = false } = {}) {
+  const now = new Date()
+
+  if (force || Date.now() - lastCustomersRunAt >= config.customersMs) {
+    await syncCustomers(fb, sky, {
+      since: force ? null : pricing.last_customers_at,
+      log,
+      batch: config.pricingBatch,
+    })
+    lastCustomersRunAt = Date.now()
+    pricing.last_customers_at = now.toISOString()
+  }
+
+  if (force || nightlyDue(pricing.last_products_at, config.productsNightlyAt, now)) {
+    await syncProducts(fb, sky, { log, batch: config.pricingBatch })
+    pricing.last_products_at = new Date().toISOString()
+  }
+
+  if (force || nightlyDue(pricing.last_history_at, config.historyNightlyAt, now)) {
+    const cursor = force ? config.historyBackfillFrom : (pricing.history_cursor || config.historyBackfillFrom)
+    if (!pricing.history_cursor && !force) log.info(`history: no stored cursor — first load from ${cursor}`)
+    const totals = await syncHistory(fb, sky, {
+      cursor, log, pageSize: config.historyPage, batch: config.pricingBatch,
+    })
+    pricing.history_cursor = totals.cursor
+    pricing.last_history_at = new Date().toISOString()
+  }
+}
+
+// The pricing mirrors must never take the Order Queue's feed down with them: a failure is logged and the
+// pollers stand down for PRICING_RETRY_MS while the tail keeps running. Standing down matters — a nightly
+// job whose clock was not stamped is due again on the very next cycle, so an unguarded failure would
+// hot-loop a broken query every 20 s. Staleness surfaces as the three ages on /pricing.
+async function pricingCycleGuarded() {
+  if (Date.now() < pricingPausedUntil) return
+  try {
+    await pricingCycle()
+  } catch (e) {
+    pricingPausedUntil = Date.now() + PRICING_RETRY_MS
+    log.error(`pricing cycle failed, retrying in ${PRICING_RETRY_MS / 60000} min: ${e.message}`)
+  }
 }
 
 async function tail() {
@@ -131,6 +183,7 @@ async function cycle() {
       await syncInventory()
       lastInventoryAt = Date.now()
     }
+    await pricingCycleGuarded()
     return { ...t, reconciled }
   })
   await sky.heartbeat({
@@ -142,10 +195,32 @@ async function cycle() {
   }
 }
 
+// `--backfill`: one full pass of the three v1.3 mirrors from scratch — customers with no `since`,
+// the whole product table, history from HISTORY_BACKFILL_FROM whatever the stored cursor says. Idempotent.
+async function backfillPricing() {
+  log.info(`pricing backfill: customers (full) + products + history from ${config.historyBackfillFrom}`)
+  await fb.withSession(() => pricingCycle({ force: true }))
+  log.info('pricing backfill complete')
+}
+
 async function main() {
   const once = process.argv.includes('--once')
+  const backfill = process.argv.includes('--backfill')
   log.info(`SkyNet Fishbowl Bridge v${config.version} starting on ${config.host} → ${config.fb.host}:${config.fb.port} (${config.fb.sessionMode}) → ${config.sb.url}`)
   await sky.signIn()
+  pricing = await sky.pricingState()
+  log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'}`)
+  if (backfill) {
+    try {
+      await backfillPricing()
+    } catch (e) {
+      log.error(`pricing backfill failed: ${e.stack || e.message}`)
+      process.exitCode = 1
+    } finally {
+      await fb.logout()
+    }
+    return
+  }
   while (!stopping) {
     const started = Date.now()
     try {

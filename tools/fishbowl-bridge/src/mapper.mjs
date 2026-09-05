@@ -21,6 +21,16 @@ export function int(v) {
   return n === null ? null : Math.trunc(n)
 }
 
+// Fishbowl booleans come back as 1/0, "1"/"0" or true/false depending on the column.
+export function bool(v) {
+  if (v === null || v === undefined || v === '') return null
+  if (typeof v === 'boolean') return v
+  const s = String(v).trim().toLowerCase()
+  if (s === '1' || s === 'true' || s === 't' || s === 'y' || s === 'yes') return true
+  if (s === '0' || s === 'false' || s === 'f' || s === 'n' || s === 'no') return false
+  return null
+}
+
 // "Remaining Parts Ship Date" arrives as whatever Fishbowl stores for a Date custom field.
 // Accept ISO (2026-09-14, 2026-09-14 00:00:00, 2026-09-14T00:00:00.000-04) and US (09/14/2026); anything else -> null.
 export function dateOnly(v) {
@@ -147,4 +157,80 @@ export function chunk(arr, size) {
   const out = []
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
   return out
+}
+
+// --- Bridge v1.3 pricing mirrors (D-PRICE-26) ---------------------------------------------------
+
+// Fishbowl stores naive local datetimes and compares them as such, so every value we put INTO a
+// WHERE clause has to be rendered in Fishbowl's own timezone, whatever the host PC is set to.
+const FB_TZ = 'America/New_York'
+const fbFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: FB_TZ, hourCycle: 'h23',
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+})
+
+// Date | ISO string | Fishbowl timestamp | 'YYYY-MM-DD' -> 'YYYY-MM-DD HH:MM:SS' in America/New_York.
+export function fbDateTime(v) {
+  if (v === null || v === undefined || v === '') return null
+  let d
+  if (v instanceof Date) d = v
+  else {
+    const s = String(v).trim()
+    // A bare date means midnight local, not midnight UTC.
+    d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00` : ts(s))
+  }
+  if (!Number.isFinite(d.getTime())) return null
+  const p = Object.fromEntries(fbFmt.formatToParts(d).map((x) => [x.type, x.value]))
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
+}
+
+export function mapCustomer(r, groupsByAccount) {
+  const accountId = int(r.accountId)
+  const groups = accountId === null ? [] : (groupsByAccount?.get(accountId) || [])
+  const row = {
+    id: int(r.id),
+    number: r.number === null || r.number === undefined ? null : String(r.number),
+    name: r.name ?? '',
+    activeFlag: bool(r.activeFlag),
+    salesman: r.salesman ?? null,
+    paymentTerms: r.paymentTerms ?? null,
+    dateCreated: ts(r.dateCreated),
+    dateLastModified: ts(r.dateLastModified),
+  }
+  // Only send `groups` when the account-group read succeeded — the RPC keeps the stored array otherwise.
+  if (groupsByAccount) row.groups = groups
+  return row
+}
+
+export function mapProduct(r) {
+  return {
+    id: int(r.id),
+    num: r.num === null || r.num === undefined ? '' : String(r.num),
+    partNum: r.partNum ?? null,
+    description: r.description ?? null,
+    price: num(r.price),
+    activeFlag: bool(r.activeFlag),
+  }
+}
+
+export function mapHistoryLine(r) {
+  return {
+    soItemId: int(r.soItemId),
+    soId: int(r.soId),
+    soNum: r.soNum === null || r.soNum === undefined ? null : String(r.soNum),
+    customerId: int(r.customerId),
+    soStatusId: int(r.soStatusId),
+    lineStatusId: int(r.lineStatusId),
+    typeId: int(r.typeId),
+    productNum: r.productNum === null || r.productNum === undefined ? '' : String(r.productNum),
+    partNum: r.partNum ?? null,
+    description: r.description ?? null,
+    qtyOrdered: num(r.qtyOrdered),
+    qtyFulfilled: num(r.qtyFulfilled),
+    unitPrice: num(r.unitPrice),
+    totalPrice: num(r.totalPrice),
+    dateCreated: ts(r.dateCreated),
+    dateCompleted: ts(r.dateCompleted),
+    salesman: r.salesman ?? null,
+  }
 }

@@ -43,6 +43,48 @@ export const q = {
     FROM qtyinventorytotals q JOIN part p ON p.id = q.PARTID
     WHERE q.PARTID IN (${idList(partIds)})`,
 
+  // --- Bridge v1.3 pricing mirrors (D-PRICE-26). All read-only, all in Fishbowl's own local time. ---
+
+  // Customers. `since` is a 'YYYY-MM-DD HH:MM:SS' local string, or null for a full backfill.
+  // withTerms=false drops the paymentterms join for a Fishbowl build that does not have that table.
+  customers: (since, withTerms = true) => {
+    const termsCol = withTerms ? ', pt.name AS paymentTerms' : ''
+    const termsJoin = withTerms ? `
+    LEFT JOIN paymentterms pt ON pt.id = c.defaultPaymentTermsId` : ''
+    const where = since ? `
+    WHERE c.dateLastModified > '${since}'` : ''
+    return `SELECT c.id, c.number, c.name, c.activeFlag, c.accountId,
+      c.dateCreated, c.dateLastModified, su.userName AS salesman${termsCol}
+    FROM customer c
+    LEFT JOIN sysuser su ON su.id = c.defaultSalesmanId${termsJoin}${where}`
+  },
+
+  // Account group membership, keyed by customer.accountId (columns confirmed 2026-09-03).
+  accountGroups: `SELECT agr.accountId, ag.name FROM accountgrouprelation agr
+    JOIN accountgroup ag ON ag.id = agr.groupId`,
+
+  // Full product table (~11k rows) with its part number, nightly.
+  products: `SELECT p.id, p.num, pt.num AS partNum, p.description, p.price, p.activeFlag
+    FROM product p LEFT JOIN part pt ON pt.id = p.partId`,
+
+  // One page of SO history: product lines (typeId 10 Sale / 12 Drop Ship — the same pair D-FB-08 calls
+  // PRODUCT_LINE_TYPES; 30 is Discount %, not drop ship, and was wrong in the Batch A brief) of every SO that is not an
+  // Estimate (10) or dead (80 Voided / 85 Cancelled / 90 Expired). Open orders are included so the
+  // history table is complete; v_customer_purchases de-dupes them against the open mirror by fb_soitem_id.
+  soHistory: (since, limit) => `SELECT si.id AS soItemId, s.id AS soId, s.num AS soNum, s.customerId, s.statusId AS soStatusId,
+      si.statusId AS lineStatusId, si.typeId, si.productNum, pt.num AS partNum, si.description,
+      si.qtyOrdered, si.qtyFulfilled, si.unitPrice, si.totalPrice, s.dateCreated, s.dateCompleted,
+      su.userName AS salesman, s.dateLastModified
+    FROM soitem si
+    JOIN so s ON s.id = si.soId
+    LEFT JOIN product p ON p.id = si.productId
+    LEFT JOIN part pt ON pt.id = p.partId
+    LEFT JOIN sysuser su ON su.id = s.salesmanId
+    WHERE si.typeId IN (10, 12) AND s.statusId NOT IN (10, 80, 85, 90)
+      AND s.dateLastModified > '${since}'
+    ORDER BY s.dateLastModified, si.id
+    LIMIT ${Number(limit) || 2000}`,
+
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',
   statusOf: (ids) => `SELECT id, statusId, dateLastModified FROM so WHERE id IN (${idList(ids)})`,

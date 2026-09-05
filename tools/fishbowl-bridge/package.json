@@ -1,16 +1,17 @@
 {
   "name": "skynet-fishbowl-bridge",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "Fishbowl -> SkyNet sales order bridge (read-only against Fishbowl)",
+  "description": "Fishbowl -> SkyNet sales order + pricing bridge (read-only against Fishbowl)",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "start": "node src/index.mjs",
     "once": "node src/index.mjs --once",
-    "backfill": "node scripts/backfill.mjs"
+    "backfill": "node scripts/backfill.mjs",
+    "backfill:pricing": "node src/index.mjs --backfill"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"

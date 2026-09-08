@@ -323,6 +323,14 @@ export async function upliftBook(bookId, pct, sectionId) {
   if (error) throw error
   return data
 }
+// Set every priced part in one catalog section to a total % over a base (in-effect) book:
+// Each = base Each × (1 + totalPct), rounded to 3 dp. Absolute and re-runnable (D-PRICE-39).
+// Returns { updated, unmatched } — unmatched = parts with no priced row in the base book, left unchanged.
+export async function setSectionVsBase(bookId, sectionId, baseBookId, totalPct) {
+  const { data, error } = await supabase.rpc('pricing_set_section_vs_base', { p_book: bookId, p_section: sectionId, p_base: baseBookId, p_total_pct: totalPct })
+  if (error) throw error
+  return data || { updated: 0, unmatched: 0 }
+}
 export async function upsertItem(bookId, item) {
   const { data, error } = await supabase.rpc('pricing_upsert_item', { p_book: bookId, p_item: item })
   if (error) throw error

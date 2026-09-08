@@ -1,7 +1,8 @@
 //
 // Pricing Portal — Price Books (S11 C3, D-PRICE-15/16/22). Admin: list books, open one,
 // clone (label / effective date / % uplift), edit a DRAFT (items, sections, rules,
-// bulk uplift), diff against another book, schedule / unschedule / publish, export the
+// bulk uplift of the whole book or of one section), diff against another book,
+// schedule / unschedule / publish, export the
 // Fishbowl Products CSV. Non-admins see the list and the diff, read-only.
 //
 import { useEffect, useMemo, useState } from 'react'
@@ -81,6 +82,8 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   const [diffAgainst, setDiffAgainst] = useState(null); const [diffRows, setDiffRows] = useState(null)
   const [uplift, setUplift] = useState('15'); const [pubDate, setPubDate] = useState(OCT1)
   const [newSection, setNewSection] = useState('')
+  const [sectionUplift, setSectionUplift] = useState('10')
+  const [baseBook, setBaseBook] = useState(null)   // { bookId, items } of the in-effect book — the per-section "vs" figure (D-PRICE-38)
 
   const book = books.find(b => b.id === bookId) || null
   const editable = canEdit && book?.status === 'draft'
@@ -96,10 +99,31 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     catch (e) { setError(e.message || String(e)) } finally { setBusy(false) }
   }
   useEffect(() => { loadBook() }, [bookId]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The section header shows how far the open book has moved from the in-effect book, so a second
+  // uplift on one family is judged against the real base (Rev 81), not the draft (D-PRICE-38).
+  // Loaded once per active book; state is set only in the promise callback.
+  const activeId = books.find(b => b.status === 'active')?.id || null
+  useEffect(() => {
+    if (!activeId || activeId === bookId || baseBook?.bookId === activeId) return
+    let live = true
+    loadBookItems(activeId).then(its => { if (live) setBaseBook({ bookId: activeId, items: its }) }).catch(() => {})
+    return () => { live = false }
+  }, [bookId, activeId]) // eslint-disable-line react-hooks/exhaustive-deps
   const note = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2500) }
   const run = async (fn, ok) => { setBusy(true); setError(null); try { await fn(); if (ok) note(ok) } catch (e) { setError(e.message || String(e)) } finally { setBusy(false) } }
 
   const sectionItems = useMemo(() => items.filter(i => i.section_id === sectionId), [items, sectionId])
+  const section = meta?.sections.find(s => s.id === sectionId) || null
+  // What a section uplift touches — priced catalog rows (sets are Σ of their components and follow
+  // them; resale is never uplifted, D-PRICE-13) — and their average Each movement vs the in-effect book.
+  const sectionStats = useMemo(() => {
+    const rows = sectionItems.filter(i => i.status === 'priced' && i.list_price != null)
+    const baseMap = baseBook && baseBook.bookId !== bookId ? new Map(baseBook.items.filter(b => b.list_price != null).map(b => [b.part_key, Number(b.list_price)])) : null
+    let sum = 0, n = 0
+    if (baseMap) for (const r of rows) { const b = baseMap.get(r.part_key); if (b) { sum += Number(r.list_price) / b - 1; n++ } }
+    return { priced: rows.length, matched: n, avgPct: n ? sum / n : null, baseLabel: baseMap ? (books.find(b => b.id === baseBook.bookId)?.rev_label || 'in-effect book') : null }
+  }, [sectionItems, baseBook, bookId, books])
+  const fmtPct = (p) => `${p > 0 ? '+' : ''}${(p * 100).toFixed(1)}%`
   const counts = useMemo(() => ({ items: items.length, priced: items.filter(i => i.status === 'priced').length, noprice: items.filter(i => i.status === 'no_price').length }), [items])
   const runDiff = async (otherId) => {
     setDiffAgainst(otherId); setDiffRows(null)
@@ -178,6 +202,23 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                 )}
               </aside>
               <div className="min-w-0">
+                {section && (
+                  <div className="flex flex-wrap items-center gap-3 mb-2 text-xs">
+                    <div className="min-w-0 flex-1 text-gray-400 truncate" title={section.name}><span className="text-white">{section.name}</span> · {num(sectionItems.length)} items · {num(sectionStats.priced)} priced{section.kind === 'resale' ? <span className="text-rose-300"> · resale — never uplifted (D-PRICE-13)</span> : ''}</div>
+                    {sectionStats.avgPct != null && (
+                      <div className="font-mono text-gray-400 whitespace-nowrap" title={`Average Each change of the ${sectionStats.matched} parts in this section that are also in ${sectionStats.baseLabel}`}>vs {sectionStats.baseLabel}: <span className={sectionStats.avgPct > 0 ? 'text-amber-300' : sectionStats.avgPct < 0 ? 'text-rose-300' : 'text-gray-300'}>{fmtPct(sectionStats.avgPct)}</span></div>
+                    )}
+                    {editable && section.kind !== 'resale' && (
+                      <div className="flex items-center gap-1"><Percent size={13} className="text-gray-500" /><input type="number" step="0.1" value={sectionUplift} onChange={e => setSectionUplift(e.target.value)} className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
+                        <button onClick={() => {
+                          const p = Number(sectionUplift)
+                          if (!Number.isFinite(p) || p === 0 || !sectionStats.priced) return
+                          const after = sectionStats.avgPct != null ? ` This section would then sit at ${fmtPct((1 + sectionStats.avgPct) * (1 + p / 100) - 1)} vs ${sectionStats.baseLabel}.` : ''
+                          if (confirm(`Raise the ${num(sectionStats.priced)} priced Each in "${section.name}" by ${p}%? This compounds on the draft's current Each.${after}`)) run(async () => { const n = await upliftBook(book.id, p / 100, section.id); await loadBook(); note(`${section.name}: ${num(n)} Each uplifted ${p}%`) })
+                        }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white whitespace-nowrap">Uplift section</button></div>
+                    )}
+                  </div>
+                )}
                 <div className="overflow-auto border border-gray-700 rounded-lg max-h-[60vh]">
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400"><th className="px-2 py-2">Part</th><th className="px-2 py-2">Description</th><th className="px-2 py-2 text-right">Each</th><th className="px-2 py-2 text-center">Rule</th><th className="px-2 py-2 text-center">Ladder</th><th className="px-2 py-2 text-center">Premier</th><th className="px-2 py-2 text-center">DFAR</th><th></th></tr></thead>

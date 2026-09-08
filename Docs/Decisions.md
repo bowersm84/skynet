@@ -3391,15 +3391,19 @@ Fishbowl is the customer master. Tiers and exceptions key on `fb_customer_id`; S
 
 ### D-PRICE-21 — Price sheet (2026-09-05)
 Guide-style sections; the customer's purchased parts by default (toggle: full catalog / chosen sections); one price column = their tier (or the three breaks for non-tiered); DFAR flag; "Prices effective <date>", book rev, salesperson; XLSX (SheetJS) and PDF (pdf-lib), generated client-side.
+**RESOLVED by** D-PRICE-29 (2026-09-05): delivered as the Customers-tab price list (PL-YYMM-NNNN) with PDF + XLSX; “purchased parts + add” is the shipped mode, full-catalog lists stay in the backlog.
 
 ### D-PRICE-22 — Interim Fishbowl sync (2026-09-05)
 Price Books page exports a Fishbowl **Products** import CSV (ProductNumber, Price) from any book so Matt can push list prices by hand until Phase F.
+**Status (2026-09-05):** still the live write-back path (Price Books ▸ Fishbowl Products CSV) until Phase F (D-PRICE-24).
 
 ### D-PRICE-23 — Quotes (Phase E) (2026-09-05)
 Lock the resolved prices for 14 days; `Q-YYMM-NNNN`; rep = logged-in user; layout from the Fishbowl acknowledgement; terms = the returns text.
+**RESOLVED by** D-PRICE-32 / D-PRICE-33 (2026-09-05): saved quotes with the 14-day lock, branded PDF; email send deferred.
 
 ### D-PRICE-24 — Write-back (Phase F) (2026-09-05)
 Outbound-only command queue polled by the bridge (D-FB-01 preserved). Qty breaks → all-customer rules; tiers → account-group rules; the 150 qty-triggered tier rules deactivated.
+**Status (2026-09-05):** deferred to the next sprint; first item in Docs/Implementation_Plans/Pricing_Portal_Backlog_2026-09-05.md.
 
 ### D-PRICE-25 — Feature flag (2026-09-05)
 `FEATURES.PRICING_PORTAL` (config.js). False → `/pricing` renders the "not enabled" card.
@@ -3409,6 +3413,7 @@ Outbound-only command queue polled by the bridge (D-FB-01 preserved). Qty breaks
 **Why:** The portal keys tiers, exceptions and purchase history on Fishbowl's customer id (D-PRICE-18/19) and needs Fishbowl's list prices for the Resale section (D-PRICE-13) and Phase F's write-back parity. D-FB-17 deliberately kept everything but open orders in Fishbowl until a round needed it — this is that round, so the history slice is added beside the open mirror rather than replacing it, and `v_customer_purchases` unions the two by `fb_soitem_id`. Salesman is taken from `sysuser.userName` and never from the denormalised `so.salesman` text, because D-PRICE-20 maps it onto a SkyNet profile. The rep tag is stripped in the RPC, not the bridge, so the display name self-heals when Matt's Fishbowl rename runs and the mirror re-reads.
 **Deploy:** Schema applied to TEST by Matt (2026-09-04). Bridge run from Matt's PC against TEST on `SESSION_MODE=per_cycle` (D-FB-37); PROD service on skyserver in Batch D.
 **Files:** tools/fishbowl-bridge/src/pricing.mjs (new — the three pollers and the nightly-due rule), src/queries.mjs (`customers`, `accountGroups`, `products`, `soHistory`), src/mapper.mjs (`bool`, `fbDateTime`, `mapCustomer`, `mapProduct`, `mapHistoryLine`), src/skynet.mjs (the three RPC wrappers + `pricingState()`), src/index.mjs (`pricingCycle`, `--backfill`), src/config.mjs (v1.3.0 + the new keys), package.json, README.md, .env.example; Docs/migrations/2026-09-04_pricing_schema.sql (applied by Matt, not CC); Docs/Fishbowl_Data_Context.md (customer / product / SO-history sections).
+**CORRECTED by** D-PRICE-28 (2026-09-05): the history filter is `typeId IN (10, 12)` — 30 is Discount %, not drop ship. PROD confirms Skybolt writes no type-12 lines (D-PRICE-35).
 
 ### D-PRICE-27 — Portal shell, Lookup, Catalog, Customers (2026-09-08)
 **What:** `/pricing` is a standalone office-session route outside MainApp (the `/kits` and `/dashboards/sales` pattern), self-gated by `FEATURES.PRICING_PORTAL` and `canViewPricing`; a kiosk JWT (`app_metadata.kiosk`) is bounced to `/`, so there is no PIN path into pricing. Four tabs. **Lookup** prices through `pricing_get_price` — the authority for anything that leaves the screen — and renders the item's full ladder beside it from the client-side mirror, with the RPC's chosen column highlighted, so the two are visibly compared on every lookup. **Catalog** renders a section from one `price_items` query using that same mirror (`src/lib/pricing.js` `columnPrice`, positional multiplier lookup identical to `_pricing_multiplier`: the Nth qty column takes m_q100/m_q300/m_q500), plus book-wide search across part / description / xref / NSN. **Customers** shows the tier badge with its full history, customer-part exceptions, and Fishbowl purchase history with last-paid against the price on the as-of date and a Δ column. **Price Books** is a read-only list this round. Gates `canViewPricing` / `canEditPricing` in roles.js mirror `_pricing_view_roles()` / `_pricing_edit_roles()`: everyone who can open the portal sees tiers, exceptions and history (D-PRICE-17); only admin sees Set Tier / Add exception / End, and the RPCs enforce the same gate server-side so a stray control would fail rather than leak. UI copy states D-PRICE-03 explicitly — 100/300/500 are quantity breaks for everyone, Tier 1–3 and Premier are customer qualifications that never depend on quantity.
@@ -3474,3 +3479,14 @@ Outbound-only command queue polled by the bridge (D-FB-01 preserved). Qty breaks
 **What:** Catalog becomes the first tab and the default landing tab; Quote Builder moves to the far right. Order is now Catalog · Customers · Price Books · Quote Builder.
 **Why:** Matt, first day on PROD — looking a price up in the book is the common errand, and quoting is the occasional one, so the portal should open where the traffic is.
 **Files:** src/pages/Pricing.jsx.
+
+### D-PRICE-37 — Sprint 11 close-out (2026-09-05)
+**What:** Sprint 11 is closed. Spec bumped to v4.6 (§3.1 gates, new §5.32 Pricing Portal, §10.10 schema, §11 D-PRICE index, §12–13 history/flags/go-live); `S11_Implementation_Plan.md` renamed `S11_Implementation_Plan_CLOSED.md` with a close-out section; deferred work consolidated in `Pricing_Portal_Backlog_2026-09-05.md`. Note on dates: D-PRICE-27 … 34 carry the *planned* batch dates from their prompt filenames (2026-09-08 … 09-13); every batch was actually delivered and accepted on 2026-09-04/05 — the headings are left as written (append-only), and this entry is the record.
+**Why:** The plan targeted a Sept 24 cutover; TEST verification ran clean batch by batch, so PROD went live 2026-09-05 with the Oct 1 book already scheduled.
+**Files:** Docs/SkyNet_Specification_v4_6.docx, Docs/Implementation_Plans/S11_Implementation_Plan_CLOSED.md, Docs/Implementation_Plans/Pricing_Portal_Backlog_2026-09-05.md, Docs/Decisions.md.
+
+### D-PRICE-38 — Per-section uplift (2026-09-08)
+**What:** The Sections & items view gains a section toolbar: name, item / priced counts, an average Each movement "vs <in-effect book>" for the parts also present there, and — on a draft, for non-resale sections — a % input with **Uplift section** that calls `pricing_uplift_book(p_book, p_pct, p_section)` for the selected section only. The RPC and `upliftBook(bookId, pct, sectionId)` already took a section id since S11 Batch A; the editor never passed one. Verified on PROD 2026-09-08: the RPC updates `price_items` in `catalog` sections only (`s.kind = 'catalog'`, so resale is skipped per D-PRICE-13), skips null Eaches, rounds to 3 dp and returns the row count — the flash shows that count. The confirm states that the percentage compounds on the draft's current Each and quotes the resulting position vs the in-effect book (a +10% on a +15% clone = +26.5% vs Rev 81). The in-effect book's items are loaded once per active book and only when a different book is open. Sets (`component_sum`) are not multiplied — they remain Σ of their components and follow them; resale sections show the D-PRICE-13 note and no control.
+**Why:** Matt, 2026-09-08 — the Oct 1 book needs family-level increases on top of the 15%, and the editor only offered one row or the whole book.
+**Not done:** no undo — a wrong section uplift is reversed by re-cloning Rev 81 at 15% (only safe if Rev 82 carries no other hand edits yet), or by hand; prefix-scoped uplift across sections (e.g. every `SK2603-`) is a follow-on that would need a new RPC parameter.
+**Files:** src/components/pricing/PriceBooks.jsx. No SQL.

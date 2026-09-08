@@ -3497,3 +3497,8 @@ Outbound-only command queue polled by the bridge (D-FB-01 preserved). Qty breaks
 **Why:** Matt's TEST run of D-PRICE-38 the same morning: +10% on the +15% draft landed at +26.5%, when +25% was meant. Percentages in a price book are stated over the book customers hold today; anchoring to the base also makes the operation absolute and re-runnable and removes stacked 3-dp rounding.
 **Not done:** the same anchoring for the whole book (not needed while books are clean clones); prefix-scoped repricing across sections.
 **Files:** src/lib/pricing.js, src/components/pricing/PriceBooks.jsx, Docs/migrations/2026-09-08_pricing_set_section_vs_base.sql (applied by Matt, not CC).
+
+### D-PRICE-40 — pricing_counters on the guardrail allowlist (2026-09-08)
+**What:** `pricing_counters` (D-PRICE-29/32) is added to the service-role-only allowlist in `Docs/migrations/rls_guardrail.sql` (Profile E, D-S7-08). RLS stays enabled with no policies: the table is written only by `pricing_next_number`, a SECURITY DEFINER function called from `pricing_save_price_list` / `pricing_save_quote`, and no client code references it.
+**Why:** The RLS Guardrail workflow failed on every push to main since the S11 cutover with "NO POLICIES … not on the allowlist" for this table; the S11 rounds created it without the D-S7-08 allowlist step.
+**Files:** Docs/migrations/rls_guardrail.sql.

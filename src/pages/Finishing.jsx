@@ -182,8 +182,8 @@ export default function Finishing() {
   const [pickupSubmitting, setPickupSubmitting] = useState(false)
   const [pickupCompleting, setPickupCompleting] = useState(null) // job id being completed
 
-  // Late Parts (D-LATEBATCH-01): jobs that finished manufacturing in the last
-  // 5 days. Parts that turn up after Complete go through as a new batch here.
+  // Late Parts (D-LATEBATCH-01/-02): jobs that finished manufacturing in the
+  // last 14 days. Parts that turn up after Complete go through as a new batch here.
   const [lateJobs, setLateJobs] = useState([])
   const [lateExpanded, setLateExpanded] = useState(false)
   const [showLateModal, setShowLateModal] = useState(false)
@@ -673,11 +673,15 @@ export default function Finishing() {
         setPickupJobs(filtered)
       }
 
-      // Late Parts (D-LATEBATCH-01): manufacturing finished within 5 days and the
-      // job is at manufacturing_complete, pending_tco, or ready_for_assembly —
-      // the three states a late batch can safely re-enter from. Complete (TCO
-      // closed) is out: custody has transferred; makeup pieces ride a re-queue.
-      const lateSince = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      // Late Parts (D-LATEBATCH-01/-02): manufacturing finished within 14 days
+      // and the job is at manufacturing_complete, pending_tco, ready_for_assembly,
+      // ready_for_outsourcing, or at_external_vendor. The first three revert to
+      // manufacturing_complete so compliance's approval can advance them again;
+      // the outsourcing pair keep their status — the job is already downstream
+      // at the right place, and the approved late batch surfaces on the
+      // Outsourcing screen as its own send (D-LATEBATCH-02). Complete (TCO
+      // closed) stays out: custody has transferred; makeup pieces ride a re-queue.
+      const lateSince = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()
       const { data: lateData, error: lateError } = await supabase
         .from('jobs')
         .select(`
@@ -691,7 +695,7 @@ export default function Finishing() {
         `)
         .eq('is_standalone_finishing', false)
         .eq('is_maintenance', false)
-        .in('status', ['manufacturing_complete', 'pending_tco', 'ready_for_assembly'])
+        .in('status', ['manufacturing_complete', 'pending_tco', 'ready_for_assembly', 'ready_for_outsourcing', 'at_external_vendor'])
         .gte('actual_end', lateSince)
         .order('actual_end', { ascending: false })
       if (lateError) {
@@ -1545,7 +1549,13 @@ export default function Finishing() {
       // the count overstates by it, exactly as the D-DATA-02 fixes accepted.
       const goodBefore = lateModalJob.good_pieces || 0
       const jobUpdate = { good_pieces: goodBefore + qty, updated_at: now }
-      if (priorStatus !== 'manufacturing_complete') jobUpdate.status = 'manufacturing_complete'
+      // D-LATEBATCH-02: only pending_tco / ready_for_assembly drop back to
+      // manufacturing_complete (ComplianceReview.handleApproveBatch advances only
+      // from there). ready_for_outsourcing / at_external_vendor keep their status:
+      // the job is already past the point approval would advance it to, and the
+      // approved late batch appears on the Outsourcing screen as its own send.
+      const revertsStatus = ['pending_tco', 'ready_for_assembly'].includes(priorStatus)
+      if (revertsStatus) jobUpdate.status = 'manufacturing_complete'
       let statusProblem = null
       const { error: jobError } = await supabase
         .from('jobs')
@@ -1564,7 +1574,7 @@ export default function Finishing() {
           prior_status: priorStatus,
           production_lot_number: pln,
           material_lot_number: materialLot,
-          status_reverted: !statusProblem && priorStatus !== 'manufacturing_complete',
+          status_reverted: !statusProblem && revertsStatus,
           good_pieces_before: goodBefore,
           good_pieces_after: statusProblem ? goodBefore : goodBefore + qty,
         },
@@ -1575,9 +1585,11 @@ export default function Finishing() {
       await loadData()
 
       if (statusProblem) {
-        alert(`Batch ${batchLabel} was created (${qty} pcs) but the job record could not be updated (status back to Manufacturing Complete, pieces count +${qty}): ${statusProblem}. Tell Matt before this job is TCO'd.`)
+        alert(`Batch ${batchLabel} was created (${qty} pcs) but the job record could not be updated (${revertsStatus ? 'status back to Manufacturing Complete, ' : ''}pieces count +${qty}): ${statusProblem}. Tell Matt before this job is TCO'd.`)
+      } else if (revertsStatus) {
+        alert(`Batch ${batchLabel} created — ${qty} pcs. It is in the Incoming Queue; the job returns to ${priorStatus === 'ready_for_assembly' ? 'Ready for Assembly' : 'Pending TCO'} once compliance approves it.`)
       } else {
-        alert(`Batch ${batchLabel} created — ${qty} pcs. It is in the Incoming Queue; the job returns to Pending TCO once compliance approves it.`)
+        alert(`Batch ${batchLabel} created — ${qty} pcs. It is in the Incoming Queue; once compliance approves it, it appears on the Outsourcing screen to send to the vendor.`)
       }
     } catch (err) {
       console.error('Late batch failed:', err)
@@ -2777,9 +2789,11 @@ export default function Finishing() {
               )}
             </div>
 
-            {/* Late Parts (D-LATEBATCH-01) — jobs that finished manufacturing in the
-                last 5 days. A late batch re-enters the normal pipeline; the job drops
-                back to Manufacturing Complete until compliance approves it. */}
+            {/* Late Parts (D-LATEBATCH-01/-02) — jobs that finished manufacturing in
+                the last 14 days. A late batch re-enters the normal pipeline; a
+                pending-TCO / ready-for-assembly job drops back to Manufacturing
+                Complete until compliance approves it, an outsourcing-routed job
+                keeps its status and the batch rides its own vendor send. */}
             {lateJobs.length > 0 && (
               <div className="bg-gray-900 rounded-lg border border-violet-900/40 p-6 mt-6 mb-6">
                 <button
@@ -2790,7 +2804,7 @@ export default function Finishing() {
                 >
                   <History size={18} className="text-violet-400" />
                   <h2 className="text-white font-semibold">Late Parts</h2>
-                  <span className="text-gray-500 text-sm">completed in the last 5 days</span>
+                  <span className="text-gray-500 text-sm">completed in the last 14 days</span>
                   <span className="ml-auto text-gray-500 text-sm">{lateJobs.length} job{lateJobs.length === 1 ? '' : 's'}</span>
                   {lateExpanded ? <ChevronUp size={16} className="text-gray-500" /> : <ChevronDown size={16} className="text-gray-500" />}
                 </button>
@@ -2990,7 +3004,9 @@ export default function Finishing() {
                 />
               </div>
               <p className="text-gray-500 text-xs">
-                The batch goes into the Incoming Queue like any other. The job returns to Manufacturing Complete now and back to {lateModalJob.status === 'ready_for_assembly' ? 'Ready for Assembly' : 'Pending TCO'} once compliance approves this batch.
+                The batch goes into the Incoming Queue like any other. {['ready_for_outsourcing', 'at_external_vendor'].includes(lateModalJob.status)
+                  ? 'The job keeps its current status; once compliance approves this batch it appears on the Outsourcing screen to send to the vendor.'
+                  : `The job returns to Manufacturing Complete now and back to ${lateModalJob.status === 'ready_for_assembly' ? 'Ready for Assembly' : 'Pending TCO'} once compliance approves this batch.`}
               </p>
             </div>
             <div className="p-6 border-t border-gray-800 flex gap-3">

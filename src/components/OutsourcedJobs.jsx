@@ -732,14 +732,32 @@ export default function OutsourcedJobs({ profile }) {
         if (send.job_routing_step_id) {
           const { data: stepSends, error: stepSendsErr } = await supabase
             .from('outbound_sends')
-            .select('id, returned_at')
+            .select('id, returned_at, finishing_send_id')
             .eq('job_routing_step_id', send.job_routing_step_id)
           if (stepSendsErr) throw stepSendsErr
 
           const allStepReturned = stepSends && stepSends.length > 0
             && stepSends.every(s => s.returned_at != null)
 
+          // D-LATEBATCH-02: a finishing batch still upstream of this step (in
+          // finishing, awaiting compliance, or approved but not yet sent out)
+          // holds the step open. Without this, a late batch arriving behind its
+          // returned siblings would strand: step marked complete, job advanced
+          // past outsourcing, batch never sent to the vendor.
+          let upstreamBatches = 0
           if (allStepReturned) {
+            const guardJobId = send.job?.id || send.job_id
+            const { data: liveBatches, error: liveErr } = await supabase
+              .from('finishing_sends')
+              .select('id')
+              .eq('job_id', guardJobId)
+              .or('compliance_status.is.null,compliance_status.neq.rejected')
+            if (liveErr) throw liveErr
+            const sentBatchIds = new Set((stepSends || []).map(s => s.finishing_send_id).filter(Boolean))
+            upstreamBatches = (liveBatches || []).filter(b => !sentBatchIds.has(b.id)).length
+          }
+
+          if (allStepReturned && upstreamBatches === 0) {
             const jobId = send.job?.id || send.job_id
             const { data: jobRow, error: jobFetchErr } = await supabase
               .from('jobs')
@@ -870,13 +888,27 @@ export default function OutsourcedJobs({ profile }) {
 
         const { data: stepSends } = await supabase
           .from('outbound_sends')
-          .select('id, returned_at')
+          .select('id, returned_at, finishing_send_id')
           .eq('job_routing_step_id', r.job_routing_step_id)
         const allStepReturned = stepSends && stepSends.length > 0
           && stepSends.every(s => s.returned_at != null)
         if (!allStepReturned) continue
 
         const jobId = r.job?.id || r.job_id
+
+        // D-LATEBATCH-02: same guard as the single-send return path — a
+        // finishing batch still upstream of this step (in finishing, awaiting
+        // compliance, or approved but not yet sent out) holds the step open, so
+        // a late batch behind a consolidated lot can never be stranded.
+        const { data: liveBatches, error: liveErr } = await supabase
+          .from('finishing_sends')
+          .select('id')
+          .eq('job_id', jobId)
+          .or('compliance_status.is.null,compliance_status.neq.rejected')
+        if (liveErr) throw liveErr
+        const sentBatchIds = new Set((stepSends || []).map(s => s.finishing_send_id).filter(Boolean))
+        const upstreamBatches = (liveBatches || []).filter(b => !sentBatchIds.has(b.id)).length
+        if (upstreamBatches > 0) continue
         const { data: jobRow } = await supabase
           .from('jobs')
           .select('id, actual_end')

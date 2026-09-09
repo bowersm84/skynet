@@ -4588,8 +4588,14 @@ export default function Kiosk() {
                   open downtime rows, INCLUDING while a job is active (the old
                   Machine Ready control lived in the no-active-job branch only,
                   which stranded machines permanently). Deliberately slim and
-                  collapsed: the job panel below stays fully visible. */}
-              {orphanedDowntimes.length > 0 && (
+                  collapsed: the job panel below stays fully visible.
+                  D-DOWN-02 — also renders on the bare machines.status flag. The
+                  flag, open downtime rows, and an open unplanned-maintenance job
+                  are independent signals; the strip (and its Machine Ready
+                  control) must appear whenever ANY of them is set, or a machine
+                  flagged down with no open row and no DTU job has no way back
+                  into service (Ganesh 1, Sep 9). */}
+              {(machine.status === 'down' || orphanedDowntimes.length > 0) && (
                 <div className="border-b border-red-800/60 bg-red-950/40">
                   <div className="px-4 py-2.5 flex items-center gap-3">
                     <AlertTriangle size={16} className="text-red-400 flex-shrink-0" />
@@ -4598,9 +4604,18 @@ export default function Kiosk() {
                         MACHINE DOWN
                       </span>
                       <span className="text-gray-400 text-sm truncate">
-                        {orphanedDowntimes[0]?.reason}
-                        {orphanedDowntimes.length > 1 && ` (+${orphanedDowntimes.length - 1} more)`}
-                        {orphanedDowntimes[0]?.start_time && ` · since ${formatDateTime(orphanedDowntimes[0].start_time)}`}
+                        {orphanedDowntimes.length > 0 ? (
+                          <>
+                            {orphanedDowntimes[0]?.reason}
+                            {orphanedDowntimes.length > 1 && ` (+${orphanedDowntimes.length - 1} more)`}
+                            {orphanedDowntimes[0]?.start_time && ` · since ${formatDateTime(orphanedDowntimes[0].start_time)}`}
+                          </>
+                        ) : (
+                          <>
+                            {machine.status_reason || 'Flagged down'}
+                            {machine.status_updated_at && ` · since ${formatDateTime(machine.status_updated_at)}`}
+                          </>
+                        )}
                       </span>
                     </div>
                     <button
@@ -4623,6 +4638,13 @@ export default function Kiosk() {
 
                   {downBannerExpanded && (
                     <div className="px-4 pb-3 pt-1 border-t border-red-900/40 space-y-2">
+                      {orphanedDowntimes.length === 0 && (
+                        <p className="text-xs text-gray-400">
+                          No open downtime record — this machine is flagged down on its status only
+                          {machine.status_reason ? `: ${machine.status_reason}` : ''}. Machine Ready clears the flag
+                          unless an unplanned maintenance job is still open on this machine (complete that job instead).
+                        </p>
+                      )}
                       {orphanedDowntimes.map(dt => (
                         <div key={dt.id} className="text-xs">
                           <div className="flex items-center justify-between gap-3">
@@ -8012,7 +8034,9 @@ export default function Kiosk() {
             
             <div className="p-6">
               <p className="text-gray-400 mb-4">
-                This will close {orphanedDowntimes.length} open downtime record{orphanedDowntimes.length > 1 ? 's' : ''} and mark the machine as available.
+                {orphanedDowntimes.length > 0
+                  ? `This will close ${orphanedDowntimes.length} open downtime record${orphanedDowntimes.length > 1 ? 's' : ''} and mark the machine as available.`
+                  : 'There is no open downtime record. This will clear the machine\'s DOWN flag and mark it available.'}
               </p>
               
               <div className="mb-4">

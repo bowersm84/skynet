@@ -170,7 +170,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const [partMachineDurations, setPartMachineDurations] = useState([])
   const [loading, setLoading] = useState(true)
   const [weekOffset, setWeekOffset] = useState(0)
-  const [windowDays, setWindowDays] = useState(7) // grid zoom: 7 / 14 / 28 days visible
+  const [windowDays, setWindowDays] = useState(28) // grid zoom: 7 / 14 / 28 days visible; 4-Week is the default view
   
   // NEW: Track ongoing downtimes and active unplanned maintenance for DOWN status
   const [ongoingDowntimes, setOngoingDowntimes] = useState([])
@@ -2996,8 +2996,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             <div className={(zoomedDay || windowDays > 7) ? 'min-w-max' : ''}>
             {/* Day View Hour Headers - inside scrollable area */}
             {zoomedDay && (
-              <div className="flex border-b border-gray-700 sticky top-0 z-20 bg-gray-900">
-                <div className="w-32 flex-shrink-0 p-2 border-r border-gray-700 bg-gray-850 sticky left-0 z-30">
+              <div className="flex border-b border-gray-700 sticky top-0 z-40 bg-gray-900">
+                <div className="w-32 flex-shrink-0 p-2 border-r border-gray-700 bg-gray-850 sticky left-0 z-50">
                   <span className="text-gray-500 text-xs">Hour</span>
                 </div>
                 <div className="flex" style={{ width: `${24 * 60}px` }}>
@@ -3067,8 +3067,15 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                         <div key={machine.id} className={`flex border-b border-gray-800 last:border-b-0 min-h-[60px] ${
                           (draggedJob || draggedScheduledJob) && isPreferred ? 'bg-yellow-900/10' : ''
                         } ${isResizingOnThisMachine ? 'overflow-visible z-20' : ''}`}>
-                          <div className={`w-32 flex-shrink-0 p-3 pl-6 border-r border-gray-700 bg-gray-850 flex flex-col justify-center ${
-                            zoomedDay ? 'sticky left-0 z-10' : ''
+                          <div className={`group relative w-32 flex-shrink-0 p-3 pl-6 border-r border-gray-700 bg-gray-850 flex flex-col justify-center cursor-help ${
+                            /* D-MACHINFO-01: pin the row header whenever the body scrolls
+                               sideways (day zoom AND the 2-/4-week windows, which set
+                               min-w-max on the body), not only in day zoom. z-30 clears
+                               every job-bar layer (multi-day z-10, highlight z-20) so the
+                               hover card below, which is trapped in THIS cell's stacking
+                               context, paints above the bars; the day-zoom hour header
+                               moved to z-40/50 to stay above the pinned column. */
+                            (zoomedDay || windowDays > 7) ? 'sticky left-0 z-30' : ''
                           } ${
                             (draggedJob || draggedScheduledJob) && isPreferred ? 'bg-yellow-900/20' : ''
                           } ${
@@ -3121,6 +3128,39 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                 </span>
                               </div>
                             )}
+
+                            {/* D-MACHINFO-01: hover card. Data lives on machines
+                                (model, model_year, max_bar_diameter_in, capabilities,
+                                max_bar_length) - maintained by SQL until a machines
+                                admin screen exists. Sits inside the sticky cell so it
+                                travels with the row header. */}
+                            <div className="hidden group-hover:block absolute left-full top-0 ml-2 z-50 w-64 p-3 bg-gray-800 border border-gray-600 rounded-lg shadow-xl text-xs pointer-events-none">
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-white font-semibold text-sm">{machine.name}</span>
+                                <span className="text-gray-500 font-mono">{machine.code}</span>
+                              </div>
+                              <div className="mt-1 text-gray-200">
+                                {machine.model || <span className="text-gray-500 italic">Model not on file</span>}
+                                {machine.model_year ? <span className="text-gray-500"> · {machine.model_year}</span> : null}
+                              </div>
+                              <div className="mt-2 space-y-0.5 text-gray-400">
+                                {machine.max_bar_diameter_in != null && (
+                                  <div><span className="text-gray-500">Max bar dia</span> {Number(machine.max_bar_diameter_in).toFixed(3)}"</div>
+                                )}
+                                {machine.max_bar_length != null && (
+                                  <div><span className="text-gray-500">Max bar length</span> {Number(machine.max_bar_length)}"</div>
+                                )}
+                                {machine.machine_type && (
+                                  <div><span className="text-gray-500">Type</span> {machine.machine_type}</div>
+                                )}
+                                {machine.location?.name && (
+                                  <div><span className="text-gray-500">Location</span> {machine.location.name}</div>
+                                )}
+                                {machine.capabilities && (
+                                  <div className="text-gray-300 pt-1 border-t border-gray-700 mt-1">{machine.capabilities}</div>
+                                )}
+                              </div>
+                            </div>
                           </div>
                           
                           {/* Week View Timeline */}

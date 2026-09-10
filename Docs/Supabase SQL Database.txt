@@ -187,6 +187,9 @@ CREATE TABLE public.jobs (
   merged_out_good integer,
   merge_requires_compliance_ack boolean NOT NULL DEFAULT false,
   schedule_qty_basis integer,
+  run_target_ack_qty integer,
+  run_target_ack_at timestamp with time zone,
+  run_target_ack_by uuid,
   CONSTRAINT jobs_pkey PRIMARY KEY (id),
   CONSTRAINT jobs_work_order_id_fkey FOREIGN KEY (work_order_id) REFERENCES public.work_orders(id),
   CONSTRAINT jobs_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
@@ -204,6 +207,7 @@ CREATE TABLE public.jobs (
   CONSTRAINT jobs_post_mfg_reviewed_by_fkey FOREIGN KEY (post_mfg_reviewed_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_merged_into_fkey FOREIGN KEY (merged_into_job_id) REFERENCES public.jobs(id),
   CONSTRAINT jobs_documents_deferred_by_fkey FOREIGN KEY (documents_deferred_by) REFERENCES public.profiles(id),
+  CONSTRAINT jobs_run_target_ack_by_fkey FOREIGN KEY (run_target_ack_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_traveler_printed_by_fkey FOREIGN KEY (traveler_printed_by) REFERENCES public.profiles(id),
   CONSTRAINT jobs_paperwork_ack_by_fkey FOREIGN KEY (paperwork_ack_by) REFERENCES public.profiles(id)
 );
@@ -1634,6 +1638,10 @@ CREATE TABLE public.fb_sync_state (
   last_error_at timestamp with time zone,
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   last_users_at timestamp with time zone,
+  last_customers_at timestamp with time zone,
+  last_history_at timestamp with time zone,
+  last_products_at timestamp with time zone,
+  history_cursor timestamp with time zone,
   CONSTRAINT fb_sync_state_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.fb_users (
@@ -1777,4 +1785,100 @@ CREATE TABLE public.paperwork_issues (
   CONSTRAINT paperwork_issues_acknowledged_by_fkey FOREIGN KEY (acknowledged_by) REFERENCES public.profiles(id),
   CONSTRAINT paperwork_issues_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.jobs(id),
   CONSTRAINT paperwork_issues_job_document_id_fkey FOREIGN KEY (job_document_id) REFERENCES public.job_documents(id)
+);
+CREATE TABLE public.price_books (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  rev_label text NOT NULL,
+  effective_from date,
+  status text NOT NULL DEFAULT 'draft'::text CHECK (status = ANY (ARRAY['draft'::text, 'scheduled'::text, 'active'::text, 'superseded'::text])),
+  source text NOT NULL DEFAULT 'clone'::text,
+  cloned_from_book_id uuid,
+  uplift_pct numeric,
+  premier_pct numeric NOT NULL DEFAULT 0.97,
+  notes text,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  published_by uuid,
+  published_at timestamp with time zone,
+  superseded_at timestamp with time zone,
+  CONSTRAINT price_books_pkey PRIMARY KEY (id),
+  CONSTRAINT price_books_cloned_from_book_id_fkey FOREIGN KEY (cloned_from_book_id) REFERENCES public.price_books(id),
+  CONSTRAINT price_books_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.profiles(id),
+  CONSTRAINT price_books_published_by_fkey FOREIGN KEY (published_by) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.price_rules (
+  book_id uuid NOT NULL,
+  code text NOT NULL,
+  m_q100 numeric,
+  m_q300 numeric,
+  m_q500 numeric,
+  m_tier1 numeric,
+  m_tier2 numeric,
+  m_tier3 numeric,
+  notes text,
+  CONSTRAINT price_rules_pkey PRIMARY KEY (book_id, code),
+  CONSTRAINT price_rules_book_id_fkey FOREIGN KEY (book_id) REFERENCES public.price_books(id)
+);
+CREATE TABLE public.price_ladders (
+  book_id uuid NOT NULL,
+  code text NOT NULL,
+  label text,
+  columns jsonb NOT NULL,
+  CONSTRAINT price_ladders_pkey PRIMARY KEY (book_id, code),
+  CONSTRAINT price_ladders_book_id_fkey FOREIGN KEY (book_id) REFERENCES public.price_books(id)
+);
+CREATE TABLE public.price_sections (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  book_id uuid NOT NULL,
+  name text NOT NULL,
+  sort integer NOT NULL DEFAULT 0,
+  kind text NOT NULL DEFAULT 'catalog'::text CHECK (kind = ANY (ARRAY['catalog'::text, 'resale'::text])),
+  header_note text,
+  source_row integer,
+  CONSTRAINT price_sections_pkey PRIMARY KEY (id),
+  CONSTRAINT price_sections_book_id_fkey FOREIGN KEY (book_id) REFERENCES public.price_books(id)
+);
+CREATE TABLE public.price_items (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  book_id uuid NOT NULL,
+  section_id uuid NOT NULL,
+  part_number text NOT NULL,
+  part_key text DEFAULT upper(regexp_replace(part_number, '\s'::text, ''::text, 'g'::text)),
+  fb_product_id integer,
+  part_id uuid,
+  kit_sku_id uuid,
+  description text,
+  list_price numeric,
+  rule_code text,
+  ladder_code text NOT NULL DEFAULT 'standard'::text,
+  has_premier boolean NOT NULL DEFAULT false,
+  dfar boolean NOT NULL DEFAULT false,
+  xref_arconic text,
+  xref_lisi text,
+  nsn text,
+  cessna text,
+  sort integer NOT NULL DEFAULT 0,
+  status text NOT NULL DEFAULT 'priced'::text CHECK (status = ANY (ARRAY['priced'::text, 'no_price'::text, 'component_sum'::text])),
+  source_row integer,
+  range_of text,
+  notes text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT price_items_pkey PRIMARY KEY (id),
+  CONSTRAINT price_items_part_id_fkey FOREIGN KEY (part_id) REFERENCES public.parts(id),
+  CONSTRAINT price_items_kit_sku_id_fkey FOREIGN KEY (kit_sku_id) REFERENCES public.kit_skus(id),
+  CONSTRAINT price_items_rule_fk FOREIGN KEY (book_id) REFERENCES public.price_rules(book_id),
+  CONSTRAINT price_items_rule_fk FOREIGN KEY (rule_code) REFERENCES public.price_rules(code),
+  CONSTRAINT price_items_ladder_fk FOREIGN KEY (book_id) REFERENCES public.price_ladders(book_id),
+  CONSTRAINT price_items_ladder_fk FOREIGN KEY (ladder_code) REFERENCES public.price_ladders(code),
+  CONSTRAINT price_items_book_id_fkey FOREIGN KEY (book_id) REFERENCES public.price_books(id),
+  CONSTRAINT price_items_section_id_fkey FOREIGN KEY (section_id) REFERENCES public.price_sections(id)
+);
+CREATE TABLE public.price_kit_components (
+  item_id uuid NOT NULL,
+  component_part_number text NOT NULL,
+  component_key text NOT NULL DEFAULT upper(regexp_replace(component_part_number, '\s'::text, ''::text, 'g'::text)),
+  qty numeric NOT NULL DEFAULT 1,
+  CONSTRAINT price_kit_components_pkey PRIMARY KEY (item_id, component_key),
+  CONSTRAINT price_kit_components_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.price_items(id)
 );

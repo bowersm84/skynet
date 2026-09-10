@@ -217,6 +217,28 @@ export async function releaseCOAllocationsIfWODead(supabase, { workOrderId, prof
   return { released: true, error: null }
 }
 
+// D-CODATE-01: the three dates per CO line, derived read-time by
+// v_co_line_dates — entered_on (Fishbowl SO creation for Fishbowl-sourced
+// lines, else the SkyNet line's created_at), target_date (entered_on + 45
+// business days), fb_due_date (Fishbowl's live effective due, else the line's
+// own due_date) + fb_due_is_default, scheduled_finish + has_unscheduled_jobs.
+// Returns a Map keyed by customer_order_line_id. Chunked: PostgREST puts the
+// id list in the URL and open-line counts run past 1,500.
+export async function getCOLineDates(supabase, lineIds) {
+  const out = new Map()
+  const ids = [...new Set((lineIds || []).filter(Boolean))]
+  for (let i = 0; i < ids.length; i += 150) {
+    const chunk = ids.slice(i, i + 150)
+    const { data, error } = await supabase
+      .from('v_co_line_dates')
+      .select('customer_order_line_id, entered_on, entered_source, target_date, fb_due_date, fb_due_is_default, line_due_date, scheduled_finish, has_unscheduled_jobs')
+      .in('customer_order_line_id', chunk)
+    if (error) throw error
+    for (const r of data || []) out.set(r.customer_order_line_id, r)
+  }
+  return out
+}
+
 // All open CO lines across all parts. Used by the Demand view to aggregate
 // pending demand by part_number.
 export async function getAllOpenCOLines(supabase) {
@@ -245,12 +267,15 @@ export async function getAllOpenCOLines(supabase) {
 
   if (error) throw error
 
+  const dates = await getCOLineDates(supabase, (data || []).map(l => l.id))
+
   return (data || [])
     .map(line => {
       const allocated = (line.allocations || [])
         .filter(a => a.is_active)
         .reduce((s, a) => s + a.quantity_allocated, 0)
       const remaining = line.quantity_ordered - line.quantity_fulfilled - allocated
+      const d = dates.get(line.id) || {}
       return {
         line_id: line.id,
         line_number: line.line_number,
@@ -269,6 +294,14 @@ export async function getAllOpenCOLines(supabase) {
         remaining,
         due_date: line.due_date,
         entry_date: line.created_at,
+        // D-CODATE-01
+        entered_on: d.entered_on || null,
+        entered_source: d.entered_source || 'skynet',
+        target_date: d.target_date || null,
+        fb_due_date: d.fb_due_date || line.due_date || null,
+        fb_due_is_default: !!d.fb_due_is_default,
+        scheduled_finish: d.scheduled_finish || null,
+        has_unscheduled_jobs: !!d.has_unscheduled_jobs,
         priority: line.priority,
       }
     })

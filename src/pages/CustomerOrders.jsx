@@ -22,6 +22,7 @@ import {
   CO_STATUS_LABELS,
   CO_STATUS_COLORS,
   getAllOpenCOLines,
+  getCOLineDates,
   getAllocationsForLine,
   getOpenStockRequestLines,
   getStockRequests,
@@ -226,16 +227,27 @@ export default function CustomerOrders({
         }
       }
 
+      // D-CODATE-01: entered / target / Fishbowl due / scheduled finish per line
+      const lineDates = await getCOLineDates(supabase, lineIds)
+
       // Merge: attach lines (with allocated/remaining) onto each CO
       const linesByCO = new Map()
       for (const l of linesRaw || []) {
         const allocated = allocByLine.get(l.id) || 0
         const ordered = Number(l.quantity_ordered) || 0
         const fulfilled = Number(l.quantity_fulfilled) || 0
+        const d = lineDates.get(l.id) || {}
         const enriched = {
           ...l,
           allocated,
           remaining: Math.max(0, ordered - fulfilled - allocated),
+          entered_on: d.entered_on || null,
+          entered_source: d.entered_source || 'skynet',
+          target_date: d.target_date || null,
+          fb_due_date: d.fb_due_date || l.due_date || null,
+          fb_due_is_default: !!d.fb_due_is_default,
+          scheduled_finish: d.scheduled_finish || null,
+          has_unscheduled_jobs: !!d.has_unscheduled_jobs,
         }
         const arr = linesByCO.get(l.customer_order_id) || []
         arr.push(enriched)
@@ -244,12 +256,15 @@ export default function CustomerOrders({
 
       const merged = (cos || []).map(co => {
         const lines = linesByCO.get(co.id) || []
-        const dueDates = lines.map(l => l.due_date).filter(Boolean).sort()
+        const openLines = lines.filter(l => l.status === 'not_started' || l.status === 'in_progress')
+        const dueDates = (openLines.length ? openLines : lines).map(l => l.fb_due_date).filter(Boolean).sort()
+        const targetDates = (openLines.length ? openLines : lines).map(l => l.target_date).filter(Boolean).sort()
         return {
           ...co,
           lines,
           line_count: lines.length,
           earliest_due: dueDates[0] || null,
+          earliest_target: targetDates[0] || null,
         }
       })
 
@@ -581,7 +596,7 @@ export default function CustomerOrders({
                 <th className="px-4 py-3 text-left">Salesperson</th>
                 <th className="px-4 py-3 text-left">PO #</th>
                 <th className="px-4 py-3 text-left">Lines</th>
-                <th className="px-4 py-3 text-left">Earliest Due</th>
+                <th className="px-4 py-3 text-left" title="Earliest SkyNet target (entered + 45 business days) over open lines; Fishbowl's earliest due beneath">Target / FB Due</th>
                 <th className="px-4 py-3 text-left">Status</th>
                 <th className="px-4 py-3 text-left">Created</th>
                 <th className="px-4 py-3 text-right">Actions</th>
@@ -851,8 +866,11 @@ function CORow({
           {co.po_number || <span className="text-gray-600">—</span>}
         </td>
         <td className="px-4 py-3 text-gray-300 text-sm">{co.line_count}</td>
-        <td className="px-4 py-3 text-gray-300 text-sm">
-          {co.earliest_due ? formatDate(co.earliest_due) : <span className="text-gray-600">—</span>}
+        <td className="px-4 py-3 text-sm whitespace-nowrap">
+          <div className="text-gray-200">{co.earliest_target ? formatDate(co.earliest_target) : <span className="text-gray-600">—</span>}</div>
+          <div className="text-[10px] text-gray-500" title="Earliest Fishbowl due date">
+            FB {co.earliest_due ? formatDateShort(co.earliest_due) : '—'}
+          </div>
         </td>
         <td className="px-4 py-3">
           <span className={`px-2 py-0.5 text-xs rounded ${statusClass}`}>{statusLabel}</span>
@@ -911,7 +929,10 @@ function CORow({
                       <th className="px-2 py-2 text-right">Allocated</th>
                       <th className="px-2 py-2 text-right">Fulfilled</th>
                       <th className="px-2 py-2 text-right">Remaining</th>
-                      <th className="px-2 py-2 text-left">Due</th>
+                      <th className="px-2 py-2 text-left" title="Day the order was entered (Fishbowl SO creation for Fishbowl-sourced lines)">Entered</th>
+                      <th className="px-2 py-2 text-left" title="SkyNet target: entered + 45 business days">Target</th>
+                      <th className="px-2 py-2 text-left" title="Fishbowl's live due date (* = Fishbowl default, no real date entered)">FB Due</th>
+                      <th className="px-2 py-2 text-left" title="Latest scheduled end across the allocated work orders' jobs">Finish</th>
                       <th className="px-2 py-2 text-left">Priority</th>
                       <th className="px-2 py-2 text-left">Status</th>
                       <th className="px-2 py-2 text-right">Actions</th>
@@ -974,8 +995,25 @@ function CORow({
                                 {l.remaining}
                               </span>
                             </td>
-                            <td className="px-2 py-2 text-gray-300 text-xs whitespace-nowrap">
-                              {l.due_date ? formatDateShort(l.due_date) : '—'}
+                            <td className="px-2 py-2 text-gray-400 text-xs whitespace-nowrap" title={l.entered_source === 'fishbowl' ? 'Fishbowl SO creation date' : 'SkyNet line creation date'}>
+                              {l.entered_on ? formatDateShort(l.entered_on) : '—'}
+                            </td>
+                            <td className="px-2 py-2 text-gray-200 text-xs whitespace-nowrap font-medium">
+                              {l.target_date ? formatDateShort(l.target_date) : '—'}
+                            </td>
+                            <td
+                              className={`px-2 py-2 text-xs whitespace-nowrap ${l.fb_due_date && l.target_date && l.fb_due_date < l.target_date ? 'text-amber-300' : 'text-gray-300'}`}
+                              title={l.fb_due_date && l.target_date && l.fb_due_date < l.target_date ? 'Fishbowl due date is earlier than the SkyNet target' : undefined}
+                            >
+                              {l.fb_due_date ? formatDateShort(l.fb_due_date) : '—'}
+                              {l.fb_due_is_default && <span className="text-amber-400 ml-0.5" title="No real date entered in Fishbowl">*</span>}
+                            </td>
+                            <td
+                              className={`px-2 py-2 text-xs whitespace-nowrap ${l.scheduled_finish && l.target_date && l.scheduled_finish > l.target_date ? 'text-red-300' : 'text-gray-300'}`}
+                              title={l.has_unscheduled_jobs ? 'Some allocated work is not scheduled yet' : (l.scheduled_finish && l.target_date && l.scheduled_finish > l.target_date ? 'Scheduled finish is after the SkyNet target' : undefined)}
+                            >
+                              {l.scheduled_finish ? formatDateShort(l.scheduled_finish) : (l.allocated > 0 ? 'unsched.' : '—')}
+                              {l.scheduled_finish && l.has_unscheduled_jobs && <span className="text-gray-500 ml-0.5">+</span>}
                             </td>
                             <td className="px-2 py-2 text-gray-400 text-xs capitalize whitespace-nowrap">{l.priority}</td>
                             <td className="px-2 py-2 whitespace-nowrap">
@@ -1019,7 +1057,7 @@ function CORow({
                           </tr>
                           {isAllocExpanded && (
                             <tr className="bg-gray-900/60">
-                              <td colSpan={10} className="px-6 py-3">
+                              <td colSpan={13} className="px-6 py-3">
                                 {allocLoading[l.id] ? (
                                   <div className="text-xs text-gray-500 flex items-center gap-2">
                                     <Loader2 size={12} className="animate-spin" /> Loading allocations…
@@ -1057,7 +1095,7 @@ function CORow({
                           )}
                           {l.components_needed && (
                             <tr className="border-t border-gray-900 bg-gray-950/60">
-                              <td colSpan={10} className="px-3 py-2">
+                              <td colSpan={13} className="px-3 py-2">
                                 <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Components Needed</div>
                                 <div className="text-xs text-gray-300 whitespace-pre-wrap">{l.components_needed}</div>
                               </td>
@@ -1444,7 +1482,9 @@ function DemandView({ profile, setActionStatus }) {
 
     const result = Array.from(byPart.entries()).map(([partId, partLines]) => {
       const totalDemand = partLines.reduce((s, l) => s + l.remaining, 0)
-      const dueDates = partLines.map(l => l.due_date).filter(Boolean).sort()
+      const dueDates = partLines.map(l => l.fb_due_date || l.due_date).filter(Boolean).sort()
+      // D-CODATE-01: the group's commitment is the earliest SkyNet target
+      const targetDates = partLines.map(l => l.target_date).filter(Boolean).sort()
       // D-STKREQ-02: split the group's demand so the collapsed row can show how
       // much of it is warehouse stock rather than customer commitment.
       const stockLines = partLines.filter(l => l.is_stock_request)
@@ -1462,16 +1502,17 @@ function DemandView({ profile, setActionStatus }) {
         is_stock_only: stockLines.length === partLines.length,
         line_count: partLines.length,
         earliest_due: dueDates[0] || null,
+        earliest_target: targetDates[0] || null,
       }
     })
 
     if (sortMode === 'due') {
       result.sort((a, b) => {
-        if (a.earliest_due && b.earliest_due) {
-          if (a.earliest_due !== b.earliest_due) return a.earliest_due < b.earliest_due ? -1 : 1
-        } else if (a.earliest_due && !b.earliest_due) {
+        if (a.earliest_target && b.earliest_target) {
+          if (a.earliest_target !== b.earliest_target) return a.earliest_target < b.earliest_target ? -1 : 1
+        } else if (a.earliest_target && !b.earliest_target) {
           return -1
-        } else if (!a.earliest_due && b.earliest_due) {
+        } else if (!a.earliest_target && b.earliest_target) {
           return 1
         }
         return b.total_demand - a.total_demand
@@ -1622,7 +1663,7 @@ function DemandView({ profile, setActionStatus }) {
           className="px-3 py-1.5 text-xs rounded bg-gray-800 text-gray-300 hover:text-white border border-gray-700 transition-colors"
           title="Toggle sort order"
         >
-          Sort: {sortMode === 'demand' ? 'Total demand ↓' : 'Earliest due ↑'}
+          Sort: {sortMode === 'demand' ? 'Total demand ↓' : 'Earliest target ↑'}
         </button>
       </div>
 
@@ -1702,8 +1743,13 @@ function DemandView({ profile, setActionStatus }) {
                     <div className="text-gray-500 text-xs whitespace-nowrap">
                       {group.line_count} line{group.line_count !== 1 ? 's' : ''}
                     </div>
-                    <div className="text-gray-500 text-xs whitespace-nowrap">
-                      {group.earliest_due ? `due ${formatDate(group.earliest_due)}` : '—'}
+                    <div className="text-xs whitespace-nowrap text-right">
+                      <div className="text-gray-300" title="Earliest SkyNet target (entered + 45 business days)">
+                        {group.earliest_target ? `target ${formatDate(group.earliest_target)}` : '—'}
+                      </div>
+                      <div className="text-[10px] text-gray-500" title="Earliest Fishbowl due date">
+                        {group.earliest_due ? `FB ${formatDateShort(group.earliest_due)}` : ''}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1723,9 +1769,10 @@ function DemandView({ profile, setActionStatus }) {
                           <th className="px-3 py-2 text-left">CO #</th>
                           <th className="px-3 py-2 text-left">Customer</th>
                           <th className="px-3 py-2 text-left">Line</th>
-                          <th className="px-3 py-2 text-left">Entered</th>
+                          <th className="px-3 py-2 text-left" title="Day the order was entered (Fishbowl SO creation for Fishbowl-sourced lines)">Entered</th>
                           <th className="px-3 py-2 text-right">Remaining</th>
-                          <th className="px-3 py-2 text-left">Due</th>
+                          <th className="px-3 py-2 text-left" title="SkyNet target: entered + 45 business days">Target</th>
+                          <th className="px-3 py-2 text-left" title="Fishbowl's live due date (* = Fishbowl default, no real date entered)">FB Due</th>
                           <th className="px-3 py-2 text-left">Priority</th>
                         </tr>
                       </thead>
@@ -1763,14 +1810,21 @@ function DemandView({ profile, setActionStatus }) {
                               <td className="px-3 py-2 text-gray-500 text-xs">
                                 {line.is_stock_request ? '—' : `#${line.line_number}`}
                               </td>
-                              <td className="px-3 py-2 text-gray-400 text-xs">
-                                {line.entry_date ? new Date(line.entry_date).toLocaleDateString() : '—'}
+                              <td className="px-3 py-2 text-gray-400 text-xs" title={line.entered_source === 'fishbowl' ? 'Fishbowl SO creation date' : 'SkyNet line creation date'}>
+                                {line.entered_on ? formatDate(line.entered_on) : (line.entry_date ? new Date(line.entry_date).toLocaleDateString() : '—')}
                               </td>
                               <td className="px-3 py-2 text-right font-mono text-amber-300">
                                 {line.remaining.toLocaleString()}
                               </td>
-                              <td className="px-3 py-2 text-gray-300 text-xs">
-                                {line.due_date ? formatDate(line.due_date) : '—'}
+                              <td className="px-3 py-2 text-gray-200 text-xs font-medium">
+                                {line.target_date ? formatDate(line.target_date) : '—'}
+                              </td>
+                              <td
+                                className={`px-3 py-2 text-xs ${line.fb_due_date && line.target_date && line.fb_due_date < line.target_date ? 'text-amber-300' : 'text-gray-300'}`}
+                                title={line.fb_due_date && line.target_date && line.fb_due_date < line.target_date ? 'Fishbowl due date is earlier than the SkyNet target' : undefined}
+                              >
+                                {(line.fb_due_date || line.due_date) ? formatDate(line.fb_due_date || line.due_date) : '—'}
+                                {line.fb_due_is_default && <span className="text-amber-400 ml-0.5" title="No real date entered in Fishbowl">*</span>}
                               </td>
                               <td className="px-3 py-2">
                                 <span className={`px-1.5 py-0.5 text-[10px] rounded capitalize ${priorityClass}`}>

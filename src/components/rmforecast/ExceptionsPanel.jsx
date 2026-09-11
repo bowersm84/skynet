@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronRight, AlertTriangle, Loader2, Sparkles } from 'lucide-react'
 import { formatDay, fmtInt } from './forecastUtils'
 import { usePartDimensionEditor } from './usePartDimensionEditor'
+import { FEATURES } from '../../config'
 import {
   LengthField,
   MaterialField,
@@ -106,18 +107,21 @@ function ExceptionRow({
         <td className="px-3 py-2 text-center whitespace-nowrap">
           {canSave ? (
             <div className="flex flex-col items-stretch gap-1">
-              <button
-                type="button"
-                onClick={handleExtract}
-                disabled={!drawing || extracting || editor.saving}
-                title={drawing
-                  ? `Read ${drawing.file_name || 'the drawing'}${drawing.job_number ? ` from job ${drawing.job_number}` : ''}`
-                  : NO_DRAWING_MESSAGE}
-                className="inline-flex items-center justify-center gap-1 text-xs px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed border border-gray-600 text-gray-200 rounded transition-colors"
-              >
-                {extracting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-                {extracting ? 'Reading' : 'Extract from drawing'}
-              </button>
+              {/* D-RMF-09: switchable in config.js (FEATURES.RM_DRAWING_EXTRACTION) */}
+              {FEATURES.RM_DRAWING_EXTRACTION && (
+                <button
+                  type="button"
+                  onClick={handleExtract}
+                  disabled={!drawing || extracting || editor.saving}
+                  title={drawing
+                    ? `Read ${drawing.file_name || 'the drawing'}${drawing.job_number ? ` from job ${drawing.job_number}` : ''}`
+                    : NO_DRAWING_MESSAGE}
+                  className="inline-flex items-center justify-center gap-1 text-xs px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed border border-gray-600 text-gray-200 rounded transition-colors"
+                >
+                  {extracting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                  {extracting ? 'Reading' : 'Extract from drawing'}
+                </button>
+              )}
               <SaveButton editor={editor} className="justify-center" />
             </div>
           ) : (
@@ -192,9 +196,10 @@ export default function ExceptionsPanel({
   const [drawings, setDrawings] = useState({})
 
   // One batched lookup for the whole panel decides which rows can offer Extract.
+  // D-RMF-09: nothing to look up when the feature is switched off.
   const partKey = rows.map(r => r.part_number).join('|')
   useEffect(() => {
-    if (!canSave || !rows.length) {
+    if (!FEATURES.RM_DRAWING_EXTRACTION || !canSave || !rows.length) {
       setDrawings({})
       return undefined
     }

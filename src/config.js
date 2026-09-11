@@ -109,4 +109,22 @@ export const FEATURES = {
    * TEST: true. PROD: flipped at Batch D cutover.
    */
   PRICING_PORTAL: true,
+
+  /**
+   * RM Forecast — "Extract from drawing" (D-RMF-09). The Needs-Data panel's
+   * per-part button that reads the part's drawing on file through the
+   * dimension-extraction edge function and proposes bar length / material /
+   * bar size for the purchaser to accept.
+   *
+   * When false:
+   *  - the button and its result card do not render; the panel's manual
+   *    dimension fields and Save are unchanged
+   *  - the panel skips its batched drawing lookup entirely (no reads of
+   *    job/part documents for this purpose, no extraction calls)
+   *
+   * When true: the D-RMF-05 behavior exactly as before.
+   *
+   * 2026-09-11  off (Matt)
+   */
+  RM_DRAWING_EXTRACTION: false,
 }

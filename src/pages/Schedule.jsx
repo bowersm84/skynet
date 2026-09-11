@@ -435,7 +435,23 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       if (unassignedError) {
         console.error('Error fetching unassigned jobs:', unassignedError)
       } else {
-        setUnassignedJobs(unassignedData || [])
+        // D-CODATE-02: earliest SkyNet target / Fishbowl due per WO for the pool cards
+        const woIds = [...new Set((unassignedData || []).map(j => j.work_order_id).filter(Boolean))]
+        const woDates = new Map()
+        if (woIds.length) {
+          const { data: wd, error: wdErr } = await supabase
+            .from('v_wo_dates')
+            .select('work_order_id, target_date, fb_due_date')
+            .in('work_order_id', woIds)
+          if (wdErr) console.error('v_wo_dates:', wdErr)
+          for (const r of wd || []) woDates.set(r.work_order_id, r)
+        }
+        setUnassignedJobs((unassignedData || []).map(j => {
+          const d = woDates.get(j.work_order_id)
+          return d && j.work_order
+            ? { ...j, work_order: { ...j.work_order, target_date: d.target_date, fb_due_date: d.fb_due_date } }
+            : j
+        }))
       }
 
       // Fetch jobs scheduled within the visible week, AND every ongoing job
@@ -1860,7 +1876,10 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
   const formatDate = (dateString) => {
     if (!dateString) return '—'
-    return new Date(dateString).toLocaleDateString('en-US', { 
+    // D-CODATE-02b: a bare YYYY-MM-DD parses as UTC midnight and renders a
+    // day early in Eastern time; anchor date-only values at local noon.
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(dateString) ? new Date(dateString + 'T12:00:00') : new Date(dateString)
+    return d.toLocaleDateString('en-US', { 
       month: 'short', 
       day: 'numeric' 
     })
@@ -2909,7 +2928,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <GripVertical size={16} className="text-gray-600" />
-                        {job.work_order?.due_date && (
+                        {job.work_order?.target_date ? (
+                          <span className="text-xs text-gray-400 text-right leading-tight" title="SkyNet target (entered + 45 business days)">
+                            Target: {formatDate(job.work_order.target_date)}
+                            {job.work_order.fb_due_date && (
+                              <span className="block text-[10px] text-gray-600" title="Fishbowl due date">FB {formatDate(job.work_order.fb_due_date)}</span>
+                            )}
+                          </span>
+                        ) : job.work_order?.due_date && (
                           <span className="text-xs text-gray-500">
                             Due: {formatDate(job.work_order.due_date)}
                           </span>

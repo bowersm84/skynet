@@ -43,6 +43,12 @@ export default function ScheduleJobModal({
   const [mergeTarget, setMergeTarget] = useState(null)
   const [merging, setMerging] = useState(false)
   const [mergeError, setMergeError] = useState(null)
+  // D-CODATE-02: earliest SkyNet target / Fishbowl due across the WO's active
+  // CO allocations (v_wo_dates). Null for MTS work orders.
+  const [woDates, setWoDates] = useState(null)
+  // D-CODATE-02b: the same row for every WO in the machine queues, keyed by
+  // work_order_id, so Step 2 compares queued jobs on the same commitment basis.
+  const [queueWoDates, setQueueWoDates] = useState({})
 
   // Initialize state on open
   useEffect(() => {
@@ -82,6 +88,46 @@ export default function ScheduleJobModal({
     })
     return () => { cancelled = true }
   }, [isOpen, job?.component_id, job?.id])
+
+  // D-CODATE-02b: WO dates for everything in the machine queues (chunked —
+  // the id list travels in the URL).
+  useEffect(() => {
+    if (!isOpen) { setQueueWoDates({}); return }
+    const ids = [...new Set((scheduledJobs || []).map(j => j.work_order_id).filter(Boolean))]
+    if (ids.length === 0) { setQueueWoDates({}); return }
+    let cancelled = false
+    ;(async () => {
+      const out = {}
+      for (let i = 0; i < ids.length; i += 150) {
+        const { data, error } = await supabase
+          .from('v_wo_dates')
+          .select('work_order_id, target_date, fb_due_date')
+          .in('work_order_id', ids.slice(i, i + 150))
+        if (error) { console.error('v_wo_dates (queue):', error); break }
+        for (const r of data || []) out[r.work_order_id] = r
+      }
+      if (!cancelled) setQueueWoDates(out)
+    })()
+    return () => { cancelled = true }
+  }, [isOpen, scheduledJobs])
+
+  // D-CODATE-02: the WO's target date, fetched here so the modal is correct
+  // whichever screen opened it.
+  useEffect(() => {
+    if (!isOpen || !job?.work_order_id) { setWoDates(null); return }
+    let cancelled = false
+    supabase
+      .from('v_wo_dates')
+      .select('work_order_id, target_date, fb_due_date, entered_on, allocation_count')
+      .eq('work_order_id', job.work_order_id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) { console.error('v_wo_dates:', error); setWoDates(null); return }
+        setWoDates(data || null)
+      })
+    return () => { cancelled = true }
+  }, [isOpen, job?.work_order_id])
 
   // D-JOBMERGE-02: same-component host candidates for the Step 1 merge card.
   // Skipped when the job can no longer be a member (started, merged, etc.).
@@ -210,11 +256,15 @@ export default function ScheduleJobModal({
     job.assigned_machine_id !== selectedMachineId
 
   // D-DATE-03: warn (never block) when the scheduled finish lands after the
-  // customer due date. due_date is a DATE column, so compare against end of day.
+  // commitment date. D-CODATE-02: that is the SkyNet target (entered + 45
+  // business days) when the WO has CO allocations, else the WO's own due_date.
+  // Both are DATE columns, so compare against end of day.
+  const commitDate = woDates?.target_date || job?.work_order?.due_date || null
+  const commitLabel = woDates?.target_date ? 'SkyNet target' : 'due date'
   const isLateSchedule =
-    !!job?.work_order?.due_date &&
+    !!commitDate &&
     !!propagation?.targetSlot &&
-    new Date(propagation.targetSlot.scheduled_end) > new Date(job.work_order.due_date + 'T23:59:59')
+    new Date(propagation.targetSlot.scheduled_end) > new Date(commitDate + 'T23:59:59')
 
   const fmtDueShort = (d) =>
     d ? new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'
@@ -230,7 +280,7 @@ export default function ScheduleJobModal({
     }
     if (isLateSchedule) {
       const ok = window.confirm(
-        `This job is scheduled to finish after the customer due date (${fmtDueShort(job.work_order.due_date)}). Schedule anyway?`
+        `This job is scheduled to finish after the ${commitLabel} (${fmtDueShort(commitDate)}). Schedule anyway?`
       )
       if (!ok) return
     }
@@ -305,9 +355,19 @@ export default function ScheduleJobModal({
             <span className="text-gray-600">·</span>
             <span className="text-gray-400 text-sm">{job.work_order.wo_number}</span>
           </>)}
-          {job.work_order?.due_date && (<>
+          {woDates?.target_date ? (<>
             <span className="text-gray-600">·</span>
-            <span className="text-gray-400 text-sm">Due {new Date(job.work_order.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+            <span className="text-gray-200 text-sm" title="SkyNet target: entered + 45 business days (earliest across this WO's customer-order lines)">
+              Target {fmtDueShort(woDates.target_date)}
+            </span>
+            {woDates.fb_due_date && (
+              <span className="text-gray-500 text-xs" title="Fishbowl due date (earliest across this WO's lines)">
+                FB {new Date(woDates.fb_due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </span>
+            )}
+          </>) : job.work_order?.due_date && (<>
+            <span className="text-gray-600">·</span>
+            <span className="text-gray-400 text-sm">Due {new Date(job.work_order.due_date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
           </>)}
         </div>
 
@@ -348,7 +408,8 @@ export default function ScheduleJobModal({
               minInsertionIndex={minInsertionIndex}
               fmtDateTime={fmtDateTime}
               fmtDueShort={fmtDueShort}
-              newJobDue={job?.work_order?.due_date || null}
+              newJobDue={commitDate}
+              woDatesById={queueWoDates}
             />
           )}
           {step === 3 && (
@@ -370,7 +431,8 @@ export default function ScheduleJobModal({
               job={job}
               isMachineSwapRevert={isMachineSwapRevert}
               isLateSchedule={isLateSchedule}
-              dueDateDisplay={fmtDueShort(job.work_order?.due_date)}
+              dueDateDisplay={fmtDueShort(commitDate)}
+              dueDateLabel={commitLabel}
               members={members}
             />
           )}
@@ -650,7 +712,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
 
 // ─────────── Step 2: Position picker ───────────
 
-function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minInsertionIndex, fmtDateTime, fmtDueShort, newJobDue }) {
+function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minInsertionIndex, fmtDateTime, fmtDueShort, newJobDue, woDatesById = {} }) {
   if (!machine) return <p className="text-gray-500">No machine selected.</p>
 
   if (queue.length === 0) {
@@ -705,13 +767,17 @@ function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minI
                   {fmtDateTime(q.scheduled_start)} → {fmtDateTime(q.scheduled_end)}
                 </span>
               </div>
-              {/* D-SCHED-21: the due date is the fact that decides the slot.
-                  Amber = this queued job is due AFTER the one being scheduled
+              {/* D-SCHED-21: the commitment date is the fact that decides the slot.
+                  Amber = this queued job is committed AFTER the one being scheduled
                   (candidate to slot ahead of). Red = this queued job already
-                  finishes past its own due date. due_date is a DATE column;
-                  compare against end of day, matching the late-schedule check. */}
+                  finishes past its own commitment. D-CODATE-02b: the commitment
+                  is the SkyNet target (entered + 45 business days) when the WO has
+                  CO allocations, else its due_date — same basis as newJobDue.
+                  DATE columns; compare against end of day. */}
               {(() => {
-                const qDue = q.work_order?.due_date || null
+                const qd = woDatesById[q.work_order_id]
+                const qDue = qd?.target_date || q.work_order?.due_date || null
+                const qLabel = qd?.target_date ? 'Target' : 'Due'
                 const qLate = !!qDue && !!q.scheduled_end &&
                   new Date(q.scheduled_end) > new Date(qDue + 'T23:59:59')
                 const dueAfterNew = !!qDue && !!newJobDue && qDue > newJobDue
@@ -721,18 +787,23 @@ function Step2Position({ machine, queue, insertionIndex, setInsertionIndex, minI
                     ? 'bg-amber-900/40 text-amber-300 border-amber-700/60'
                     : 'bg-gray-800 text-gray-400 border-gray-700'
                 const chipTitle = qLate
-                  ? 'Already scheduled to finish after its due date'
+                  ? `Already scheduled to finish after its ${qLabel.toLowerCase()}`
                   : dueAfterNew
-                    ? 'Due later than the job you are scheduling'
-                    : qDue ? 'Due on or before the job you are scheduling' : 'No customer due date'
+                    ? `${qLabel} later than the job you are scheduling`
+                    : qDue ? `${qLabel} on or before the job you are scheduling` : 'No commitment date'
                 return (
                   <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs">
                     <span
                       className={`px-1.5 py-0.5 rounded border font-medium ${chipClass}`}
                       title={chipTitle}
                     >
-                      Due {fmtDueShort(qDue)}
+                      {qLabel} {fmtDueShort(qDue)}
                     </span>
+                    {qd?.target_date && qd?.fb_due_date && (
+                      <span className="text-gray-600" title="Fishbowl due date">
+                        FB {fmtDueShort(qd.fb_due_date)}
+                      </span>
+                    )}
                     {q.work_order?.customer && (
                       <span className="text-gray-500 truncate max-w-[260px]" title={q.work_order.customer}>
                         {q.work_order.customer}
@@ -780,7 +851,7 @@ function Step3Duration({
   machine, queue, insertionIndex,
   durationDays, setDurationDays, durationHours, setDurationHours,
   totalMinutes, propagation, fmtDateTime, job, isMachineSwapRevert,
-  isLateSchedule, dueDateDisplay,
+  isLateSchedule, dueDateDisplay, dueDateLabel = 'due date',
   partsPerDay, setPartsPerDay, applyPartsPerDay, suggestedPartsPerDay,
   members = []
 }) {
@@ -898,7 +969,7 @@ function Step3Duration({
         <div className="bg-amber-900/30 border border-amber-700 rounded p-3 text-amber-200 text-sm flex items-start gap-2">
           <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
           <div>
-            Scheduled finish {fmtDateTime(targetSlot?.scheduled_end)} is after the customer due date {dueDateDisplay}.
+            Scheduled finish {fmtDateTime(targetSlot?.scheduled_end)} is after the {dueDateLabel} {dueDateDisplay}.
           </div>
         </div>
       )}

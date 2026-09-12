@@ -4,6 +4,7 @@ import { canExportReports } from '../lib/roles'
 import { supabase } from '../lib/supabase'
 import ReportAdvisorPanel from '../components/ReportAdvisorPanel'
 import PartHistoryReport from '../components/reports/PartHistoryReport'
+import InventoryMovementReport from '../components/reports/InventoryMovementReport'
 import { fetchReports, runReport, toCsv, downloadCsv, reportFilename, summarize } from '../lib/reports'
 
 const PREVIEW_CAP = 200
@@ -61,8 +62,8 @@ export default function Reports({ profile }) {
   }, [profile])
 
   const openReport = useCallback(async (report) => {
-    if (report.report_kind === 'part_history') {
-      // D-RPT-13: interactive report — the component runs its own query.
+    if (report.report_kind === 'part_history' || report.report_kind === 'inventory_movement') {
+      // D-RPT-13 / D-RPT-14: interactive report — the component runs its own query.
       setActive(report)
       setRows(null)
       setRunError(null)
@@ -128,6 +129,17 @@ export default function Reports({ profile }) {
   if (active && active.report_kind === 'part_history') {
     return (
       <PartHistoryReport
+        report={active}
+        profile={profile}
+        onBack={() => { setActive(null); setRows(null); setRunError(null) }}
+      />
+    )
+  }
+
+  // D-RPT-14: raw-material movement for a date range.
+  if (active && active.report_kind === 'inventory_movement') {
+    return (
+      <InventoryMovementReport
         report={active}
         profile={profile}
         onBack={() => { setActive(null); setRows(null); setRunError(null) }}

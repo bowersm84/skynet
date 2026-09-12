@@ -7,6 +7,13 @@
 -- Objects may already exist from the Sep 4 SQL Editor run, so both functions are
 -- DROPped before create (CREATE OR REPLACE cannot change a function's result
 -- type) and the registry row is upserted on slug.
+--
+-- v2 (2026-09-12): supersedes the same-day v1, which failed CHECK 6 with
+-- 42804 "Returned type character varying(100) does not match expected type
+-- text in column 11". Fix is confined to the detail RPC's final projection
+-- (explicit casts on all twelve outputs). Summary RPC, registry row, and the
+-- verification block are unchanged; the summary inherits the fix because it
+-- consumes the detail RPC's typed output.
 -- ============================================================================
 BEGIN;
 
@@ -107,10 +114,24 @@ BEGIN
     WHERE iar.status = 'approved'
   ),
   mv AS (SELECT * FROM recv UNION ALL SELECT * FROM used UNION ALL SELECT * FROM adj)
-  SELECT mv.mv_date, mv.category, mv.material, mv.lot_number, mv.heat_number, mv.movement_type,
-         mv.qty_change, mv.unit_cost,
-         CASE WHEN mv.unit_cost IS NULL THEN NULL ELSE ROUND(mv.qty_change * mv.unit_cost, 2) END AS value_change,
-         mv.reference, mv.recorded_by, mv.notes
+  -- v2: every output is cast explicitly. RETURN QUERY in PL/pgSQL requires exact
+  -- type matches against RETURNS TABLE; profiles.full_name is varchar(100) and
+  -- several source columns are varchar, so the uncast v1 failed with 42804.
+  -- Casting all twelve also makes the contract immune to future source-column
+  -- type changes.
+  SELECT mv.mv_date::date,
+         mv.category::text,
+         mv.material::text,
+         mv.lot_number::text,
+         mv.heat_number::text,
+         mv.movement_type::text,
+         mv.qty_change::numeric,
+         mv.unit_cost::numeric,
+         (CASE WHEN mv.unit_cost IS NULL THEN NULL
+               ELSE ROUND(mv.qty_change * mv.unit_cost, 2) END)::numeric AS value_change,
+         mv.reference::text,
+         mv.recorded_by::text,
+         mv.notes::text
   FROM mv
   WHERE mv.mv_date BETWEEN p_start AND p_end
   ORDER BY mv.mv_date DESC, mv.category, mv.movement_type, mv.material;

@@ -3579,3 +3579,22 @@ Four decisions taken where the build prompt was silent or self-contradictory. (1
 **Why:** Kits are sold on type-80 header lines and their components ship as type-10 lines at $0. Discovery 2026-09-13/14: the SOs the Kit Registry records as kit sales contained only components in SkyNet — the kit itself was never imported. Fishbowl, Irwin International alone: type 80 = 1,373 lines / $693,844 against type 10 = $1,819,380, so 27% of the account was invisible, and the 15,797 $0 component lines read as unpriced direct purchases. Statistics used for tier seeding (D-PRICE-18) and the top-customer panel were computed without kit revenue.
 **Next (step 2):** kits into the book under their Fishbowl product numbers; `via_kit` on `v_customer_purchases` (component line on an SO that carries a type-80 line) with a Direct / Via kits / All toggle on Customers; kit-dealer discount as a book rule after the paid/book histogram on header lines; Kit Registry price panel via `pricing_get_price`.
 **Files:** tools/fishbowl-bridge/src/queries.mjs (+ version bump).
+
+### D-REFRESH-07 — The PROD→TEST refresh was double-encoding every non-ASCII character (2026-09-14)
+**What:** `Docs/refresh-test-from-prod.ps1` read the PROD dump with `Get-Content $pubSql -Raw` and no `-Encoding`. Windows PowerShell 5.1 defaults `Get-Content` to the ANSI codepage (WIN1252 on this machine), so pg_dump's UTF-8 bytes were decoded as cp1252 and then written back out as real UTF-8 by the `WriteAllText` that follows — double-encoding the damage into the load file before psql ever saw it. `®` (`C2 AE`) became `Â®` (`C3 82 C2 AE`) and `—` (`E2 80 94`) became `â€”`, which is the `Skybolt CLocÂ® 2000 Series Kit` and `Rev 81 â€” Jun 2026` seen on TEST 2026-09-14. Reproduced on Matt's machine through the script's exact read→write pattern and confirmed at byte level; the corrected path round-trips byte-identical. Two further `Get-Content` reads of the profiles backup had the same defect — the second (`$pbLines`, written back to `$profSafe`) would corrupt any non-ASCII character in a TEST profile name. All three now pass `-Encoding UTF8`, and `$env:PGCLIENTENCODING = 'UTF8'` is set at the top so libpq cannot derive `client_encoding` from the Windows locale as an independent second path to the same corruption. Shipped alongside the D-REFRESH-06 `SET CONSTRAINTS ALL IMMEDIATE` fix.
+**Why it was invisible:** PROD is never round-tripped through the script, so only TEST carries the mojibake — the natural read is an app bug, and the app is identical on both. It is also not confined to pricing: it hits every text column of every table the dump carries, which is why the Reports list showed `Production Drop Calendar â€” 8 Weeks` as well.
+**Sweep on TEST (Matt, 2026-09-14):** the information_schema sweep found **29 affected text columns** across the public schema. Fixing the script does not repair rows already loaded, so the remedy is to re-run the corrected refresh — TEST is a disposable copy of a clean PROD, and a text repair would have to touch every column and is single-use (running it twice corrupts in the other direction).
+**Now the post-refresh check:** the sweep query is a standing verification step after every refresh, beside the row counts and the trigger count. It is read-only and must return **zero rows with `bad_rows > 0`**; anything else means the load mangled the encoding again.
+```sql
+SELECT c.table_name, c.column_name,
+       (xpath('/row/cnt/text()', query_to_xml(format(
+         'SELECT count(*) AS cnt FROM public.%I WHERE %I LIKE ''%%Â%%'' OR %I LIKE ''%%â€%%''',
+         c.table_name, c.column_name, c.column_name), false, true, '')))[1]::text::int AS bad_rows
+FROM information_schema.columns c
+JOIN information_schema.tables t
+  ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+WHERE c.table_schema = 'public' AND c.data_type IN ('text','character varying')
+ORDER BY 3 DESC NULLS LAST;
+```
+**General principle:** any tooling that reads a database dump into a PowerShell string must state the encoding on the way in and on the way out. A silent ANSI read is lossy in a way that survives the load, passes every row-count and trigger check, and only shows up as garbled text in the UI.
+**Files:** Docs/refresh-test-from-prod.ps1. No SQL, no app change.

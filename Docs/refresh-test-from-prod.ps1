@@ -71,6 +71,10 @@ $ErrorActionPreference = 'Stop'
 # at launch).
 # -----------------------------------------------------------------------------
 $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+# Pin psql/pg_dump to UTF-8. Without this libpq derives client_encoding from the
+# Windows locale (WIN1252 here), which is a second way to mangle the dump on the
+# way into TEST. Both databases are UTF-8, so this is the honest declaration.
+$env:PGCLIENTENCODING = 'UTF8'
 if (-not $env:PROD_DB_URL) { $env:PROD_DB_URL = [Environment]::GetEnvironmentVariable("PROD_DB_URL","User") }
 if (-not $env:TEST_DB_URL) { $env:TEST_DB_URL = [Environment]::GetEnvironmentVariable("TEST_DB_URL","User") }
 
@@ -131,7 +135,12 @@ $prodUserIds = (psql $prod -t -A -c "SELECT id FROM profiles") -split "`r?`n" | 
 if (-not $prodUserIds -or $prodUserIds.Count -eq 0) {
   throw "Could not read PROD user ids. Aborting before touching TEST."
 }
-$text = Get-Content $pubSql -Raw
+# -Encoding UTF8 is NOT optional. Windows PowerShell 5.1's Get-Content defaults to
+# the ANSI codepage (WIN1252), so a UTF-8 dump read without it comes back as
+# mojibake - (R) becomes A-circumflex-(R), an em dash becomes a-euro-quote - and
+# line 174 then writes that back out as real UTF-8, baking the damage into TEST.
+# That is the 2026-09-14 "CLocA(R)" / "Rev 81 a-euro-quote Jun 2026" corruption.
+$text = Get-Content $pubSql -Raw -Encoding UTF8
 foreach ($id in $prodUserIds) { $text = $text.Replace($id, $ADMIN_ID) }
 # Wrap the load in a user-trigger suspension. Business-rule triggers (bar-length
 # limits, cert-package immutability, consolidation lot checks) validate rows that
@@ -151,6 +160,15 @@ END
 
 "@
 $trgOn = @"
+
+-- Fire any deferred constraint checks BEFORE re-arming triggers. price_items
+-- carries two DEFERRABLE INITIALLY DEFERRED FKs (ladder/rule); jobs and
+-- outbound_sends carry deferred constraints too. Their events queue during the
+-- load, and Postgres refuses ALTER TABLE ... ENABLE TRIGGER on a table with
+-- pending trigger events ("cannot ALTER TABLE ... because it has pending
+-- trigger events" - the 2026-09-13 failure). This only moves the checks earlier
+-- within the same transaction; nothing is skipped.
+SET CONSTRAINTS ALL IMMEDIATE;
 
 DO `$`$
 DECLARE r record;
@@ -178,7 +196,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $profBak) -or (Get-Item $profBak).Le
 # the case where a previous run failed partway and left profiles empty — wiping
 # now would lose your TEST users permanently. Restore your users first.
 $profRows = 0; $inCopy = $false
-foreach ($l in Get-Content -LiteralPath $profBak) {
+foreach ($l in Get-Content -LiteralPath $profBak -Encoding UTF8) {
   if ($l -match '^COPY public\.profiles \(') { $inCopy = $true; continue }
   if ($inCopy -and $l -eq '\.') { break }
   if ($inCopy -and $l.Trim() -ne '') { $profRows++ }
@@ -193,7 +211,9 @@ Write-Host "      $profRows TEST profiles backed up." -ForegroundColor DarkGray
 # home_location_id would violate profiles_home_location_id_fkey. Header-aware so
 # it stays correct if the column order ever changes.
 $inCopy = $false; $hlIdx = -1
-$pbLines = foreach ($l in Get-Content -LiteralPath $profBak) {
+# Same UTF-8 requirement as above: these lines are written back out to $profSafe,
+# so an ANSI read would corrupt any non-ASCII character in a TEST profile name.
+$pbLines = foreach ($l in Get-Content -LiteralPath $profBak -Encoding UTF8) {
   if ($l -match '^COPY public\.profiles \((.+?)\) FROM stdin;') {
     $cols = $matches[1] -split '\s*,\s*'; $hlIdx = [array]::IndexOf($cols,'home_location_id'); $inCopy = $true; $l; continue
   }

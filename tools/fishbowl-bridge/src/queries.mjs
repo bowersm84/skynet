@@ -67,10 +67,13 @@ export const q = {
   products: `SELECT p.id, p.num, pt.num AS partNum, p.description, p.price, p.activeFlag
     FROM product p LEFT JOIN part pt ON pt.id = p.partId`,
 
-  // One page of SO history: product lines (typeId 10 Sale / 12 Drop Ship — the same pair D-FB-08 calls
-  // PRODUCT_LINE_TYPES; 30 is Discount %, not drop ship, and was wrong in the Batch A brief) of every SO that is not an
-  // Estimate (10) or dead (80 Voided / 85 Cancelled / 90 Expired). Open orders are included so the
-  // history table is complete; v_customer_purchases de-dupes them against the open mirror by fb_soitem_id.
+  // One page of SO history: product lines (typeId 10 Sale / 12 Drop Ship — the pair D-FB-08 calls
+  // PRODUCT_LINE_TYPES; 30 is Discount %, not drop ship, and was wrong in the Batch A brief) plus 80 Kit,
+  // the header line a kit is sold and priced on (D-PRICE-44 — its components ship as type-10 lines at $0,
+  // so without the header the whole kit sale was invisible). PRODUCT_LINE_TYPES itself governs open-SO
+  // dispositioning and stays [10, 12]. Included from every SO that is not an Estimate (10) or dead
+  // (80 Voided / 85 Cancelled / 90 Expired). Open orders are included so the history table is complete;
+  // v_customer_purchases de-dupes them against the open mirror by fb_soitem_id.
   soHistory: (since, limit) => `SELECT si.id AS soItemId, s.id AS soId, s.num AS soNum, s.customerId, s.statusId AS soStatusId,
       si.statusId AS lineStatusId, si.typeId, si.productNum, pt.num AS partNum, si.description,
       si.qtyOrdered, si.qtyFulfilled, si.unitPrice, si.totalPrice, s.dateCreated, s.dateCompleted,
@@ -80,7 +83,7 @@ export const q = {
     LEFT JOIN product p ON p.id = si.productId
     LEFT JOIN part pt ON pt.id = p.partId
     LEFT JOIN sysuser su ON su.id = s.salesmanId
-    WHERE si.typeId IN (10, 12) AND s.statusId NOT IN (10, 80, 85, 90)
+    WHERE si.typeId IN (10, 12, 80) AND s.statusId NOT IN (10, 80, 85, 90)
       AND s.dateLastModified > '${since}'
     ORDER BY s.dateLastModified, si.id
     LIMIT ${Number(limit) || 2000}`,

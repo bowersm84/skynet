@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.3.0',
+  version: '1.3.1',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',

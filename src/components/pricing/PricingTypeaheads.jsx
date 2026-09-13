@@ -4,7 +4,7 @@
 // input so they work inside cards and modals alike.
 //
 import { useEffect, useRef, useState } from 'react'
-import { Search, Loader2, X } from 'lucide-react'
+import { Search, Loader2, X, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 import { searchItems, searchFbProducts, searchCustomers, TIER_LABELS, TIER_COLORS } from '../../lib/pricing'
 
 const DEBOUNCE = 250
@@ -155,5 +155,17 @@ export function CustomerTypeahead({ value, onPick, onClear, includeInactive = fa
         </div>
       )}
     </div>
+  )
+}
+
+// ── Sortable column header for the Customers purchase table and the Price List
+// builder (D-PRICE-42). The hook that drives it, useSortedRows, lives in ./hooks
+// so this file keeps exporting components only.
+export function SortableTh({ col, label, sort, onToggle, className = '' }) {
+  const active = sort?.key === col
+  return (
+    <th className={`px-3 py-2 select-none cursor-pointer hover:text-white ${active ? 'text-white' : ''} ${className}`} onClick={() => onToggle(col)} title="Sort · click again to reverse · third click clears">
+      <span className="inline-flex items-center gap-1">{label}{active ? (sort.dir === 'asc' ? <ChevronUp size={11} /> : <ChevronDown size={11} />) : <ChevronsUpDown size={11} className="opacity-30" />}</span>
+    </th>
   )
 }

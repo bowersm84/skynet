@@ -11,7 +11,7 @@ import { BRAND, safe, drawLetterhead } from './pdfText'
 const LETTER = [612, 792]
 const MARGIN = 40
 const INK = BRAND.ink, GREY = BRAND.grey, LINE = BRAND.line, ACCENT = BRAND.red, BAND = BRAND.band
-const TERMS = 'Prices are in US dollars, per piece, FOB Origin, and are subject to change without notice after the effective date shown. Quantity breaks do not apply to tiered pricing. DFAR = DFARS 252.225-7014 compliant material available on request. Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
+const TERMS = 'Prices are in US dollars, per piece, FOB Origin, and are subject to change without notice after the effective date shown. Quantity breaks do not apply to tiered pricing. Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
 
 function wrap(text, font, size, width) {
   const words = safe(text).split(/\s+/); const lines = []; let cur = ''
@@ -36,8 +36,8 @@ export async function buildPriceListPdf(list, lines) {
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold)
   const mono = await pdf.embedFont(StandardFonts.Courier)
   const [W, H] = LETTER
-  const colX = { part: MARGIN, desc: MARGIN + 118, dfar: W - MARGIN - 190, each: W - MARGIN - 150, price: W - MARGIN - 70 }
-  const descW = colX.dfar - colX.desc - 8
+  const colX = { part: MARGIN, desc: MARGIN + 118, each: W - MARGIN - 150, price: W - MARGIN - 70 }   // DFAR column dropped from printed lists (D-PRICE-42)
+  const descW = colX.each - colX.desc - 8
   let page, y
 
   const header = async (pageNo) => {
@@ -62,7 +62,7 @@ export async function buildPriceListPdf(list, lines) {
     // table head
     page.drawRectangle({ x: MARGIN, y: y - 14, width: W - 2 * MARGIN, height: 16, color: BAND })
     const th = (t, x, right) => page.drawText(t, { x: right ? x - bold.widthOfTextAtSize(t, 7) : x, y: y - 10, size: 7, font: bold, color: GREY })
-    th('PART NUMBER', colX.part); th('DESCRIPTION', colX.desc); th('DFAR', colX.dfar); th('LIST (EACH)', colX.each + 40, true); th('YOUR PRICE', W - MARGIN, true)
+    th('PART NUMBER', colX.part); th('DESCRIPTION', colX.desc); th('LIST (EACH)', colX.each + 40, true); th('YOUR PRICE', W - MARGIN, true)
     y -= 22
     page.drawText(`Page ${pageNo}`, { x: W - MARGIN - font.widthOfTextAtSize(`Page ${pageNo}`, 7), y: MARGIN - 14, size: 7, font, color: GREY })
   }
@@ -73,7 +73,6 @@ export async function buildPriceListPdf(list, lines) {
     if (y - rowH < MARGIN + 70) { pageNo += 1; await header(pageNo) }
     page.drawText(safe(l.part_number), { x: colX.part, y: y - 8, size: 8, font: mono, color: INK })
     descLines.forEach((ln, i) => page.drawText(ln, { x: colX.desc, y: y - 8 - i * 10, size: 8, font, color: INK }))
-    if (l.dfar) page.drawText('Y', { x: colX.dfar + 8, y: y - 8, size: 8, font, color: INK })
     const each = l.each_price !== null && l.each_price !== undefined ? money(l.each_price) : ''
     const yours = money(l.customer_price)
     page.drawText(each, { x: colX.each + 40 - mono.widthOfTextAtSize(each, 8), y: y - 8, size: 8, font: mono, color: GREY })
@@ -95,12 +94,12 @@ export function buildPriceListXlsx(list, lines) {
     ['Customer', list.customer_name, 'Effective', String(list.as_of)],
     ['Pricing level', TIER_LABELS[list.tier] || 'List / quantity breaks', 'Price book', list.rev_label || ''],
     [],
-    ['Part Number', 'Description', 'DFAR', 'List (Each)', 'Your Price'],
-    ...lines.map(l => [l.part_number, l.description || '', l.dfar ? 'Y' : 'N', l.each_price === null ? '' : Number(l.each_price), Number(l.customer_price)]),
+    ['Part Number', 'Description', 'List (Each)', 'Your Price'],
+    ...lines.map(l => [l.part_number, l.description || '', l.each_price === null ? '' : Number(l.each_price), Number(l.customer_price)]),
     [], [TERMS],
   ]
   const ws = XLSX.utils.aoa_to_sheet(rows)
-  ws['!cols'] = [{ wch: 20 }, { wch: 60 }, { wch: 6 }, { wch: 12 }, { wch: 12 }]
+  ws['!cols'] = [{ wch: 20 }, { wch: 66 }, { wch: 12 }, { wch: 12 }]
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, list.list_number)
   return XLSX.write(wb, { type: 'array', bookType: 'xlsx' })
 }

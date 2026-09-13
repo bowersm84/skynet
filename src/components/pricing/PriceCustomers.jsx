@@ -12,7 +12,10 @@ import {
 import { buildQuotePdf, quoteFilename } from '../../lib/quoteDoc'
 import { buildPriceListPdf, downloadBytes, priceListFilename } from '../../lib/priceListDoc'
 import PriceListBuilder from './PriceListBuilder'
-import { CustomerTypeahead, TierBadge } from './PricingTypeaheads'
+import { CustomerTypeahead, TierBadge, SortableTh } from './PricingTypeaheads'
+import { useSortedRows } from './hooks'
+
+const EMPTY_SET = new Set()
 
 function SetTierPanel({ customer, onSaved, onCancel }) {
   const [tier, setTier] = useState(customer.tier || 'none')
@@ -123,6 +126,8 @@ export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, n
   const [showSetTier, setShowSetTier] = useState(false)
   const [showAddExc, setShowAddExc] = useState(false)
   const [filter, setFilter] = useState('')
+  const [range, setRange] = useState({ from: '', to: '' })              // "bought between" — filters the table and the price-list pre-fill (D-PRICE-42)
+  const [picked, setPicked] = useState({ id: null, keys: EMPTY_SET })  // product_keys ticked for the price list, scoped to one customer (D-PRICE-42)
 
   const reload = async (id) => {
     setBusy(true)
@@ -133,25 +138,49 @@ export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, n
   }
   useEffect(() => { if (customer?.fb_customer_id) reload(customer.fb_customer_id) }, [customer?.fb_customer_id])
 
-  // Current price for each purchased part (top 200 by revenue keeps this snappy).
+  // Current price for every purchased part, 40 RPC calls at a time, shown as each batch lands.
+  // (Was capped at the top 200 by revenue, which left every $0 kit-component line unpriced — D-PRICE-42.)
   useEffect(() => {
     if (!customer || !purchases.length) { setCurrent({}); return }
     let cancelled = false
-    const top = purchases.slice(0, 200)
-    Promise.all(top.map(p => getPrice(p.product_num, customer.fb_customer_id, 1, asOf).then(r => [p.product_key, r]).catch(() => [p.product_key, null])))
-      .then(pairs => { if (!cancelled) setCurrent(Object.fromEntries(pairs)) })
+    setCurrent({})
+    ;(async () => {
+      for (let i = 0; i < purchases.length && !cancelled; i += 40) {
+        const batch = purchases.slice(i, i + 40)
+        const pairs = await Promise.all(batch.map(p => getPrice(p.product_num, customer.fb_customer_id, 1, asOf).then(r => [p.product_key, r]).catch(() => [p.product_key, null])))
+        if (!cancelled) setCurrent(cur => ({ ...cur, ...Object.fromEntries(pairs) }))
+      }
+    })()
     return () => { cancelled = true }
   }, [customer, purchases, asOf])
 
   const rows = useMemo(() => {
     const f = filter.trim().toUpperCase()
-    return f ? purchases.filter(p => p.product_key.includes(f.replace(/\s+/g, '')) || (p.description || '').toUpperCase().includes(f)) : purchases
-  }, [purchases, filter])
+    return purchases.filter(p =>
+      (!f || p.product_key.includes(f.replace(/\s+/g, '')) || (p.description || '').toUpperCase().includes(f))
+      && (!range.from || (p.last_bought || '') >= range.from)      // bought at least once on/after From …
+      && (!range.to || (p.first_bought || '') <= range.to))        // … and at least once on/before To
+  }, [purchases, filter, range])
+  const purchaseCols = useMemo(() => ({
+    part: p => p.product_num, description: p => p.description || '', qty: p => Number(p.qty || 0), revenue: p => Number(p.revenue || 0),
+    first: p => p.first_bought || '', last: p => p.last_bought || '', last_paid: p => Number(p.last_paid) > 0 ? Number(p.last_paid) : null,
+    now: p => current[p.product_key]?.unit_price_2dp ?? null,
+    delta: p => { const n = current[p.product_key]?.unit_price_2dp ?? null; const lp = Number(p.last_paid); return n !== null && lp > 0 ? (n - lp) / lp : null },
+    basis: p => { const c = current[p.product_key]; return c?.basis === 'exception' ? 'special' : (c?.col_key || '') },
+  }), [current])
+  const { sorted: shown, sort, toggle } = useSortedRows(rows, purchaseCols)
+  const pickedKeys = picked.id === customer?.fb_customer_id ? picked.keys : EMPTY_SET
+  const pickedShown = useMemo(() => shown.filter(p => pickedKeys.has(p.product_key)).length, [shown, pickedKeys])
+  const setKeys = (fn) => setPicked(pk => { const keys = new Set(pk.id === customer?.fb_customer_id ? pk.keys : []); fn(keys); return { id: customer?.fb_customer_id, keys } })
+  const togglePick = (key) => setKeys(keys => { if (keys.has(key)) keys.delete(key); else keys.add(key) })
+  const pickAllShown = (on) => setKeys(keys => { for (const p of shown) { if (on) keys.add(p.product_key); else keys.delete(p.product_key) } })
+  // What Create Price List pre-fills: the ticked parts if any are ticked, otherwise every part currently shown (after filter, range and sort).
+  const listKeys = useMemo(() => (pickedShown ? shown.filter(p => pickedKeys.has(p.product_key)) : shown).map(p => p.product_key), [shown, pickedKeys, pickedShown])
   const totals = useMemo(() => purchases.reduce((a, p) => ({ rev: a.rev + Number(p.revenue || 0), parts: a.parts + 1 }), { rev: 0, parts: 0 }), [purchases])
 
   return (
     <div className="space-y-4">
-      {showBuilder && customer && <PriceListBuilder customer={customer} book={book} nextBook={nextBook} profile={profile} onClose={() => setShowBuilder(false)} onSaved={() => reload(customer.fb_customer_id)} />}
+      {showBuilder && customer && <PriceListBuilder customer={customer} book={book} nextBook={nextBook} profile={profile} partKeys={listKeys} onClose={() => setShowBuilder(false)} onSaved={() => reload(customer.fb_customer_id)} />}
       <div className="max-w-xl"><CustomerTypeahead includeInactive onPick={setCustomer} onClear={() => { setCustomer(null); setPurchases([]); setHistory([]); setExceptions([]) }} /></div>
 
       {!customer && (
@@ -219,7 +248,7 @@ export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, n
               <div><div className="text-2xl font-semibold text-white font-mono">{money(totals.rev, 0)}</div><div className="text-xs text-gray-500">revenue</div></div>
               <div><div className="text-2xl font-semibold text-white font-mono">{num(totals.parts)}</div><div className="text-xs text-gray-500">distinct parts</div></div>
             </div>
-            <button onClick={() => setShowBuilder(true)} className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-skynet-accent text-gray-900 font-medium text-sm"><FileText size={15} /> Create Price List</button>
+            <button onClick={() => setShowBuilder(true)} className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-skynet-accent text-gray-900 font-medium text-sm"><FileText size={15} /> Create Price List{pickedShown ? ` · ${num(pickedShown)} ticked` : shown.length !== purchases.length ? ` · ${num(shown.length)} shown` : ''}</button>
             {quotes.length > 0 && (
               <div className="mt-3">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Quotes</div>
@@ -254,25 +283,33 @@ export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, n
 
           {/* Purchases */}
           <div className="xl:col-span-3">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-white font-semibold">Purchase history · priced as of {asOf}</h3>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <h3 className="text-white font-semibold mr-auto">Purchase history · priced as of {asOf}</h3>
+              <label className="text-[11px] uppercase tracking-wide text-gray-500">Bought</label>
+              <input type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from: e.target.value }))} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono outline-none" title="Parts bought at least once on or after this date" />
+              <span className="text-gray-600 text-xs">to</span>
+              <input type="date" value={range.to} onChange={e => setRange(r => ({ ...r, to: e.target.value }))} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono outline-none" title="Parts bought at least once on or before this date" />
+              {(range.from || range.to) && <button onClick={() => setRange({ from: '', to: '' })} className="text-xs text-gray-400 hover:text-white">clear</button>}
               <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="filter parts" className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs outline-none w-44" />
+              <span className="text-xs text-gray-500 font-mono">{num(shown.length)} of {num(purchases.length)}{pickedShown ? ` · ${num(pickedShown)} ticked` : ''}</span>
             </div>
             {busy ? <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div> : (
               <div className="overflow-auto rounded-xl border border-gray-700 max-h-[60vh]">
                 <table className="min-w-full text-sm">
                   <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400">
-                    <th className="px-3 py-2">Part</th><th className="px-3 py-2">Description</th><th className="px-3 py-2 text-right">Qty</th><th className="px-3 py-2 text-right">Revenue</th>
-                    <th className="px-3 py-2">First</th><th className="px-3 py-2">Last</th><th className="px-3 py-2 text-right">Last paid</th><th className="px-3 py-2 text-right">Now</th><th className="px-3 py-2 text-right">Δ</th><th className="px-3 py-2">Basis</th>
+                    <th className="px-2 py-2"><input type="checkbox" checked={shown.length > 0 && pickedShown === shown.length} ref={el => { if (el) el.indeterminate = pickedShown > 0 && pickedShown < shown.length }} onChange={e => pickAllShown(e.target.checked)} title="Tick / untick every part shown" /></th>
+                    <SortableTh col="part" label="Part" sort={sort} onToggle={toggle} /><SortableTh col="description" label="Description" sort={sort} onToggle={toggle} /><SortableTh col="qty" label="Qty" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="revenue" label="Revenue" sort={sort} onToggle={toggle} className="text-right" />
+                    <SortableTh col="first" label="First" sort={sort} onToggle={toggle} /><SortableTh col="last" label="Last" sort={sort} onToggle={toggle} /><SortableTh col="last_paid" label="Last paid" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="now" label="Now" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="delta" label="Δ" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="basis" label="Basis" sort={sort} onToggle={toggle} />
                   </tr></thead>
                   <tbody>
-                    {rows.map(p => {
+                    {shown.map(p => {
                       const c = current[p.product_key]
                       const now = c?.unit_price_2dp ?? null
                       const lp = Number(p.last_paid)
                       const delta = now !== null && lp > 0 ? (now - lp) / lp : null
                       return (
-                        <tr key={p.product_key} className="border-t border-gray-800 hover:bg-gray-800/60">
+                        <tr key={p.product_key} className={`border-t border-gray-800 hover:bg-gray-800/60 ${pickedKeys.has(p.product_key) ? 'bg-skynet-accent/5' : ''}`}>
+                          <td className="px-2 py-1.5"><input type="checkbox" checked={pickedKeys.has(p.product_key)} onChange={() => togglePick(p.product_key)} /></td>
                           <td className="px-3 py-1.5 font-mono text-white whitespace-nowrap">{p.product_num}</td>
                           <td className="px-3 py-1.5 text-gray-300 truncate max-w-xs" title={p.description || ''}>{p.description || ''}</td>
                           <td className="px-3 py-1.5 text-right font-mono text-gray-300">{num(p.qty)}</td>

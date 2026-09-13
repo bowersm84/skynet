@@ -8,13 +8,26 @@
 //
 import { useEffect, useMemo, useState } from 'react'
 import { X, Loader2, Plus, Trash2, FileDown, FileSpreadsheet, Save, Calendar, AlertTriangle, Check } from 'lucide-react'
-import { loadCustomerSheet, savePriceList, loadPriceList, getPrice, money, num, round2, todayIso, TIER_LABELS } from '../../lib/pricing'
+import { loadCustomerSheet, savePriceList, loadPriceList, getPrice, partKey, money, num, round2, todayIso, TIER_LABELS } from '../../lib/pricing'
 import { buildPriceListPdf, buildPriceListXlsx, downloadBytes, priceListFilename } from '../../lib/priceListDoc'
-import { PartTypeahead, TierBadge } from './PricingTypeaheads'
+import { PartTypeahead, TierBadge, SortableTh } from './PricingTypeaheads'
+import { useSortedRows } from './hooks'
+
+// Sort accessors for the builder table (stable module constant — see useSortedRows). Rows keep the
+// sorted order when saved, so the PDF / XLSX print in the order the rep arranged on screen (D-PRICE-42).
+const BUILDER_COLS = {
+  part: r => r.part_number, description: r => r.description || '', last_paid: r => Number(r.last_paid) > 0 ? Number(r.last_paid) : null,
+  each: r => r.each_price ?? null, book: r => r.recommended_price ?? null, yours: r => Number(r.customer_price),
+}
 
 const OCT1 = '2026-10-01'
 
-export default function PriceListBuilder({ customer, book, nextBook, profile, onClose, onSaved }) {
+export default function PriceListBuilder({ customer, book, nextBook, profile, partKeys, onClose, onSaved }) {
+  // partKeys (optional) = product_keys chosen on the customer page; the sheet is narrowed to them.
+  // Compared as a joined string so a fresh array from the parent does not reload the sheet.
+  // null = no prop at all (show everything they have bought); '' = a prop that selected
+  // nothing, which narrows to nothing rather than silently falling back to the full sheet.
+  const keySig = partKeys ? partKeys.join('|') : null
   const [asOf, setAsOf] = useState(todayIso())
   const [rows, setRows] = useState(null)
   const [notes, setNotes] = useState('')
@@ -28,10 +41,11 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
   useEffect(() => {
     let cancelled = false
     setRows(null); setError(null)
+    const keySet = keySig === null ? null : new Set(keySig ? keySig.split('|') : [])
     loadCustomerSheet(customer.fb_customer_id, asOf, 'purchased')
       .then(data => {
         if (cancelled) return
-        setRows(data.map((r, i) => ({
+        setRows(data.filter(r => !keySet || keySet.has(partKey(r.part_number))).map((r, i) => ({
           key: `${r.part_number}-${i}`, part_number: r.part_number, description: r.description || '', dfar: !!r.dfar,
           each_price: null,                                                     // filled below (list price on the date)
           recommended_price: r.unit_price, customer_price: r.unit_price, basis: r.basis, col_key: r.col_key,
@@ -40,7 +54,7 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
       })
       .catch(e => { if (!cancelled) setError(e.message || String(e)) })
     return () => { cancelled = true }
-  }, [customer.fb_customer_id, asOf])
+  }, [customer.fb_customer_id, asOf, keySig])
 
   // Each (list) per row and the rev label for the date, via the RPC with no customer.
   useEffect(() => {
@@ -66,6 +80,7 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
   }
 
   const overrides = useMemo(() => (rows || []).filter(r => Number(r.customer_price) !== Number(r.recommended_price)).length, [rows])
+  const { sorted: view, sort, toggle } = useSortedRows(rows, BUILDER_COLS)
 
   const save = async () => {
     if (!rows?.length) { setError('Add at least one part'); return }
@@ -76,7 +91,7 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
       const payload = {
         fb_customer_id: customer.fb_customer_id, customer_name: customer.name_clean, customer_number: customer.customer_number, tier: customer.tier,
         book_id: book?.id, rev_label: revLabel, as_of: asOf, record_specials: recordSpecials, notes: notes || null,
-        lines: rows.map(r => ({ part_number: r.part_number, description: r.description, dfar: r.dfar, each_price: r.each_price, customer_price: round2(r.customer_price),
+        lines: (view || rows).map(r => ({ part_number: r.part_number, description: r.description, dfar: r.dfar, each_price: r.each_price, customer_price: round2(r.customer_price),
           recommended_price: r.recommended_price, basis: r.basis, col_key: r.col_key, is_override: Number(r.customer_price) !== Number(r.recommended_price), last_paid: r.last_paid })),
       }
       const res = await savePriceList(payload)
@@ -98,6 +113,7 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
           <div className="min-w-0">
             <div className="text-white font-semibold">Price list · {customer.name_clean} <TierBadge tier={customer.tier} /></div>
             <div className="text-xs text-gray-500">{saved ? <span className="text-emerald-300">Saved as {saved.list_number}{saved.specials_recorded ? ` · ${saved.specials_recorded} special price${saved.specials_recorded === 1 ? '' : 's'} recorded` : ''}</span> : 'Their purchased parts at their pricing level. Change a price or add parts, then Save to issue a numbered list.'}</div>
+            {!saved && partKeys && <div className="text-[11px] text-gray-500 mt-0.5">{partKeys.length ? `Pre-filled with the ${num(partKeys.length)} part${partKeys.length === 1 ? '' : 's'} chosen on the customer page` : 'No purchased parts matched the range or filter on the customer page — add parts below.'}</div>}
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={20} /></button>
         </div>
@@ -119,11 +135,12 @@ export default function PriceListBuilder({ customer, book, nextBook, profile, on
             <div className="overflow-auto rounded-xl border border-gray-700 max-h-[55vh]">
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400">
-                  <th className="px-3 py-2">Part</th><th className="px-3 py-2">Description</th><th className="px-2 py-2 text-center">DFAR</th>
-                  <th className="px-3 py-2 text-right">Last paid</th><th className="px-3 py-2 text-right">Each (list)</th><th className="px-3 py-2 text-right">Book price</th><th className="px-3 py-2 text-right">Your price</th><th className="px-2 py-2"></th>
+                  {saved ? <><th className="px-3 py-2">Part</th><th className="px-3 py-2">Description</th></> : <><SortableTh col="part" label="Part" sort={sort} onToggle={toggle} /><SortableTh col="description" label="Description" sort={sort} onToggle={toggle} /></>}<th className="px-2 py-2 text-center" title="Shown here for the rep; not printed on the PDF or XLSX">DFAR</th>
+                  {saved ? <><th className="px-3 py-2 text-right">Last paid</th><th className="px-3 py-2 text-right">Each (list)</th><th className="px-3 py-2 text-right">Book price</th><th className="px-3 py-2 text-right">Your price</th></>
+                         : <><SortableTh col="last_paid" label="Last paid" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="each" label="Each (list)" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="book" label="Book price" sort={sort} onToggle={toggle} className="text-right" /><SortableTh col="yours" label="Your price" sort={sort} onToggle={toggle} className="text-right" /></>}<th className="px-2 py-2"></th>
                 </tr></thead>
                 <tbody>
-                  {(saved ? saved.lines : rows).map(r => {
+                  {(saved ? saved.lines : view).map(r => {
                     const price = saved ? r.customer_price : r.customer_price
                     const rec = saved ? r.recommended_price : r.recommended_price
                     const changed = Number(price) !== Number(rec)

@@ -67,6 +67,42 @@ export const q = {
   products: `SELECT p.id, p.num, pt.num AS partNum, p.description, p.price, p.activeFlag
     FROM product p LEFT JOIN part pt ON pt.id = p.partId`,
 
+  // Latest RECEIVED purchase cost per part (D-PRICE-47). One row per part: the PO line with the most
+  // recent dateLastFulfillment. Full read, no cursor — the result is one row per part, like `products`.
+  // The price book values kit hardware at 2 x this cost, so a wrong number here becomes a wrong list price.
+  //
+  // TWO UNVERIFIED ASSUMPTIONS — Matt validates both in Fishbowl's Data module before 1.4.0 runs:
+  //   1. po.statusId = 70 means Void. The bridge has never read a PO table and carries no PO-status
+  //      constants; FB_SO_STATUS in src/lib/fishbowl.js is the SALES order status set, a different list,
+  //      so 70 is expectation, not evidence. If Void is a different id, fix the literal below.
+  //   2. part.defaultProductId exists on this Fishbowl version. If it does not, replace the product join
+  //      with `LEFT JOIN product pr ON pr.partId = p.id` and collapse to one row per part (MIN(pr.id)).
+  // Reserved-word check (MySQL 8): po, poitem, part, product, vendor and every column below are
+  // non-reserved; the aliases poi/p/pr/v/x are clear of `rows`, `rank`, `lines`, `system`.
+  //
+  // Ties: if two PO lines share a part's newest dateLastFulfillment this returns both. That is resolved
+  // deterministically in partCosts.mjs before the upsert, because fb_upsert_part_costs sends the whole
+  // batch through one ON CONFLICT statement and Postgres errors on a repeated key.
+  partCosts: `SELECT p.num            AS partNum,
+       pr.num           AS productNum,
+       p.id             AS fbPartId,
+       poi.unitCost     AS lastCost,
+       poi.dateLastFulfillment AS lastCostDate,
+       po.num           AS lastPoNumber,
+       v.name           AS lastVendor,
+       poi.qtyFulfilled AS lastQty,
+       p.stdCost        AS stdCost
+    FROM poitem poi
+    JOIN po      ON po.id = poi.poId
+    JOIN part p  ON p.id  = poi.partId
+    LEFT JOIN product pr ON pr.id = p.defaultProductId
+    LEFT JOIN vendor v   ON v.id  = po.vendorId
+    WHERE poi.qtyFulfilled > 0
+      AND poi.dateLastFulfillment IS NOT NULL
+      AND po.statusId <> 70
+      AND poi.dateLastFulfillment = (SELECT MAX(x.dateLastFulfillment) FROM poitem x
+                                      WHERE x.partId = poi.partId AND x.qtyFulfilled > 0 AND x.dateLastFulfillment IS NOT NULL)`,
+
   // One page of SO history: product lines (typeId 10 Sale / 12 Drop Ship — the pair D-FB-08 calls
   // PRODUCT_LINE_TYPES; 30 is Discount %, not drop ship, and was wrong in the Batch A brief) plus 80 Kit,
   // the header line a kit is sold and priced on (D-PRICE-44 — its components ship as type-10 lines at $0,

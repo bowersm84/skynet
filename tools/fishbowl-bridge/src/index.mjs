@@ -1,7 +1,7 @@
 // index.mjs — SkyNet Fishbowl Bridge. Read-only against Fishbowl; writes to SkyNet only through fb_* RPCs.
 //   node src/index.mjs             run forever (this is what the Windows service runs)
 //   node src/index.mjs --once      one tail + one reconcile pass, then exit (smoke test)
-//   node src/index.mjs --backfill  one full customers + products + SO history load, then exit (v1.3)
+//   node src/index.mjs --backfill  one full customers + products + part costs + SO history load (v1.4)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
@@ -9,6 +9,7 @@ import { q } from './queries.mjs'
 import { ts, chunk } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
 import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
+import { syncPartCosts } from './partCosts.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -90,7 +91,14 @@ async function pricingCycle({ force = false } = {}) {
 
   if (force || nightlyDue(pricing.last_products_at, config.productsNightlyAt, now)) {
     await syncProducts(fb, sky, { log, batch: config.pricingBatch })
+    // Stamped before part costs runs, on purpose: fb_upsert_products has already moved the real clock in
+    // fb_sync_state, so if part costs then throws we must not leave the in-memory clock behind and make
+    // the products poll look due again on the very next cycle.
     pricing.last_products_at = new Date().toISOString()
+    // D-PRICE-47 rides this slot rather than getting its own. fb_upsert_part_costs stamps no clock and
+    // fb_sync_state has no last_part_costs_at column, so nightlyDue() has nothing to read — it would
+    // return true on every 20 s cycle after the target time and re-read the whole PO history each pass.
+    if (config.partCostsEnabled) await syncPartCosts(fb, sky, { log, batch: config.pricingBatch })
   }
 
   if (force || nightlyDue(pricing.last_history_at, config.historyNightlyAt, now)) {
@@ -195,7 +203,7 @@ async function cycle() {
   }
 }
 
-// `--backfill`: one full pass of the three v1.3 mirrors from scratch — customers with no `since`,
+// `--backfill`: one full pass of the v1.4 mirrors from scratch — customers with no `since`,
 // the whole product table, history from HISTORY_BACKFILL_FROM whatever the stored cursor says. Idempotent.
 async function backfillPricing() {
   log.info(`pricing backfill: customers (full) + products + history from ${config.historyBackfillFrom}`)

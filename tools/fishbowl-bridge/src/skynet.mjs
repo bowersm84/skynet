@@ -86,6 +86,10 @@ export class SkyNet {
 
   upsertSoHistory(rows, cursor = null) { return this.rpc('fb_upsert_so_history', { p_rows: rows, p_cursor: cursor }) }
 
+  // D-PRICE-47. Unlike the three above, this RPC stamps no fb_sync_state clock — there is no
+  // last_part_costs_at column — so the poller rides the products nightly slot instead (see index.mjs).
+  upsertPartCosts(rows) { return this.rpc('fb_upsert_part_costs', { p_rows: rows }) }
+
   // The pricing pollers' own clocks, read once at start-up. fb_sync_state is SELECT-able by authenticated.
   async pricingState() {
     await this.ensureSignedIn()

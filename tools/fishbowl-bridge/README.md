@@ -30,10 +30,14 @@ second session (D-FB-37). Each writes through its own `_pricing_gate('integratio
 |---|---|---|---|
 | customers | every `POLL_CUSTOMERS_SEC` (900 s) | `customer` ⋈ `sysuser` ⋈ `paymentterms`, plus account groups via `accountgrouprelation`. First run is a full backfill; after that `dateLastModified > last_customers_at − 1 h`. | `fb_upsert_customers` → `fb_customers` (the RPC computes `name_clean` and self-links SkyNet `customers` by Fishbowl customer number) |
 | products | nightly at `PRODUCTS_NIGHTLY_AT` (02:10 local) | the whole `product` ⋈ `part` table (~11k rows) | `fb_upsert_products` → `fb_products` (the RPC also links `price_items.fb_product_id`) |
+| part_costs | with the products poll (D-PRICE-47) | latest RECEIVED `poitem` ⋈ `po` line per `part` (cost, date, PO number, vendor, qty) plus `part.stdCost`. Full read, no cursor. Skipped when `PART_COSTS_ENABLED=false` | `fb_upsert_part_costs` → `fb_part_costs`; the RPC derives `part_key` from `coalesce(product_num, part_num)` and stamps no `fb_sync_state` clock |
 | so_history | nightly at `HISTORY_NIGHTLY_AT` (02:20 local) | `soitem` ⋈ `so` product lines (`typeId` 10 Sale / 12 Drop Ship) and kit header lines (`typeId` 80, D-PRICE-44), every status but Estimate (10), Voided (80), Cancelled (85) and Expired (90), paged 2,000 rows at a time from `fb_sync_state.history_cursor` (`HISTORY_BACKFILL_FROM` when there is none) | `fb_upsert_so_history` → `fb_so_history_lines`, each page carrying its own `dateLastModified` as the new cursor |
 
 Nightly means "today's HH:MM has passed and the last run was before it", read from `fb_sync_state` — so a restart
 cannot double-run a nightly job, and a bridge that was down at 02:20 catches up when it comes back.
+`part_costs` is the exception: `fb_sync_state` has no `last_part_costs_at` column, so it has no clock of its own
+and instead runs immediately after each products poll. That keeps it nightly without letting it fire on every
+20 s cycle, which is what an unscheduled `nightlyDue(null, …)` would do.
 `paymentterms` and `accountgroup` are the two table names not confirmed on 25.9: if either read fails the poller
 logs one warning and carries on without that column for the life of the process, rather than guessing names. A poll that finds nothing to do still calls its RPC with an empty payload, so the three ages on /pricing mean "last polled", not "last time anything changed". A pricing failure never stops the SO tail: it is logged and the pollers stand down for 15 minutes.
 

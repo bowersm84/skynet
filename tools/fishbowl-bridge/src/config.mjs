@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.3.1',
+  version: '1.4.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -70,6 +70,9 @@ export const config = {
   historyBackfillFrom: process.env.HISTORY_BACKFILL_FROM || '2023-11-27',
   historyPage: num('HISTORY_PAGE', 2000),
   pricingBatch: num('PRICING_BATCH', 500),
+  // D-PRICE-47 part costs. No nightly time of its own: it runs immediately after the products poll, in
+  // the same nightly slot, because fb_sync_state has no last_part_costs_at column to schedule it from.
+  partCostsEnabled: String(process.env.PART_COSTS_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   overlapRevs: num('OVERLAP_REVS', 200),
   chunk: num('CHUNK', 50),
   logDir: resolve(ROOT, 'logs'),

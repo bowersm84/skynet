@@ -213,6 +213,25 @@ export function mapProduct(r) {
   }
 }
 
+// D-PRICE-47. snake_case on purpose, unlike every mapper above it: fb_upsert_part_costs reads the payload
+// through jsonb_to_recordset(...) as r(part_num text, product_num text, fb_part_id integer, last_cost
+// numeric, last_cost_date timestamptz, last_po_number text, last_vendor text, last_qty numeric, std_cost
+// numeric) — nine keys, and a key whose name does not match arrives as NULL rather than as an error.
+// part_key and synced_at are computed by the RPC and must not be sent.
+export function mapPartCost(r) {
+  return {
+    part_num: r.partNum === null || r.partNum === undefined ? null : String(r.partNum),
+    product_num: r.productNum === null || r.productNum === undefined ? null : String(r.productNum),
+    fb_part_id: int(r.fbPartId),
+    last_cost: num(r.lastCost),
+    last_cost_date: ts(r.lastCostDate),
+    last_po_number: r.lastPoNumber === null || r.lastPoNumber === undefined ? null : String(r.lastPoNumber),
+    last_vendor: r.lastVendor ?? null,
+    last_qty: num(r.lastQty),
+    std_cost: num(r.stdCost),
+  }
+}
+
 export function mapHistoryLine(r) {
   return {
     soItemId: int(r.soItemId),

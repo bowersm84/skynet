@@ -379,16 +379,41 @@ export async function upsertSection(bookId, sec) {
   return data
 }
 // Diff two books by part_key: list price / rule / ladder / status changes, adds, removals.
-export function diffBooks(baseItems, newItems) {
+// The Each each side of a diff actually carries: list_price for a plain row, the resolved component
+// sum for a set or kit. Resolution happens WITHIN one book — a set's components are that book's rows —
+// so each side gets its own key map, meta and book (D-PRICE-48 addendum). A sum that does not resolve
+// is null, never 0, and is then excluded from the % rather than reported as a 100% move.
+function eachMapFor(arr, meta, book) {
+  const byKey = new Map((arr || []).map(i => [i.part_key, i]))
+  const resolve = (k) => byKey.get(k) || null
+  const m = new Map()
+  for (const i of arr || []) {
+    if (i.status === 'component_sum') {
+      const v = i._components && i._components.length ? columnPrice(i, 'each', meta || null, book || null, resolve) : null
+      m.set(i.part_key, v === null || !Number.isFinite(Number(v)) ? null : Number(v))
+    } else {
+      m.set(i.part_key, i.list_price === null || i.list_price === undefined ? null : Number(i.list_price))
+    }
+  }
+  return m
+}
+// opts: { baseMeta, baseBook, newMeta, newBook } — omit and sets simply compare as null (no Each).
+export function diffBooks(baseItems, newItems, opts = null) {
+  const o = opts || {}
   const a = Object.fromEntries(baseItems.map(i => [i.part_key, i])), b = Object.fromEntries(newItems.map(i => [i.part_key, i]))
+  const aEach = eachMapFor(baseItems, o.baseMeta, o.baseBook)
+  const bEach = eachMapFor(newItems, o.newMeta, o.newBook)
+  const pctOf = (from, to) => (from !== null && to !== null && Number(from) !== 0 ? (to - from) / from : null)
   const out = []
   for (const k of Object.keys(b)) {
     const x = a[k], y = b[k]
-    if (!x) { out.push({ kind: 'added', part_number: y.part_number, to: y }); continue }
-    const changed = Number(x.list_price ?? -1) !== Number(y.list_price ?? -1) || x.rule_code !== y.rule_code || x.ladder_code !== y.ladder_code || x.status !== y.status || !!x.has_premier !== !!y.has_premier
-    if (changed) out.push({ kind: 'changed', part_number: y.part_number, from: x, to: y, pct: x.list_price && y.list_price ? (Number(y.list_price) - Number(x.list_price)) / Number(x.list_price) : null })
+    const toEach = bEach.get(k) ?? null
+    if (!x) { out.push({ kind: 'added', part_number: y.part_number, to: y, fromEach: null, toEach, pct: null }); continue }
+    const fromEach = aEach.get(k) ?? null
+    const changed = fromEach !== toEach || x.rule_code !== y.rule_code || x.ladder_code !== y.ladder_code || x.status !== y.status || !!x.has_premier !== !!y.has_premier
+    if (changed) out.push({ kind: 'changed', part_number: y.part_number, from: x, to: y, fromEach, toEach, pct: pctOf(fromEach, toEach) })
   }
-  for (const k of Object.keys(a)) if (!b[k]) out.push({ kind: 'removed', part_number: a[k].part_number, from: a[k] })
+  for (const k of Object.keys(a)) if (!b[k]) out.push({ kind: 'removed', part_number: a[k].part_number, from: a[k], fromEach: aEach.get(k) ?? null, toEach: null, pct: null })
   return out
 }
 // Fishbowl Products import CSV (ProductNumber, Price) from a book — interim write-back (D-PRICE-22).

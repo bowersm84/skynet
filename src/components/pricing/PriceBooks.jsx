@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check, RefreshCw } from 'lucide-react'
 import {
   loadBooks, loadBookMeta, loadBookItems, cloneBook, publishBook, unpublishBook, upliftBook, setSectionVsBase, upsertItem, deleteItem, upsertRule, upsertSection,
-  diffBooks, productsCsv, money, num,
+  diffBooks, productsCsv, money, num, columnPrice,
   loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift,
 } from '../../lib/pricing'
 import { downloadBytes } from '../../lib/priceListDoc'
@@ -49,7 +49,10 @@ function CloneDialog({ books, onClose, onDone }) {
   )
 }
 
-function ItemRow({ it, meta, editable, onSave, onDelete }) {
+// `sum` is the precomputed { each, total, missing[] } for a component_sum row (D-PRICE-48 addendum).
+// Precomputed on purpose: resolving a sum needs a part_key map over the whole book, and building
+// that per row would be quadratic across a 4,500-item book.
+function ItemRow({ it, meta, editable, sum, onSave, onDelete }) {
   const [v, setV] = useState(it); const [dirty, setDirty] = useState(false); const [busy, setBusy] = useState(false)
   useEffect(() => { setV(it); setDirty(false) }, [it])
   const set = (k, val) => { setV(x => ({ ...x, [k]: val })); setDirty(true) }
@@ -59,7 +62,11 @@ function ItemRow({ it, meta, editable, onSave, onDelete }) {
     <tr className={`border-t border-gray-800 ${dirty ? 'bg-amber-950/20' : ''}`}>
       <td className="px-2 py-1 font-mono text-white whitespace-nowrap">{editable ? <input value={v.part_number} onChange={e => set('part_number', e.target.value)} className={`${cell} font-mono`} /> : it.part_number}{it.status === 'component_sum' && <span className="ml-1 text-[10px] text-sky-300">SET</span>}</td>
       <td className="px-2 py-1 text-gray-300 min-w-[260px]">{editable ? <input value={v.description || ''} onChange={e => set('description', e.target.value)} className={cell} /> : it.description}</td>
-      <td className="px-2 py-1 text-right font-mono">{editable && it.status !== 'component_sum' ? <input type="number" step="0.001" value={v.list_price ?? ''} onChange={e => set('list_price', e.target.value)} className={`${cell} text-right w-24`} /> : it.status === 'component_sum' ? <span className="text-gray-500">Σ</span> : it.list_price === null ? <span className="text-gray-500 italic text-xs">no price</span> : money(it.list_price, 3)}</td>
+      <td className="px-2 py-1 text-right font-mono">{editable && it.status !== 'component_sum' ? <input type="number" step="0.001" value={v.list_price ?? ''} onChange={e => set('list_price', e.target.value)} className={`${cell} text-right w-24`} /> : it.status === 'component_sum' ? (
+        sum && sum.each !== null
+          ? <span title={`Sum of ${sum.total} components`}>Σ {money(sum.each)}</span>
+          : <span className="text-rose-300" title={!sum || !sum.total ? 'No components on file' : `${sum.missing.length} of ${sum.total} components unpriced: ${sum.missing.join(', ')}`}>Σ —</span>
+      ) : it.list_price === null ? <span className="text-gray-500 italic text-xs">no price</span> : money(it.list_price, 3)}</td>
       <td className="px-2 py-1 text-center">{editable && it.status !== 'component_sum' ? <select value={v.rule_code || ''} onChange={e => set('rule_code', e.target.value || null)} className="bg-gray-800 border border-gray-700 rounded px-1 text-xs"><option value="">—</option>{Object.keys(meta.rules).sort().map(c => <option key={c} value={c}>{c}</option>)}</select> : <span className="text-xs text-gray-400">{it.rule_code || ''}</span>}</td>
       <td className="px-2 py-1 text-center">{editable ? <select value={v.ladder_code} onChange={e => set('ladder_code', e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-1 text-xs">{Object.keys(meta.ladders).sort().map(c => <option key={c} value={c}>{c}</option>)}</select> : <span className="text-xs text-gray-400">{it.ladder_code}</span>}</td>
       <td className="px-2 py-1 text-center"><input type="checkbox" checked={!!v.has_premier} disabled={!editable} onChange={e => set('has_premier', e.target.checked)} /></td>
@@ -138,7 +145,27 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     return m
   }, [comps])
   const enriched = useMemo(() => items.map(i => (i.status === 'component_sum' ? { ...i, _components: compsByItem.get(i.id) || [] } : i)), [items, compsByItem])
-  const sectionItems = useMemo(() => items.filter(i => i.section_id === sectionId), [items, sectionId])
+  const itemsByKey = useMemo(() => new Map(enriched.map(i => [i.part_key, i])), [enriched])
+  // Sets and kits are shown in the grid from `enriched`, so each row carries its components.
+  const sectionItems = useMemo(() => enriched.filter(i => i.section_id === sectionId), [enriched, sectionId])
+  // One pass per section: the resolved Each of every set/kit plus which components blocked it.
+  const sectionSums = useMemo(() => {
+    const resolve = (k) => itemsByKey.get(k) || null
+    const m = new Map()
+    for (const it of sectionItems) {
+      if (it.status !== 'component_sum') continue
+      const comps = it._components || []
+      const missing = []
+      for (const kc of comps) {
+        const c = resolve(kc.component_key)
+        const v = c ? columnPrice(c, 'each', meta, book, null) : null
+        if (v === null || !Number.isFinite(Number(v))) missing.push(kc.component_part_number || kc.component_key)
+      }
+      const each = comps.length && !missing.length ? columnPrice(it, 'each', meta, book, resolve) : null
+      m.set(it.id, { each: each === null || !Number.isFinite(Number(each)) ? null : Number(each), total: comps.length, missing })
+    }
+    return m
+  }, [sectionItems, itemsByKey, meta, book])
   // Cost-based rows are priced from purchase cost (D-PRICE-47), so a percentage reprice is meaningless
   // for them — the section is tagged and Set section is withdrawn.
   const sectionHasCostPlus = useMemo(() => sectionItems.some(i => i.cost_plus), [sectionItems])
@@ -150,14 +177,29 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     const baseMap = baseBook && baseBook.bookId !== bookId ? new Map(baseBook.items.filter(b => b.status === 'priced' && b.list_price != null).map(b => [b.part_key, Number(b.list_price)])) : null
     let sum = 0, n = 0
     if (baseMap) for (const r of rows) { const b = baseMap.get(r.part_key); if (b) { sum += Number(r.list_price) / b - 1; n++ } }
-    return { priced: rows.length, matched: n, unmatched: baseMap ? rows.length - n : null, avgPct: n ? sum / n : null, baseId: baseMap ? baseBook.bookId : null, baseLabel: baseMap ? (books.find(b => b.id === baseBook.bookId)?.rev_label || 'in-effect book') : null }
-  }, [sectionItems, baseBook, bookId, books])
+    // Sets and kits are counted separately: they carry no list_price, so they never take part in the
+    // "vs in-effect book" average (unchanged), but they do belong in the section count.
+    let resolvedSums = 0, unresolvedSums = 0
+    for (const i of sectionItems) {
+      if (i.status !== 'component_sum') continue
+      if (sectionSums.get(i.id)?.each != null) resolvedSums++
+      else unresolvedSums++
+    }
+    return { priced: rows.length, resolvedSums, unresolvedSums, matched: n, unmatched: baseMap ? rows.length - n : null, avgPct: n ? sum / n : null, baseId: baseMap ? baseBook.bookId : null, baseLabel: baseMap ? (books.find(b => b.id === baseBook.bookId)?.rev_label || 'in-effect book') : null }
+  }, [sectionItems, sectionSums, baseBook, bookId, books])
   const fmtPct = (p) => `${p > 0 ? '+' : ''}${(p * 100).toFixed(1)}%`
   const counts = useMemo(() => ({ items: items.length, priced: items.filter(i => i.status === 'priced').length, noprice: items.filter(i => i.status === 'no_price').length }), [items])
   const runDiff = async (otherId) => {
     setDiffAgainst(otherId); setDiffRows(null)
     if (!otherId) return
-    const base = await loadBookItems(otherId); setDiffRows(diffBooks(base, items))
+    // Both sides need components and meta: a set Each is resolved inside its own book.
+    const [bm, base] = await Promise.all([loadBookMeta(otherId), loadBookItems(otherId)])
+    const baseKitIds = base.filter(i => i.status === 'component_sum').map(i => i.id)
+    const bc = baseKitIds.length ? await loadKitComponentsForItems(baseKitIds) : []
+    const byItem = new Map()
+    for (const c of bc) { const a = byItem.get(c.item_id); if (a) a.push(c); else byItem.set(c.item_id, [c]) }
+    const baseEnriched = base.map(i => (i.status === 'component_sum' ? { ...i, _components: byItem.get(i.id) || [] } : i))
+    setDiffRows(diffBooks(baseEnriched, enriched, { baseMeta: bm, baseBook: books.find(x => x.id === otherId) || null, newMeta: meta, newBook: book }))
   }
 
   return (
@@ -274,7 +316,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400"><th className="px-2 py-2">Part</th><th className="px-2 py-2">Description</th><th className="px-2 py-2 text-right">Each</th><th className="px-2 py-2 text-center">Rule</th><th className="px-2 py-2 text-center">Ladder</th><th className="px-2 py-2 text-center">Premier</th><th className="px-2 py-2 text-center">DFAR</th><th></th></tr></thead>
                     <tbody>
-                      {sectionItems.map(it => <ItemRow key={it.id} it={it} meta={meta} editable={editable} onSave={(v) => run(async () => { await upsertItem(book.id, { ...v, section_id: sectionId }); await loadBook() }, `${v.part_number} saved`)} onDelete={(x) => { if (confirm(`Remove ${x.part_number} from ${book.rev_label}?`)) run(async () => { await deleteItem(book.id, x.id); await loadBook() }, 'Removed') }} />)}
+                      {sectionItems.map(it => <ItemRow key={it.id} it={it} meta={meta} editable={editable} sum={sectionSums.get(it.id)} onSave={(v) => run(async () => { await upsertItem(book.id, { ...v, section_id: sectionId }); await loadBook() }, `${v.part_number} saved`)} onDelete={(x) => { if (confirm(`Remove ${x.part_number} from ${book.rev_label}?`)) run(async () => { await deleteItem(book.id, x.id); await loadBook() }, 'Removed') }} />)}
                     </tbody>
                   </table>
                 </div>
@@ -329,8 +371,8 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                           <tr key={i} className="border-t border-gray-800">
                             <td className="px-2 py-1 font-mono text-white">{d.part_number}</td>
                             <td className={`px-2 py-1 text-xs ${d.kind === 'added' ? 'text-emerald-300' : d.kind === 'removed' ? 'text-rose-300' : 'text-amber-300'}`}>{d.kind}</td>
-                            <td className="px-2 py-1 text-right font-mono text-gray-400">{d.from?.list_price != null ? money(d.from.list_price, 3) : ''}</td>
-                            <td className="px-2 py-1 text-right font-mono text-white">{d.to?.list_price != null ? money(d.to.list_price, 3) : ''}</td>
+                            <td className="px-2 py-1 text-right font-mono text-gray-400">{d.fromEach != null ? money(d.fromEach, 3) : d.from?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
+                            <td className="px-2 py-1 text-right font-mono text-white">{d.toEach != null ? money(d.toEach, 3) : d.to?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
                             <td className="px-2 py-1 text-right font-mono text-xs text-gray-300">{d.pct != null ? `${d.pct > 0 ? '+' : ''}${(d.pct * 100).toFixed(1)}%` : ''}</td>
                             <td className="px-2 py-1 text-xs text-gray-400">{d.from && d.to && (d.from.rule_code !== d.to.rule_code || d.from.ladder_code !== d.to.ladder_code) ? `${d.from.rule_code || '—'}/${d.from.ladder_code} → ${d.to.rule_code || '—'}/${d.to.ladder_code}` : ''}</td>
                           </tr>

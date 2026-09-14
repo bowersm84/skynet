@@ -90,6 +90,19 @@ export class SkyNet {
   // last_part_costs_at column — so the poller rides the products nightly slot instead (see index.mjs).
   upsertPartCosts(rows) { return this.rpc('fb_upsert_part_costs', { p_rows: rows }) }
 
+  // D-PRICE-49. Pushes the book's kit prices to the public skybolt-kits site. This is what makes
+  // Oct 1 work without anyone present: the book flips by date at midnight and the nightly cycle
+  // publishes it. The bridge signs in as the integration profile, which the function accepts.
+  async syncKitsSite(triggeredBy = 'nightly') {
+    await this.ensureSignedIn()
+    const { data, error } = await this.client.functions.invoke('sync-kits', {
+      body: { dry_run: false, triggered_by: triggeredBy },
+    })
+    if (error) throw new Error(`sync-kits failed: ${error.message}`)
+    if (data?.error) throw new Error(`sync-kits failed: ${data.error}`)
+    return data
+  }
+
   // The pricing pollers' own clocks, read once at start-up. fb_sync_state is SELECT-able by authenticated.
   async pricingState() {
     await this.ensureSignedIn()

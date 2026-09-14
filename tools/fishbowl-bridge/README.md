@@ -35,6 +35,10 @@ second session (D-FB-37). Each writes through its own `_pricing_gate('integratio
 
 Nightly means "today's HH:MM has passed and the last run was before it", read from `fb_sync_state` — so a restart
 cannot double-run a nightly job, and a bridge that was down at 02:20 catches up when it comes back.
+After the part-costs read, the nightly slot also POSTs the `sync-kits` Edge Function (D-PRICE-49), which pushes the
+price book's kit prices to the public skybolt-kits project. `KITS_SYNC_ENABLED=false` skips it. A failure there is
+logged and swallowed: the kits site missing a night must not stand the Fishbowl mirrors down.
+
 `part_costs` is the exception: `fb_sync_state` has no `last_part_costs_at` column, so it has no clock of its own
 and instead runs immediately after each products poll. That keeps it nightly without letting it fire on every
 20 s cycle, which is what an unscheduled `nightlyDue(null, …)` would do.

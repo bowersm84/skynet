@@ -1,6 +1,6 @@
 {
   "name": "skynet-fishbowl-bridge",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "Fishbowl -> SkyNet sales order + pricing bridge (read-only against Fishbowl)",

@@ -99,6 +99,17 @@ async function pricingCycle({ force = false } = {}) {
     // fb_sync_state has no last_part_costs_at column, so nightlyDue() has nothing to read — it would
     // return true on every 20 s cycle after the target time and re-read the whole PO history each pass.
     if (config.partCostsEnabled) await syncPartCosts(fb, sky, { log, batch: config.pricingBatch })
+    // D-PRICE-49, last in the nightly slot: costs are in, so the book's kit sums are final for today.
+    // A failure here is logged and swallowed — the mirrors are the bridge's job, and the kits site
+    // going a night without an update must not stand the pricing pollers down for 15 minutes.
+    if (config.kitsSyncEnabled) {
+      try {
+        const r = await sky.syncKitsSite('nightly')
+        log.info(`kits site: ${r?.prices_written ?? 0} price(s) written, ${r?.stale_marked ?? 0} stale, ${r?.discontinued ?? 0} discontinued${r?.book_label ? ` (${r.book_label})` : ''}`)
+      } catch (e) {
+        log.error(`kits site sync failed (mirrors unaffected): ${e.message}`)
+      }
+    }
   }
 
   if (force || nightlyDue(pricing.last_history_at, config.historyNightlyAt, now)) {

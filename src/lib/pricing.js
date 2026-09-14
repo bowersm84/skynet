@@ -354,6 +354,17 @@ export async function refreshHardwareCosts(bookId, markup = 1.0) {
   if (error) throw error
   return data || { updated: 0, added: 0, no_cost_on_file: 0, markup }
 }
+// Push the book's kit prices to the public skybolt-kits site (D-PRICE-49). Dry run by default here
+// as well as in the function, so a mis-click reports rather than writes. Returns the kits_sync_runs
+// row: counts, the per-kit report, and the unmatched lists both ways.
+export async function syncKitsSite({ dryRun = true, asOf = null, triggeredBy = 'manual' } = {}) {
+  const { data, error } = await supabase.functions.invoke('sync-kits', {
+    body: { dry_run: dryRun, as_of: asOf || todayIso(), triggered_by: triggeredBy },
+  })
+  if (error) throw error
+  if (data?.error) throw new Error(data.error)
+  return data
+}
 // Active-book hardware whose Each has drifted more than 10% from 2 × today's received cost.
 export async function loadHardwareCostDrift() {
   const { data, error } = await supabase.from('v_hardware_cost_drift').select('*').order('drift_pct')

@@ -11,7 +11,7 @@ import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plu
 import {
   loadBooks, loadBookMeta, loadBookItems, cloneBook, publishBook, unpublishBook, upliftBook, setSectionVsBase, upsertItem, deleteItem, upsertRule, upsertSection,
   diffBooks, productsCsv, money, num, columnPrice,
-  loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift,
+  loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift, syncKitsSite,
 } from '../../lib/pricing'
 import { downloadBytes } from '../../lib/priceListDoc'
 import { PartTypeahead } from './PricingTypeaheads'
@@ -63,6 +63,61 @@ function CloneDialog({ books, onClose, onDone }) {
 // `sum` is the precomputed { each, total, missing[] } for a component_sum row (D-PRICE-48 addendum).
 // Precomputed on purpose: resolving a sum needs a part_key map over the whole book, and building
 // that per row would be quadratic across a 4,500-item book.
+// The kit-site push, reported before it is run (D-PRICE-49). Dry run is on by default and the
+// report is the same shape either way, so the only difference in unticking it is that the writes
+// actually land. Counts come back from kits_sync_runs, so what is shown is what was logged.
+function KitsSyncDialog({ onClose }) {
+  const [dry, setDry] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const [res, setRes] = useState(null)
+  const go = async () => {
+    setBusy(true); setErr(null); setRes(null)
+    try { setRes(await syncKitsSite({ dryRun: dry, triggeredBy: dry ? 'manual-dry' : 'manual' })) }
+    catch (e) { setErr(e.message || String(e)) } finally { setBusy(false) }
+  }
+  const rows = res?.report?.actions || []
+  return (
+    <div className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-4xl p-5 space-y-3" onClick={e => e.stopPropagation()}>
+        <div className="text-white font-semibold flex items-center gap-2"><RefreshCw size={16} className="text-skynet-accent" /> Sync the kits site</div>
+        <div className="text-[11px] text-gray-500">Writes kit prices from the book in effect to skybolt-kits. Kit rows are never created or deleted; a superseded price keeps its row with `is_current = false`.</div>
+        <label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={dry} onChange={e => setDry(e.target.checked)} /> Dry run — report what would change, write nothing</label>
+        {err && <div className="text-rose-300 text-xs">{err}</div>}
+        {res && (
+          <div className="space-y-2">
+            <div className="text-xs text-gray-300">{res.dry_run ? 'Would write' : 'Wrote'} · {num(res.prices_written)} prices · {num(res.stale_marked)} stale · {num(res.discontinued)} discontinued · {num(res.components_rewritten)} BOMs · {num(res.prices_unchanged)} unchanged{res.book_label ? ` · ${res.book_label}` : ''}</div>
+            {(res.unmatched_registry_only?.length || res.unmatched_site_only?.length) ? (
+              <div className="text-[11px] text-amber-300">Unmatched — registry only: {res.unmatched_registry_only?.length || 0}; site only: {res.unmatched_site_only?.length || 0}</div>
+            ) : null}
+            <div className="max-h-[50vh] overflow-auto border border-gray-700 rounded-lg">
+              <table className="min-w-full text-xs">
+                <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[10px] uppercase tracking-wide text-gray-400"><th className="px-2 py-1.5">Kit</th><th className="px-2 py-1.5 text-right">Site price</th><th className="px-2 py-1.5 text-right">Book price</th><th className="px-2 py-1.5">Action</th><th className="px-2 py-1.5">Why</th></tr></thead>
+                <tbody>
+                  {rows.length === 0 && <tr><td colSpan={5} className="px-2 py-3 text-gray-500">Nothing to change.</td></tr>}
+                  {rows.slice(0, 500).map((r, i) => (
+                    <tr key={`${r.kit}-${i}`} className="border-t border-gray-800">
+                      <td className="px-2 py-1 font-mono text-white whitespace-nowrap">{r.kit}{r.match !== 'exact' && <span className="ml-1 text-[10px] text-amber-300" title={`matched the registry's ${r.registry_kit} by ${r.match}`}>~</span>}</td>
+                      <td className="px-2 py-1 text-right font-mono text-gray-400">{r.site_price == null ? '—' : money(r.site_price)}</td>
+                      <td className="px-2 py-1 text-right font-mono text-white">{r.book_price == null ? '—' : money(r.book_price)}</td>
+                      <td className="px-2 py-1 text-gray-300">{r.action}</td>
+                      <td className="px-2 py-1 text-gray-500 truncate max-w-xs" title={r.reason}>{r.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">Close</button>
+          <button onClick={go} disabled={busy} className="px-3 py-1.5 text-sm rounded bg-skynet-accent text-gray-900 font-medium disabled:opacity-50">{busy ? 'Running…' : dry ? 'Run dry' : 'Write to the site'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ItemRow({ it, meta, editable, sum, onSave, onDelete }) {
   const [v, setV] = useState(it); const [dirty, setDirty] = useState(false); const [busy, setBusy] = useState(false)
   useEffect(() => { setV(it); setDirty(false) }, [it])
@@ -100,6 +155,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   const [secByTab, setSecByTab] = useState({ items: null, kits: null })
   const [busy, setBusy] = useState(false); const [error, setError] = useState(null); const [flash, setFlash] = useState(null)
   const [showClone, setShowClone] = useState(false)
+  const [showKitsSync, setShowKitsSync] = useState(false)
   const [view, setView] = useState('items')          // items | rules | diff
   const [diffAgainst, setDiffAgainst] = useState(null); const [diffRows, setDiffRows] = useState(null)
   const [uplift, setUplift] = useState('15'); const [pubDate, setPubDate] = useState(OCT1)
@@ -267,11 +323,15 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   return (
     <div className="space-y-4">
       {showClone && <CloneDialog books={books} onClose={() => setShowClone(false)} onDone={async (id) => { setShowClone(false); await refreshBooks(); setBookId(id); note('Draft created') }} />}
+      {showKitsSync && <KitsSyncDialog onClose={() => setShowKitsSync(false)} />}
       {/* Books list */}
       <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-white font-semibold flex items-center gap-2"><BookOpen size={16} className="text-skynet-accent" /> Price books</h2>
-          {canEdit && <button onClick={() => setShowClone(true)} className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-600 text-gray-200 text-sm hover:text-white"><Copy size={14} /> Clone…</button>}
+          <div className="flex items-center gap-2">
+            {canEdit && <button onClick={() => setShowKitsSync(true)} className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-600 text-gray-200 text-sm hover:text-white" title="Push kit prices from the book in effect to the public skybolt-kits site (D-PRICE-49)"><RefreshCw size={14} /> Sync kits site…</button>}
+            {canEdit && <button onClick={() => setShowClone(true)} className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-600 text-gray-200 text-sm hover:text-white"><Copy size={14} /> Clone…</button>}
+          </div>
         </div>
         <table className="text-sm w-full">
           <thead><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400"><th className="pr-4 py-1">Book</th><th className="pr-4 py-1">Effective</th><th className="pr-4 py-1">Status</th><th className="pr-4 py-1">Uplift</th><th className="pr-4 py-1">Premier</th><th className="pr-4 py-1">Created</th><th></th></tr></thead>
@@ -313,7 +373,17 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                 <div className="flex items-center gap-1 text-xs"><Percent size={13} className="text-gray-500" /><input type="number" step="0.1" value={uplift} onChange={e => setUplift(e.target.value)} className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
                   <button onClick={() => { if (confirm(`Raise every catalog Each in ${book.rev_label} by ${uplift}%?`)) run(async () => { const n = await upliftBook(book.id, Number(uplift) / 100); await loadBook(); return n }, `Uplifted ${uplift}%`) }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white">Uplift all</button></div>
                 <div className="flex items-center gap-1 text-xs"><CalendarClock size={13} className="text-gray-500" /><input type="date" value={pubDate} onChange={e => setPubDate(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
-                  <button onClick={() => { if (confirm(`Publish ${book.rev_label} effective ${pubDate}?`)) run(async () => { await publishBook(book.id, pubDate); await refreshBooks() }, 'Published') }} className="px-2 py-1 rounded bg-skynet-accent text-gray-900 font-medium">Schedule / publish</button></div>
+                  <button onClick={() => { if (confirm(`Publish ${book.rev_label} effective ${pubDate}?`)) run(async () => {
+                    await publishBook(book.id, pubDate); await refreshBooks()
+                    // Push the kit prices straight after (D-PRICE-49). A failure here must not read as
+                    // a failed publish — the book IS published — so it is reported, not thrown.
+                    try {
+                      const r = await syncKitsSite({ dryRun: false, triggeredBy: 'publish' })
+                      note(`Published · Kits site: ${num(r.prices_written)} prices written, ${num(r.stale_marked)} marked stale, ${num(r.discontinued)} discontinued`)
+                    } catch (e) {
+                      note(`Published — but the kits-site sync failed: ${e.message || e}`)
+                    }
+                  }) }} className="px-2 py-1 rounded bg-skynet-accent text-gray-900 font-medium">Schedule / publish</button></div>
                 <button onClick={doRefreshCosts} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Set every cost-based hardware Each to 2 × the latest received purchase cost, and add kit components that now have a cost (D-PRICE-47)"><RefreshCw size={13} /> Refresh costs</button>
               </>
             )}

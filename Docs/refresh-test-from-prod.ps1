@@ -271,3 +271,51 @@ Write-Host ""
 Write-Host "Done. TEST data mirrors PROD; your test users are intact." -ForegroundColor Green
 Write-Host "Imported rows are owned by the TEST admin (cosmetic attribution only)." -ForegroundColor Green
 Write-Host "Note: profiles.home_location is reset to blank on every refresh (cosmetic)." -ForegroundColor DarkGray
+
+# ---------------------------------------------------------------------------
+# POST-CHECK - encoding sweep (D-REFRESH-07). Read-only; never writes.
+# Every text column in public is counted for the two signatures of a cp1252
+# double-encode: chr(194) is the A-circumflex that fronts a mangled 2-byte
+# character, chr(226)+chr(8364) the a-euro that fronts a mangled 3-byte one
+# (dashes, smart quotes). Patterns are built with chr() on purpose - this file
+# has no BOM, so PowerShell 5.1 parses it as ANSI and any non-ASCII literal
+# written here would itself be mangled before psql ever saw it.
+# Must print "Clean". Anything else means the load re-broke the encoding.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Post-check  Encoding sweep (looking for double-encoded text)..." -ForegroundColor Cyan
+$sweepSql = @'
+SELECT z.table_name || '.' || z.column_name || '  ->  ' || z.bad_rows || ' row(s)'
+FROM (
+  SELECT c.table_name, c.column_name,
+         (xpath('/row/cnt/text()', query_to_xml(
+            format('SELECT count(*) AS cnt FROM public.%I WHERE %I LIKE %L OR %I LIKE %L',
+                   c.table_name, c.column_name,
+                   '%' || chr(194) || '%',
+                   c.column_name,
+                   '%' || chr(226) || chr(8364) || '%'),
+            false, true, '')))[1]::text::int AS bad_rows
+  FROM information_schema.columns c
+  JOIN information_schema.tables t
+    ON t.table_schema = c.table_schema
+   AND t.table_name   = c.table_name
+   AND t.table_type   = 'BASE TABLE'
+  WHERE c.table_schema = 'public'
+    AND c.data_type IN ('text','character varying')
+) z
+WHERE z.bad_rows > 0
+ORDER BY z.bad_rows DESC, z.table_name, z.column_name;
+'@
+$sweepRaw  = psql $test -t -A -c $sweepSql
+$sweepCode = $LASTEXITCODE
+$sweep     = $sweepRaw | Where-Object { $_.Trim() -ne '' }
+if ($sweepCode -ne 0) {
+  Write-Host "      WARNING: the sweep did not run (psql exit $sweepCode). Check the encoding by hand." -ForegroundColor Yellow
+} elseif (-not $sweep) {
+  Write-Host "      Clean - no column carries double-encoded text." -ForegroundColor Green
+} else {
+  Write-Host "      MOJIBAKE FOUND in $($sweep.Count) column(s):" -ForegroundColor Red
+  $sweep | ForEach-Object { Write-Host "        $_" -ForegroundColor Red }
+  Write-Host "      The load mangled the encoding again - see D-REFRESH-07 in Docs/Decisions.md." -ForegroundColor Red
+  Write-Host "      Do not use this TEST database until it is re-refreshed." -ForegroundColor Red
+}

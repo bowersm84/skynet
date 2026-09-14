@@ -122,6 +122,21 @@ export async function loadItemsByKeys(bookId, keys) {
   }
   return out
 }
+// Kit components for many items at once — the whole-book equivalent of loadKitComponents.
+// loadBookItems() returns bare price_items rows with no `_components`, and columnPrice() sums an
+// empty component list to 0 rather than null, so anything that prices a set or kit from a whole-book
+// load must attach components first or it will silently value them at zero (D-PRICE-48).
+export async function loadKitComponentsForItems(itemIds) {
+  const uniq = [...new Set((itemIds || []).filter(Boolean))]
+  if (!uniq.length) return []
+  const out = []
+  for (let i = 0; i < uniq.length; i += 200) {
+    const { data, error } = await supabase.from('price_kit_components').select('*').in('item_id', uniq.slice(i, i + 200))
+    if (error) throw error
+    out.push(...(data || []))
+  }
+  return out
+}
 // Kit components for a set of items (lookup detail).
 export async function loadKitComponents(itemId) {
   const { data, error } = await supabase.from('price_kit_components').select('*').eq('item_id', itemId)
@@ -331,6 +346,20 @@ export async function setSectionVsBase(bookId, sectionId, baseBookId, totalPct) 
   if (error) throw error
   return data || { updated: 0, unmatched: 0 }
 }
+// Reprice cost-based hardware in a DRAFT book at cost × (1 + markup), and add any kit component that
+// now has a cost on file but no book row, so blocked kit sums unblock as costs arrive (D-PRICE-47).
+// Returns { updated, added, no_cost_on_file, markup }. Draft-only and edit-gated in the RPC.
+export async function refreshHardwareCosts(bookId, markup = 1.0) {
+  const { data, error } = await supabase.rpc('pricing_refresh_hardware_costs', { p_book: bookId, p_markup: markup })
+  if (error) throw error
+  return data || { updated: 0, added: 0, no_cost_on_file: 0, markup }
+}
+// Active-book hardware whose Each has drifted more than 10% from 2 × today's received cost.
+export async function loadHardwareCostDrift() {
+  const { data, error } = await supabase.from('v_hardware_cost_drift').select('*').order('drift_pct')
+  if (error) throw error
+  return data || []
+}
 export async function upsertItem(bookId, item) {
   const { data, error } = await supabase.rpc('pricing_upsert_item', { p_book: bookId, p_item: item })
   if (error) throw error
@@ -363,8 +392,32 @@ export function diffBooks(baseItems, newItems) {
   return out
 }
 // Fishbowl Products import CSV (ProductNumber, Price) from a book — interim write-back (D-PRICE-22).
-export function productsCsv(items) {
-  const rows = items.filter(i => i.status === 'priced' && i.list_price !== null).map(i => [i.part_number, Number(i.list_price).toFixed(2)])
+//
+// Carries `component_sum` rows as well as `priced` ones (D-PRICE-48). Until now only `priced` was
+// exported, so the 13 Common Sets never reached Fishbowl — their Fishbowl list has sat ~25% under book
+// since Rev 81 — and the 318 kits D-PRICE-46 added would not have reached it on Oct 1 either.
+//
+// `items` must already carry `_components` (see loadKitComponentsForItems). A set with none is treated
+// as UNRESOLVED, never as free: columnPrice() sums an empty component list to 0, and a 0 here would
+// import a $0.00 list price into Fishbowl for every kit. Same for a sum whose component is unpriced.
+// Pass `opts.stats` to receive { priced, sums, skipped_sums }.
+export function productsCsv(items, meta = null, book = null, opts = null) {
+  const byKey = new Map((items || []).map(i => [i.part_key, i]))
+  const resolve = (k) => byKey.get(k) || null
+  const stats = { priced: 0, sums: 0, skipped_sums: 0 }
+  const rows = []
+  for (const i of items || []) {
+    if (i.status === 'priced' && i.list_price !== null) {
+      rows.push([i.part_number, Number(i.list_price).toFixed(2)]); stats.priced++
+    } else if (i.status === 'component_sum') {
+      const each = i._components && i._components.length
+        ? columnPrice(i, 'each', meta, book, resolve)
+        : null
+      if (each === null || !Number.isFinite(Number(each))) { stats.skipped_sums++; continue }
+      rows.push([i.part_number, Number(each).toFixed(2)]); stats.sums++
+    }
+  }
+  if (opts && opts.stats) Object.assign(opts.stats, stats)
   const esc = v => (/["\r\n,]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v)
   return ['ProductNumber,Price', ...rows.map(r => r.map(esc).join(','))].join('\r\n') + '\r\n'
 }

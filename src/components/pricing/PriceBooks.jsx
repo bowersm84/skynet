@@ -5,11 +5,12 @@
 // against another book, schedule / unschedule / publish, export the
 // Fishbowl Products CSV. Non-admins see the list and the diff, read-only.
 //
-import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check, RefreshCw } from 'lucide-react'
 import {
   loadBooks, loadBookMeta, loadBookItems, cloneBook, publishBook, unpublishBook, upliftBook, setSectionVsBase, upsertItem, deleteItem, upsertRule, upsertSection,
   diffBooks, productsCsv, money, num,
+  loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift,
 } from '../../lib/pricing'
 import { downloadBytes } from '../../lib/priceListDoc'
 import { PartTypeahead } from './PricingTypeaheads'
@@ -82,6 +83,11 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   const [diffAgainst, setDiffAgainst] = useState(null); const [diffRows, setDiffRows] = useState(null)
   const [uplift, setUplift] = useState('15'); const [pubDate, setPubDate] = useState(OCT1)
   const [newSection, setNewSection] = useState('')
+  const [comps, setComps] = useState([])            // price_kit_components for this book's sets and kits (D-PRICE-48)
+  const [drift, setDrift] = useState([])            // v_hardware_cost_drift, loaded once per mount (D-PRICE-48)
+  // Section to select once the next book's meta lands — set by the drift pill, consumed in loadBook().
+  // A ref, not state, so it cannot re-trigger the load effect it is read inside.
+  const pendingSection = useRef(null)
   const [sectionTarget, setSectionTarget] = useState('')   // total % over the in-effect book for the selected section (D-PRICE-39)
   const [baseBook, setBaseBook] = useState(null)   // { bookId, items } of the in-effect book — the per-section "vs" figure (D-PRICE-38)
 
@@ -95,9 +101,22 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     // The diff is computed from `items`, so any reload — a different book, or an edit to this
     // one — invalidates it. Without this a stale diff stays on screen under the new book's name.
     setDiffAgainst(null); setDiffRows(null)
-    try { const [m, its] = await Promise.all([loadBookMeta(bookId), loadBookItems(bookId)]); setMeta(m); setItems(its); setSectionId(s => s && m.sections.some(x => x.id === s) ? s : m.sections[0]?.id || null) }
+    try {
+      const [m, its] = await Promise.all([loadBookMeta(bookId), loadBookItems(bookId)])
+      // Sets and kits price as the sum of their components, so the book's components are loaded
+      // alongside its items — without them productsCsv would value every kit at zero (D-PRICE-48).
+      const kitIds = its.filter(i => i.status === 'component_sum').map(i => i.id)
+      const kc = kitIds.length ? await loadKitComponentsForItems(kitIds) : []
+      setMeta(m); setItems(its); setComps(kc)
+      const want = pendingSection.current; pendingSection.current = null
+      const hit = want ? m.sections.find(s => s.name.toLowerCase().includes(want)) : null
+      if (hit) setView('items')
+      setSectionId(s => hit ? hit.id : (s && m.sections.some(x => x.id === s) ? s : m.sections[0]?.id || null))
+    }
     catch (e) { setError(e.message || String(e)) } finally { setBusy(false) }
   }
+  // Cost drift on the in-effect book. Read once per mount, never polled.
+  useEffect(() => { loadHardwareCostDrift().then(setDrift).catch(() => {}) }, [])
   useEffect(() => { loadBook() }, [bookId]) // eslint-disable-line react-hooks/exhaustive-deps
   // The section header shows how far the open book has moved from the in-effect book, so a second
   // uplift on one family is judged against the real base (Rev 81), not the draft (D-PRICE-38).
@@ -112,7 +131,17 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   const note = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2500) }
   const run = async (fn, ok) => { setBusy(true); setError(null); try { await fn(); if (ok) note(ok) } catch (e) { setError(e.message || String(e)) } finally { setBusy(false) } }
 
+  // Items carrying their components, which is what productsCsv and any set/kit pricing needs.
+  const compsByItem = useMemo(() => {
+    const m = new Map()
+    for (const c of comps) { const a = m.get(c.item_id); if (a) a.push(c); else m.set(c.item_id, [c]) }
+    return m
+  }, [comps])
+  const enriched = useMemo(() => items.map(i => (i.status === 'component_sum' ? { ...i, _components: compsByItem.get(i.id) || [] } : i)), [items, compsByItem])
   const sectionItems = useMemo(() => items.filter(i => i.section_id === sectionId), [items, sectionId])
+  // Cost-based rows are priced from purchase cost (D-PRICE-47), so a percentage reprice is meaningless
+  // for them — the section is tagged and Set section is withdrawn.
+  const sectionHasCostPlus = useMemo(() => sectionItems.some(i => i.cost_plus), [sectionItems])
   const section = meta?.sections.find(s => s.id === sectionId) || null
   // What a section uplift touches — priced catalog rows (sets are Σ of their components and follow
   // them; resale is never uplifted, D-PRICE-13) — and their average Each movement vs the in-effect book.
@@ -145,7 +174,16 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
           <tbody>
             {books.map(b => (
               <tr key={b.id} onClick={() => setBookId(b.id)} className={`border-t border-gray-800 cursor-pointer ${bookId === b.id ? 'bg-gray-700/50' : 'hover:bg-gray-800/60'}`}>
-                <td className="pr-4 py-1.5 text-white">{b.rev_label}</td>
+                <td className="pr-4 py-1.5 text-white">{b.rev_label}
+                  {b.status === 'active' && drift.length > 0 && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); pendingSection.current = 'kit hardware'; if (bookId === b.id) { const hit = meta?.sections.find(s => s.name.toLowerCase().includes('kit hardware')); pendingSection.current = null; if (hit) { setView('items'); setSectionId(hit.id) } } else setBookId(b.id) }}
+                      title={drift.slice(0, 5).map(d => `${d.part_number} (${money(d.book_each)} → ${money(d.cost_plus_now)})`).join('\n')}
+                      className="ml-2 align-middle px-2 py-0.5 rounded text-[11px] bg-amber-900/50 text-amber-200 border border-amber-800 hover:text-white">
+                      {num(drift.length)} hardware cost{drift.length === 1 ? '' : 's'} drifted &gt;10%
+                    </button>
+                  )}
+                </td>
                 <td className="pr-4 py-1.5 font-mono text-gray-300">{b.effective_from || '—'}</td>
                 <td className="pr-4 py-1.5"><span className={`px-2 py-0.5 rounded text-xs ${STATUS_CLS[b.status] || ''}`}>{b.status}</span></td>
                 <td className="pr-4 py-1.5 font-mono text-gray-300">{b.uplift_pct ? `${(Number(b.uplift_pct) * 100).toFixed(1)}%` : ''}</td>
@@ -172,10 +210,23 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                   <button onClick={() => { if (confirm(`Raise every catalog Each in ${book.rev_label} by ${uplift}%?`)) run(async () => { const n = await upliftBook(book.id, Number(uplift) / 100); await loadBook(); return n }, `Uplifted ${uplift}%`) }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white">Uplift all</button></div>
                 <div className="flex items-center gap-1 text-xs"><CalendarClock size={13} className="text-gray-500" /><input type="date" value={pubDate} onChange={e => setPubDate(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
                   <button onClick={() => { if (confirm(`Publish ${book.rev_label} effective ${pubDate}?`)) run(async () => { await publishBook(book.id, pubDate); await refreshBooks() }, 'Published') }} className="px-2 py-1 rounded bg-skynet-accent text-gray-900 font-medium">Schedule / publish</button></div>
+                <button onClick={() => {
+                  if (!confirm(`Reprice cost-based hardware in "${book.rev_label}" at 2 × latest received Fishbowl cost, and add any kit component that now has a cost on file? Published books are never changed.`)) return
+                  run(async () => {
+                    const r = await refreshHardwareCosts(book.id, 1.0)
+                    await loadBook()
+                    note(`Costs refreshed: ${num(r.updated)} repriced, ${num(r.added)} added for kit sums, ${num(r.no_cost_on_file)} still without a cost on file`)
+                  })
+                }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Set every cost-based hardware Each to 2 × the latest received purchase cost, and add kit components that now have a cost (D-PRICE-47)"><RefreshCw size={13} /> Refresh costs</button>
               </>
             )}
             {canEdit && book.status === 'scheduled' && <button onClick={() => { if (confirm(`Take ${book.rev_label} back to draft?`)) run(async () => { await unpublishBook(book.id); await refreshBooks() }, 'Back to draft') }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white"><Undo2 size={13} /> Unschedule (edit)</button>}
-            <button onClick={() => downloadBytes(new TextEncoder().encode(productsCsv(items)), `Fishbowl_Products_${book.rev_label.replace(/[^A-Za-z0-9]+/g, '_')}.csv`, 'text/csv')} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Fishbowl Products import (ProductNumber, Price) — interim write-back (D-PRICE-22)"><FileDown size={13} /> Fishbowl Products CSV</button>
+            <button onClick={() => {
+              const stats = {}
+              const csv = productsCsv(enriched, meta, book, { stats })
+              downloadBytes(new TextEncoder().encode(csv), `Fishbowl_Products_${book.rev_label.replace(/[^A-Za-z0-9]+/g, '_')}.csv`, 'text/csv')
+              note(`Fishbowl Products CSV: ${num(stats.priced)} priced + ${num(stats.sums)} sets/kits${stats.skipped_sums ? ` (${num(stats.skipped_sums)} kits skipped — sum unresolved)` : ''}`)
+            }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Fishbowl Products import (ProductNumber, Price) — priced parts plus every set and kit whose component sum resolves (D-PRICE-22/48)"><FileDown size={13} /> Fishbowl Products CSV</button>
           </div>
           {error && <div className="mb-3 flex items-center gap-2 text-sm text-rose-300 bg-rose-950/40 border border-rose-900 rounded px-3 py-2"><AlertTriangle size={14} /> {error}</div>}
           {flash && <div className="mb-3 flex items-center gap-2 text-sm text-emerald-300"><Check size={14} /> {flash}</div>}
@@ -204,11 +255,11 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
               <div className="min-w-0">
                 {section && (
                   <div className="flex flex-wrap items-center gap-3 mb-2 text-xs">
-                    <div className="min-w-0 flex-1 text-gray-400 truncate" title={section.name}><span className="text-white">{section.name}</span> · {num(sectionItems.length)} items · {num(sectionStats.priced)} priced{section.kind === 'resale' ? <span className="text-rose-300"> · resale — never uplifted (D-PRICE-13)</span> : ''}</div>
+                    <div className="min-w-0 flex-1 text-gray-400 truncate" title={section.name}><span className="text-white">{section.name}</span>{sectionHasCostPlus && <span className="ml-2 px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 text-[10px] align-middle" title="Priced from the latest received purchase cost (D-PRICE-47) — use Refresh costs, not a percentage">cost-based</span>} · {num(sectionItems.length)} items · {num(sectionStats.priced)} priced{section.kind === 'resale' ? <span className="text-rose-300"> · resale — never uplifted (D-PRICE-13)</span> : ''}</div>
                     {sectionStats.avgPct != null && (
                       <div className="font-mono text-gray-400 whitespace-nowrap" title={`Average Each change of the ${sectionStats.matched} parts in this section that are also in ${sectionStats.baseLabel}${sectionStats.unmatched ? `; ${sectionStats.unmatched} not in it` : ''}`}>vs {sectionStats.baseLabel}: <span className={sectionStats.avgPct > 0 ? 'text-amber-300' : sectionStats.avgPct < 0 ? 'text-rose-300' : 'text-gray-300'}>{fmtPct(sectionStats.avgPct)}</span></div>
                     )}
-                    {editable && section.kind !== 'resale' && sectionStats.baseId && (
+                    {editable && section.kind !== 'resale' && sectionStats.baseId && !sectionHasCostPlus && (
                       <div className="flex items-center gap-1 whitespace-nowrap"><span className="text-gray-500">→ set to</span><input type="number" step="0.1" value={sectionTarget} onChange={e => setSectionTarget(e.target.value)} placeholder={sectionStats.avgPct != null ? (sectionStats.avgPct * 100).toFixed(1) : ''} className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" /><Percent size={13} className="text-gray-500" />
                         <button disabled={sectionTarget === '' || !sectionStats.matched} onClick={() => {
                           const t = Number(sectionTarget)

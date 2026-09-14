@@ -11,6 +11,7 @@ import {
   StatusBadge, ConfidenceBadge, SourceBadge, Pill, Spinner, Empty, LinkText, LotsTable, Pager,
 } from './ui'
 import { useAsyncData, usePageReset } from './hooks'
+import KitPricePanel from './KitPricePanel'
 
 // One drawer component for every entity. Navigation is a breadcrumb STACK —
 // opening a reference from inside a drawer pushes; Back pops. Keeps deep
@@ -397,6 +398,10 @@ function SkuBody({ id, onPush }) {
           <Row label="Known installations">{installCount}</Row>
           <Row label="Notes">{sku.notes}</Row>
         </dl>
+      </Block>
+
+      <Block title="Pricing">
+        <KitPricePanel sku={sku} bom={bom} />
       </Block>
 
       <Block title={`BOM (${bom.length} lines)`}>

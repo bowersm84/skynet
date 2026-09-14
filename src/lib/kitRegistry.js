@@ -83,6 +83,22 @@ export function sanitizeTerm(term) {
   return (term || '').replace(/[,()%*\\]/g, ' ').trim()
 }
 
+// Exact SKU lookup for the ?sku= deep link (D-PRICE-48 addendum 2). Deliberately NOT filtered on
+// is_active: the 87 Trim / Fuel Tank kits D-PRICE-46 retired must still open from a price-book link.
+// Tries the stored spelling first, then a case-insensitive match for a link typed by hand.
+export async function skuIdByPartNumber(partNumber) {
+  const raw = String(partNumber || '').trim()
+  if (!raw) return null
+  const exact = await supabase.from('kit_skus').select('id').eq('part_number', raw).limit(1).maybeSingle()
+  if (exact.error) throw exact.error
+  if (exact.data?.id) return exact.data.id
+  const t = sanitizeTerm(raw)
+  if (!t) return null
+  const { data, error } = await supabase.from('kit_skus').select('id').ilike('part_number', t).limit(1).maybeSingle()
+  if (error) throw error
+  return data?.id || null
+}
+
 // "SK203 99000" — the display form everywhere in this module.
 export function lotLabel(lot) {
   if (!lot) return '—'

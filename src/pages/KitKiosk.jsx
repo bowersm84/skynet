@@ -91,7 +91,9 @@ export default function KitKiosk() {
   const [savePinError, setSavePinError] = useState(null)
 
   // --- Shell ---------------------------------------------------------------
-  const [nav, setNav] = useState('entry')
+  // A ?sku= deep link (D-PRICE-48 addendum 2) is a Search-tab thing, so land there rather than on
+  // Entry. Lazy initialiser, so no effect and no first-render flash of the wrong tab.
+  const [nav, setNav] = useState(() => (new URLSearchParams(window.location.search).get('sku') ? 'search' : 'entry'))
 
   // --- Reference data ------------------------------------------------------
   const [books, setBooks] = useState([])

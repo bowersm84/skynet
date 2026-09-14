@@ -5,7 +5,7 @@ import {
   previewLotByNumber, lookupInvoice, componentRecall, skusByIds,
   loadLots, filteredLotStats, partyLens, skuLens, invoiceLens,
   componentLotLens, componentLotLotIds,
-  loadGlobalDashboard, formatLogDate, formatSince, lotLabel, uniq,
+  loadGlobalDashboard, formatLogDate, formatSince, lotLabel, uniq, skuIdByPartNumber,
   FIELD_DEBOUNCE, PAGE_SIZE,
 } from '../../lib/kitRegistry'
 import { supabase } from '../../lib/supabase'
@@ -45,6 +45,18 @@ export default function KitSearch() {
   const push = useCallback((entry) => setStack(s => [...s, entry]), [])
   const pop = useCallback(() => setStack(s => s.slice(0, -1)), [])
   const closeDrawer = useCallback(() => setStack([]), [])
+
+  // ?sku=<part number> opens the drawer straight onto that kit — the Price Books editor links here
+  // per kit (D-PRICE-48 addendum 2). Read once on mount; state is set only from the async callback.
+  useEffect(() => {
+    const want = new URLSearchParams(window.location.search).get('sku')
+    if (!want) return
+    let cancelled = false
+    skuIdByPartNumber(want)
+      .then(id => { if (!cancelled && id) setStack([{ type: 'sku', id, label: want }]) })
+      .catch(err => console.error('Deep link to SKU failed:', err))
+    return () => { cancelled = true }
+  }, [])
 
   // --- kit # live preview ---------------------------------------------------
   useEffect(() => {

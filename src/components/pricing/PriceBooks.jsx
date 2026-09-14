@@ -6,7 +6,8 @@
 // Fishbowl Products CSV. Non-admins see the list and the diff, read-only.
 //
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check, RefreshCw } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check, RefreshCw, ExternalLink } from 'lucide-react'
 import {
   loadBooks, loadBookMeta, loadBookItems, cloneBook, publishBook, unpublishBook, upliftBook, setSectionVsBase, upsertItem, deleteItem, upsertRule, upsertSection,
   diffBooks, productsCsv, money, num, columnPrice,
@@ -14,6 +15,16 @@ import {
 } from '../../lib/pricing'
 import { downloadBytes } from '../../lib/priceListDoc'
 import { PartTypeahead } from './PricingTypeaheads'
+
+// Kits tab ordering — Matt's reading order (Common Sets, Cowling, Option, RV, Lancair, Kit Hardware),
+// matched on content words so a section rename or a new family does not silently fall to the bottom.
+const KIT_HARDWARE_RE = /kit hardware/i
+const KIT_ORDER = ['common set', 'cowling', 'option', 'rv kit', 'lancair', 'kit hardware']
+const kitRank = (name) => {
+  const n = String(name || '').toLowerCase()
+  const i = KIT_ORDER.findIndex(k => n.includes(k))
+  return i === -1 ? KIT_ORDER.length : i
+}
 
 const STATUS_CLS = { active: 'bg-emerald-900 text-emerald-200', scheduled: 'bg-sky-900 text-sky-200', draft: 'bg-gray-700 text-gray-300', superseded: 'bg-gray-800 text-gray-500' }
 const OCT1 = '2026-10-01'
@@ -60,7 +71,9 @@ function ItemRow({ it, meta, editable, sum, onSave, onDelete }) {
   const cell = 'bg-transparent border-b border-transparent focus:border-skynet-accent outline-none w-full'
   return (
     <tr className={`border-t border-gray-800 ${dirty ? 'bg-amber-950/20' : ''}`}>
-      <td className="px-2 py-1 font-mono text-white whitespace-nowrap">{editable ? <input value={v.part_number} onChange={e => set('part_number', e.target.value)} className={`${cell} font-mono`} /> : it.part_number}{it.status === 'component_sum' && <span className="ml-1 text-[10px] text-sky-300">SET</span>}</td>
+      <td className="px-2 py-1 font-mono text-white whitespace-nowrap">{editable ? <input value={v.part_number} onChange={e => set('part_number', e.target.value)} className={`${cell} font-mono`} /> : it.part_number}{it.status === 'component_sum' && <span className="ml-1 text-[10px] text-sky-300">{it.kit_sku_id ? 'KIT' : 'SET'}</span>}{it.status === 'component_sum' && it.kit_sku_id && (
+        <Link to={`/kits?sku=${encodeURIComponent(it.part_number)}`} title={`Open ${it.part_number} in the Kit Registry`} className="ml-1 inline-flex align-middle text-gray-500 hover:text-white"><ExternalLink size={13} /></Link>
+      )}</td>
       <td className="px-2 py-1 text-gray-300 min-w-[260px]">{editable ? <input value={v.description || ''} onChange={e => set('description', e.target.value)} className={cell} /> : it.description}</td>
       <td className="px-2 py-1 text-right font-mono">{editable && it.status !== 'component_sum' ? <input type="number" step="0.001" value={v.list_price ?? ''} onChange={e => set('list_price', e.target.value)} className={`${cell} text-right w-24`} /> : it.status === 'component_sum' ? (
         sum && sum.each !== null
@@ -83,7 +96,8 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   const [books, setBooks] = useState([])
   const [bookId, setBookId] = useState(null)
   const [meta, setMeta] = useState(null); const [items, setItems] = useState([])
-  const [sectionId, setSectionId] = useState(null)
+  // Selected section per tab: Sections & items and Kits each keep their own place (addendum 2).
+  const [secByTab, setSecByTab] = useState({ items: null, kits: null })
   const [busy, setBusy] = useState(false); const [error, setError] = useState(null); const [flash, setFlash] = useState(null)
   const [showClone, setShowClone] = useState(false)
   const [view, setView] = useState('items')          // items | rules | diff
@@ -115,10 +129,10 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
       const kitIds = its.filter(i => i.status === 'component_sum').map(i => i.id)
       const kc = kitIds.length ? await loadKitComponentsForItems(kitIds) : []
       setMeta(m); setItems(its); setComps(kc)
+      // Kit Hardware lives on the Kits tab, so the drift pill lands there rather than on Sections & items.
       const want = pendingSection.current; pendingSection.current = null
       const hit = want ? m.sections.find(s => s.name.toLowerCase().includes(want)) : null
-      if (hit) setView('items')
-      setSectionId(s => hit ? hit.id : (s && m.sections.some(x => x.id === s) ? s : m.sections[0]?.id || null))
+      if (hit) { setView('kits'); setSecByTab(s => ({ ...s, kits: hit.id })) }
     }
     catch (e) { setError(e.message || String(e)) } finally { setBusy(false) }
   }
@@ -136,6 +150,18 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     return () => { live = false }
   }, [bookId, activeId]) // eslint-disable-line react-hooks/exhaustive-deps
   const note = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2500) }
+  // One handler, two buttons: the draft toolbar at the top and the Kit Hardware section on the Kits
+  // tab. Kept in both places on purpose — the top one is where it shipped and where a reprice is
+  // reached without first finding the right section (addendum 2).
+  const doRefreshCosts = () => {
+    if (!book) return
+    if (!confirm(`Reprice cost-based hardware in "${book.rev_label}" at 2 × latest received Fishbowl cost, and add any kit component that now has a cost on file? Published books are never changed.`)) return
+    run(async () => {
+      const r = await refreshHardwareCosts(book.id, 1.0)
+      await loadBook()
+      note(`Costs refreshed: ${num(r.updated)} repriced, ${num(r.added)} added for kit sums, ${num(r.no_cost_on_file)} still without a cost on file`)
+    })
+  }
   const run = async (fn, ok) => { setBusy(true); setError(null); try { await fn(); if (ok) note(ok) } catch (e) { setError(e.message || String(e)) } finally { setBusy(false) } }
 
   // Items carrying their components, which is what productsCsv and any set/kit pricing needs.
@@ -146,13 +172,12 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   }, [comps])
   const enriched = useMemo(() => items.map(i => (i.status === 'component_sum' ? { ...i, _components: compsByItem.get(i.id) || [] } : i)), [items, compsByItem])
   const itemsByKey = useMemo(() => new Map(enriched.map(i => [i.part_key, i])), [enriched])
-  // Sets and kits are shown in the grid from `enriched`, so each row carries its components.
-  const sectionItems = useMemo(() => enriched.filter(i => i.section_id === sectionId), [enriched, sectionId])
-  // One pass per section: the resolved Each of every set/kit plus which components blocked it.
-  const sectionSums = useMemo(() => {
+  // Book-wide, not per section: the Kits tab's section list needs resolved / unresolved counts for
+  // every kit section at once, and 331 sums over ~10 components each is trivial to do in one pass.
+  const sumsByItem = useMemo(() => {
     const resolve = (k) => itemsByKey.get(k) || null
     const m = new Map()
-    for (const it of sectionItems) {
+    for (const it of enriched) {
       if (it.status !== 'component_sum') continue
       const comps = it._components || []
       const missing = []
@@ -165,7 +190,44 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
       m.set(it.id, { each: each === null || !Number.isFinite(Number(each)) ? null : Number(each), total: comps.length, missing })
     }
     return m
-  }, [sectionItems, itemsByKey, meta, book])
+  }, [enriched, itemsByKey, meta, book])
+  // Per section: how many items, how many of its sums resolve, and whether it holds any sum at all —
+  // the last is what decides which tab the section belongs to.
+  const sectionCounts = useMemo(() => {
+    const m = new Map()
+    for (const i of enriched) {
+      const e = m.get(i.section_id) || { items: 0, sums: 0, resolved: 0, unresolved: 0 }
+      e.items++
+      if (i.status === 'component_sum') {
+        e.sums++
+        if (sumsByItem.get(i.id)?.each != null) e.resolved++; else e.unresolved++
+      }
+      m.set(i.section_id, e)
+    }
+    return m
+  }, [enriched, sumsByItem])
+  // Kits tab = every section that actually holds a sum, plus Kit Hardware. Partitioned by CONTENT,
+  // so a future kit family needs no rename and no list here (addendum 2). Kit Hardware is matched by
+  // name because it holds cost rows, not sums. Order is Matt's reading order, not the book's sort.
+  const { kitSections, plainSections } = useMemo(() => {
+    const kit = [], plain = []
+    for (const s of meta?.sections || []) {
+      if ((sectionCounts.get(s.id)?.sums || 0) > 0 || KIT_HARDWARE_RE.test(s.name)) kit.push(s); else plain.push(s)
+    }
+    kit.sort((a, b) => kitRank(a.name) - kitRank(b.name) || a.sort - b.sort)
+    return { kitSections: kit, plainSections: plain }
+  }, [meta, sectionCounts])
+  const visibleSections = view === 'kits' ? kitSections : plainSections
+  const sectionId = view === 'kits' ? secByTab.kits : secByTab.items
+  const pickSection = (id) => setSecByTab(s => ({ ...s, [view === 'kits' ? 'kits' : 'items']: id }))
+  // Keep each tab pointed at a section that exists in it, without losing the other tab's place.
+  useEffect(() => {
+    setSecByTab(s => ({
+      items: s.items && plainSections.some(x => x.id === s.items) ? s.items : (plainSections[0]?.id || null),
+      kits: s.kits && kitSections.some(x => x.id === s.kits) ? s.kits : (kitSections[0]?.id || null),
+    }))
+  }, [plainSections, kitSections])
+  const sectionItems = useMemo(() => enriched.filter(i => i.section_id === sectionId), [enriched, sectionId])
   // Cost-based rows are priced from purchase cost (D-PRICE-47), so a percentage reprice is meaningless
   // for them — the section is tagged and Set section is withdrawn.
   const sectionHasCostPlus = useMemo(() => sectionItems.some(i => i.cost_plus), [sectionItems])
@@ -182,11 +244,11 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     let resolvedSums = 0, unresolvedSums = 0
     for (const i of sectionItems) {
       if (i.status !== 'component_sum') continue
-      if (sectionSums.get(i.id)?.each != null) resolvedSums++
+      if (sumsByItem.get(i.id)?.each != null) resolvedSums++
       else unresolvedSums++
     }
     return { priced: rows.length, resolvedSums, unresolvedSums, matched: n, unmatched: baseMap ? rows.length - n : null, avgPct: n ? sum / n : null, baseId: baseMap ? baseBook.bookId : null, baseLabel: baseMap ? (books.find(b => b.id === baseBook.bookId)?.rev_label || 'in-effect book') : null }
-  }, [sectionItems, sectionSums, baseBook, bookId, books])
+  }, [sectionItems, sumsByItem, baseBook, bookId, books])
   const fmtPct = (p) => `${p > 0 ? '+' : ''}${(p * 100).toFixed(1)}%`
   const counts = useMemo(() => ({ items: items.length, priced: items.filter(i => i.status === 'priced').length, noprice: items.filter(i => i.status === 'no_price').length }), [items])
   const runDiff = async (otherId) => {
@@ -219,7 +281,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                 <td className="pr-4 py-1.5 text-white">{b.rev_label}
                   {b.status === 'active' && drift.length > 0 && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); pendingSection.current = 'kit hardware'; if (bookId === b.id) { const hit = meta?.sections.find(s => s.name.toLowerCase().includes('kit hardware')); pendingSection.current = null; if (hit) { setView('items'); setSectionId(hit.id) } } else setBookId(b.id) }}
+                      onClick={(e) => { e.stopPropagation(); pendingSection.current = 'kit hardware'; if (bookId === b.id) { const hit = meta?.sections.find(s => s.name.toLowerCase().includes('kit hardware')); pendingSection.current = null; if (hit) { setView('kits'); setSecByTab(s => ({ ...s, kits: hit.id })) } } else setBookId(b.id) }}
                       title={drift.slice(0, 5).map(d => `${d.part_number} (${money(d.book_each)} → ${money(d.cost_plus_now)})`).join('\n')}
                       className="ml-2 align-middle px-2 py-0.5 rounded text-[11px] bg-amber-900/50 text-amber-200 border border-amber-800 hover:text-white">
                       {num(drift.length)} hardware cost{drift.length === 1 ? '' : 's'} drifted &gt;10%
@@ -252,14 +314,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                   <button onClick={() => { if (confirm(`Raise every catalog Each in ${book.rev_label} by ${uplift}%?`)) run(async () => { const n = await upliftBook(book.id, Number(uplift) / 100); await loadBook(); return n }, `Uplifted ${uplift}%`) }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white">Uplift all</button></div>
                 <div className="flex items-center gap-1 text-xs"><CalendarClock size={13} className="text-gray-500" /><input type="date" value={pubDate} onChange={e => setPubDate(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
                   <button onClick={() => { if (confirm(`Publish ${book.rev_label} effective ${pubDate}?`)) run(async () => { await publishBook(book.id, pubDate); await refreshBooks() }, 'Published') }} className="px-2 py-1 rounded bg-skynet-accent text-gray-900 font-medium">Schedule / publish</button></div>
-                <button onClick={() => {
-                  if (!confirm(`Reprice cost-based hardware in "${book.rev_label}" at 2 × latest received Fishbowl cost, and add any kit component that now has a cost on file? Published books are never changed.`)) return
-                  run(async () => {
-                    const r = await refreshHardwareCosts(book.id, 1.0)
-                    await loadBook()
-                    note(`Costs refreshed: ${num(r.updated)} repriced, ${num(r.added)} added for kit sums, ${num(r.no_cost_on_file)} still without a cost on file`)
-                  })
-                }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Set every cost-based hardware Each to 2 × the latest received purchase cost, and add kit components that now have a cost (D-PRICE-47)"><RefreshCw size={13} /> Refresh costs</button>
+                <button onClick={doRefreshCosts} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Set every cost-based hardware Each to 2 × the latest received purchase cost, and add kit components that now have a cost (D-PRICE-47)"><RefreshCw size={13} /> Refresh costs</button>
               </>
             )}
             {canEdit && book.status === 'scheduled' && <button onClick={() => { if (confirm(`Take ${book.rev_label} back to draft?`)) run(async () => { await unpublishBook(book.id); await refreshBooks() }, 'Back to draft') }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white"><Undo2 size={13} /> Unschedule (edit)</button>}
@@ -276,18 +331,26 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
           {book.status === 'active' && canEdit && <div className="mb-3 text-xs text-gray-400">The active book is read-only. Clone it to make changes, then schedule the clone.</div>}
 
           <nav className="flex gap-1 border-b border-gray-700 mb-3">
-            {[['items', 'Sections & items'], ['rules', 'Rules & ladders'], ['diff', 'Diff']].map(([k, l]) => <button key={k} onClick={() => setView(k)} className={`px-3 py-1.5 text-sm border-b-2 -mb-px ${view === k ? 'border-skynet-accent text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>{l}</button>)}
+            {[['items', 'Sections & items'], ['kits', 'Kits'], ['rules', 'Rules & ladders'], ['diff', 'Diff']].map(([k, l]) => <button key={k} onClick={() => setView(k)} className={`px-3 py-1.5 text-sm border-b-2 -mb-px ${view === k ? 'border-skynet-accent text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>{l}</button>)}
           </nav>
 
           {busy && <div className="p-6 text-center"><Loader2 size={20} className="animate-spin text-gray-500 mx-auto" /></div>}
 
-          {!busy && view === 'items' && meta && (
+          {!busy && (view === 'items' || view === 'kits') && meta && (
             <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4">
               <aside>
                 <div className="max-h-[60vh] overflow-auto border border-gray-700 rounded-lg">
-                  {meta.sections.map(s => <button key={s.id} onClick={() => { setSectionId(s.id); setSectionTarget('') }} className={`w-full text-left px-3 py-1.5 text-xs border-b border-gray-800 ${sectionId === s.id ? 'bg-gray-700 text-white' : 'text-gray-300 hover:bg-gray-700/60'}`}>{s.name}{s.kind === 'resale' ? <span className="ml-1 text-rose-300">· resale</span> : ''}</button>)}
+                  {visibleSections.map(s => {
+                    const c = sectionCounts.get(s.id) || { items: 0, resolved: 0, unresolved: 0 }
+                    return (
+                      <button key={s.id} onClick={() => { pickSection(s.id); setSectionTarget('') }} className={`w-full text-left px-3 py-1.5 text-xs border-b border-gray-800 ${sectionId === s.id ? 'bg-gray-700 text-white' : 'text-gray-300 hover:bg-gray-700/60'}`}>
+                        {s.name}{s.kind === 'resale' ? <span className="ml-1 text-rose-300">· resale</span> : ''}
+                        {view === 'kits' && <span className="block text-[10px] text-gray-500 mt-0.5">{num(c.items)} items · {num(c.resolved)} resolved{c.unresolved ? <span className="text-rose-300"> · {num(c.unresolved)} unresolved</span> : ''}</span>}
+                      </button>
+                    )
+                  })}
                 </div>
-                {editable && (
+                {editable && view === 'items' && (
                   <div className="mt-2 flex gap-1">
                     <input value={newSection} onChange={e => setNewSection(e.target.value)} placeholder="New section name" className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs outline-none" />
                     <button onClick={() => { if (!newSection.trim()) return; run(async () => { await upsertSection(book.id, { name: newSection.trim(), sort: (meta.sections.length ? Math.max(...meta.sections.map(s => s.sort)) : 0) + 1 }); setNewSection(''); await loadBook() }, 'Section added') }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white"><Plus size={12} /></button>
@@ -301,7 +364,11 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                     {sectionStats.avgPct != null && (
                       <div className="font-mono text-gray-400 whitespace-nowrap" title={`Average Each change of the ${sectionStats.matched} parts in this section that are also in ${sectionStats.baseLabel}${sectionStats.unmatched ? `; ${sectionStats.unmatched} not in it` : ''}`}>vs {sectionStats.baseLabel}: <span className={sectionStats.avgPct > 0 ? 'text-amber-300' : sectionStats.avgPct < 0 ? 'text-rose-300' : 'text-gray-300'}>{fmtPct(sectionStats.avgPct)}</span></div>
                     )}
-                    {editable && section.kind !== 'resale' && sectionStats.baseId && !sectionHasCostPlus && (
+                    {view === 'kits' && <div className="text-[11px] text-gray-500 whitespace-nowrap">Kit price = sum of components at book price · hardware at 2× cost (D-PRICE-46/47)</div>}
+                    {view === 'kits' && editable && sectionHasCostPlus && (
+                      <button onClick={doRefreshCosts} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white whitespace-nowrap" title="Set every cost-based hardware Each to 2 × the latest received purchase cost, and add kit components that now have a cost (D-PRICE-47)"><RefreshCw size={13} /> Refresh costs</button>
+                    )}
+                    {view !== 'kits' && editable && section.kind !== 'resale' && sectionStats.baseId && !sectionHasCostPlus && (
                       <div className="flex items-center gap-1 whitespace-nowrap"><span className="text-gray-500">→ set to</span><input type="number" step="0.1" value={sectionTarget} onChange={e => setSectionTarget(e.target.value)} placeholder={sectionStats.avgPct != null ? (sectionStats.avgPct * 100).toFixed(1) : ''} className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" /><Percent size={13} className="text-gray-500" />
                         <button disabled={sectionTarget === '' || !sectionStats.matched} onClick={() => {
                           const t = Number(sectionTarget)
@@ -316,7 +383,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-800 sticky top-0"><tr className="text-left text-[11px] uppercase tracking-wide text-gray-400"><th className="px-2 py-2">Part</th><th className="px-2 py-2">Description</th><th className="px-2 py-2 text-right">Each</th><th className="px-2 py-2 text-center">Rule</th><th className="px-2 py-2 text-center">Ladder</th><th className="px-2 py-2 text-center">Premier</th><th className="px-2 py-2 text-center">DFAR</th><th></th></tr></thead>
                     <tbody>
-                      {sectionItems.map(it => <ItemRow key={it.id} it={it} meta={meta} editable={editable} sum={sectionSums.get(it.id)} onSave={(v) => run(async () => { await upsertItem(book.id, { ...v, section_id: sectionId }); await loadBook() }, `${v.part_number} saved`)} onDelete={(x) => { if (confirm(`Remove ${x.part_number} from ${book.rev_label}?`)) run(async () => { await deleteItem(book.id, x.id); await loadBook() }, 'Removed') }} />)}
+                      {sectionItems.map(it => <ItemRow key={it.id} it={it} meta={meta} editable={editable} sum={sumsByItem.get(it.id)} onSave={(v) => run(async () => { await upsertItem(book.id, { ...v, section_id: sectionId }); await loadBook() }, `${v.part_number} saved`)} onDelete={(x) => { if (confirm(`Remove ${x.part_number} from ${book.rev_label}?`)) run(async () => { await deleteItem(book.id, x.id); await loadBook() }, 'Removed') }} />)}
                     </tbody>
                   </table>
                 </div>

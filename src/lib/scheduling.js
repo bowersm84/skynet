@@ -169,15 +169,14 @@ export function formatDurationDH(minutes) {
 export async function applySchedule({
   supabase, profile, targetJob, targetMachineId,
   targetStart, targetEnd, targetMinutes, cascadeChanges,
-  revertCompliance = false
+  revertCompliance = false // D-SCHED-25: retained for signature compatibility; the RPC ignores it
 }) {
   // SKY63 Packet 3 — apply the placement + downstream cascade in ONE server-side
   // transaction (reschedule_with_cascade) so the deferrable overlap constraint is
   // validated only on the final arrangement, not the intermediate shuffle. Writing
   // the moves one-by-one tripped the constraint on a transient overlap.
-  const newStatus = revertCompliance
-    ? 'pending_compliance'
-    : (targetJob.status === 'pending_compliance' ? 'pending_compliance' : 'assigned')
+  // D-SCHED-25: a machine change never sends an approved job back to compliance.
+  const newStatus = targetJob.status === 'pending_compliance' ? 'pending_compliance' : 'assigned'
 
   const cascade = (cascadeChanges || []).map(change => ({
     job_id: change.job.id,

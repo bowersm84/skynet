@@ -87,6 +87,44 @@ export function isPaperworkStale(job) {
   return changed > Math.max(printed, acked)
 }
 
+// D-SCHED-25: every job whose traveler is derived-stale, for the Compliance
+// Review "Traveler Outdated" worklist. Covers machine change, merge, unmerge and
+// lot-split hosts alike — the reason string says which. Filtered client-side
+// because staleness is a comparison of three timestamps, not a column.
+export async function fetchStalePaperworkJobs() {
+  const { data, error } = await supabase
+    .from('jobs')
+    .select(`
+      id, job_number, work_order_id, status,
+      paperwork_changed_at, paperwork_changed_reason, traveler_printed_at, paperwork_ack_at,
+      component:parts!component_id(part_number),
+      assigned_machine:machines!assigned_machine_id(code, name)
+    `)
+    .not('paperwork_changed_at', 'is', null)
+    .in('status', ['assigned', 'in_setup', 'in_progress', 'manufacturing_complete'])
+    .order('paperwork_changed_at', { ascending: true })
+  if (error) throw error
+  return (data || []).filter(isPaperworkStale)
+}
+
+// D-SCHED-26: classify a paperwork_changed_reason for display. Reasons are written
+// by the RPCs (merge_job_into_host, unmerge_job, split_job_lot_change,
+// reschedule_with_cascade) with fixed prefixes — match on those, never on free text.
+export function classifyPaperworkChange(reason) {
+  const r = (reason || '').trim()
+  // Order matters: "Merged into" must be tested before the bare "Merge:" host prefix.
+  // Verified against TEST data 2026-09-15: "Merge:" (host), "Merged into" (member),
+  // "Machine changed:", "Lot-change split:". Unmerge prefixes confirmed from recovered RPC
+  // source (D-JOBMERGE-21): host "Unmerge:", member "Unmerged from".
+  if (/^machine changed:/i.test(r))  return { kind: 'machine', label: 'Machine change', className: 'bg-blue-900/60 text-blue-200 border-blue-700' }
+  if (/^merged into/i.test(r))       return { kind: 'member',  label: 'Merged member',  className: 'bg-amber-900/40 text-amber-300/80 border-amber-800' }
+  if (/^unmerged from/i.test(r))     return { kind: 'unmember', label: 'Unmerged member', className: 'bg-purple-900/40 text-purple-300/80 border-purple-800' }
+  if (/^unmerge:/i.test(r))          return { kind: 'unmerge', label: 'Unmerge',        className: 'bg-purple-900/60 text-purple-200 border-purple-700' }
+  if (/^merge:/i.test(r))            return { kind: 'merge',   label: 'Merge',          className: 'bg-amber-900/60 text-amber-200 border-amber-700' }
+  if (/^lot-change split:/i.test(r)) return { kind: 'lot',     label: 'Lot split',      className: 'bg-emerald-900/60 text-emerald-200 border-emerald-700' }
+  return { kind: 'other', label: 'Paperwork', className: 'bg-gray-800 text-gray-300 border-gray-600' }
+}
+
 // Active members of a host run, with WO context. Two queries client-merged
 // (nesting past two levels is unreliable in a single select).
 export async function fetchActiveMembers(hostJobId) {

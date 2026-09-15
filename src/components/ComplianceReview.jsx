@@ -11,6 +11,7 @@ import { batchRequiresChemicals } from '../lib/routing'
 import PrintPackageModal from './PrintPackageModal'
 import DocsDeferredBadge from './DocsDeferredBadge'
 import { fetchOpenIssues, ackPaperworkIssue } from '../lib/paperworkIssues'
+import { fetchStalePaperworkJobs, ackJobPaperwork, classifyPaperworkChange } from '../lib/jobMerge'
 import DeferredDocsWidget from './DeferredDocsWidget'
 import AddJobDocumentModal from './AddJobDocumentModal'
 import { 
@@ -125,6 +126,10 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
   const [acknowledgingPaperworkId, setAcknowledgingPaperworkId] = useState(null)
   // Paperwork issues flagged from the Kiosk (D-PAPERWORK-01) — acknowledged here.
   const [paperworkIssues, setPaperworkIssues] = useState([])
+  // D-SCHED-25: jobs whose traveler is derived-stale (machine change, merge, lot split).
+  const [staleTravelers, setStaleTravelers] = useState([])
+  const [stalePaperAckNotes, setStalePaperAckNotes] = useState({})
+  const [ackingStaleJobId, setAckingStaleJobId] = useState(null)
   const [ackingIssueId, setAckingIssueId] = useState(null)
   const [issueAckNotes, setIssueAckNotes] = useState({})
   // Shape: { [jobId]: [sends sorted by sent_at] }
@@ -234,6 +239,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     fetchLotChangePaperwork()
     fetchMergedAwaitingAck()
     fetchPaperworkIssues()
+    fetchStaleTravelers()
 
     const sub = supabase
       .channel('compliance-finishing-sends')
@@ -262,10 +268,22 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       }, () => fetchPaperworkIssues())
       .subscribe()
 
+    // D-SCHED-25: the stale-traveler worklist is derived from job timestamps —
+    // a reschedule, merge, ack or print all land as a jobs UPDATE.
+    const staleTravelersSub = supabase
+      .channel('compliance-stale-travelers')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'jobs'
+      }, () => fetchStaleTravelers())
+      .subscribe()
+
     return () => {
       supabase.removeChannel(sub)
       supabase.removeChannel(splitsSub)
       supabase.removeChannel(issuesSub)
+      supabase.removeChannel(staleTravelersSub)
     }
   }, [])
 
@@ -296,6 +314,29 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       setPaperworkIssues(await fetchOpenIssues())
     } catch (error) {
       console.error('Error loading paperwork issues:', error)
+    }
+  }
+
+  // D-SCHED-25: stale-traveler worklist. Reprinting the traveler or acknowledging
+  // clears an item by timestamp (isPaperworkStale) — nothing else on the job changes.
+  const fetchStaleTravelers = async () => {
+    try {
+      setStaleTravelers(await fetchStalePaperworkJobs())
+    } catch (error) {
+      console.error('Error loading stale travelers:', error)
+    }
+  }
+
+  const handleAckStaleTraveler = async (job) => {
+    setAckingStaleJobId(job.id)
+    try {
+      await ackJobPaperwork(job.id, stalePaperAckNotes[job.id] || null)
+      setStalePaperAckNotes(prev => { const next = { ...prev }; delete next[job.id]; return next })
+      await fetchStaleTravelers()
+    } catch (e) {
+      alert(`Could not acknowledge: ${e.message}`)
+    } finally {
+      setAckingStaleJobId(null)
     }
   }
 
@@ -623,6 +664,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
           .eq('id', jobId)
           .then(({ error: stampErr }) => {
             if (stampErr) console.error('traveler_printed stamp failed (non-blocking):', stampErr)
+            fetchStaleTravelers()
           })
       })
     } catch (err) {
@@ -2670,6 +2712,72 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
     <div className="space-y-4">
       {/* Deferred-documents widget — self-hides when count = 0 */}
       <DeferredDocsWidget refreshKey={jobs} onNavigateToWO={onNavigateToWO} />
+
+      {/* Traveler Outdated (D-SCHED-25) — machine change, merge/unmerge or lot-split host
+          stamped paperwork_changed. Reprint swaps the traveler; Acknowledge continues on
+          existing paper. Not a gate — the machinist can already run. Self-hides when empty. */}
+      {staleTravelers.length > 0 && (
+        <div className="border border-blue-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 bg-blue-900/20 border-b border-blue-800 flex items-center gap-2">
+            <FileWarning size={16} className="text-blue-400" />
+            <h3 className="text-white font-semibold text-sm">Traveler Outdated ({staleTravelers.length})</h3>
+            <span className="text-xs text-gray-400">
+              {Object.entries(staleTravelers.reduce((acc, j) => {
+                const { label } = classifyPaperworkChange(j.paperwork_changed_reason)
+                acc[label] = (acc[label] || 0) + 1
+                return acc
+              }, {})).map(([label, n]) => `${n} ${label.toLowerCase()}`).join(' · ')}
+            </span>
+            <span className="text-blue-300/70 text-xs ml-auto">Reprint or acknowledge — not a gate</span>
+          </div>
+          <div className="p-3 space-y-2">
+            {staleTravelers.map(job => {
+              const busy = ackingStaleJobId === job.id
+              const kind = classifyPaperworkChange(job.paperwork_changed_reason)
+              return (
+                <div key={job.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-white text-sm font-medium flex items-center gap-2 flex-wrap">
+                        <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold uppercase tracking-wide ${kind.className}`}>{kind.label}</span>
+                        <span>{job.job_number} · {job.component?.part_number || '—'}</span>
+                        {job.assigned_machine ? <span className="text-gray-400">· {job.assigned_machine.name}</span> : null}
+                      </div>
+                      <div className="text-xs text-gray-300 mt-1">{job.paperwork_changed_reason || 'Paperwork changed'}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        Changed {new Date(job.paperwork_changed_at).toLocaleString()}
+                        {job.traveler_printed_at ? ` · last printed ${new Date(job.traveler_printed_at).toLocaleString()}` : ' · never printed'}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <input
+                        type="text"
+                        placeholder="Note (optional)"
+                        value={stalePaperAckNotes[job.id] || ''}
+                        onChange={e => setStalePaperAckNotes(prev => ({ ...prev, [job.id]: e.target.value }))}
+                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white w-44"
+                      />
+                      <button
+                        onClick={() => handleViewTraveler(job.id)}
+                        className="px-2 py-1 text-xs rounded bg-gray-700 hover:bg-gray-600 text-white flex items-center gap-1"
+                      >
+                        <Printer size={12} />Print traveler
+                      </button>
+                      <button
+                        onClick={() => handleAckStaleTraveler(job)}
+                        disabled={busy}
+                        className="px-2 py-1 text-xs rounded bg-blue-700 hover:bg-blue-600 text-white flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {busy ? 'Saving…' : <><CheckCircle size={12} />Acknowledge</>}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Paperwork Issues (D-PAPERWORK-01) — machinists flag a job's paperwork from the
           Kiosk; compliance acknowledges here and passes drawing fixes to R&D.

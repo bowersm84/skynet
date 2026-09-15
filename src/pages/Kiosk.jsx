@@ -2593,7 +2593,7 @@ export default function Kiosk() {
     if (!lotChangeForm.send_choice) { alert('Choose whether to send a final batch or complete without sending.'); return }
     if (lotChangeForm.send_choice === 'send' && finalBatch <= 0) { alert('Enter the final batch quantity being sent to finishing.'); return }
     if (made <= 0) { alert('Nothing made on this lot — nothing to finalize.'); return }
-    if (made >= (activeRunTarget || activeJob.quantity || 0)) { alert('That leaves no remainder — use Complete Job instead.'); return }
+    if (made >= (activeRunTarget || activeJob.quantity || 0)) { alert(`That leaves no remainder against the run target of ${activeRunTarget || activeJob.quantity || 0} — use Complete Job instead.`); return }
     if (!lotChangeNewLot.trim()) { alert('Enter the new material lot number.'); return }
 
     setActionLoading(true)

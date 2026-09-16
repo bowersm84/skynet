@@ -12,18 +12,14 @@
 import { supabase } from './supabase'
 
 const PAGE = 1000
-export const TIERS = ['none', 'tier1', 'tier2', 'tier3', 'premier']
-export const TIER_LABELS = { none: 'No tier', tier1: 'Tier 1', tier2: 'Tier 2', tier3: 'Tier 3', premier: 'Premier' }
-export const TIER_COLORS = {
-  none: 'bg-gray-700 text-gray-300',
-  tier1: 'bg-sky-900 text-sky-200',
-  tier2: 'bg-indigo-900 text-indigo-200',
-  tier3: 'bg-violet-900 text-violet-200',
-  premier: 'bg-amber-900 text-amber-200',
-}
+// The tier vocabulary (levels + the D-PRICE-51 column tiers) lives in pricingView.js so it
+// can be unit-tested from Node; re-exported here because every caller imports it from this
+// module and nothing about where a constant is declared should ripple through them.
+export { TIERS, LEVEL_TIERS, COLUMN_TIERS, TIER_LABELS, TIER_COLORS, COLUMN_TIER_NOTE, isColumnTier } from './pricingView'
 export const BASIS_LABELS = {
   list: 'List (Each)', qty_break: 'Quantity break', tier: 'Customer tier', premier: 'Premier',
   exception: 'Customer-part exception', kit_sum: 'Sum of components', no_price: 'No pricing available',
+  column: 'Customer column', manual: 'Manual price',
 }
 
 export function todayIso() {
@@ -137,6 +133,35 @@ export async function loadKitComponentsForItems(itemIds) {
   }
   return out
 }
+// Which of a book's sections hold at least one component_sum — the partition input for the
+// Kits tab (D-PRICE-48 addendum 2). One narrow column for the sums only: 331 rows on Rev 82,
+// 13 on Rev 81, so the Catalog can decide which book its Kits tab reads without loading it.
+export async function loadSumSectionIds(bookId) {
+  if (!bookId) return new Set()
+  const rows = await fetchAll(() => supabase.from('price_items').select('section_id').eq('book_id', bookId).eq('status', 'component_sum'))
+  return new Set(rows.map(r => r.section_id))
+}
+// Items per section, for the Catalog's section search results. One column over the whole
+// book, read once per book and cached by the caller.
+export async function loadSectionItemCounts(bookId) {
+  if (!bookId) return {}
+  const rows = await fetchAll(() => supabase.from('price_items').select('section_id').eq('book_id', bookId))
+  const out = {}
+  for (const r of rows) out[r.section_id] = (out[r.section_id] || 0) + 1
+  return out
+}
+// Today's Fishbowl list price for a set of part keys — the "Fishbowl today" column beside
+// the scheduled book's kit prices (D-PRICE-52 F).
+export async function loadFbListPrices(keys) {
+  const uniq = [...new Set((keys || []).filter(Boolean))]
+  const out = {}
+  for (let i = 0; i < uniq.length; i += 200) {
+    const { data, error } = await supabase.from('fb_products').select('product_key, list_price').in('product_key', uniq.slice(i, i + 200))
+    if (error) throw error
+    for (const r of data || []) if (out[r.product_key] === undefined) out[r.product_key] = r.list_price
+  }
+  return out
+}
 // Kit components for a set of items (lookup detail).
 export async function loadKitComponents(itemId) {
   const { data, error } = await supabase.from('price_kit_components').select('*').eq('item_id', itemId)
@@ -188,6 +213,55 @@ export function columnPrice(item, colKey, meta, book, resolveComponent) {
   }
   const m = multiplierFor(rule, ladder, colKey)
   return m === null ? null : list * Number(m)
+}
+// The price a grid or a sheet should SHOW for one item at one column: columnPrice() plus the
+// two guards the RPC applies that the raw mirror leaves to the caller — a column the item's
+// ladder does not carry is blank, and Premier belongs only to an item flagged for it. (The
+// Catalog grid has always applied both inline; this is the same rule, in one place, so the
+// export and the grid cannot drift apart.) A set sums its components through the same guards
+// and is all-or-nothing: one unpriced component and the whole kit is null, never partial
+// and never zero (D-PRICE-48 / D-PRICE-50). columnPrice() itself is untouched.
+// `resolve(part_key)` supplies component items; one level deep, like the RPC.
+export function bookPricer(meta, book, resolve) {
+  const price = (item, colKey) => {
+    if (!item || item.status === 'no_price') return null
+    // The columns an item HAS are Each, its own ladder's, and Premier when it is flagged —
+    // the same set pricing_item_prices() builds per row. A kit is judged on its own ladder
+    // before its components are summed, which is why a kit on the q100/q300/q500 ladder has
+    // no Tier 3 price in the book even though every component does.
+    if (colKey !== 'each') {
+      if (colKey === 'premier') { if (!item.has_premier) return null }
+      else if (!((meta?.ladders?.[item.ladder_code]?.columns) || []).some(c => c.key === colKey)) return null
+    }
+    if (item.status === 'component_sum') {
+      const comps = item._components || []
+      if (!comps.length) return null
+      let sum = 0
+      for (const kc of comps) {
+        const c = resolve?.(kc.component_key) || null
+        const v = c ? price(c, colKey) : null
+        if (v === null || !Number.isFinite(Number(v))) return null
+        sum += Number(v) * Number(kc.qty || 1)
+      }
+      return sum
+    }
+    return columnPrice(item, colKey, meta, book, null)
+  }
+  return price
+}
+// The same sum, with the workings: { value, total, missing[] } — so a blocked kit can show
+// "Σ —" and name the components that block it instead of a silent dash.
+export function sumDetail(item, colKey, resolve, price) {
+  const comps = item?._components || []
+  const missing = []
+  let sum = 0
+  for (const kc of comps) {
+    const comp = resolve?.(kc.component_key) || null
+    const v = comp ? price(comp, colKey) : null
+    if (v === null || !Number.isFinite(Number(v))) missing.push(kc.component_part_number || kc.component_key)
+    else sum += Number(v) * Number(kc.qty || 1)
+  }
+  return { value: comps.length && !missing.length ? sum : null, total: comps.length, missing }
 }
 
 // ---------------------------------------------------------------- the price (RPC)
@@ -516,6 +590,25 @@ export async function loadQuote(id) {
 export async function setQuoteStatus(id, status, fbSoNumber, sentTo) {
   const { error } = await supabase.rpc('pricing_set_quote_status', { p_id: id, p_status: status, p_fb_so_number: fbSoNumber || null, p_sent_to: sentTo || null })
   if (error) throw error
+}
+
+// ---------------------------------------------------------------- deviations (D-PRICE-51/52)
+// Every quote line priced away from the book's recommendation, newest quote first. The view is
+// readable by `authenticated`; the portal shows it to admin and pricing_manager only
+// (canSeePricingDeviations) — a read-only screen, no writes anywhere in this path.
+//
+// The date range is the filter worth pushing to the server. rep and kind are accepted here for
+// completeness, but the Deviations tab loads a range once and narrows it with filterDeviations()
+// so switching a dropdown is instant and the rep list stays complete.
+export async function loadQuoteDeviations({ from, to, rep = null, kind = null } = {}) {
+  return fetchAll(() => {
+    let q = supabase.from('v_quote_deviations').select('*').order('issued_on', { ascending: false }).order('quote_number', { ascending: false }).order('sort')
+    if (from) q = q.gte('issued_on', from)
+    if (to) q = q.lte('issued_on', to)
+    if (rep) q = q.eq('created_by', rep)
+    if (kind) q = q.eq('deviation_kind', kind)
+    return q
+  })
 }
 
 // ---------------------------------------------------------------- images (C1)

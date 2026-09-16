@@ -79,3 +79,18 @@ export function canViewPricing(profile) {
 export function canEditPricing(profile) {
   return hasRole(profile, 'admin') && !isReadOnlyRole(profile?.role)
 }
+
+// Tier assignment and the Deviations view (S11, D-PRICE-51). Narrower than the rest of the
+// portal: admin, or the `pricing_manager` ADDITIONAL role (April, profiles.roles[]).
+// pricing_set_customer_tier enforces the same set server-side via _pricing_tier_roles(), so
+// the UI must not offer what the RPC will refuse. Deviations names reps and their pricing,
+// which is why it rides the same gate rather than the portal's view roles.
+export const PRICING_TIER_ROLES = ['admin', 'pricing_manager']
+
+export function canSetPricingTier(profile) {
+  return hasRole(profile, ...PRICING_TIER_ROLES) && !isReadOnlyRole(profile?.role)
+}
+
+export function canSeePricingDeviations(profile) {
+  return hasRole(profile, ...PRICING_TIER_ROLES)
+}

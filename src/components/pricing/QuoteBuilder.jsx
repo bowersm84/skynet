@@ -6,7 +6,7 @@
 // gives quotes a table, a number and a PDF; its line shape already matches.
 //
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Calendar, Hash, Info, AlertTriangle, Plus, Trash2, FileText, Users, Star, Save, FileDown, RotateCcw, Check, XCircle } from 'lucide-react'
+import { Loader2, Calendar, Hash, Info, AlertTriangle, Plus, Trash2, FileText, Users, Star, Save, FileDown, RotateCcw, Check, XCircle, PencilLine } from 'lucide-react'
 import {
   getPrice, loadKitComponents, loadItemsByKeys, loadPartHistory, loadPartCustomers, loadPartImages, partKey, columnPrice, itemColumns, money, num, round2,
   loadDraft, saveDraft, draftTotals, BASIS_LABELS, TIER_LABELS,
@@ -19,6 +19,11 @@ import { PartTypeahead, CustomerTypeahead, TierBadge } from './PricingTypeaheads
 import ImageLightbox from './ImageLightbox'
 
 const OCT1 = '2026-10-01'
+// A manual price is its own column key and its own basis, so v_quote_deviations can tell it
+// from a rep who simply picked another column (D-PRICE-51). It never creates a customer
+// special — that stays the price-list path (D-PRICE-29).
+const MANUAL = 'manual'
+const MIN_REASON = 10
 
 function StatusPill({ soStatus, lineStatus }) {
   const label = FB_LINE_STATUS[lineStatus] || FB_SO_STATUS[soStatus] || '—'
@@ -39,7 +44,8 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
   const [compItems, setCompItems] = useState({})
   const [history, setHistory] = useState([])
   const [buyers, setBuyers] = useState([])
-  const [chosen, setChosen] = useState(null)          // col key the rep picked; null = follow the recommendation
+  const [chosen, setChosen] = useState(null)          // col key the rep picked, or 'manual'; null = follow the recommendation
+  const [manual, setManual] = useState({ price: '', reason: '' })   // D-PRICE-52 D
   const [draft, setDraft] = useState(() => loadDraft(uid))
   const [flash, setFlash] = useState(null)
   const [image, setImage] = useState(null)
@@ -58,7 +64,7 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
   useEffect(() => {
     if (!part) { setResult(null); return }
     let cancelled = false
-    setBusy(true); setError(null); setChosen(null)
+    setBusy(true); setError(null); setChosen(null); setManual({ price: '', reason: '' })
     getPrice(part.part_number, customer?.fb_customer_id ?? null, Number(qty) || 1, asOf)
       .then(r => { if (!cancelled) setResult(r) })
       .catch(err => { if (!cancelled) setError(err.message || String(err)) })
@@ -95,9 +101,14 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
 
   const recommendedCol = result?.col_key === 'exception' ? 'exception' : result?.col_key || null
   const recommendedPrice = result?.unit_price_2dp ?? null
-  const chosenRow = chosen ? ladderRows.find(r => r.key === chosen) : null
-  const unitPrice = chosenRow ? round2(chosenRow.price) : recommendedPrice
-  const isOverride = !!chosen && chosen !== recommendedCol
+  const onManual = chosen === MANUAL
+  const chosenRow = chosen && !onManual ? ladderRows.find(r => r.key === chosen) : null
+  // A manual price is a deliberate, recorded departure, so it needs a real reason before it
+  // can be quoted (D-PRICE-52 D). The recommendation is kept on the line either way.
+  const manualReason = manual.reason.trim()
+  const manualOk = onManual && Number(manual.price) > 0 && manualReason.length >= MIN_REASON
+  const unitPrice = onManual ? (manualOk ? round2(Number(manual.price)) : null) : chosenRow ? round2(chosenRow.price) : recommendedPrice
+  const isOverride = onManual || (!!chosen && chosen !== recommendedCol)
   const tier = result?.tier || customer?.tier || 'none'
 
   const addToQuote = () => {
@@ -105,8 +116,9 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
     const line = {
       key: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       part_number: part.part_number, description: part.description || part.fb_description || '',
-      qty: Number(qty) || 1, col_key: chosen || recommendedCol, unit_price: unitPrice,
-      recommended_col: recommendedCol, recommended_price: recommendedPrice, basis: result?.basis, is_override: isOverride,
+      qty: Number(qty) || 1, col_key: onManual ? MANUAL : (chosen || recommendedCol), unit_price: unitPrice,
+      recommended_col: recommendedCol, recommended_price: recommendedPrice,
+      basis: onManual ? MANUAL : result?.basis, is_override: isOverride, note: onManual ? manualReason : null,
       dfar: !!part.dfar,
     }
     setDraft(d => {
@@ -129,7 +141,8 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
         book_id: book?.id || null, rev_label: draft.rev_label || book?.rev_label || null, as_of: draft.as_of || asOf,
         payment_terms: head.payment_terms || null, notes: head.notes || null, supersedes: draft.supersedes || null,
         lines: draft.lines.map(l => ({ part_number: l.part_number, description: l.description, dfar: !!l.dfar, qty: l.qty, unit_price: l.unit_price,
-          col_key: l.col_key, recommended_col: l.recommended_col, recommended_price: l.recommended_price, basis: l.basis, is_override: !!l.is_override })),
+          col_key: l.col_key, recommended_col: l.recommended_col, recommended_price: l.recommended_price, basis: l.basis, is_override: !!l.is_override,
+          note: l.note || null })),   // the manual-price reason: internal, never printed
       })
       // The quote is saved and numbered at this point: clear the draft first so a PDF
       // hiccup can never lead to a second Save (and a second number) for the same quote.
@@ -148,7 +161,7 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
       as_of: asOf, rev_label: book?.rev_label, supersedes: quote.status === 'issued' ? quote.id : null,
       head: { contact_name: quote.contact_name, contact_email: quote.contact_email, customer_po: quote.customer_po, payment_terms: quote.payment_terms, notes: quote.notes, walkin_name: quote.fb_customer_id ? null : quote.customer_name },
       lines: lines.map(l => ({ key: `${Date.now()}-${l.id}`, part_number: l.part_number, description: l.description, qty: Number(l.qty), col_key: l.col_key, unit_price: Number(l.unit_price),
-        recommended_col: l.recommended_col, recommended_price: l.recommended_price === null ? null : Number(l.recommended_price), basis: l.basis, is_override: l.is_override, dfar: l.dfar })),
+        recommended_col: l.recommended_col, recommended_price: l.recommended_price === null ? null : Number(l.recommended_price), basis: l.basis, is_override: l.is_override, note: l.note, dfar: l.dfar })),
     })
     setJustSaved(null)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -257,13 +270,15 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
                 {busy && <Loader2 size={22} className="animate-spin text-gray-500 ml-auto" />}
                 {!busy && result && recommendedPrice !== null && (
                   <>
-                    <div className="text-3xl font-semibold text-white font-mono">{money(unitPrice)}</div>
-                    {isOverride
-                      ? <div className="text-xs text-amber-300 mt-1">Override · {chosenRow?.label}{chosenRow?.kind === 'qty' ? '+' : ''} — recommended {money(recommendedPrice)} ({BASIS_LABELS[result.basis] || result.basis})</div>
-                      : <div className="text-xs text-gray-400 mt-1"><Star size={11} className="inline -mt-0.5 text-skynet-accent" /> Recommended · {BASIS_LABELS[result.basis] || result.basis}{result.col_key && result.col_key !== 'exception' ? ` · ${result.col_key}` : ''}</div>}
+                    <div className="text-3xl font-semibold text-white font-mono">{unitPrice === null ? '—' : money(unitPrice)}</div>
+                    {onManual
+                      ? <div className="text-xs text-rose-300 mt-1">Manual price — recommended {money(recommendedPrice)} ({BASIS_LABELS[result.basis] || result.basis})</div>
+                      : isOverride
+                        ? <div className="text-xs text-amber-300 mt-1">Override · {chosenRow?.label}{chosenRow?.kind === 'qty' ? '+' : ''} — recommended {money(recommendedPrice)} ({BASIS_LABELS[result.basis] || result.basis})</div>
+                        : <div className="text-xs text-gray-400 mt-1"><Star size={11} className="inline -mt-0.5 text-skynet-accent" /> Recommended · {BASIS_LABELS[result.basis] || result.basis}{result.col_key && result.col_key !== 'exception' ? ` · ${result.col_key}` : ''}</div>}
                     <div className="text-xs text-gray-500">{TIER_LABELS[tier]} · {result.rev_label}</div>
-                    <div className="text-sm text-gray-300 mt-2 font-mono">{num(qty)} × {money(unitPrice)} = <span className="text-white">{money(round2(Number(qty) * Number(unitPrice)))}</span></div>
-                    <button onClick={addToQuote} className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-skynet-accent text-gray-900 font-medium text-sm hover:opacity-90">
+                    {unitPrice !== null && <div className="text-sm text-gray-300 mt-2 font-mono">{num(qty)} × {money(unitPrice)} = <span className="text-white">{money(round2(Number(qty) * Number(unitPrice)))}</span></div>}
+                    <button onClick={addToQuote} disabled={unitPrice === null} className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-skynet-accent text-gray-900 font-medium text-sm hover:opacity-90 disabled:opacity-40">
                       <Plus size={16} /> Add to Quote
                     </button>
                     {flash && <div className="text-xs text-emerald-300 mt-1">{flash}</div>}
@@ -292,7 +307,34 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
                       </button>
                     )
                   })}
+                  <button onClick={() => setChosen(onManual ? null : MANUAL)}
+                    className={`text-left rounded-lg border px-3 py-2 min-w-[92px] transition-colors ${onManual ? 'border-rose-400 bg-rose-500/10' : 'border-gray-700 bg-gray-900/40 hover:border-gray-500'}`}>
+                    <div className="text-[11px] text-gray-500 flex items-center gap-1"><PencilLine size={10} /> Manual</div>
+                    <div className={`font-mono text-sm ${onManual ? 'text-white' : 'text-gray-300'}`}>{onManual && manual.price ? money(round2(Number(manual.price))) : '—'}</div>
+                  </button>
                 </div>
+                {onManual && (
+                  <div className="mt-3 bg-rose-950/30 border border-rose-900 rounded-lg p-3 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <label className="text-[11px] uppercase tracking-wide text-gray-400">Price each</label>
+                      <input type="number" min="0" step="0.001" value={manual.price} onChange={e => setManual(m => ({ ...m, price: e.target.value }))} autoFocus
+                        className="w-32 bg-gray-800 border border-gray-700 rounded px-2 py-1 font-mono outline-none" />
+                      {manual.price !== '' && recommendedPrice !== null && Number(manual.price) > 0 && (
+                        <span className={`text-xs font-mono ${Number(manual.price) < recommendedPrice ? 'text-rose-300' : 'text-emerald-300'}`}>
+                          Δ {money(round2(Number(manual.price) - recommendedPrice))} vs recommended
+                        </span>
+                      )}
+                    </div>
+                    <input value={manual.reason} onChange={e => setManual(m => ({ ...m, reason: e.target.value }))}
+                      placeholder="Reason — why this price (required, kept internal)" className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm outline-none" />
+                    <div className="text-[11px] text-gray-500">
+                      {manualReason.length < MIN_REASON
+                        ? <span className="text-amber-300">A reason of at least {MIN_REASON} characters is required before this price can be quoted.</span>
+                        : 'Saved with the line and visible on the Deviations tab. The customer PDF prints the price with no annotation.'}
+                    </div>
+                    <div className="text-[11px] text-gray-600">A manual price applies to this quote only — it never becomes a customer special (D-PRICE-29).</div>
+                  </div>
+                )}
                 <div className="mt-2 text-[11px] text-gray-600">★ = the book's recommendation for this customer and quantity. 100 / 300 / 500 are quantity breaks for everyone; Tier 1–3 and Premier are customer qualifications and never depend on quantity (D-PRICE-03).</div>
               </div>
             )}
@@ -356,7 +398,18 @@ export default function QuoteBuilder({ book, meta, asOf, setAsOf, todayIso: toda
                     <span className="text-gray-400">× {money(l.unit_price)}</span>
                     <span className="ml-auto font-mono text-white">{money(round2(l.qty * l.unit_price))}</span>
                   </div>
-                  <div className="mt-1 text-[10px] text-gray-500">{l.col_key}{l.is_override ? <span className="text-amber-300"> · override (rec. {money(l.recommended_price)} {l.recommended_col})</span> : ' · recommended'}{l.dfar ? ' · DFAR' : ''}</div>
+                  <div className="mt-1 text-[10px] text-gray-500 flex flex-wrap items-center gap-1">
+                    {l.basis === MANUAL
+                      ? <><span className="px-1 py-0.5 rounded bg-rose-900 text-rose-200 font-medium">MANUAL</span>
+                        {l.recommended_price !== null && l.recommended_price !== undefined && (
+                          <span className={Number(l.unit_price) < Number(l.recommended_price) ? 'text-rose-300' : 'text-emerald-300'}>
+                            Δ {money(round2(Number(l.unit_price) - Number(l.recommended_price)))} vs {money(l.recommended_price)} {l.recommended_col}
+                          </span>
+                        )}
+                        {l.note ? <span className="text-gray-500 truncate max-w-[180px]" title={l.note}>· {l.note}</span> : null}</>
+                      : <>{l.col_key}{l.is_override ? <span className="text-amber-300">· override (rec. {money(l.recommended_price)} {l.recommended_col})</span> : <span>· recommended</span>}</>}
+                    {l.dfar ? <span>· DFAR</span> : null}
+                  </div>
                 </div>
               ))}
             </div>

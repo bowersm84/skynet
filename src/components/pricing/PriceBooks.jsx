@@ -13,18 +13,9 @@ import {
   diffBooks, productsCsv, money, num, columnPrice,
   loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift, syncKitsSite,
 } from '../../lib/pricing'
+import { partitionKitSections } from '../../lib/pricingView'
 import { downloadBytes } from '../../lib/priceListDoc'
 import { PartTypeahead } from './PricingTypeaheads'
-
-// Kits tab ordering — Matt's reading order (Common Sets, Cowling, Option, RV, Lancair, Kit Hardware),
-// matched on content words so a section rename or a new family does not silently fall to the bottom.
-const KIT_HARDWARE_RE = /kit hardware/i
-const KIT_ORDER = ['common set', 'cowling', 'option', 'rv kit', 'lancair', 'kit hardware']
-const kitRank = (name) => {
-  const n = String(name || '').toLowerCase()
-  const i = KIT_ORDER.findIndex(k => n.includes(k))
-  return i === -1 ? KIT_ORDER.length : i
-}
 
 const STATUS_CLS = { active: 'bg-emerald-900 text-emerald-200', scheduled: 'bg-sky-900 text-sky-200', draft: 'bg-gray-700 text-gray-300', superseded: 'bg-gray-800 text-gray-500' }
 const OCT1 = '2026-10-01'
@@ -265,14 +256,9 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   // Kits tab = every section that actually holds a sum, plus Kit Hardware. Partitioned by CONTENT,
   // so a future kit family needs no rename and no list here (addendum 2). Kit Hardware is matched by
   // name because it holds cost rows, not sums. Order is Matt's reading order, not the book's sort.
-  const { kitSections, plainSections } = useMemo(() => {
-    const kit = [], plain = []
-    for (const s of meta?.sections || []) {
-      if ((sectionCounts.get(s.id)?.sums || 0) > 0 || KIT_HARDWARE_RE.test(s.name)) kit.push(s); else plain.push(s)
-    }
-    kit.sort((a, b) => kitRank(a.name) - kitRank(b.name) || a.sort - b.sort)
-    return { kitSections: kit, plainSections: plain }
-  }, [meta, sectionCounts])
+  const { kitSections, plainSections } = useMemo(
+    () => partitionKitSections(meta?.sections || [], s => (sectionCounts.get(s.id)?.sums || 0) > 0),
+    [meta, sectionCounts])
   const visibleSections = view === 'kits' ? kitSections : plainSections
   const sectionId = view === 'kits' ? secByTab.kits : secByTab.items
   const pickSection = (id) => setSecByTab(s => ({ ...s, [view === 'kits' ? 'kits' : 'items']: id }))

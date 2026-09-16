@@ -7,7 +7,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Loader2, ShieldCheck, Tag, History, Plus, X, AlertTriangle, TrendingUp, FileText, FileDown } from 'lucide-react'
 import {
   loadCustomer, loadTierHistory, setCustomerTier, loadExceptions, upsertException, closeException,
-  loadPurchases, loadTopCustomers, loadPriceLists, loadPriceList, loadQuotes, loadQuote, quoteIsExpired, QUOTE_STATUS_LABELS, getPrice, TIERS, TIER_LABELS, money, num, todayIso,
+  loadPurchases, loadTopCustomers, loadPriceLists, loadPriceList, loadQuotes, loadQuote, quoteIsExpired, QUOTE_STATUS_LABELS, getPrice,
+  LEVEL_TIERS, COLUMN_TIERS, COLUMN_TIER_NOTE, TIER_LABELS, money, num, todayIso,
 } from '../../lib/pricing'
 import { buildQuotePdf, quoteFilename } from '../../lib/quoteDoc'
 import { buildPriceListPdf, downloadBytes, priceListFilename } from '../../lib/priceListDoc'
@@ -27,13 +28,16 @@ function SetTierPanel({ customer, onSaved, onCancel }) {
     try { await setCustomerTier(customer.fb_customer_id, tier, from, note); onSaved() }
     catch (e) { setErr(e.message || String(e)) } finally { setBusy(false) }
   }
+  // Two rows on purpose: the levels a customer qualifies for, and the quantity column a
+  // customer simply lives on (D-PRICE-51). They are not degrees of the same thing.
+  const tierButton = (t) => (
+    <button key={t} onClick={() => setTier(t)} className={`px-3 py-1 rounded border text-sm ${tier === t ? 'border-skynet-accent text-white bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'}`}>{TIER_LABELS[t]}</button>
+  )
   return (
     <div className="mt-3 bg-gray-900/60 border border-gray-700 rounded-lg p-3 space-y-2">
-      <div className="flex flex-wrap gap-2">
-        {TIERS.map(t => (
-          <button key={t} onClick={() => setTier(t)} className={`px-3 py-1 rounded border text-sm ${tier === t ? 'border-skynet-accent text-white bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'}`}>{TIER_LABELS[t]}</button>
-        ))}
-      </div>
+      <div className="flex flex-wrap gap-2">{LEVEL_TIERS.map(tierButton)}</div>
+      <div className="flex flex-wrap gap-2">{COLUMN_TIERS.map(tierButton)}</div>
+      <div className="text-[11px] text-gray-500">{COLUMN_TIER_NOTE}</div>
       <div className="grid grid-cols-[auto_1fr] gap-2 items-center text-sm">
         <label className="text-gray-500 text-xs">Effective</label>
         <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm font-mono outline-none w-44" />
@@ -113,7 +117,7 @@ function TopCustomers({ onPick }) {
   )
 }
 
-export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, nextBook, profile }) {
+export default function PriceCustomers({ asOf, canEdit, canSetTier, initialCustomer, book, nextBook, profile }) {
   const [customer, setCustomer] = useState(initialCustomer || null)
   const [priceLists, setPriceLists] = useState([])
   const [quotes, setQuotes] = useState([])
@@ -203,8 +207,11 @@ export default function PriceCustomers({ asOf, canEdit, initialCustomer, book, n
               <TierBadge tier={customer.tier} size="lg" />
             </div>
             {customer.tier_note && <div className="mt-2 text-xs text-amber-300/90 flex items-start gap-1"><AlertTriangle size={12} className="mt-0.5 shrink-0" />{customer.tier_note}</div>}
-            {canEdit && !showSetTier && <button onClick={() => setShowSetTier(true)} className="mt-3 text-sm text-skynet-accent hover:underline flex items-center gap-1"><ShieldCheck size={14} /> Set tier</button>}
-            {showSetTier && <SetTierPanel customer={customer} onCancel={() => setShowSetTier(false)} onSaved={() => { setShowSetTier(false); reload(customer.fb_customer_id) }} />}
+            {/* Tier assignment is admin or pricing_manager (D-PRICE-51); pricing_set_customer_tier
+                refuses anyone else, so everyone else sees the badge and history read-only. */}
+            {canSetTier && !showSetTier && <button onClick={() => setShowSetTier(true)} className="mt-3 text-sm text-skynet-accent hover:underline flex items-center gap-1"><ShieldCheck size={14} /> Set tier</button>}
+            {!canSetTier && <div className="mt-3 text-[11px] text-gray-500">Tier changes: admin or pricing manager</div>}
+            {canSetTier && showSetTier && <SetTierPanel customer={customer} onCancel={() => setShowSetTier(false)} onSaved={() => { setShowSetTier(false); reload(customer.fb_customer_id) }} />}
             {history.length > 0 && (
               <div className="mt-4">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1"><History size={12} /> Tier history</div>

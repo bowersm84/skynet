@@ -7,19 +7,23 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { FEATURES } from '../config'
-import { canViewPricing, canEditPricing } from '../lib/roles'
+import { canViewPricing, canEditPricing, canSetPricingTier, canSeePricingDeviations } from '../lib/roles'
 import { loadBooks, loadBookMeta, bookContext, loadSyncAges, ageLabel, todayIso, rollBooks } from '../lib/pricing'
 import QuoteBuilder from '../components/pricing/QuoteBuilder'
 import PriceCatalog from '../components/pricing/PriceCatalog'
 import PriceCustomers from '../components/pricing/PriceCustomers'
 import PriceBooks from '../components/pricing/PriceBooks'
-import { Loader2, Tags, FileText, Layers, Users, BookOpen, LogOut, RefreshCw, AlertTriangle } from 'lucide-react'
+import PriceDeviations from '../components/pricing/PriceDeviations'
+import { Loader2, Tags, FileText, Layers, Users, BookOpen, Scale, LogOut, RefreshCw, AlertTriangle } from 'lucide-react'
 
+// Deviations names reps and what they quoted, so it is admin / pricing_manager only
+// (D-PRICE-52 E) — hidden from the tab strip and refused if the tab is somehow selected.
 const TABS = [
   { key: 'catalog', label: 'Catalog', icon: Layers },
   { key: 'customers', label: 'Customers', icon: Users },
   { key: 'books', label: 'Price Books', icon: BookOpen },
   { key: 'quote', label: 'Quote Builder', icon: FileText },
+  { key: 'deviations', label: 'Deviations', icon: Scale, gate: canSeePricingDeviations },
 ]
 
 export default function Pricing() {
@@ -74,6 +78,9 @@ export default function Pricing() {
   }, [current?.id])
 
   const canEdit = canEditPricing(profile)
+  const canSetTier = canSetPricingTier(profile)
+  const seeDeviations = canSeePricingDeviations(profile)
+  const tabs = TABS.filter(t => !t.gate || t.gate(profile))
   const today = todayIso()
 
   if (!FEATURES.PRICING_PORTAL) {
@@ -123,7 +130,7 @@ export default function Pricing() {
           </div>
         </div>
         <nav className="px-5 flex gap-1">
-          {TABS.map(t => (
+          {tabs.map(t => (
             <button key={t.key} onClick={() => setTab(t.key)}
               className={`flex items-center gap-2 px-4 py-2 text-sm border-b-2 -mb-px transition-colors ${tab === t.key ? 'border-skynet-accent text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>
               <t.icon size={15} /> {t.label}
@@ -135,9 +142,10 @@ export default function Pricing() {
       <main className="px-5 py-5">
         {error && <div className="mb-4 flex items-center gap-2 text-sm text-rose-300 bg-rose-950/40 border border-rose-900 rounded px-3 py-2"><AlertTriangle size={14} /> {error}</div>}
         {tab === 'quote' && <QuoteBuilder book={current} meta={meta} asOf={asOf} setAsOf={setAsOf} todayIso={today} nextBook={next} canEdit={canEdit} profile={profile} />}
-        {tab === 'catalog' && (meta ? <PriceCatalog book={current} meta={meta} canEdit={canEdit} /> : <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div>)}
-        {tab === 'customers' && <PriceCustomers asOf={asOf} canEdit={canEdit} book={current} nextBook={next} profile={profile} />}
+        {tab === 'catalog' && (meta ? <PriceCatalog book={current} meta={meta} nextBook={next} canEdit={canEdit} /> : <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div>)}
+        {tab === 'customers' && <PriceCustomers asOf={asOf} canEdit={canEdit} canSetTier={canSetTier} book={current} nextBook={next} profile={profile} />}
         {tab === 'books' && <PriceBooks canEdit={canEdit} onBooksChanged={refresh} />}
+        {tab === 'deviations' && (seeDeviations ? <PriceDeviations /> : <div className="text-sm text-gray-400">Deviations are visible to admin and pricing managers.</div>)}
       </main>
     </div>
   )

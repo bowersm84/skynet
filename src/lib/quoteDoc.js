@@ -5,13 +5,13 @@
 // line table (Number, Description, Unit, Qty, Total), subtotal, returns terms.
 //
 import { PDFDocument, StandardFonts } from 'pdf-lib'
-import { money, num, TIER_LABELS } from './pricing'
+import { money, num, fmtUsDate, TIER_LABELS } from './pricing'
 import { BRAND, safe, drawLetterhead } from './pdfText'
 
 const LETTER = [612, 792]
 const M = 40
 const INK = BRAND.ink, GREY = BRAND.grey, LINE = BRAND.line, ACCENT = BRAND.red, BAND = BRAND.band
-export const QUOTE_TERMS = 'Prices are in US dollars, per piece, FOB Origin, valid through the date shown; orders received after that date are re-priced from the current price book. Lead time quoted at time of order. RETURNS MUST BE WITHIN 30 DAYS AFTER PRIOR APPROVAL FROM SKYBOLT. CUSTOMER IS RESPONSIBLE FOR FREIGHT & 30% RESTOCKING FEE. ALL RETURNS MUST HAVE A RETURN AUTHORIZATION NUMBER AND MUST BE IN THE ORIGINAL PACKAGING.'
+export const QUOTE_TERMS = 'Prices are in US dollars, per piece, valid through the date shown; orders received after that date are re-priced from the current price book. Lead time quoted at time of order. RETURNS MUST BE WITHIN 30 DAYS AFTER PRIOR APPROVAL FROM SKYBOLT. CUSTOMER IS RESPONSIBLE FOR FREIGHT & 30% RESTOCKING FEE. ALL RETURNS MUST HAVE A RETURN AUTHORIZATION NUMBER AND MUST BE IN THE ORIGINAL PACKAGING.'
 
 function wrap(text, font, size, width) {
   const words = safe(text).split(/\s+/); const lines = []; let cur = ''
@@ -42,7 +42,7 @@ export async function buildQuotePdf(q, lines) {
     const bx = W - M - 230, by = y - 60, bw = 230
     page.drawRectangle({ x: bx, y: by, width: bw, height: 34, borderColor: LINE, borderWidth: 0.8 })
     page.drawRectangle({ x: bx, y: by + 17, width: bw, height: 17, color: BAND })
-    const cells = [['Quote #', q.quote_number], ['Date', String(q.issued_on)], ['Valid until', String(q.valid_until)]]
+    const cells = [['Quote #', q.quote_number], ['Date', fmtUsDate(q.issued_on)], ['Valid until', fmtUsDate(q.valid_until)]]
     cells.forEach(([k, v], i) => {
       const cx = bx + i * (bw / 3), cw = bw / 3
       page.drawText(k, { x: cx + (cw - bold.widthOfTextAtSize(k, 8)) / 2, y: by + 22, size: 8, font: bold, color: INK })
@@ -61,11 +61,12 @@ export async function buildQuotePdf(q, lines) {
       page.drawRectangle({ x: rx, y: y - 52, width: (W - 2 * M) / 2 - 8, height: 60, borderColor: LINE, borderWidth: 0.8 })
       page.drawRectangle({ x: rx, y: y - 6, width: (W - 2 * M) / 2 - 8, height: 14, color: BAND })
       page.drawText('Reference:', { x: rx + 4, y: y - 3, size: 8, font: bold, color: INK })
-      const ref = [`Pricing level: ${TIER_LABELS[q.tier] || 'List / quantity breaks'}`, q.customer_po ? `Customer PO / RFQ: ${q.customer_po}` : '', `Price book: ${q.rev_label || ''} (as of ${q.as_of})`].filter(Boolean)
+      const ref = [`Pricing level: ${TIER_LABELS[q.tier] || 'List / quantity breaks'}`, q.customer_po ? `Customer PO / RFQ: ${q.customer_po}` : '', `Price book: ${q.rev_label || ''} (as of ${fmtUsDate(q.as_of)})`].filter(Boolean)
       ref.forEach((t, i) => page.drawText(safe(t), { x: rx + 4, y: y - 20 - i * 11, size: 9, font, color: INK }))
       y -= 64
-      // strip: Sales rep | Payment terms | FOB | Prepared
-      const strip = [['Sales Rep', q.created_by_name || ''], ['Payment Terms', q.payment_terms || 'Per account terms'], ['FOB Point', 'Origin'], ['Prepared', String(q.created_at || '').slice(0, 10)]]
+      // strip: Sales rep | Payment terms | Prepared. FOB Point dropped (Matt, 2026-09-16);
+      // the three cells re-space themselves off strip.length.
+      const strip = [['Sales Rep', q.created_by_name || ''], ['Payment Terms', q.payment_terms || 'Per account terms'], ['Prepared', fmtUsDate(q.created_at)]]
       const sw = (W - 2 * M) / strip.length
       page.drawRectangle({ x: M, y: y - 26, width: W - 2 * M, height: 28, borderColor: LINE, borderWidth: 0.8 })
       page.drawRectangle({ x: M, y: y - 12, width: W - 2 * M, height: 14, color: BAND })

@@ -35,6 +35,15 @@ export function num(v, dp = 0) {
   if (v === null || v === undefined) return '—'
   return Number(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp })
 }
+// Customer documents print US dates: 2026-09-16 → 09/16/2026 (D-PRICE-52 addendum).
+// PRINTED PAGES ONLY — ISO stays everywhere else: it is what the database stores, what the
+// portal shows, and what sorts correctly as a string. Parsed as text rather than through
+// Date(), because `new Date('2026-09-16')` is UTC midnight and prints as the 15th in Florida.
+// Anything that is not an ISO date (empty, already formatted, a stray label) is returned as is.
+export function fmtUsDate(v) {
+  const m = String(v ?? '').match(/^(\d{4})-(\d{2})-(\d{2})/)
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : String(v ?? '')
+}
 // Half-up to 2 dp, matching round(numeric, 2) in Postgres (D-PRICE-02).
 export function round2(v) { return v === null || v === undefined ? null : Math.round((Number(v) + Number.EPSILON) * 100) / 100 }
 export function ilikeSafe(term) { return String(term || '').replace(/[%_\\,()]/g, ' ').trim() }

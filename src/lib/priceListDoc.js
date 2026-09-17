@@ -5,13 +5,13 @@
 //
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import * as XLSX from 'xlsx'
-import { money, TIER_LABELS } from './pricing'
+import { money, fmtUsDate, TIER_LABELS } from './pricing'
 import { BRAND, safe, drawLetterhead } from './pdfText'
 
 const LETTER = [612, 792]
 const MARGIN = 40
 const INK = BRAND.ink, GREY = BRAND.grey, LINE = BRAND.line, ACCENT = BRAND.red, BAND = BRAND.band
-const TERMS = 'Prices are in US dollars, per piece, FOB Origin, and are subject to change without notice after the effective date shown. Quantity breaks do not apply to tiered pricing. Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
+const TERMS = 'Prices are in US dollars, per piece, and are subject to change without notice after the effective date shown. Quantity breaks do not apply to tiered pricing. Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
 
 function wrap(text, font, size, width) {
   const words = safe(text).split(/\s+/); const lines = []; let cur = ''
@@ -52,7 +52,7 @@ export async function buildPriceListPdf(list, lines) {
     y -= 14
     if (pageNo === 1) {
       const left = [['Customer', `${list.customer_name}${list.customer_number ? `  (#${list.customer_number})` : ''}`], ['Pricing level', TIER_LABELS[list.tier] || 'List / quantity breaks'], ['Prepared by', list.created_by_name || '']]
-      const right = [['Effective', String(list.as_of)], ['Price book', list.rev_label || ''], ['Issued', String(list.created_at || '').slice(0, 10)]]
+      const right = [['Effective', fmtUsDate(list.as_of)], ['Price book', list.rev_label || ''], ['Issued', fmtUsDate(list.created_at)]]
       const rowH = 13
       left.forEach(([k, v], i) => { page.drawText(k.toUpperCase(), { x: MARGIN, y: y - i * rowH, size: 7, font: bold, color: GREY }); page.drawText(safe(v), { x: MARGIN + 70, y: y - i * rowH, size: 9, font, color: INK }) })
       right.forEach(([k, v], i) => { page.drawText(k.toUpperCase(), { x: W / 2 + 20, y: y - i * rowH, size: 7, font: bold, color: GREY }); page.drawText(safe(v), { x: W / 2 + 90, y: y - i * rowH, size: 9, font, color: INK }) })

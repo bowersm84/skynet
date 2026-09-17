@@ -1,0 +1,11 @@
+customer_orders|200
+finishing_sends|1070
+job_routing_steps|1075
+jobs|316
+kit_lot_component_lots|16977
+kit_lots|1444
+material_receiving|200
+material_reconciliation_flags|35
+material_usage|724
+stc_requests|72
+work_orders|229

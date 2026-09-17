@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { X, Loader2, Plus, Trash2, ChevronDown, ChevronRight, Package, Wrench, AlertTriangle, ShoppingCart, Save } from 'lucide-react'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 import { resyncWODueDates } from '../lib/woDueDate'
+import { updateJobQuantity } from '../lib/jobMerge'
 import CustomerDisplay from './CustomerDisplay'
 
 const ALLOC_GATE_ROLES = ['admin', 'scheduler']
@@ -161,7 +162,10 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
           quantity: j.quantity,
           originalQuantity: j.quantity,
           status: j.status,
-          isEditable: ['pending_compliance', 'ready'].includes(j.status)
+          // D-WOLOOKUP-QTYEDIT01: editable until production starts. Scheduled
+          // (assigned / in_setup) edits go through update_job_quantity.
+          isEditable: ['pending_compliance', 'ready', 'assigned', 'in_setup'].includes(j.status),
+          isScheduled: ['assigned', 'in_setup'].includes(j.status)
         })),
         expanded: true
       }
@@ -538,6 +542,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     setError('')
 
     try {
+      const windowNotes = []
       // 1. Update WO-level fields
       const woUpdates = {}
       if (customer !== workOrder.customer) woUpdates.customer = customer
@@ -575,14 +580,20 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
           if (woaErr) throw woaErr
         }
 
-        // Update job quantities
+        // Update job quantities. Scheduled jobs go through the RPC so the traveler
+        // is stamped stale and compliance is notified (D-WOLOOKUP-QTYEDIT01).
         for (const job of assembly.jobs) {
           if (job.quantity !== job.originalQuantity && job.isEditable) {
-            const { error: jobErr } = await supabase
-              .from('jobs')
-              .update({ quantity: job.quantity })
-              .eq('id', job.id)
-            if (jobErr) throw jobErr
+            if (job.isScheduled) {
+              const res = await updateJobQuantity(job.id, job.quantity, `Work order ${workOrder.wo_number} edit`)
+              if (res?.window_note) windowNotes.push(`${job.jobNumber}: ${res.window_note}`)
+            } else {
+              const { error: jobErr } = await supabase
+                .from('jobs')
+                .update({ quantity: job.quantity })
+                .eq('id', job.id)
+              if (jobErr) throw jobErr
+            }
           }
         }
       }
@@ -797,6 +808,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
         setNewComponents([])
       }
 
+      if (windowNotes.length > 0) alert(windowNotes.join('\n'))
       onSuccess?.()
       onClose()
     } catch (err) {
@@ -1120,7 +1132,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                       </div>
                     </div>
                     {!allEditable && (
-                      <span className="text-xs text-gray-600" title="Some jobs already scheduled">🔒</span>
+                      <span className="text-xs text-gray-600" title="Production has started on a job — quantity locked. Use a lot split or merge.">🔒</span>
                     )}
                   </div>
                 </div>
@@ -1162,6 +1174,11 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
                               }`}>
                                 {job.status.replace(/_/g, ' ')}
                               </span>
+                              {job.isScheduled && job.quantity !== job.originalQuantity && (
+                                <span className="text-[10px] text-cyan-300" title="Scheduled job — traveler will be flagged stale and Compliance notified on save">
+                                  stamps traveler
+                                </span>
+                              )}
                             </div>
                           </div>
                         ))}

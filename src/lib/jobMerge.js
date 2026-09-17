@@ -107,6 +107,17 @@ export async function fetchStalePaperworkJobs() {
   return (data || []).filter(isPaperworkStale)
 }
 
+// D-WOLOOKUP-QTYEDIT01: quantity change on a not-yet-started job. Scheduled jobs get
+// the paperwork-stale stamp + compliance notice server-side; never bypass with a
+// direct jobs UPDATE for assigned / in_setup.
+export async function updateJobQuantity(jobId, newQuantity, reason = 'Work order edit') {
+  const { data, error } = await supabase.rpc('update_job_quantity', {
+    p_job_id: jobId, p_new_quantity: newQuantity, p_reason: reason
+  })
+  if (error) throw error
+  return data
+}
+
 // D-SCHED-26: classify a paperwork_changed_reason for display. Reasons are written
 // by the RPCs (merge_job_into_host, unmerge_job, split_job_lot_change,
 // reschedule_with_cascade) with fixed prefixes — match on those, never on free text.
@@ -117,6 +128,7 @@ export function classifyPaperworkChange(reason) {
   // "Machine changed:", "Lot-change split:". Unmerge prefixes confirmed from recovered RPC
   // source (D-JOBMERGE-21): host "Unmerge:", member "Unmerged from".
   if (/^machine changed:/i.test(r))  return { kind: 'machine', label: 'Machine change', className: 'bg-blue-900/60 text-blue-200 border-blue-700' }
+  if (/^quantity changed:/i.test(r)) return { kind: 'qty',     label: 'Qty change',     className: 'bg-cyan-900/60 text-cyan-200 border-cyan-700' }
   if (/^merged into/i.test(r))       return { kind: 'member',  label: 'Merged member',  className: 'bg-amber-900/40 text-amber-300/80 border-amber-800' }
   if (/^unmerged from/i.test(r))     return { kind: 'unmember', label: 'Unmerged member', className: 'bg-purple-900/40 text-purple-300/80 border-purple-800' }
   if (/^unmerge:/i.test(r))          return { kind: 'unmerge', label: 'Unmerge',        className: 'bg-purple-900/60 text-purple-200 border-purple-700' }

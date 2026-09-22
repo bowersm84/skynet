@@ -39,7 +39,7 @@ import {
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
-import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes } from '../lib/scheduling'
+import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes, fetchPartFamily, fetchLengthFamilyHistory, fetchPartMachineHistory, buildRateLadder } from '../lib/scheduling'
 import AIAdvisorPanel from '../components/schedule/AIAdvisorPanel'
 import { FEATURES } from '../config'
 
@@ -305,6 +305,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // D-SCHED-13: parts/day calculator in the Adjust End Date modal
   const [endDatePartsPerDay, setEndDatePartsPerDay] = useState('')
   const [endDateHistoryRuns, setEndDateHistoryRuns] = useState([])
+  // D-SCHED-27: the rate ladder for this job's assigned machine, so family evidence
+  // shows here too. Display-only — D-SCHED-13 keeps this modal a deliberate human pass.
+  const [endDateLadder, setEndDateLadder] = useState(null)
   const [endDateSaving, setEndDateSaving] = useState(false)
   const [endDateError, setEndDateError] = useState(null)
   // D-SCHED-16: live run rate from accepted finishing — { rate, pieces, elapsedMs }
@@ -1225,6 +1228,27 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     setEndDateHistoryRuns([])
     setEndDateLiveRate(null)
     fetchPartThroughputRuns(supabase, job.component_id, job.id).then(setEndDateHistoryRuns)
+    // D-SCHED-27: the same length-family evidence the Schedule modal shows, on the job's
+    // assigned machine. Matt, 2026-09-22: family evidence belongs here too. Display-only.
+    setEndDateLadder(null)
+    ;(async () => {
+      if (!job.component_id) return
+      const fam = await fetchPartFamily(supabase, job.component_id)
+      const key = fam?.length_family_key || null
+      const [famHistory, partHistory, partRuns] = await Promise.all([
+        fetchLengthFamilyHistory(supabase, key),
+        fetchPartMachineHistory(supabase, job.component_id, job.id),
+        fetchPartThroughputRuns(supabase, job.component_id, job.id)
+      ])
+      setEndDateLadder(buildRateLadder({
+        partHistory,
+        partRuns,
+        familyHistory: famHistory,
+        machines,
+        machineId: job.assigned_machine_id,
+        familyKey: key
+      }))
+    })()
     // D-SCHED-16: live run rate from accepted finishing (D-SCHED-14 gates:
     // ≥1h elapsed, >0 pieces). Prefill the recommendation ONLY when the
     // schedule is stale — a non-stale open must not move anything.
@@ -4104,6 +4128,23 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       <button type="button" onClick={() => applyPpdRate(ppdSuggestion.rate)} className="px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200 rounded">Use</button>
                     </p>
                   )}
+                  {/* D-SCHED-27: length-family evidence. The part's own history is the
+                      History line above; these are the family rungs of the same ladder. */}
+                  {(endDateLadder?.evidence || [])
+                    .filter(e => e.rate != null && e.tier !== 'part_on_machine' && e.tier !== 'part_elsewhere')
+                    .map(e => (
+                      <p key={e.tier} className="text-violet-300/80 text-xs mt-1 flex items-center gap-2">
+                        <span>
+                          {e.label} — {e.rate.toLocaleString()}/day
+                          {e.steadyMin != null && e.steadyMax != null && (
+                            e.steadyMin === e.steadyMax
+                              ? ` (steady ${e.steadyMin.toLocaleString()})`
+                              : ` (steady ${e.steadyMin.toLocaleString()}–${e.steadyMax.toLocaleString()})`
+                          )}
+                        </span>
+                        <button type="button" onClick={() => applyPpdRate(e.rate)} className="px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200 rounded">Use</button>
+                      </p>
+                    ))}
                 </div>
                 <div>
                   <label className="block text-gray-400 mb-1">New end</label>

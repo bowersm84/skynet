@@ -1,6 +1,6 @@
 // src/lib/scheduleSnapshot.js
 // Assembles the advisor's input from state Schedule.jsx already holds, plus
-// the stats/policy reads (part_machine_stats, family_machine_stats,
+// the stats/policy reads (part_machine_stats, v_length_family_machine_history,
 // scheduler_policies). Pure assembly: all queue math arrives via the values
 // and functions passed in from Schedule.jsx / lib/scheduling.js — this file
 // never reimplements the physics. Nothing is queried more than two levels
@@ -37,23 +37,38 @@ export async function buildScheduleSnapshot({
     stats = data || []
   }
 
-  // Family history — inert until parts.family_key is seeded (D-AISCHED-01).
+  // Family history. D-SCHED-27: the family is now the LENGTH family
+  // (parts.length_family_key, e.g. SK4C#S — the part number with the length dash masked),
+  // which is the machining grain: same geometry, same setup, different length. This is not
+  // the D-AISCHED-05 pricing family (parts.family_key), which merges materials and so
+  // averaged steel with stainless. Rows come from v_length_family_machine_history and are
+  // mapped to the shape the envelope already carries, so the Edge Function is unchanged.
   const familyByPart = {}
   let familyStats = []
   if (poolPartIds.length) {
     const { data: fams } = await supabase
       .from('parts')
-      .select('id, family_key')
+      .select('id, length_family_key')
       .in('id', poolPartIds)
-      .not('family_key', 'is', null)
-    ;(fams || []).forEach(f => { familyByPart[f.id] = f.family_key })
+      .not('length_family_key', 'is', null)
+    ;(fams || []).forEach(f => { familyByPart[f.id] = f.length_family_key })
     const keys = [...new Set(Object.values(familyByPart))]
     if (keys.length) {
       const { data: fs } = await supabase
-        .from('family_machine_stats')
+        .from('v_length_family_machine_history')
         .select('*')
-        .in('family_key', keys)
-      familyStats = fs || []
+        .in('length_family_key', keys)
+      familyStats = (fs || []).map(r => ({
+        family_key: r.length_family_key,
+        machine_id: r.machine_id,
+        machine_name: r.machine_name,
+        machine_code: r.machine_code,
+        parts_in_family: r.parts_run,
+        completed_runs: r.runs,
+        total_qty: r.pieces,
+        actual_pcs_per_hour: r.calendar_rate ? Math.round(r.calendar_rate / 24 * 100) / 100 : null,
+        last_run_at: r.last_run_at,
+      }))
     }
   }
 

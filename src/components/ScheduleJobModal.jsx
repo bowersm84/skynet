@@ -7,8 +7,12 @@ import {
 import {
   getMachineQueue, isJobRunning, buildPropagatedQueue,
   formatDurationDH, applySchedule,
-  fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes,
-  fetchPartMachineHistory
+  fetchPartThroughputRuns, partsPerDayToMinutes,
+  fetchPartMachineHistory,
+  // D-SCHED-27: length-family evidence, the rate ladder, and the card helpers.
+  fetchPartFamily, fetchLengthFamilyHistory, fetchObservedMaterial,
+  fetchRunningMaterials, fetchMatchingPolicies, fetchJobFirstRun,
+  buildRateLadder, projectFinish, isAfterCommit, materialAffinity
 } from '../lib/scheduling'
 import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible, getRunTarget } from '../lib/jobMerge'
 
@@ -35,6 +39,15 @@ export default function ScheduleJobModal({
   const [partsPerDay, setPartsPerDay] = useState('')
   const [historyRuns, setHistoryRuns] = useState([])
   const [partMachineHistory, setPartMachineHistory] = useState({})
+  // D-SCHED-27: the length family this part belongs to, what that family has done on
+  // each machine, the bar it runs on, the standing rules that name it, and whether this
+  // job is the first of its kind in SkyNet.
+  const [family, setFamily] = useState(null)
+  const [familyHistory, setFamilyHistory] = useState([])
+  const [observedMaterial, setObservedMaterial] = useState({ part: null, family: null })
+  const [runningMaterials, setRunningMaterials] = useState({})
+  const [policies, setPolicies] = useState([])
+  const [firstRun, setFirstRun] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
 
@@ -75,19 +88,40 @@ export default function ScheduleJobModal({
   }, [isOpen, defaults?.machineId, editMode, job?.id])
 
   // D-SCHED-10: completed runs for this part prove real throughput.
-  // time_per_unit = minutes/piece from production_start → actual_end (written at completion).
+  // D-SCHED-19: which machines have actually made this part, and how fast.
+  // D-SCHED-27: plus the length family's own record, the bar it runs on, the standing
+  // rules naming it, and the first-run flag. The family key has to land first — every
+  // other family read is keyed on it — so it leads and the rest go out together.
   useEffect(() => {
-    if (!isOpen || !job?.component_id) { setHistoryRuns([]); setPartMachineHistory({}); return }
+    if (!isOpen || !job?.component_id) {
+      setHistoryRuns([]); setPartMachineHistory({}); setFamily(null); setFamilyHistory([])
+      setObservedMaterial({ part: null, family: null }); setPolicies([]); setFirstRun(null)
+      return
+    }
     let cancelled = false
-    fetchPartThroughputRuns(supabase, job.component_id, job?.id).then(runs => {
-      if (!cancelled) setHistoryRuns(runs)
-    })
-    // D-SCHED-19: which machines have actually made this part, and how fast.
-    fetchPartMachineHistory(supabase, job.component_id, job?.id).then(byMachine => {
-      if (!cancelled) setPartMachineHistory(byMachine)
-    })
+    ;(async () => {
+      const fam = await fetchPartFamily(supabase, job.component_id)
+      if (cancelled) return
+      setFamily(fam)
+      const key = fam?.length_family_key || null
+      const [runs, byMachine, famHistory, material, pols, fr] = await Promise.all([
+        fetchPartThroughputRuns(supabase, job.component_id, job?.id),
+        fetchPartMachineHistory(supabase, job.component_id, job?.id),
+        fetchLengthFamilyHistory(supabase, key),
+        fetchObservedMaterial(supabase, job.component_id, key),
+        fetchMatchingPolicies(supabase, job.component?.part_number, key),
+        fetchJobFirstRun(supabase, job?.id)
+      ])
+      if (cancelled) return
+      setHistoryRuns(runs)
+      setPartMachineHistory(byMachine)
+      setFamilyHistory(famHistory)
+      setObservedMaterial(material)
+      setPolicies(pols)
+      setFirstRun(fr)
+    })()
     return () => { cancelled = true }
-  }, [isOpen, job?.component_id, job?.id])
+  }, [isOpen, job?.component_id, job?.id, job?.component?.part_number])
 
   // D-CODATE-02b: WO dates for everything in the machine queues (chunked —
   // the id list travels in the URL).
@@ -153,12 +187,6 @@ export default function ScheduleJobModal({
 
   const totalMinutes = durationDays * 24 * 60 + durationHours * 60
 
-  // D-SCHED-10: weighted-average throughput from history, machine-specific when available.
-  const suggestedPartsPerDay = useMemo(
-    () => computePartsPerDaySuggestion(historyRuns, selectedMachineId),
-    [historyRuns, selectedMachineId]
-  )
-
   // D-SCHED-10: parts/day → duration (+10% buffer, rounded up to the hour)
   const applyPartsPerDay = (value) => {
     const total = partsPerDayToMinutes(getRunTarget(job, members), value)
@@ -167,15 +195,14 @@ export default function ScheduleJobModal({
     setDurationHours(Math.floor((total % (24 * 60)) / 60))
   }
 
-  // D-SCHED-10: prefill from history on entering Step 3; never clobber an existing duration.
-  useEffect(() => {
-    if (step !== 3 || partsPerDay !== '' || !suggestedPartsPerDay) return
-    setPartsPerDay(String(suggestedPartsPerDay.rate))
-    if (totalMinutes === 0) applyPartsPerDay(suggestedPartsPerDay.rate)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, suggestedPartsPerDay])
+  // D-DATE-03: warn (never block) when the scheduled finish lands after the
+  // commitment date. D-CODATE-02: that is the SkyNet target (entered + 45
+  // business days) when the WO has CO allocations, else the WO's own due_date.
+  // Both are DATE columns, so compare against end of day.
+  const commitDate = woDates?.target_date || job?.work_order?.due_date || null
+  const commitLabel = woDates?.target_date ? 'SkyNet target' : 'due date'
 
-  const availableMachines = useMemo(() => {
+  const baseMachines = useMemo(() => {
     return (machines || [])
       .filter(m => m.machine_type !== 'finishing' && m.is_active)
       .map(m => {
@@ -198,7 +225,78 @@ export default function ScheduleJobModal({
       })
   }, [machines, scheduledJobs, job?.component_id, job?.id, partMachineDurations, partMachineHistory, editMode])
 
+  // D-SCHED-27: what each candidate machine has in the bar right now. Keyed on the
+  // running job ids alone so it does not wait on the family fetch.
+  const runningJobIds = useMemo(
+    () => [...new Set(baseMachines.map(m => m.runningJob?.id).filter(Boolean))].sort(),
+    [baseMachines]
+  )
+  const runningJobIdsKey = runningJobIds.join(',')
+
+  useEffect(() => {
+    if (!isOpen || runningJobIds.length === 0) { setRunningMaterials({}); return }
+    let cancelled = false
+    fetchRunningMaterials(supabase, runningJobIds).then(byJob => {
+      if (!cancelled) setRunningMaterials(byJob)
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, runningJobIdsKey])
+
+  // D-SCHED-27: family record, rate ladder, projected finish vs target, and material
+  // affinity per machine — so a scheduler who knows nothing about the part or the
+  // machines can read a card on its own and see why one placement beats another.
+  const availableMachines = useMemo(() => {
+    const familyKey = family?.length_family_key || null
+    const partBar = observedMaterial.part || observedMaterial.family || null
+    const runTarget = getRunTarget(job, members)
+    const now = new Date()
+    return baseMachines.map(m => {
+      const famRow = familyKey ? (familyHistory.find(f => f.machine_id === m.id) || null) : null
+      const ladder = buildRateLadder({
+        partHistory: partMachineHistory,
+        partRuns: historyRuns,
+        familyHistory,
+        machines,
+        machineId: m.id,
+        familyKey
+      })
+      const startAt = m.lastEnd && m.lastEnd > now ? m.lastEnd : now
+      const projectedFinish = projectFinish({ startAt, qty: runTarget, rate: ladder.chosen?.rate })
+      // The family proved itself on a sister machine of the same model but never here.
+      const sameModelRow = ladder.evidence.find(e => e.tier === 'family_same_model') || null
+      return {
+        ...m,
+        familyHistory: famRow,
+        ladder,
+        projectedFinish,
+        projectedLate: isAfterCommit(projectedFinish, commitDate),
+        material: materialAffinity(partBar, runningMaterials[m.runningJob?.id] || null),
+        sameModelFamily: !famRow && !!sameModelRow,
+        sameModelPeer: sameModelRow?.machineName || null
+      }
+    })
+  }, [
+    baseMachines, family, familyHistory, observedMaterial, runningMaterials,
+    partMachineHistory, historyRuns, machines, job, members, commitDate
+  ])
+
   const selectedMachine = availableMachines.find(m => m.id === selectedMachineId)
+
+  // D-SCHED-27: the rate that fills Parts per day is the top of the ladder for the
+  // machine actually chosen — part on this machine, then its length family here, then
+  // the part elsewhere, then the family on the same model, then the family anywhere.
+  // Always the calendar rate: the duration math and its +10% buffer are tuned on it.
+  const selectedLadder = selectedMachine?.ladder || null
+  const suggestedPartsPerDay = selectedLadder?.chosen || null
+
+  // D-SCHED-10: prefill from history on entering Step 3; never clobber an existing duration.
+  useEffect(() => {
+    if (step !== 3 || partsPerDay !== '' || !suggestedPartsPerDay) return
+    setPartsPerDay(String(suggestedPartsPerDay.rate))
+    if (totalMinutes === 0) applyPartsPerDay(suggestedPartsPerDay.rate)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, suggestedPartsPerDay])
 
   const currentQueue = useMemo(() => {
     if (!selectedMachineId) return []
@@ -255,12 +353,8 @@ export default function ScheduleJobModal({
     job?.assigned_machine_id &&
     job.assigned_machine_id !== selectedMachineId
 
-  // D-DATE-03: warn (never block) when the scheduled finish lands after the
-  // commitment date. D-CODATE-02: that is the SkyNet target (entered + 45
-  // business days) when the WO has CO allocations, else the WO's own due_date.
-  // Both are DATE columns, so compare against end of day.
-  const commitDate = woDates?.target_date || job?.work_order?.due_date || null
-  const commitLabel = woDates?.target_date ? 'SkyNet target' : 'due date'
+  // D-DATE-03 / D-CODATE-02: commitDate and commitLabel are computed above, alongside
+  // the machine cards that project their finish against them.
   const isLateSchedule =
     !!commitDate &&
     !!propagation?.targetSlot &&
@@ -389,6 +483,12 @@ export default function ScheduleJobModal({
                 availableMachines={availableMachines}
                 selectedMachineId={selectedMachineId}
                 setSelectedMachineId={setSelectedMachineId}
+                familyKey={family?.length_family_key || null}
+                familyHistory={familyHistory}
+                firstRun={firstRun}
+                policies={policies}
+                commitDate={commitDate}
+                partNumber={job.component?.part_number || job.job_number}
               />
             </>
           )}
@@ -418,7 +518,9 @@ export default function ScheduleJobModal({
               partsPerDay={partsPerDay}
               setPartsPerDay={setPartsPerDay}
               applyPartsPerDay={applyPartsPerDay}
-              suggestedPartsPerDay={suggestedPartsPerDay}
+              ladder={selectedLadder}
+              familyKey={family?.length_family_key || null}
+              commitDate={commitDate}
               propagation={propagation}
               fmtDateTime={fmtDateTime}
               job={job}
@@ -504,7 +606,27 @@ export default function ScheduleJobModal({
 
 // ─────────── Step 1: Machine picker ───────────
 
-function MachinePickCard({ m, selected, onSelect, showPlacement }) {
+// D-SCHED-27 display helpers. Steady rate reads as a range when the clean waypoint
+// intervals disagree and as one number when they don't.
+function fmtSteadyRange(row) {
+  const lo = row?.steady_min
+  const hi = row?.steady_max
+  if (lo != null && hi != null && lo !== hi) return `${lo.toLocaleString()}–${hi.toLocaleString()}`
+  const one = lo ?? hi ?? row?.steady_median
+  return one != null ? one.toLocaleString() : '—'
+}
+
+const fmtDashList = (dashes) =>
+  dashes?.length ? dashes.map(d => `-${d}`).join(', ') : null
+
+const fmtProjDay = (d) =>
+  d ? new Date(d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : '—'
+
+// Commitment dates are DATE columns — anchor at local noon so they never render a day early.
+const fmtCommitDay = (d) =>
+  d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'
+
+function MachinePickCard({ m, selected, onSelect, showPlacement, commitDate }) {
   const isDown = m.status === 'down' || m.status === 'offline'
   return (
     <button
@@ -548,6 +670,50 @@ function MachinePickCard({ m, selected, onSelect, showPlacement }) {
           {m.partHistory.lastRun && ` · last ${m.partHistory.lastRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
         </div>
       )}
+      {/* D-SCHED-27: what the rest of the length family has done here. Calendar rate
+          leads because it is the guide; steady is the context behind it. */}
+      {m.familyHistory && (
+        <div className="text-xs text-violet-300/90 mt-1">
+          Family {m.familyHistory.length_family_key}: {m.familyHistory.runs} run{m.familyHistory.runs === 1 ? '' : 's'}
+          {fmtDashList(m.familyHistory.dashes) && ` · ${fmtDashList(m.familyHistory.dashes)}`}
+          {m.familyHistory.calendar_rate != null && ` · ${m.familyHistory.calendar_rate.toLocaleString()}/day`}
+          {m.familyHistory.steady_median != null && ` · steady ${fmtSteadyRange(m.familyHistory)}`}
+          {m.familyHistory.last_run_at && ` · last ${new Date(m.familyHistory.last_run_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+          {m.familyHistory.paper_runs > 0 && ` · ${m.familyHistory.paper_runs} unrated`}
+        </div>
+      )}
+      {m.sameModelFamily && m.sameModelPeer && (
+        <div className="text-xs text-gray-500 mt-1">
+          Same model as {m.sameModelPeer} ({m.model}) — family untested here
+        </div>
+      )}
+      {m.material?.label && (
+        <div className={`text-xs mt-1 ${
+          m.material.kind === 'same_bar'
+            ? 'text-green-400'
+            : m.material.kind === 'change'
+              ? 'text-amber-400'
+              : 'text-gray-500'
+        }`}>
+          {m.material.label}
+        </div>
+      )}
+      {m.projectedFinish && (
+        <div
+          className={`text-xs mt-1 flex items-center gap-1 ${m.projectedLate ? 'text-amber-400' : 'text-gray-500'}`}
+          title={m.ladder?.chosen
+            ? `from ${m.ladder.chosen.label} (${m.ladder.chosen.rate.toLocaleString()}/day)`
+            : undefined}
+        >
+          {m.projectedLate && <AlertTriangle size={11} className="shrink-0" />}
+          <span>
+            → this job ≈ {fmtProjDay(m.projectedFinish)}
+            {commitDate && (m.projectedLate
+              ? ` · after target ${fmtCommitDay(commitDate)}`
+              : ` · target ${fmtCommitDay(commitDate)}`)}
+          </span>
+        </div>
+      )}
       {m.runningJob && (
         <div className="text-xs text-gray-400 mt-1">
           <span className="text-green-400 font-bold">RUNNING</span> {m.runningJob.component?.part_number || m.runningJob.job_number}
@@ -563,7 +729,11 @@ function MachinePickCard({ m, selected, onSelect, showPlacement }) {
   )
 }
 
-function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachineId }) {
+function Step1Machines({
+  availableMachines, selectedMachineId, setSelectedMachineId,
+  familyKey = null, familyHistory = [], firstRun = null, policies = [],
+  commitDate = null, partNumber = ''
+}) {
   // Machines with proven runs on this part lead the list in their own section.
   // Run history outranks the master-data Preferred star in the scheduler's
   // capability hierarchy, so it should not be something the scheduler has to
@@ -582,12 +752,38 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
       })
   }, [availableMachines])
 
-  const provenIds = useMemo(() => new Set(proven.map(m => m.id)), [proven])
+  // D-SCHED-27: machines where the length family has run but this exact length has not.
+  // The next-strongest evidence after the part's own history, so it gets its own section
+  // between the proven machines and the grouped list. Moved, not duplicated.
+  const familyOnly = useMemo(() => {
+    if (!familyKey) return []
+    return availableMachines
+      .filter(m => m.familyHistory && !m.partHistory)
+      .sort((a, b) => {
+        const ra = a.familyHistory.calendar_rate ?? -1
+        const rb = b.familyHistory.calendar_rate ?? -1
+        if (ra !== rb) return rb - ra
+        if (a.familyHistory.runs !== b.familyHistory.runs) return b.familyHistory.runs - a.familyHistory.runs
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      })
+  }, [availableMachines, familyKey])
+
+  const liftedIds = useMemo(
+    () => new Set([...proven.map(m => m.id), ...familyOnly.map(m => m.id)]),
+    [proven, familyOnly]
+  )
+
+  // Machines the family has actually run on, for the first-run banner's "its family has" clause.
+  const familyRunMachines = useMemo(
+    () => [...new Set((familyHistory || []).map(f => f.machine_name).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })),
+    [familyHistory]
+  )
 
   const grouped = useMemo(() => {
     const byLocation = {}
     for (const m of availableMachines) {
-      if (provenIds.has(m.id)) continue
+      if (liftedIds.has(m.id)) continue
       const locName = m.location?.name || 'Unknown Location'
       const brand = m.machine_type || 'Other'
       if (!byLocation[locName]) byLocation[locName] = {}
@@ -621,7 +817,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
         machines: byLocation[loc][b]
       }))
     }))
-  }, [availableMachines, provenIds])
+  }, [availableMachines, liftedIds])
 
   if (availableMachines.length === 0) {
     return <p className="text-gray-500 italic">No production machines available.</p>
@@ -629,6 +825,44 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
 
   return (
     <div>
+      {/* D-SCHED-27: a first run is the one thing the scheduler most needs to know
+          before picking anything — it leads. */}
+      {firstRun?.first_run_kind && (
+        <div className="mb-4 flex items-start gap-2 p-3 bg-amber-900/30 border border-amber-700 rounded-lg text-sm">
+          <AlertTriangle size={15} className="text-amber-400 mt-0.5 shrink-0" />
+          <p className="text-amber-200">
+            {firstRun.first_run_kind === 'part_and_family' ? (
+              <>
+                <span className="font-semibold">First run in SkyNet.</span>{' '}
+                No run of <span className="font-mono">{partNumber}</span>
+                {familyKey ? <>, or its <span className="font-mono">{familyKey}</span> family,</> : null}
+                {' '}since go-live. Expect programming and a first article; consider attended and extra setup.
+              </>
+            ) : (
+              <>
+                <span className="font-semibold">First run of this length.</span>{' '}
+                <span className="font-mono">{partNumber}</span> has not run since go-live; its{' '}
+                <span className="font-mono">{familyKey}</span> family has
+                {familyRunMachines.length > 0 ? ` (${familyRunMachines.join(', ')})` : ''}.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
+      {policies.length > 0 && (
+        <div className="mb-4 bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+          <p className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
+            Standing rules for this part
+          </p>
+          <ul className="space-y-1">
+            {policies.map(p => (
+              <li key={p.id} className="text-gray-300 text-sm">{p.policy_text}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <p className="text-gray-400 text-sm mb-3">
         Choose a machine for this job.
         {proven.length > 0 && (
@@ -636,9 +870,15 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
             {' '}Machines that have run this part are listed first.
           </span>
         )}
+        {proven.length === 0 && familyOnly.length > 0 && (
+          <span className="text-violet-300/90">
+            {' '}No machine has run this exact length; machines that have run the{' '}
+            <span className="font-mono">{familyKey}</span> family are listed first.
+          </span>
+        )}
       </p>
 
-      {proven.length === 0 && (
+      {proven.length === 0 && familyOnly.length === 0 && (
         <p className="text-gray-500 text-xs mb-4">
           No machine has produced this part since SkyNet went live in April 2026. Earlier runs
           exist only on paper, so an absent history is not evidence a machine cannot make it —
@@ -663,13 +903,38 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                 selected={m.id === selectedMachineId}
                 onSelect={setSelectedMachineId}
                 showPlacement
+                commitDate={commitDate}
               />
             ))}
           </div>
         </div>
       )}
 
-      {proven.length > 0 && grouped.length > 0 && (
+      {familyOnly.length > 0 && (
+        <div className="mb-5">
+          <div className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-violet-300/80 font-semibold border-b border-violet-900/50 pb-1.5 mb-2">
+            <Layers size={12} />
+            Family has run here · {familyKey}
+            <span className="text-gray-500 normal-case tracking-normal font-normal">
+              ({familyOnly.length} machine{familyOnly.length === 1 ? '' : 's'})
+            </span>
+          </div>
+          <div className="space-y-2">
+            {familyOnly.map(m => (
+              <MachinePickCard
+                key={m.id}
+                m={m}
+                selected={m.id === selectedMachineId}
+                onSelect={setSelectedMachineId}
+                showPlacement
+                commitDate={commitDate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(proven.length > 0 || familyOnly.length > 0) && grouped.length > 0 && (
         <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-3">
           Other machines
         </div>
@@ -692,6 +957,7 @@ function Step1Machines({ availableMachines, selectedMachineId, setSelectedMachin
                     m={m}
                     selected={m.id === selectedMachineId}
                     onSelect={setSelectedMachineId}
+                    commitDate={commitDate}
                   />
                 ))}
               </div>
@@ -840,18 +1106,131 @@ function InsertionSlot({ label, active, onClick }) {
 
 // ─────────── Step 3: Duration entry ───────────
 
+// D-SCHED-27: per-dash calendar rates from the family's runs_detail, piece-weighted
+// where one length ran more than once. A length trend without a regression.
+function buildPerDash(detail) {
+  const byDash = new Map()
+  for (const d of detail || []) {
+    if (d?.dash == null) continue
+    const acc = byDash.get(d.dash) || { pieces: 0, days: 0 }
+    const rate = Number(d.calendar_rate)
+    const pieces = Number(d.pieces) || 0
+    if (rate > 0 && pieces > 0) {
+      acc.pieces += pieces
+      acc.days += pieces / rate
+    }
+    byDash.set(d.dash, acc)
+  }
+  const parts = [...byDash.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([dash, v]) => `-${dash} ${v.days > 0 ? Math.round(v.pieces / v.days).toLocaleString() : '—'}`)
+  return parts.length ? parts.join(' · ') : null
+}
+
+// One rung of the rate ladder. The chosen tier carries ●; every rated line offers a
+// one-click Use, and the steady rate rides beneath it as a second, smaller override.
+function EvidenceLine({ e, chosen, onUse }) {
+  const dashes = e.dashes?.length ? e.dashes.map(d => `-${d}`).join(',') : null
+  const perDash = buildPerDash(e.detail)
+  const ratedRuns = e.ratedRuns || 0
+  const steadyRange = (e.steadyMin != null && e.steadyMax != null && e.steadyMin !== e.steadyMax)
+    ? ` (${e.steadyMin.toLocaleString()}–${e.steadyMax.toLocaleString()})`
+    : ''
+  const noRunText = e.runs > 0
+    ? (e.paperRuns === e.runs ? 'unrated (paper record)' : 'unrated')
+    : 'no run'
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-2 text-xs">
+        <span className={chosen ? 'text-white' : 'text-gray-400'}>
+          <span className={`mr-1 ${chosen ? 'text-skynet-accent' : 'text-transparent'}`}>●</span>
+          {e.label}
+        </span>
+        {e.rate != null ? (
+          <span className="flex items-center gap-2 shrink-0">
+            <span className={`font-mono ${chosen ? 'text-white' : 'text-gray-300'}`}>
+              {e.rate.toLocaleString()}/day
+            </span>
+            <span className="text-gray-500">
+              · {ratedRuns} rated run{ratedRuns === 1 ? '' : 's'}
+              {dashes ? ` · ${dashes}` : ''}
+              {e.machineNames?.length ? ` (${e.machineNames.join(', ')})` : ''}
+            </span>
+            <button
+              type="button"
+              onClick={() => onUse(e.rate)}
+              className="px-1.5 py-0.5 text-[10px] bg-gray-700 hover:bg-gray-600 text-gray-200 rounded shrink-0"
+            >
+              Use {e.rate.toLocaleString()}
+            </button>
+          </span>
+        ) : (
+          <span className="text-gray-600 shrink-0">{noRunText}</span>
+        )}
+      </div>
+      {e.rate != null && e.steadyMedian != null && (
+        <div className="flex items-center justify-end gap-2 text-[11px] mt-0.5">
+          <span className="text-gray-500">steady {e.steadyMedian.toLocaleString()}{steadyRange}</span>
+          <button
+            type="button"
+            onClick={() => onUse(e.steadyMedian)}
+            className="px-1 py-0.5 text-[9px] bg-gray-800 hover:bg-gray-700 text-gray-400 border border-gray-700 rounded shrink-0"
+          >
+            Use {e.steadyMedian.toLocaleString()}
+          </button>
+        </div>
+      )}
+      {perDash && (
+        <div className="text-[11px] text-gray-600 mt-0.5 pl-4">{perDash}</div>
+      )}
+    </div>
+  )
+}
+
 function Step3Duration({
   machine, queue, insertionIndex,
   durationDays, setDurationDays, durationHours, setDurationHours,
   totalMinutes, propagation, fmtDateTime, job, isMachineChange,
   isLateSchedule, dueDateDisplay, dueDateLabel = 'due date',
-  partsPerDay, setPartsPerDay, applyPartsPerDay, suggestedPartsPerDay,
+  partsPerDay, setPartsPerDay, applyPartsPerDay,
+  ladder = null, familyKey = null, commitDate = null,
   members = []
 }) {
   const beforeJob = queue[insertionIndex - 1]
   const afterJob = queue[insertionIndex]
   const targetSlot = propagation?.targetSlot
   const cascadeJobs = propagation?.changes || []
+
+  // D-SCHED-27: the ladder, chosen rung first so the number in the box is explained
+  // by the line directly above it; the rest follow in tier order as the alternatives.
+  const evidenceLines = useMemo(() => {
+    const ev = ladder?.evidence || []
+    const chosenTier = ladder?.chosen?.tier
+    if (!chosenTier) return ev
+    return [...ev.filter(e => e.tier === chosenTier), ...ev.filter(e => e.tier !== chosenTier)]
+  }, [ladder])
+
+  const onUseRate = (rate) => {
+    setPartsPerDay(String(rate))
+    applyPartsPerDay(rate)
+  }
+
+  const basisText = ladder?.chosen
+    ? `Prefilled from ${ladder.chosen.label} — calendar ${ladder.chosen.rate.toLocaleString()}/day.`
+    : familyKey
+      ? 'No kiosk-timed run of this part or its family yet — enter a rate.'
+      : 'No kiosk-timed run of this part yet — enter a rate.'
+
+  // Days between the scheduled finish and the commitment. D-DATE-03: the commitment is
+  // a DATE, so it is judged at end of day.
+  const targetDelta = (() => {
+    if (!commitDate || !targetSlot?.scheduled_end) return null
+    const end = new Date(targetSlot.scheduled_end)
+    const commitEnd = new Date(String(commitDate).slice(0, 10) + 'T23:59:59')
+    const days = Math.round((commitEnd - end) / 86400000)
+    return { days: Math.abs(days), late: days < 0 }
+  })()
 
   let placementText = 'First job on this machine'
   if (beforeJob && afterJob) {
@@ -897,13 +1276,22 @@ function Step3Duration({
             className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:outline-none focus:border-skynet-accent"
           />
           <span className="text-gray-400 text-sm">parts / 24h day</span>
-          {suggestedPartsPerDay && (
-            <span className="text-gray-500 text-xs">
-              ≈ {suggestedPartsPerDay.rate.toLocaleString()}/day from {suggestedPartsPerDay.runCount} completed run{suggestedPartsPerDay.runCount === 1 ? '' : 's'}
-              {suggestedPartsPerDay.machineSpecific ? ' on this machine' : ' (all machines)'}
-            </span>
-          )}
         </div>
+
+        {evidenceLines.length > 0 && (
+          <div className="mt-2 bg-gray-800/40 border border-gray-700/60 rounded p-2.5 space-y-1.5">
+            {evidenceLines.map(e => (
+              <EvidenceLine
+                key={e.tier}
+                e={e}
+                chosen={ladder?.chosen?.tier === e.tier}
+                onUse={onUseRate}
+              />
+            ))}
+          </div>
+        )}
+
+        <p className="text-gray-400 text-xs mt-2">{basisText}</p>
         <p className="text-gray-500 text-xs mt-1">
           Duration = qty {getRunTarget(job, members).toLocaleString()}{members.length > 0 ? ` (incl. ${members.length} merged)` : ''} ÷ parts/day, +10% buffer, rounded up to the whole hour. Estimate — adjust below if needed.
         </p>
@@ -976,6 +1364,23 @@ function Step3Duration({
             <span className="text-gray-400">End</span>
             <span className="text-white font-mono">{fmtDateTime(targetSlot.scheduled_end)}</span>
           </div>
+          {/* D-SCHED-27: the commitment, right beside the finish it is judged against.
+              The amber warning above carries the sentence; this row carries the margin. */}
+          {commitDate && (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-400">Target</span>
+              <span className="flex items-center gap-2">
+                <span className="text-white font-mono">{dueDateDisplay}</span>
+                {targetDelta && (
+                  <span className={`text-xs ${targetDelta.late ? 'text-amber-400' : 'text-gray-500'}`}>
+                    {targetDelta.days === 0
+                      ? 'same day'
+                      : `${targetDelta.days} day${targetDelta.days === 1 ? '' : 's'} ${targetDelta.late ? 'late' : 'early'}`}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

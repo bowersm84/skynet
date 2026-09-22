@@ -44,6 +44,7 @@ import { evaluateJobShortfall } from '../lib/shortfall'
 import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 import { fetchOrdersVsStock, ordersVsStockStatus } from '../lib/ordersVsStock'
 import { logPaperworkIssue, fetchOpenIssuesForJob, MIN_DESCRIPTION } from '../lib/paperworkIssues'
+import { fetchJobFirstRun } from '../lib/scheduling'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
@@ -98,6 +99,9 @@ export default function Kiosk() {
   const [jobs, setJobs] = useState([])
   const [jobsLoading, setJobsLoading] = useState(false)
   const [activeJob, setActiveJob] = useState(null)
+  // D-SCHED-27: v_job_first_run row for the active job — the machinist should know
+  // before the first chip that nothing like this has run in SkyNet.
+  const [activeFirstRun, setActiveFirstRun] = useState(null)
 
   // D-JOBMERGE-04: active member claims on the current host job.
   const [activeJobMembers, setActiveJobMembers] = useState([])
@@ -1033,6 +1037,14 @@ export default function Kiosk() {
           : j.status === activeStatus
       )
       setActiveJob(active || null)
+
+      // D-SCHED-27: is this the first run of the part — or of anything in its length
+      // family — since go-live? Drives the FIRST RUN badge beside the part number.
+      if (active) {
+        fetchJobFirstRun(supabase, active.id).then(setActiveFirstRun)
+      } else {
+        setActiveFirstRun(null)
+      }
 
       // Bolt Masters run blanks (no job_materials load row). Hydrate the active job's blank
       // type/dash from its receipt/stub so the Materials panel can always show something.
@@ -4955,6 +4967,22 @@ export default function Kiosk() {
                         {activeJob.paused_at && (
                           <span className="px-2 py-0.5 bg-yellow-600/20 text-yellow-400 text-xs font-bold rounded border border-yellow-600/50 flex items-center gap-1">
                             <PauseCircle size={12} />PAUSED
+                          </span>
+                        )}
+                        {activeFirstRun?.first_run_kind === 'part_and_family' && (
+                          <span
+                            className="px-2 py-0.5 bg-amber-600/20 text-amber-300 text-xs font-bold rounded border border-amber-600/50"
+                            title="First run of this part and its family in SkyNet — first article, check program and setup"
+                          >
+                            FIRST RUN
+                          </span>
+                        )}
+                        {activeFirstRun?.first_run_kind === 'part' && (
+                          <span
+                            className="px-2 py-0.5 bg-amber-600/20 text-amber-300 text-xs font-bold rounded border border-amber-600/50"
+                            title="First run of this length in SkyNet — family has run"
+                          >
+                            FIRST OF LENGTH
                           </span>
                         )}
                       </div>

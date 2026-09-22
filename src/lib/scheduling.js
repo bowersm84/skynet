@@ -352,56 +352,190 @@ export function effectiveTimePerUnit(job) {
   return { tpu: minutes / pieces, derived: true }
 }
 
-// Returns { [machineId]: { runs, pieces, rate, derived, lastRun } } for every
-// machine that has produced this part. rate is piece-weighted parts/day on the
-// same basis as computePartsPerDaySuggestion; null when no run on that machine
-// yields a usable time/unit.
+// D-SCHED-27: single history source. One row per production-done run on a machine
+// (view v_part_run_rates); calendar_rate/tpu_minutes carry the effectiveTimePerUnit basis,
+// steady_* carry the D-COST-31 waypoint basis, is_paper_era marks pre-kiosk rows.
+export async function fetchPartRunRates(supabase, componentId, excludeJobId) {
+  if (!componentId) return []
+  const { data, error } = await supabase
+    .from('v_part_run_rates')
+    .select('*')
+    .eq('part_id', componentId)
+    .order('actual_end', { ascending: false })
+    .limit(300)
+  if (error) { console.error('v_part_run_rates:', error); return [] }
+  return (data || []).filter(r => r.job_id !== excludeJobId)
+}
+
+// Median of a numeric list; null when empty. Used for the per-machine steady rate.
+function medianOf(values) {
+  const xs = (values || []).map(Number).filter(v => Number.isFinite(v)).sort((a, b) => a - b)
+  if (!xs.length) return null
+  const mid = Math.floor(xs.length / 2)
+  return xs.length % 2 ? xs[mid] : Math.round((xs[mid - 1] + xs[mid]) / 2)
+}
+
+// Returns { [machineId]: { runs, pieces, ratedPieces, ratedMinutes, ratedRuns, derived,
+// paperRuns, lastRun, rate, steadyMedian, steadyMin, steadyMax } } for every machine that
+// has produced this part. rate stays piece-weighted calendar parts/day on the same basis as
+// computePartsPerDaySuggestion; null when no run on that machine yields a usable time/unit.
+// D-SCHED-27: rows now come from v_part_run_rates, which already applies the production-done
+// status set and the effectiveTimePerUnit rate basis — one definition, server-side.
 export async function fetchPartMachineHistory(supabase, componentId, excludeJobId) {
   if (!componentId) return {}
-  const { data } = await supabase
-    .from('jobs')
-    .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end, production_start, status')
-    .eq('component_id', componentId)
-    .order('created_at', { ascending: false })
-    .limit(300)
+  const rows = await fetchPartRunRates(supabase, componentId, excludeJobId)
 
   const byMachine = {}
-  for (const j of data || []) {
-    if (!j.assigned_machine_id || j.id === excludeJobId) continue
-    if (!PRODUCTION_DONE_STATUSES.includes(j.status)) continue
-    const m = byMachine[j.assigned_machine_id] || (byMachine[j.assigned_machine_id] = {
-      runs: 0, pieces: 0, ratedPieces: 0, ratedMinutes: 0, derived: 0, lastRun: null
+  for (const r of rows) {
+    if (!r.machine_id) continue
+    const m = byMachine[r.machine_id] || (byMachine[r.machine_id] = {
+      runs: 0, pieces: 0, ratedPieces: 0, ratedMinutes: 0, ratedRuns: 0, derived: 0,
+      paperRuns: 0, lastRun: null, _steady: []
     })
     m.runs += 1
-    const pieces = (j.good_pieces > 0 ? j.good_pieces : j.quantity) || 0
+    const pieces = Number(r.pieces) || 0
     m.pieces += pieces
-    const eff = effectiveTimePerUnit(j)
-    if (eff && pieces > 0) {
+    if (r.is_paper_era) m.paperRuns += 1
+    const tpu = Number(r.tpu_minutes)
+    if (r.is_rated && tpu > 0 && pieces > 0) {
+      m.ratedRuns += 1
       m.ratedPieces += pieces
-      m.ratedMinutes += pieces * eff.tpu
-      if (eff.derived) m.derived += 1
+      m.ratedMinutes += pieces * tpu
+      if (r.tpu_derived) m.derived += 1
     }
-    const end = j.actual_end ? new Date(j.actual_end) : null
+    if (r.steady_rate != null) m._steady.push(Number(r.steady_rate))
+    const end = r.actual_end ? new Date(r.actual_end) : null
     if (end && (!m.lastRun || end > m.lastRun)) m.lastRun = end
   }
   for (const m of Object.values(byMachine)) {
     m.rate = m.ratedMinutes > 0
       ? Math.max(1, Math.round(m.ratedPieces / (m.ratedMinutes / (24 * 60))))
       : null
+    m.steadyMedian = medianOf(m._steady)
+    m.steadyMin = m._steady.length ? Math.min(...m._steady) : null
+    m.steadyMax = m._steady.length ? Math.max(...m._steady) : null
+    delete m._steady
   }
   return byMachine
 }
 
+// The 10 most recent RATED runs, in the legacy row shape computePartsPerDaySuggestion
+// expects. D-SCHED-27: the source is now v_part_run_rates, so derived rates (production_start
+// → actual_end ÷ good_pieces) enter the duration suggestion alongside recorded time_per_unit —
+// this is the D-SCHED-19 alignment, deliberate and Matt-approved. Paper-era rows are unrated
+// in the view, so they can never reach it.
 export async function fetchPartThroughputRuns(supabase, componentId, excludeJobId) {
-  if (!componentId) return []
-  const { data } = await supabase
-    .from('jobs')
-    .select('id, assigned_machine_id, good_pieces, quantity, time_per_unit, actual_end')
-    .eq('component_id', componentId)
-    .gt('time_per_unit', 0)
-    .order('actual_end', { ascending: false })
-    .limit(10)
-  return (data || []).filter(r => r.id !== excludeJobId)
+  const rows = await fetchPartRunRates(supabase, componentId, excludeJobId)
+  return rows
+    .filter(r => r.is_rated)
+    .slice(0, 10)
+    .map(r => ({
+      id: r.job_id,
+      assigned_machine_id: r.machine_id,
+      good_pieces: r.good_pieces,
+      quantity: r.quantity,
+      time_per_unit: r.tpu_minutes,
+      actual_end: r.actual_end
+    }))
+}
+
+// ─────────── D-SCHED-27: length-family history, materials, policies, first run ───────────
+
+export async function fetchPartFamily(supabase, componentId) {
+  if (!componentId) return null
+  const { data, error } = await supabase
+    .from('parts')
+    .select('id, part_number, length_family_key, length_dash')
+    .eq('id', componentId)
+    .maybeSingle()
+  if (error) { console.error('parts (length family):', error); return null }
+  return data || null
+}
+
+export async function fetchLengthFamilyHistory(supabase, familyKey) {
+  if (!familyKey) return []
+  const { data, error } = await supabase
+    .from('v_length_family_machine_history')
+    .select('*')
+    .eq('length_family_key', familyKey)
+  if (error) { console.error('v_length_family_machine_history:', error); return [] }
+  return data || []
+}
+
+// What bar this part — or, failing that, its family — has actually been loaded with.
+export async function fetchObservedMaterial(supabase, componentId, familyKey) {
+  const out = { part: null, family: null }
+  if (componentId) {
+    const { data, error } = await supabase
+      .from('v_part_observed_material')
+      .select('*')
+      .eq('part_id', componentId)
+      .eq('is_primary', true)
+      .maybeSingle()
+    if (error) console.error('v_part_observed_material:', error)
+    else out.part = data || null
+  }
+  if (familyKey) {
+    const { data, error } = await supabase
+      .from('v_length_family_material')
+      .select('*')
+      .eq('length_family_key', familyKey)
+      .eq('is_primary', true)
+      .maybeSingle()
+    if (error) console.error('v_length_family_material:', error)
+    else out.family = data || null
+  }
+  return out
+}
+
+// Latest material load per running job. Chunked at 150 — the id list travels in the URL.
+export async function fetchRunningMaterials(supabase, jobIds) {
+  const ids = [...new Set((jobIds || []).filter(Boolean))]
+  if (!ids.length) return {}
+  const out = {}
+  for (let i = 0; i < ids.length; i += 150) {
+    const { data, error } = await supabase
+      .from('job_materials')
+      .select('job_id, material_type, bar_size, bars_loaded, bars_remaining, loaded_at')
+      .in('job_id', ids.slice(i, i + 150))
+    if (error) { console.error('job_materials:', error); break }
+    for (const r of data || []) {
+      const prev = out[r.job_id]
+      if (!prev || new Date(r.loaded_at || 0) >= new Date(prev.loaded_at || 0)) out[r.job_id] = r
+    }
+  }
+  return out
+}
+
+// Standing rules that name this part or its family. Policy text is free-form, so the
+// match is a literal case-insensitive containment done client-side — "SK213-#B" matches
+// the family key exactly as it is written in the rule.
+export async function fetchMatchingPolicies(supabase, partNumber, familyKey) {
+  const needles = [partNumber, familyKey]
+    .filter(Boolean)
+    .map(s => String(s).toLowerCase())
+  if (!needles.length) return []
+  const { data, error } = await supabase
+    .from('scheduler_policies')
+    .select('id, policy_text')
+    .eq('is_active', true)
+    .order('created_at', { ascending: true })
+  if (error) { console.error('scheduler_policies:', error); return [] }
+  return (data || []).filter(p => {
+    const text = String(p.policy_text || '').toLowerCase()
+    return needles.some(n => text.includes(n))
+  })
+}
+
+export async function fetchJobFirstRun(supabase, jobId) {
+  if (!jobId) return null
+  const { data, error } = await supabase
+    .from('v_job_first_run')
+    .select('*')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  if (error) { console.error('v_job_first_run:', error); return null }
+  return data || null
 }
 
 // Weighted-average parts per 24h day; prefers runs on machineId when any exist.
@@ -434,4 +568,175 @@ export function partsPerDayToMinutes(quantity, rate) {
   if (!(r > 0) || !(qty > 0)) return null
   const raw = (qty / r) * 24 * 60 * 1.10
   return Math.max(60, Math.ceil(raw / 60) * 60)
+}
+
+// D-SCHED-27 rate ladder. One precedence, calendar basis only (the duration math and its
+// +10% buffer are tuned on it). First tier with a rated number wins. Paper-era evidence is
+// listed but can never be chosen. Machine outranks part-elsewhere because in Skybolt's data
+// the machine is the larger variable (identical SK4C studs ran 1.4× faster on NT-7 than NT-4;
+// adjacent dashes on one machine differ far less).
+//
+// Returns { chosen: { rate, tier, label } | null, evidence: [...] } with evidence ordered
+// by tier. Steady rate rides along as context and a one-click override — never the default.
+export function buildRateLadder({ partHistory, partRuns, familyHistory, machines, machineId, familyKey }) {
+  const famRows = familyHistory || []
+  const machineList = machines || []
+  const machine = machineList.find(m => m.id === machineId) || null
+  const machineName = machine?.name || 'this machine'
+  const model = machine?.model || null
+  const nameOf = (id) => machineList.find(m => m.id === id)?.name || '—'
+
+  const line = (tier, label, extra) => ({
+    tier, label,
+    machineId: null, machineName: null, sameModel: false,
+    rate: null, steadyMedian: null, steadyMin: null, steadyMax: null,
+    runs: 0, ratedRuns: 0, paperRuns: 0,
+    dashes: null, lastRun: null, detail: null, machineNames: null,
+    ...extra
+  })
+
+  const fromFamilyRow = (row) => ({
+    machineId: row.machine_id,
+    machineName: row.machine_name,
+    rate: row.calendar_rate ?? null,
+    steadyMedian: row.steady_median ?? null,
+    steadyMin: row.steady_min ?? null,
+    steadyMax: row.steady_max ?? null,
+    runs: row.runs || 0,
+    ratedRuns: row.rated_runs || 0,
+    paperRuns: row.paper_runs || 0,
+    dashes: row.dashes || null,
+    lastRun: row.last_run_at ? new Date(row.last_run_at) : null,
+    detail: row.runs_detail || null
+  })
+
+  // 1 — this part, on this machine.
+  const ph = (partHistory || {})[machineId] || null
+  const t1 = line('part_on_machine', `This part on ${machineName}`, {
+    machineId, machineName,
+    rate: ph?.rate ?? null,
+    steadyMedian: ph?.steadyMedian ?? null,
+    steadyMin: ph?.steadyMin ?? null,
+    steadyMax: ph?.steadyMax ?? null,
+    runs: ph?.runs || 0,
+    ratedRuns: ph?.ratedRuns || 0,
+    paperRuns: ph?.paperRuns || 0,
+    lastRun: ph?.lastRun || null
+  })
+
+  // 2 — the length family, on this machine.
+  const famHere = familyKey ? (famRows.find(f => f.machine_id === machineId) || null) : null
+  const t2 = familyKey
+    ? line('family_on_machine', `${familyKey} family on ${machineName}`,
+        famHere ? fromFamilyRow(famHere) : { machineId, machineName })
+    : null
+
+  // 3 — this part, on every machine (the D-SCHED-10 basis, unchanged).
+  const elsewhere = computePartsPerDaySuggestion(partRuns, null)
+  const runMachineNames = [...new Set((partRuns || [])
+    .map(r => nameOf(r.assigned_machine_id))
+    .filter(n => n && n !== '—'))]
+  const t3 = line('part_elsewhere', 'This part on other machines', {
+    rate: elsewhere?.rate ?? null,
+    runs: elsewhere?.runCount || 0,
+    ratedRuns: elsewhere?.runCount || 0,
+    machineNames: runMachineNames.length ? runMachineNames : null
+  })
+
+  // 4 — the family on a sister machine of the same model.
+  const sameModelRows = (familyKey && model)
+    ? famRows
+        .filter(f => f.machine_id !== machineId && f.machine_model === model && f.calendar_rate != null)
+        .sort((a, b) => (b.rated_runs || 0) - (a.rated_runs || 0))
+    : []
+  const smRow = sameModelRows[0] || null
+  const t4 = smRow
+    ? line('family_same_model', `${familyKey} family on ${smRow.machine_name} (same model · ${model})`,
+        { ...fromFamilyRow(smRow), sameModel: true })
+    : null
+
+  // 5 — the family, everywhere. Piece-weighted across every rated family row.
+  const ratedFam = famRows.filter(f => f.calendar_rate != null && Number(f.pieces) > 0)
+  let t5 = null
+  if (familyKey && ratedFam.length) {
+    const pieces = ratedFam.reduce((s, f) => s + Number(f.pieces || 0), 0)
+    const days = ratedFam.reduce((s, f) => s + Number(f.pieces || 0) / Number(f.calendar_rate), 0)
+    const steadies = ratedFam.map(f => f.steady_median).filter(v => v != null).map(Number)
+    const lastRuns = ratedFam.map(f => f.last_run_at).filter(Boolean).map(d => new Date(d))
+    t5 = line('family_anywhere', `${familyKey} family, all machines`, {
+      rate: days > 0 ? Math.max(1, Math.round(pieces / days)) : null,
+      steadyMedian: medianOf(steadies),
+      steadyMin: ratedFam.map(f => f.steady_min).filter(v => v != null).length
+        ? Math.min(...ratedFam.map(f => f.steady_min).filter(v => v != null).map(Number)) : null,
+      steadyMax: ratedFam.map(f => f.steady_max).filter(v => v != null).length
+        ? Math.max(...ratedFam.map(f => f.steady_max).filter(v => v != null).map(Number)) : null,
+      runs: ratedFam.reduce((s, f) => s + (f.runs || 0), 0),
+      ratedRuns: ratedFam.reduce((s, f) => s + (f.rated_runs || 0), 0),
+      paperRuns: ratedFam.reduce((s, f) => s + (f.paper_runs || 0), 0),
+      dashes: [...new Set(ratedFam.flatMap(f => f.dashes || []))].sort((a, b) => a - b),
+      lastRun: lastRuns.length ? new Date(Math.max(...lastRuns.map(d => d.getTime()))) : null,
+      detail: ratedFam.flatMap(f => f.runs_detail || []),
+      machineNames: ratedFam.map(f => f.machine_name)
+    })
+  }
+
+  const chosen = [t1, t2, t3, t4, t5].filter(Boolean).find(t => t.rate != null) || null
+
+  // Display set: the two machine-specific tiers always (they say "no run" when empty —
+  // that absence is itself the evidence); the wider tiers only when they carry a number.
+  // Tier 5 is suppressed when it would merely restate a single family row already shown.
+  const evidence = [t1]
+  if (t2) evidence.push(t2)
+  if (t3.rate != null || (partRuns || []).length > 0) evidence.push(t3)
+  if (t4) evidence.push(t4)
+  if (t5 && !(ratedFam.length === 1 && (t2?.rate != null || t4?.rate != null))) evidence.push(t5)
+
+  return {
+    chosen: chosen ? { rate: chosen.rate, tier: chosen.tier, label: chosen.label } : null,
+    evidence
+  }
+}
+
+// Projected finish for a run of `qty` at `rate` parts/day starting at `startAt`.
+// Same duration math as the Step 3 calculator (+10% buffer, ceil to the hour).
+export function projectFinish({ startAt, qty, rate }) {
+  if (!startAt || !(Number(rate) > 0)) return null
+  const minutes = partsPerDayToMinutes(qty, rate)
+  if (minutes === null) return null
+  const start = new Date(startAt)
+  if (isNaN(start.getTime())) return null
+  return new Date(start.getTime() + minutes * 60000)
+}
+
+// D-DATE-03: commitDate is a DATE string, so the comparison is against end of day.
+export function isAfterCommit(date, commitDate) {
+  if (!date || !commitDate) return false
+  const d = new Date(date)
+  if (isNaN(d.getTime())) return false
+  return d > new Date(String(commitDate).slice(0, 10) + 'T23:59:59')
+}
+
+// Bar affinity between the part being scheduled and what the machine is running now.
+// Matt, 2026-09-22: a material change means swapping scrap bins and pulling new bar —
+// "prefer to stick with what's running." Either side missing renders nothing.
+export function materialAffinity(partBar, runningBar) {
+  const norm = (b) => (b && b.material_type && b.bar_size)
+    ? { mat: String(b.material_type).trim(), size: String(b.bar_size).trim() }
+    : null
+  const part = norm(partBar)
+  const running = norm(runningBar)
+  if (!part || !running) return { kind: 'unknown', label: null }
+
+  const sameMat = part.mat.toLowerCase() === running.mat.toLowerCase()
+  const sameSize = part.size.toLowerCase() === running.size.toLowerCase()
+  if (sameMat && sameSize) {
+    return { kind: 'same_bar', label: `Same bar loaded: ${running.size} ${running.mat}` }
+  }
+  if (sameMat) {
+    return { kind: 'same_material', label: `Same material, bar change: ${running.size} → ${part.size}` }
+  }
+  return {
+    kind: 'change',
+    label: `Material change: ${running.mat} → ${part.mat} (scrap bins + bar pull)`
+  }
 }

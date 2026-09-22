@@ -55,6 +55,9 @@ export default function ProductionDisplay() {
   })
 
   const [activeJobs, setActiveJobs] = useState([])
+  // D-SCHED-27: every job on the board that is the first run of its part, or of its
+  // whole length family — the production meeting's own list.
+  const [firstRunRows, setFirstRunRows] = useState([])
   const [downMachineETAs, setDownMachineETAs] = useState([])
   const [requestedJobIds, setRequestedJobIds] = useState(() => new Set())
 
@@ -478,6 +481,68 @@ export default function ProductionDisplay() {
       return { ...j, finished, targetQty, mergedMemberQty, mergedMemberCount, trafficLight, elapsedMs, currentPartsPerDay, ovs: ovsByJob[j.id] || null }
     })
 
+    // D-SCHED-27: first-run flags. The row badge keys off the jobs already loaded; the
+    // production-meeting panel is board-wide, so a job that is scheduled but has not yet
+    // reached a machine's active row still gets named in the meeting.
+    const firstRunByJob = {}
+    if (activeJobIds.length > 0) {
+      for (let i = 0; i < activeJobIds.length; i += 150) {
+        const { data: frRows, error: e4 } = await supabase
+          .from('v_job_first_run')
+          .select('job_id, first_run_kind, length_family_key')
+          .in('job_id', activeJobIds.slice(i, i + 150))
+        if (e4) { console.error('loadActiveJobs/first-run error:', e4); break }
+        for (const r of frRows || []) firstRunByJob[r.job_id] = r
+      }
+    }
+    for (const row of enriched) {
+      row.firstRunKind = firstRunByJob[row.id]?.first_run_kind || null
+    }
+
+    const { data: frBoard, error: e5 } = await supabase
+      .from('v_job_first_run')
+      .select('job_id, job_number, part_number, first_run_kind, status, length_family_key')
+      .not('first_run_kind', 'is', null)
+      .in('status', ['assigned', 'in_setup', 'in_progress'])
+    if (e5) {
+      console.error('loadActiveJobs/first-run board error:', e5)
+      setFirstRunRows([])
+    } else {
+      const liveById = {}
+      for (const row of enriched) liveById[row.id] = row
+      // Machine and start for the flagged jobs that are not on an active row.
+      const missingIds = (frBoard || []).map(r => r.job_id).filter(id => !liveById[id])
+      const extraById = {}
+      for (let i = 0; i < missingIds.length; i += 150) {
+        const { data: extra, error: e6 } = await supabase
+          .from('jobs')
+          .select('id, job_number, status, scheduled_start, machine:machines!assigned_machine_id(code), component:parts!component_id(part_number)')
+          .in('id', missingIds.slice(i, i + 150))
+        if (e6) { console.error('loadActiveJobs/first-run detail error:', e6); break }
+        for (const r of extra || []) extraById[r.id] = r
+      }
+      setFirstRunRows(
+        (frBoard || [])
+          .map(r => {
+            const live = liveById[r.job_id]
+            const extra = extraById[r.job_id]
+            return {
+              job_id: r.job_id,
+              job_number: r.job_number || live?.job_number || extra?.job_number || '—',
+              part_number: r.part_number || live?.component?.part_number || extra?.component?.part_number || '—',
+              first_run_kind: r.first_run_kind,
+              machine_code: live?.machine?.code || extra?.machine?.code || '—',
+              scheduled_start: live?.scheduled_start || extra?.scheduled_start || null,
+            }
+          })
+          .sort((a, b) => {
+            const as = a.scheduled_start ? new Date(a.scheduled_start).getTime() : Infinity
+            const bs = b.scheduled_start ? new Date(b.scheduled_start).getTime() : Infinity
+            return as - bs
+          })
+      )
+    }
+
     // UP NEXT enrichment. For each active row, find the next queued job on
     // the same machine. Filter out the row's own id so a staged-synthesized
     // row (which appears in both the active list AND queuedByMachine via the
@@ -773,6 +838,51 @@ export default function ProductionDisplay() {
             )}
           </div>
 
+          {/* ===== D-SCHED-27: First runs — production meeting ===== */}
+          <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 mb-4">
+            <p className="text-gray-400 text-xs uppercase tracking-wide mb-3">
+              First runs — production meeting{firstRunRows.length > 0 ? ` · ${firstRunRows.length}` : ''}
+            </p>
+            {firstRunRows.length === 0 ? (
+              <p className="text-gray-600 text-sm italic">No first runs on the board.</p>
+            ) : (
+              <div className="space-y-1">
+                {firstRunRows.map(r => (
+                  <div
+                    key={r.job_id}
+                    className="flex items-center gap-3 px-3 py-1.5 bg-gray-900/60 border border-gray-800 rounded"
+                  >
+                    <span className="text-white font-mono text-sm font-semibold truncate min-w-0 flex-1">
+                      {r.part_number}
+                    </span>
+                    {r.first_run_kind === 'part_and_family' ? (
+                      <span
+                        className="bg-amber-900/60 text-amber-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0"
+                        title="First run of this part and its family in SkyNet"
+                      >
+                        First run
+                      </span>
+                    ) : (
+                      <span
+                        className="bg-gray-800 text-gray-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0"
+                        title="First run of this length in SkyNet — the family has run"
+                      >
+                        First of length
+                      </span>
+                    )}
+                    <span className="text-white font-mono text-sm shrink-0 w-14">{r.machine_code}</span>
+                    <span className="text-gray-400 font-mono text-xs shrink-0 w-20 text-right">
+                      {r.scheduled_start
+                        ? new Date(r.scheduled_start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+                        : '—'}
+                    </span>
+                    <span className="text-blue-400 font-mono text-xs shrink-0">{r.job_number}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
         </div>
 
         {/* Machine Status */}
@@ -971,6 +1081,22 @@ function ActiveJobRow({ job, hasOpenRequest, onRequestDue }) {
               title={`Orders covered at ${ovsStatus.ordersOnRun.toLocaleString()} — ${ovsStatus.stockMade.toLocaleString()} of ${ovsStatus.stock.toLocaleString()} stock finished`}
             >
               Stock
+            </span>
+          )}
+          {job.firstRunKind === 'part_and_family' && (
+            <span
+              className="bg-amber-900/60 text-amber-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded"
+              title="First run of this part and its family in SkyNet"
+            >
+              First run
+            </span>
+          )}
+          {job.firstRunKind === 'part' && (
+            <span
+              className="bg-gray-800 text-gray-300 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded"
+              title="First run of this length in SkyNet — the family has run"
+            >
+              First of length
             </span>
           )}
           {isBehind && (

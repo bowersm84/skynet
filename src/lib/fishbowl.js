@@ -364,44 +364,26 @@ export async function getInventoryFor(partNums) {
   return out
 }
 
-// D-FB-39: which of these part numbers Fishbowl knows at all. Tells "Fishbowl has the
-// part but the bridge doesn't sync its inventory" apart from "no such Fishbowl part".
-// Two reads per chunk rather than an .or() so part numbers never need quoting.
-export async function getFbProductPartNums(partNums) {
-  const keys = [...new Set((partNums || []).filter(Boolean))]
-  if (keys.length === 0) return new Set()
-  const found = new Set()
-  for (const col of ['part_num', 'product_num']) {
-    for (let i = 0; i < keys.length; i += 200) {
-      const { data, error } = await supabase
-        .from('fb_products')
-        .select(col)
-        .is('removed_at', null)
-        .in(col, keys.slice(i, i + 200))
-      if (error) throw error
-      for (const r of data || []) if (r[col]) found.add(r[col])
-    }
-  }
-  return found
-}
-
 // D-FB-39. One reading of a fb_part_inventory row, shared by the Order Queue Avail cell
 // and Create WO so the two surfaces cannot drift.
 //
-// opts: { need = 0, basis = 'ship' | 'use', lastInventoryAt = null, inFishbowl = null, openJobs = null }
+// opts: { need = 0, lastInventoryAt = null, openJobs = null }
 // → { state, onHand, allocated, notAvailable, onOrder, free, tone, text, compactText, title, asOf }
 //
-// basis 'ship'  — the product being ordered: qty_available, the D-FB-33 definition
-//                 (Main + Warehouse only, so WIP never reads as shippable). Unchanged.
-// basis 'use'   — BOM components: free stock across EVERY location group, because a stud
-//                 or a cup sits in Material/Manufacturing, which the ship basis excludes.
+// free is always qty_available — the D-FB-33 definition (the bridge's available location
+// groups). D-FB-39a: a second "free to use" basis summed across every group was removed
+// before merge; a read of Fishbowl on 2026-09-23 put 4,784 of 4,787 inventory-totals rows
+// in Main and none in Material or Manufacturing, so it produced the same number under a
+// different explanation.
 //
-// state: no row → not_in_fishbowl (no fb_products row) else not_synced;
-//        row older than 10 min before the cycle's last_inventory_at → stale. Rows that
-//        leave the bridge's scope keep their last values (113 of 443 on 2026-09-23), so
-//        the cycle timestamp — not the row's age — is the reliable test.
+// state: no row → not_synced; row older than 10 min before the cycle's last_inventory_at
+//        → stale. Rows that leave the bridge's scope keep their last values (113 of 443
+//        on 2026-09-23), so the cycle timestamp — not the row's age — is the reliable
+//        test. D-FB-39a: there is no "not in Fishbowl" state. fb_products cannot prove
+//        absence — SK4FB13S had 53 on hand in Main with no Fishbowl product row — so a
+//        missing inventory row only ever means the bridge does not read this part yet.
 export function summarizeFbInventory(inv, opts = {}) {
-  const { need = 0, basis = 'ship', lastInventoryAt = null, inFishbowl = null, openJobs = null } = opts
+  const { need = 0, lastInventoryAt = null, openJobs = null } = opts
 
   const openJobsSuffix = () => {
     if (!openJobs || !(Number(openJobs.qty) > 0)) return ''
@@ -413,16 +395,13 @@ export function summarizeFbInventory(inv, opts = {}) {
   }
 
   if (!inv) {
-    const state = inFishbowl === false ? 'not_in_fishbowl' : 'not_synced'
     return {
-      state,
+      state: 'not_synced',
       onHand: 0, allocated: 0, notAvailable: 0, onOrder: 0, free: 0,
       tone: 'text-gray-500',
-      text: state === 'not_in_fishbowl' ? 'Not in Fishbowl' : 'Not synced from Fishbowl',
-      compactText: state === 'not_in_fishbowl' ? 'not in FB' : '—',
-      title: (state === 'not_in_fishbowl'
-        ? 'No Fishbowl part with this number.'
-        : 'Fishbowl has this part, but the bridge does not sync its inventory — it reads only parts on the sales orders it mirrors (D-FB-33).')
+      text: 'Not synced from Fishbowl',
+      compactText: '—',
+      title: 'No Fishbowl inventory row for this part — the bridge currently reads inventory only for parts on the sales orders it mirrors (D-FB-33).'
         + openJobsSuffix(),
       asOf: null,
     }
@@ -434,12 +413,7 @@ export function summarizeFbInventory(inv, opts = {}) {
   const onOrder = Number(inv.qty_on_order || 0)
   const byLocEntries = Object.entries(inv.by_location || {})
 
-  const free = basis === 'use'
-    ? (byLocEntries.length
-        ? byLocEntries.reduce((s, [, v]) =>
-            s + Number(v?.onHand || 0) - Number(v?.allocated || 0) - Number(v?.notAvailable || 0), 0)
-        : onHand - allocated - notAvailable)
-    : Number(inv.qty_available ?? 0)
+  const free = Number(inv.qty_available ?? 0)
 
   const stale = !!(lastInventoryAt && inv.snapshot_at
     && Date.parse(inv.snapshot_at) < Date.parse(lastInventoryAt) - 10 * 60 * 1000)
@@ -462,14 +436,12 @@ export function summarizeFbInventory(inv, opts = {}) {
   }
   if (onOrder > 0) text += ` · ${onOrder.toLocaleString()} on order`
 
-  // The ship-basis title is byte-identical to the pre-D-FB-39 AvailCell tooltip: same
-  // expressions on the same raw fields, so a string quirk there is reproduced here.
+  // Byte-identical to the pre-D-FB-39 AvailCell tooltip: same expressions on the same
+  // raw fields, so a string quirk there is reproduced here rather than silently fixed.
   const byLoc = byLocEntries
     .map(([lg, v]) => `${FB_LOCATION_GROUPS[lg] || `LG ${lg}`}: ${Number(v.onHand || 0).toLocaleString()} on hand, ${Number(v.allocated || 0).toLocaleString()} allocated`)
     .join('\n')
-  const head = basis === 'use'
-    ? `Free to use ${free.toLocaleString()} (on hand − allocated − not available, all location groups)`
-    : `Available ${Number(inv.qty_available ?? 0).toLocaleString()} (on hand ${Number(inv.qty_on_hand || 0).toLocaleString()} − allocated ${Number(inv.qty_allocated || 0).toLocaleString()} − not available ${Number(inv.qty_not_available || 0).toLocaleString()}; available location groups only)`
+  const head = `Available ${Number(inv.qty_available ?? 0).toLocaleString()} (on hand ${Number(inv.qty_on_hand || 0).toLocaleString()} − allocated ${Number(inv.qty_allocated || 0).toLocaleString()} − not available ${Number(inv.qty_not_available || 0).toLocaleString()}; available location groups only)`
 
   let title = head
     + (inv.qty_on_order ? `\nOn order ${Number(inv.qty_on_order).toLocaleString()}` : '')

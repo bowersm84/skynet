@@ -7,7 +7,7 @@ import { fetchExplodedBom, submitNestedTree } from '../lib/nestedAssembly'
 import NestedBomTree from './NestedBomTree'
 import FbInventoryChip from './FbInventoryChip'
 import {
-  getInventoryFor, getFbProductPartNums, getSyncState, summarizeFbInventory,
+  getInventoryFor, getSyncState, summarizeFbInventory,
   formatDateTime, formatAge,
 } from '../lib/fishbowl'
 
@@ -194,7 +194,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   // them, plus what SkyNet already has in open jobs. Read-only — nothing here feeds
   // "+ Stock" or any other input (D-FB-20 stands).
   const [fbInventory, setFbInventory] = useState({})
-  const [fbInFishbowl, setFbInFishbowl] = useState(() => new Set())
+
   const [fbSyncState, setFbSyncState] = useState(null)
   const [openJobsByPart, setOpenJobsByPart] = useState({})
 
@@ -567,7 +567,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
 
   useEffect(() => {
     if (!isOpen || fbPartList.length === 0) {
-      setFbInventory({}); setFbInFishbowl(new Set()); setOpenJobsByPart({})
+      setFbInventory({}); setOpenJobsByPart({})
       return
     }
     let cancelled = false
@@ -575,27 +575,22 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
     const partIds = fbPartList.map(([, id]) => id).filter(Boolean)
     Promise.all([
       getInventoryFor(partNums).catch(e => { console.error('fb inventory:', e); return {} }),
-      getFbProductPartNums(partNums).catch(e => { console.error('fb products:', e); return new Set() }),
       fetchOpenJobQtyByPart(supabase, partIds),
-    ]).then(([inv, inFb, openJobs]) => {
+    ]).then(([inv, openJobs]) => {
       if (cancelled) return
       setFbInventory(inv)
-      setFbInFishbowl(inFb)
       setOpenJobsByPart(openJobs)
     })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, fbPartListKey])
 
-  // inFishbowl stays null until the fb_products read lands, so a part never flashes
-  // "Not in Fishbowl" on its way to "Not synced".
-  const fbSummaryFor = (partNumber, need, basis) => summarizeFbInventory(
+  // D-FB-39a: every line reads the same way — product and BOM row alike.
+  const fbSummaryFor = (partNumber, need) => summarizeFbInventory(
     partNumber ? fbInventory[partNumber] : null,
     {
       need: Number(need) || 0,
-      basis,
       lastInventoryAt: fbSyncState?.last_inventory_at || null,
-      inFishbowl: fbInFishbowl.size ? fbInFishbowl.has(partNumber) : null,
     }
   )
 
@@ -1658,8 +1653,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                     <FbInventoryChip
                                       summary={fbSummaryFor(
                                         selectedPart.part_number,
-                                        (selected.orderQuantity || 0) + (selected.additionalForStock || 0),
-                                        'ship'
+                                        (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
                                       )}
                                       openJobs={openJobsByPart[selectedPart.id] || null}
                                     />
@@ -1681,8 +1675,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   <FbInventoryChip
                                     summary={fbSummaryFor(
                                       getAssemblyById(selected.assemblyId).part_number,
-                                      (selected.orderQuantity || 0) + (selected.additionalForStock || 0),
-                                      'ship'
+                                      (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
                                     )}
                                     openJobs={openJobsByPart[selected.assemblyId] || null}
                                   />
@@ -1729,7 +1722,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 selected={nestedSelectedByIndex[assemblyIndex] || {}}
                                 onToggleLeaf={(node) => toggleNestedLeaf(assemblyIndex, node)}
                                 inventoryFor={(node, qty) => ({
-                                  summary: fbSummaryFor(node.partNumber, qty, 'use'),
+                                  summary: fbSummaryFor(node.partNumber, qty),
                                   openJobs: openJobsByPart[node.componentId] || null,
                                 })}
                               />
@@ -1758,8 +1751,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                             size="compact"
                                             summary={fbSummaryFor(
                                               bom.component.part_number,
-                                              (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0)),
-                                              'use'
+                                              (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
                                             )}
                                           />
                                           <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
@@ -1792,8 +1784,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           size="compact"
                                           summary={fbSummaryFor(
                                             bom.component.part_number,
-                                            (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0)),
-                                            'use'
+                                            (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
                                           )}
                                         />
                                         <span className="text-gray-500">×{bom.quantity}</span>

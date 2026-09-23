@@ -29,11 +29,11 @@ function AvailCell({ line, inv, isProduct }) {
   if (!isProduct) return <td className="px-2 py-2" />
   if (!inv) return <td className="px-2 py-2 text-right font-mono text-xs text-gray-600" title="No Fishbowl inventory record for this part">—</td>
   // D-FB-39: the reading moved to summarizeFbInventory so this cell and Create WO share
-  // one definition. Ship basis with no lastInventoryAt/openJobs reproduces the old
-  // tone and tooltip exactly; the rendered number stays qty_available.
+  // one definition. With neither lastInventoryAt nor openJobs it reproduces the old tone
+  // and tooltip exactly; the rendered number stays qty_available.
   const need = coQtyForLine(line)
   const avail = Number(inv.qty_available ?? 0)
-  const summary = summarizeFbInventory(inv, { need, basis: 'ship' })
+  const summary = summarizeFbInventory(inv, { need })
   return (
     <td className={`px-2 py-2 text-right font-mono text-xs ${summary.tone}`} title={summary.title}>
       {avail.toLocaleString()}

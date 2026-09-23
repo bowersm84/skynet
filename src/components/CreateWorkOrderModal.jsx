@@ -586,11 +586,15 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   }, [isOpen, fbPartListKey])
 
   // D-FB-39a: every line reads the same way — product and BOM row alike.
-  const fbSummaryFor = (partNumber, need) => summarizeFbInventory(
+  // D-FB-39b: the part's open SkyNet jobs travel with the reading, so every tooltip
+  // lists them. A compact BOM chip has no room for the full line, and a component that
+  // already has a job open is exactly where a duplicate gets raised.
+  const fbSummaryFor = (partNumber, partId, need) => summarizeFbInventory(
     partNumber ? fbInventory[partNumber] : null,
     {
       need: Number(need) || 0,
       lastInventoryAt: fbSyncState?.last_inventory_at || null,
+      openJobs: (partId && openJobsByPart[partId]) || null,
     }
   )
 
@@ -1653,6 +1657,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                     <FbInventoryChip
                                       summary={fbSummaryFor(
                                         selectedPart.part_number,
+                                        selectedPart.id,
                                         (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
                                       )}
                                       openJobs={openJobsByPart[selectedPart.id] || null}
@@ -1675,6 +1680,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                   <FbInventoryChip
                                     summary={fbSummaryFor(
                                       getAssemblyById(selected.assemblyId).part_number,
+                                      selected.assemblyId,
                                       (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
                                     )}
                                     openJobs={openJobsByPart[selected.assemblyId] || null}
@@ -1722,7 +1728,7 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 selected={nestedSelectedByIndex[assemblyIndex] || {}}
                                 onToggleLeaf={(node) => toggleNestedLeaf(assemblyIndex, node)}
                                 inventoryFor={(node, qty) => ({
-                                  summary: fbSummaryFor(node.partNumber, qty),
+                                  summary: fbSummaryFor(node.partNumber, node.componentId, qty),
                                   openJobs: openJobsByPart[node.componentId] || null,
                                 })}
                               />
@@ -1751,8 +1757,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                             size="compact"
                                             summary={fbSummaryFor(
                                               bom.component.part_number,
+                                              bom.component.id,
                                               (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
                                             )}
+                                            openJobs={openJobsByPart[bom.component.id] || null}
                                           />
                                           <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
                                             📦 Part (Purchased)
@@ -1784,8 +1792,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           size="compact"
                                           summary={fbSummaryFor(
                                             bom.component.part_number,
+                                            bom.component.id,
                                             (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
                                           )}
+                                          openJobs={openJobsByPart[bom.component.id] || null}
                                         />
                                         <span className="text-gray-500">×{bom.quantity}</span>
                                         {isAdded ? (

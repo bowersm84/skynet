@@ -8,7 +8,10 @@ import { formatTsDateShort } from '../lib/fishbowl'
 //   size 'full'     → the plain-English line ("874 on hand, all allocated · 6,426 short")
 //   size 'compact'  → just the on-hand number, for BOM rows; "—" when the bridge has no
 //                     row for the part (D-FB-39a: that is the only no-row state)
-//   openJobs        → { qty, jobs: [{ job_number, status }] }; full size only
+//   openJobs        → { qty, jobs: [{ job_number, status }] }. Full size spells the line
+//                     out; compact adds a short "· N in jobs" cue (D-FB-39b), because a
+//                     component that already has a job open is the reason not to raise
+//                     another. Either way the full list is in the tooltip, via summary.
 //
 // Native title tooltip, matching the Order Queue cell — this modal has no drag
 // interactions, so there is nothing for a tooltip to fight with (D-SCHED-27a).
@@ -39,6 +42,12 @@ export default function FbInventoryChip({ summary, size = 'full', openJobs = nul
             SkyNet {openQty.toLocaleString()} in open jobs
             {openJobs.jobs?.[0]?.job_number ? ` (${openJobs.jobs[0].job_number})` : ''}
           </span>
+        </>
+      )}
+      {!full && openQty > 0 && (
+        <>
+          <span className="text-gray-600">·</span>
+          <span className="text-sky-300/80">{openQty.toLocaleString()} in jobs</span>
         </>
       )}
     </span>

@@ -15,9 +15,22 @@ Decisions: `Docs/Decisions.md` (D-FB-*, D-PRICE-19/20/26).
   The RPC upserts by fingerprint, marks lines missing from the payload as removed, writes `fb_sync_events`, and
   advances the cursor only when the last chunk of a window lands.
 - Every `RECONCILE_MS` (15 min): compare Fishbowl's open SOs with the mirror's open SOs and refetch any that differ.
-- Every `INVENTORY_MS` (5 min): on-hand / allocated / available per part for every part on an open SO line, from
-  `qtyinventorytotals` summed per location group; `AVAILABLE_LOCATION_GROUPS` decides which groups count as
-  available (default Main + Warehouse). Shown as the "Avail" column in the Order Queue.
+- Every `INVENTORY_MS` (5 min): on-hand / allocated / available per part, from `qtyinventorytotals` summed per
+  location group; `AVAILABLE_LOCATION_GROUPS` decides which groups count as available (default Main + Warehouse).
+  Shown as the "Avail" column in the Order Queue and as the inventory chips in Create Work Order (D-FB-39).
+  **Scope (D-FB-40, v1.6):** the union of every part on an open SO line, every SkyNet `parts.part_number`, and every
+  part already in `fb_part_inventory` — about 1,300 parts, resolved to Fishbowl parts through `part.num`.
+  **Zero rows:** the query starts from `part` and LEFT JOINs the totals, so a Fishbowl part with no stock record is
+  written with every quantity 0 and `by_location = {}`. Before v1.6 such a part was skipped, and because the poller
+  sends nothing for a part it did not read, its mirrored row kept its last values indefinitely (113 of 443 rows on
+  2026-09-23). A part number Fishbowl does not know gets no row at all, so "no row" means "not a Fishbowl part".
+  Every in-scope part is sent every cycle, which is what makes the D-FB-39 staleness test meaningful.
+  Per cycle at ~1,300 parts: one `parts`/`fb_part_inventory` page read each, ~5 Fishbowl reads of 300 ids, and
+  ~3 `fb_upsert_inventory` calls of 500 rows.
+  **`INVENTORY_DRY_RUN=true`** builds the payload, logs the cycle line and the probe parts (SK-O, SK40S47-13S,
+  SK26FB, SK4000-3S, SK4000CGP81, SK4C13C, SK4FB13S), and returns without writing. Only the literal `true` enables
+  it — unlike `KITS_SYNC_ENABLED`, an absent or misspelt value leaves the poller writing normally.
+  The arithmetic is a pure function in `src/inventory.mjs`; `node src/inventory.test.mjs` exercises it.
 - Every `USERS_MS` (daily): Fishbowl user names (never password hashes or MFA secrets) so events say who changed what.
 - Every cycle: `fb_heartbeat` (the Order Queue banner reads it).
 

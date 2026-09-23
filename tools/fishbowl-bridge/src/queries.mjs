@@ -3,6 +3,16 @@
 
 const idList = (ids) => ids.map((n) => Number(n)).filter(Number.isFinite).join(',')
 
+// D-FB-40. A MySQL string list. Part numbers carry spaces and slashes ('SK2600FW-SET 2',
+// '10RX1/2THBS') and come from SkyNet's own parts table, so they are escaped rather than trusted:
+// backslash first, then the quote doubled (''), which is an escape in every sql_mode. An empty list
+// becomes NULL so `IN ()` — a MySQL syntax error — can never be emitted.
+const strList = (vals) => (vals || [])
+  .map((s) => String(s ?? '').trim())
+  .filter((s) => s.length > 0)
+  .map((s) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`)
+  .join(',') || 'NULL'
+
 export const q = {
   maxRev: 'SELECT MAX(id) AS maxRev FROM revinfo',
 
@@ -37,11 +47,22 @@ export const q = {
   // Users (daily): names only — never userPwd / mfaSecret (D-FB-34).
   users: 'SELECT id, userName, firstName, lastName, activeFlag FROM sysuser',
 
-  // Inventory snapshot per part per location group for the parts on open SO lines (D-FB-33).
-  inventory: (partIds) => `SELECT q.PARTID AS partId, p.num AS partNum, q.LOCATIONGROUPID AS locationGroupId,
+  // Fishbowl part ids for a batch of part numbers (D-FB-40). Case-insensitive through the column's
+  // own collation — no BINARY, so 'sk4c13c' still finds SK4C13C. A number with no row here is a
+  // number Fishbowl does not know, and the poller gives it no inventory row at all.
+  partsByNum: (nums) => `SELECT p.id AS partId, p.num AS partNum FROM part p WHERE p.num IN (${strList(nums)})`,
+
+  // Inventory snapshot per part per location group (D-FB-33), for every part in scope (D-FB-40).
+  // D-FB-40 turns the join around: it starts from `part` and LEFT JOINs the totals, so a Fishbowl
+  // part with no qtyinventorytotals record comes back as one row with a null locationGroupId and is
+  // written as a zero row. Under the old inner join such a part was simply absent from the result and
+  // the poller sent nothing for it, so its mirrored row kept its last values for ever (113 of 443 on
+  // 2026-09-23). partId now comes from p.id, not q.PARTID, which is null on a miss.
+  // Column casing is Fishbowl's own, unchanged from D-FB-33; only FROM/JOIN/WHERE moved.
+  inventory: (partIds) => `SELECT p.id AS partId, p.num AS partNum, q.LOCATIONGROUPID AS locationGroupId,
       q.QTYONHAND AS qtyOnHand, q.QTYALLOCATED AS qtyAllocated, q.QTYNOTAVAILABLE AS qtyNotAvailable, q.QTYONORDER AS qtyOnOrder
-    FROM qtyinventorytotals q JOIN part p ON p.id = q.PARTID
-    WHERE q.PARTID IN (${idList(partIds)})`,
+    FROM part p LEFT JOIN qtyinventorytotals q ON q.PARTID = p.id
+    WHERE p.id IN (${idList(partIds)})`,
 
   // --- Bridge v1.3 pricing mirrors (D-PRICE-26). All read-only, all in Fishbowl's own local time. ---
 

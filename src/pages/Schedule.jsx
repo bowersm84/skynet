@@ -39,7 +39,7 @@ import {
 } from 'lucide-react'
 import CreateMaintenanceModal from '../components/CreateMaintenanceModal'
 import ScheduleJobModal from '../components/ScheduleJobModal'
-import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes, fetchPartFamily, fetchLengthFamilyHistory, fetchPartMachineHistory, buildRateLadder } from '../lib/scheduling'
+import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes, fetchPartFamily, fetchLengthFamilyHistory, fetchPartMachineHistory, buildRateLadder, resolveJobMaterial, fetchRunningMaterials, fetchObservedMaterialsForParts, fetchFamilyMaterials, fetchJobFirstRuns } from '../lib/scheduling'
 import AIAdvisorPanel from '../components/schedule/AIAdvisorPanel'
 import { FEATURES } from '../config'
 
@@ -429,7 +429,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .select(`
           *,
           work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, has_cancelled_allocation, has_open_shortfall),
-          component:parts!component_id(id, part_number, description)
+          component:parts!component_id(id, part_number, description, length_family_key, length_dash, material_type:material_types!material_type_id(name, short_code))
         `)
         .in('status', ['ready', 'pending_compliance'])
         .is('assigned_machine_id', null)
@@ -470,7 +470,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         .select(`
           *,
           work_order:work_orders(id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation, has_open_shortfall),
-          component:parts!component_id(id, part_number, description),
+          component:parts!component_id(id, part_number, description, length_family_key, length_dash, material_type:material_types!material_type_id(name, short_code)),
           assigned_machine:machines(id, name, code)
         `)
         .not('assigned_machine_id', 'is', null)
@@ -631,7 +631,8 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           id, wo_number, customer, priority, due_date, order_type, maintenance_type, has_cancelled_allocation
         ),
         component:parts!component_id(
-          id, part_number, description
+          id, part_number, description, length_family_key, length_dash,
+          material_type:material_types!material_type_id(name, short_code)
         ),
         assigned_machine:machines(id, name, code)
       `)
@@ -1036,6 +1037,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       e.preventDefault()
       return
     }
+    clearHoverCard()
     setDraggedJob(job)
     setDraggedScheduledJob(null)
     e.dataTransfer.effectAllowed = 'move'
@@ -1051,6 +1053,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       e.preventDefault()
       return
     }
+    clearHoverCard()
     setDraggedScheduledJob(job)
     setDraggedJob(null)
     e.dataTransfer.effectAllowed = 'move'
@@ -1626,6 +1629,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const handleResizeStart = (e, job, edge) => {
     e.preventDefault()
     e.stopPropagation()
+    clearHoverCard()
     
     const jobStart = new Date(job.scheduled_start)
     const jobEnd = job.scheduled_end 
@@ -1867,6 +1871,107 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   const isMaintenanceJob = (job) => {
     return job.is_maintenance || job.work_order?.order_type === 'maintenance'
   }
+
+  // ─────────── D-SCHED-27a: material + first-run for the grid and the hover card ───────────
+  // A job only has a job_materials row once the machinist loaded it, so everything still
+  // queued resolves through the part's observed bar, its family's, then master data
+  // (resolveJobMaterial). Fired after the job queries resolve; the board renders without
+  // waiting, and a failure just leaves the tag and the material line off.
+  const [materialSources, setMaterialSources] = useState({ loaded: {}, partObserved: {}, familyObserved: {} })
+  const [firstRunKinds, setFirstRunKinds] = useState({})
+  const [materialShortByName, setMaterialShortByName] = useState({})
+
+  useEffect(() => {
+    const jobs = [...(scheduledJobs || []), ...(unassignedJobs || [])]
+    if (jobs.length === 0) {
+      setMaterialSources({ loaded: {}, partObserved: {}, familyObserved: {} })
+      setFirstRunKinds({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const liveIds = jobs.filter(j => j.status === 'in_progress' || j.status === 'in_setup').map(j => j.id)
+      const partIds = [...new Set(jobs.map(j => j.component_id).filter(Boolean))]
+      const familyKeys = [...new Set(jobs.map(j => j.component?.length_family_key).filter(Boolean))]
+      const [loaded, partObserved, familyObserved, kinds] = await Promise.all([
+        fetchRunningMaterials(supabase, liveIds),
+        fetchObservedMaterialsForParts(supabase, partIds),
+        fetchFamilyMaterials(supabase, familyKeys),
+        fetchJobFirstRuns(supabase, jobs.map(j => j.id))
+      ])
+      if (cancelled) return
+      setMaterialSources({ loaded, partObserved, familyObserved })
+      setFirstRunKinds(kinds)
+    })()
+    return () => { cancelled = true }
+  }, [scheduledJobs, unassignedJobs])
+
+  // Short codes by material name. Master data carries its own; observed and loaded rows
+  // are matched back by name so the grid tag reads "41L40" rather than a chopped-off name.
+  useEffect(() => {
+    let cancelled = false
+    supabase.from('material_types').select('name, short_code').then(({ data, error }) => {
+      if (cancelled) return
+      if (error) { console.error('material_types:', error); return }
+      const map = {}
+      for (const r of data || []) {
+        if (r.name && r.short_code) map[String(r.name).trim().toLowerCase()] = r.short_code
+      }
+      setMaterialShortByName(map)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const jobMaterialMap = useMemo(() => {
+    const out = {}
+    for (const j of [...(scheduledJobs || []), ...(unassignedJobs || [])]) {
+      out[j.id] = resolveJobMaterial({
+        loaded: materialSources.loaded[j.id] || null,
+        partObserved: materialSources.partObserved[j.component_id] || null,
+        familyObserved: materialSources.familyObserved[j.component?.length_family_key] || null,
+        master: j.component?.material_type || null
+      })
+    }
+    return out
+  }, [scheduledJobs, unassignedJobs, materialSources])
+
+  const jobMaterial = (job) => (job ? jobMaterialMap[job.id] || null : null)
+
+  const materialShort = (mat) => {
+    const name = mat?.material_type
+    if (!name) return null
+    const code = mat.short_code || materialShortByName[String(name).trim().toLowerCase()]
+    if (code) return code
+    return name.length > 12 ? name.slice(0, 12) : name
+  }
+
+  // Hover card. 250 ms so it does not flicker while the eye scans the board; the card is
+  // pointer-events-none and carries nothing interactive, so it can never eat a drag.
+  const [hoverCard, setHoverCard] = useState(null)   // { job, x, y, showRange }
+  const hoverTimerRef = useRef(null)
+
+  const clearHoverCard = useCallback(() => {
+    if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null }
+    setHoverCard(null)
+  }, [])
+
+  const hoverProps = (job, showRange) => ({
+    onMouseEnter: (e) => {
+      const x = e.clientX
+      const y = e.clientY
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = setTimeout(() => setHoverCard({ job, x, y, showRange }), 250)
+    },
+    onMouseLeave: clearHoverCard
+  })
+
+  useEffect(() => {
+    if (!hoverCard) return
+    window.addEventListener('scroll', clearHoverCard, true)
+    return () => window.removeEventListener('scroll', clearHoverCard, true)
+  }, [hoverCard, clearHoverCard])
+
+  useEffect(() => () => { if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current) }, [])
 
   const getBlockSizeTier = (durationHours) => {
     if (durationHours >= 4) return 'large'
@@ -2361,6 +2466,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             />
           )}
           <span className="text-white text-xs font-bold truncate">{line1}</span>
+          {/* D-SCHED-27a: material beside the part number. Small blocks have no room —
+              the hover card carries it there. Nothing when the material is unknown. */}
+          {!isMaint && sizeTier !== 'small' && (() => {
+            const short = materialShort(jobMaterial(job))
+            return short
+              ? <span className="text-white/60 text-[10px] font-mono truncate">· {short}</span>
+              : null
+          })()}
           {(mergeAllocs[job.id]?.length > 0) && (
             <Layers size={10} className="text-cyan-300 flex-shrink-0 ml-0.5" title={`Combined run · ${mergeAllocs[job.id].length + 1} orders`} />
           )}
@@ -2912,6 +3025,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                     draggable
                     onDragStart={(e) => handleDragStart(e, job)}
                     onDragEnd={handleDragEnd}
+                    {...hoverProps(job, false)}
                     className={`rounded-lg p-3 border-l-4
                       cursor-grab active:cursor-grabbing hover:bg-gray-750 transition-all touch-manipulation
                       ${draggedJob?.id === job.id ? 'opacity-50 scale-95' : ''}
@@ -3302,7 +3416,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                         left: style.left,
                                         width: style.width
                                       }}
-                                      title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}${hasCancelledAlloc ? ' ⚠️ Customer order cancelled — review allocation' : ''}`}
+                                      {...hoverProps(job, true)}
                                     >
                                       <JobBlockContent job={job} sizeTier={getBlockSizeTier(style.durationHours)} />
                                     </div>
@@ -3407,7 +3521,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                                   left: style.left,
                                   width: style.width
                                 }}
-                                title={`${job.job_number} - ${isMaintenanceJob(job) ? (job.maintenance_description || 'Maintenance') : job.component?.part_number} - Qty: ${job.quantity}${isCompleted ? ' (Complete)' : job.status === 'in_progress' ? ' (In Progress)' : ' (drag to reschedule, drag edges to resize)'}${isOverdue(job) ? ' ⚠️ OVERDUE' : ''}${job.work_order?.maintenance_type === 'unplanned' ? ' ⚠️ UNPLANNED' : ''}${hasCancelledAlloc ? ' ⚠️ Customer order cancelled — review allocation' : ''}`}
+                                {...hoverProps(job, true)}
                               >
                                 {/* Left resize handle - only for non-completed jobs */}
                                 {!style.continuesFromPrevious && canResize && (
@@ -3739,6 +3853,70 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
           </div>
         )}
       </div>
+
+      {/* D-SCHED-27a: part hover card — what a scheduler who may know nothing about the
+          parts needs before deciding anything. Replaces the blocks' native title tooltip.
+          Pointer-events none; hidden on drag start and on scroll. */}
+      {hoverCard && (() => {
+        const job = hoverCard.job
+        const isMaint = isMaintenanceJob(job)
+        const mat = jobMaterial(job)
+        const kind = firstRunKinds[job.id] || null
+        const sourceWord = mat
+          ? { loaded: 'loaded', part: 'observed', family: 'observed', master: 'master data' }[mat.source]
+          : null
+        const description = isMaint
+          ? (job.maintenance_description || null)
+          : (job.component?.description || null)
+        const qtyLine = [
+          isMaint ? null : `Qty ${(job.quantity ?? 0).toLocaleString()}`,
+          job.work_order?.customer || null,
+          job.work_order?.due_date ? `Due ${formatDate(job.work_order.due_date)}` : null
+        ].filter(Boolean).join(' · ')
+        const range = job.scheduled_start
+          ? `${formatDate(job.scheduled_start)} ${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
+          : null
+        const CARD_W = 300
+        const CARD_H = 210
+        const left = Math.max(8, Math.min(hoverCard.x + 14, window.innerWidth - CARD_W - 8))
+        const top = Math.max(8, Math.min(hoverCard.y + 14, window.innerHeight - CARD_H - 8))
+        return (
+          <div
+            className="fixed z-[60] pointer-events-none bg-gray-900 border border-gray-700 rounded-lg shadow-xl px-3 py-2"
+            style={{ left, top, width: CARD_W }}
+          >
+            <div className="flex items-baseline gap-2 min-w-0">
+              <span className="font-mono font-bold text-white truncate">
+                {isMaint ? (job.work_order?.maintenance_type === 'unplanned' ? 'UNPLANNED' : 'MAINTENANCE') : (job.component?.part_number || job.job_number)}
+              </span>
+              <span className="font-mono text-[11px] text-gray-500 shrink-0">{job.job_number}</span>
+            </div>
+            {description && (
+              <p className="text-gray-300 text-xs mt-1 leading-snug">{description}</p>
+            )}
+            {mat && (
+              <p className="text-xs mt-1">
+                <span className="text-gray-200">
+                  {mat.material_type}{mat.bar_size ? ` · ${mat.bar_size}` : ''}
+                </span>
+                {sourceWord && <span className="text-gray-500"> · {sourceWord}</span>}
+              </p>
+            )}
+            {job.component?.length_family_key && (
+              <p className="text-xs mt-1 text-violet-300/80">
+                Family {job.component.length_family_key}
+                {job.component.length_dash != null ? ` · -${job.component.length_dash}` : ''}
+                {kind === 'part_and_family' && <span className="text-amber-400"> · FIRST RUN</span>}
+                {kind === 'part' && <span className="text-gray-400"> · FIRST OF LENGTH</span>}
+              </p>
+            )}
+            {qtyLine && <p className="text-gray-400 text-xs mt-1">{qtyLine}</p>}
+            {hoverCard.showRange && range && (
+              <p className="text-gray-500 text-xs mt-1">{range}</p>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Job Detail Popup */}
       {selectedJob && (

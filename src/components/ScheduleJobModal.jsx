@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   X, Loader2, AlertTriangle, ArrowLeft, ArrowRight, Star,
@@ -12,7 +12,9 @@ import {
   // D-SCHED-27: length-family evidence, the rate ladder, and the card helpers.
   fetchPartFamily, fetchLengthFamilyHistory, fetchObservedMaterial,
   fetchRunningMaterials, fetchMatchingPolicies, fetchJobFirstRun,
-  buildRateLadder, projectFinish, isAfterCommit, materialAffinity
+  buildRateLadder, projectFinish, isAfterCommit, materialAffinity,
+  // D-SCHED-27a
+  resolveJobMaterial, fetchObservedMaterialsForParts, fetchFamilyMaterials
 } from '../lib/scheduling'
 import { fetchMergeHostCandidates, mergeJobIntoHost, isMemberEligible, getRunTarget } from '../lib/jobMerge'
 
@@ -45,7 +47,12 @@ export default function ScheduleJobModal({
   const [family, setFamily] = useState(null)
   const [familyHistory, setFamilyHistory] = useState([])
   const [observedMaterial, setObservedMaterial] = useState({ part: null, family: null })
-  const [runningMaterials, setRunningMaterials] = useState({})
+  // D-SCHED-27a: the neighbour is the queue TAIL — the job this one lands behind.
+  // Queued jobs carry no job_materials row until the kiosk load, so the tail's material
+  // is resolved from its part (observed, then family, then master data).
+  const [neighbourMaterials, setNeighbourMaterials] = useState({})
+  const [neighbourObserved, setNeighbourObserved] = useState({})
+  const [neighbourFamilyMaterials, setNeighbourFamilyMaterials] = useState({})
   const [policies, setPolicies] = useState([])
   const [firstRun, setFirstRun] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -225,30 +232,86 @@ export default function ScheduleJobModal({
       })
   }, [machines, scheduledJobs, job?.component_id, job?.id, partMachineDurations, partMachineHistory, editMode])
 
-  // D-SCHED-27: what each candidate machine has in the bar right now. Keyed on the
-  // running job ids alone so it does not wait on the family fetch.
-  const runningJobIds = useMemo(
-    () => [...new Set(baseMachines.map(m => m.runningJob?.id).filter(Boolean))].sort(),
+  // D-SCHED-27a: the neighbour is the queue TAIL (`lastJob`) — the job this one lands
+  // behind. The queue includes the running job, so with nothing else queued the tail IS
+  // the running job and no special case is needed. Keyed on the tail ids alone so it does
+  // not wait on the family fetch.
+  const neighbourJobIds = useMemo(
+    () => [...new Set(baseMachines.map(m => m.lastJob?.id).filter(Boolean))].sort(),
     [baseMachines]
   )
-  const runningJobIdsKey = runningJobIds.join(',')
+  const neighbourJobIdsKey = neighbourJobIds.join(',')
 
   useEffect(() => {
-    if (!isOpen || runningJobIds.length === 0) { setRunningMaterials({}); return }
+    if (!isOpen || neighbourJobIds.length === 0) { setNeighbourMaterials({}); return }
     let cancelled = false
-    fetchRunningMaterials(supabase, runningJobIds).then(byJob => {
-      if (!cancelled) setRunningMaterials(byJob)
+    fetchRunningMaterials(supabase, neighbourJobIds).then(byJob => {
+      if (!cancelled) setNeighbourMaterials(byJob)
     })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, runningJobIdsKey])
+  }, [isOpen, neighbourJobIdsKey])
+
+  // Only a job the machinist has already loaded has a job_materials row, so the tails
+  // that are still queued need their part's — or their family's — observed bar instead.
+  const neighbourPartIds = useMemo(
+    () => [...new Set(baseMachines.map(m => m.lastJob?.component_id).filter(Boolean))].sort(),
+    [baseMachines]
+  )
+  const neighbourFamilyKeys = useMemo(
+    () => [...new Set(baseMachines.map(m => m.lastJob?.component?.length_family_key).filter(Boolean))].sort(),
+    [baseMachines]
+  )
+  const neighbourPartIdsKey = neighbourPartIds.join(',')
+  const neighbourFamilyKeysKey = neighbourFamilyKeys.join(',')
+
+  useEffect(() => {
+    if (!isOpen || (neighbourPartIds.length === 0 && neighbourFamilyKeys.length === 0)) {
+      setNeighbourObserved({}); setNeighbourFamilyMaterials({}); return
+    }
+    let cancelled = false
+    Promise.all([
+      fetchObservedMaterialsForParts(supabase, neighbourPartIds),
+      fetchFamilyMaterials(supabase, neighbourFamilyKeys)
+    ]).then(([byPart, byFamily]) => {
+      if (cancelled) return
+      setNeighbourObserved(byPart)
+      setNeighbourFamilyMaterials(byFamily)
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, neighbourPartIdsKey, neighbourFamilyKeysKey])
+
+  // This job's own material, by the same ladder.
+  const partBar = useMemo(() => resolveJobMaterial({
+    loaded: null,
+    partObserved: observedMaterial.part,
+    familyObserved: observedMaterial.family,
+    master: job?.component?.material_type || null
+  }), [observedMaterial, job?.component?.material_type])
+
+  const neighbourMaterialFor = useCallback((j) => {
+    if (!j) return null
+    return resolveJobMaterial({
+      loaded: neighbourMaterials[j.id] || null,
+      partObserved: neighbourObserved[j.component_id] || null,
+      familyObserved: neighbourFamilyMaterials[j.component?.length_family_key] || null,
+      master: j.component?.material_type || null
+    })
+  }, [neighbourMaterials, neighbourObserved, neighbourFamilyMaterials])
+
+  // "SK26FB4 (last in queue)" / "SK4C7 (running)" — the label that makes the line readable.
+  const neighbourLabelFor = useCallback((j) => {
+    if (!j) return null
+    const name = j.component?.part_number || j.job_number
+    return `${name} (${isJobRunning(j) ? 'running' : 'last in queue'})`
+  }, [])
 
   // D-SCHED-27: family record, rate ladder, projected finish vs target, and material
   // affinity per machine — so a scheduler who knows nothing about the part or the
   // machines can read a card on its own and see why one placement beats another.
   const availableMachines = useMemo(() => {
     const familyKey = family?.length_family_key || null
-    const partBar = observedMaterial.part || observedMaterial.family || null
     const runTarget = getRunTarget(job, members)
     const now = new Date()
     return baseMachines.map(m => {
@@ -271,15 +334,18 @@ export default function ScheduleJobModal({
         ladder,
         projectedFinish,
         projectedLate: isAfterCommit(projectedFinish, commitDate),
-        material: materialAffinity(partBar, runningMaterials[m.runningJob?.id] || null),
+        material: materialAffinity(partBar, neighbourMaterialFor(m.lastJob), {
+          neighbourLabel: neighbourLabelFor(m.lastJob)
+        }),
         sameModelFamily: !famRow && !!sameModelRow,
         sameModelPeer: sameModelRow?.machineName || null
       }
     })
   }, [
-    baseMachines, family, familyHistory, observedMaterial, runningMaterials,
+    baseMachines, family, familyHistory, partBar, neighbourMaterialFor, neighbourLabelFor,
     partMachineHistory, historyRuns, machines, job, members, commitDate
   ])
+
 
   const selectedMachine = availableMachines.find(m => m.id === selectedMachineId)
 
@@ -302,6 +368,18 @@ export default function ScheduleJobModal({
     if (!selectedMachineId) return []
     return getMachineQueue(scheduledJobs, selectedMachineId, { excludeJobId: editMode ? job?.id : null })
   }, [scheduledJobs, selectedMachineId, editMode, job?.id])
+
+  // D-SCHED-27a: once a slot is chosen, the changeover that matters is against the job
+  // actually in front of it, not the queue tail. No predecessor at the front of the queue.
+  const predecessorAffinity = useMemo(() => {
+    if (insertionIndex === null || insertionIndex <= 0) return null
+    const before = currentQueue[insertionIndex - 1]
+    if (!before) return null
+    const name = before.component?.part_number || before.job_number
+    return materialAffinity(partBar, neighbourMaterialFor(before), {
+      neighbourLabel: isJobRunning(before) ? `${name} (running)` : name
+    })
+  }, [insertionIndex, currentQueue, partBar, neighbourMaterialFor])
 
   const minInsertionIndex = useMemo(() => {
     if (currentQueue.length === 0) return 0
@@ -519,6 +597,7 @@ export default function ScheduleJobModal({
               setPartsPerDay={setPartsPerDay}
               applyPartsPerDay={applyPartsPerDay}
               ladder={selectedLadder}
+              predecessorAffinity={predecessorAffinity}
               familyKey={family?.length_family_key || null}
               commitDate={commitDate}
               propagation={propagation}
@@ -1194,7 +1273,7 @@ function Step3Duration({
   totalMinutes, propagation, fmtDateTime, job, isMachineChange,
   isLateSchedule, dueDateDisplay, dueDateLabel = 'due date',
   partsPerDay, setPartsPerDay, applyPartsPerDay,
-  ladder = null, familyKey = null, commitDate = null,
+  ladder = null, familyKey = null, commitDate = null, predecessorAffinity = null,
   members = []
 }) {
   const beforeJob = queue[insertionIndex - 1]
@@ -1248,6 +1327,18 @@ function Step3Duration({
           <span className="text-white font-mono">{job.component?.part_number || job.job_number}</span> on <span className="text-white font-medium">{machine?.name}</span>
         </p>
         <p className="text-gray-500 text-xs mt-1">{placementText}</p>
+        {/* D-SCHED-27a: the changeover against the job actually in front of this slot. */}
+        {predecessorAffinity?.label && (
+          <p className={`text-xs mt-1 ${
+            predecessorAffinity.kind === 'same_bar'
+              ? 'text-green-400'
+              : predecessorAffinity.kind === 'change'
+                ? 'text-amber-400'
+                : 'text-gray-500'
+          }`}>
+            {predecessorAffinity.label}
+          </p>
+        )}
       </div>
 
       {(machine?.status === 'down' || machine?.status === 'offline') && (

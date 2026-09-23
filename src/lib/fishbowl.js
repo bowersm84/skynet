@@ -364,6 +364,102 @@ export async function getInventoryFor(partNums) {
   return out
 }
 
+// D-FB-39. One reading of a fb_part_inventory row, shared by the Order Queue Avail cell
+// and Create WO so the two surfaces cannot drift.
+//
+// opts: { need = 0, lastInventoryAt = null, openJobs = null }
+// → { state, onHand, allocated, notAvailable, onOrder, free, tone, text, compactText, title, asOf }
+//
+// free is always qty_available — the D-FB-33 definition (the bridge's available location
+// groups). D-FB-39a: a second "free to use" basis summed across every group was removed
+// before merge; a read of Fishbowl on 2026-09-23 put 4,784 of 4,787 inventory-totals rows
+// in Main and none in Material or Manufacturing, so it produced the same number under a
+// different explanation.
+//
+// state: no row → not_synced; row older than 10 min before the cycle's last_inventory_at
+//        → stale. Rows that leave the bridge's scope keep their last values (113 of 443
+//        on 2026-09-23), so the cycle timestamp — not the row's age — is the reliable
+//        test. D-FB-39a: there is no "not in Fishbowl" state. fb_products cannot prove
+//        absence — SK4FB13S had 53 on hand in Main with no Fishbowl product row — so a
+//        missing inventory row only ever means the bridge does not read this part yet.
+export function summarizeFbInventory(inv, opts = {}) {
+  const { need = 0, lastInventoryAt = null, openJobs = null } = opts
+
+  const openJobsSuffix = () => {
+    if (!openJobs || !(Number(openJobs.qty) > 0)) return ''
+    const jobs = openJobs.jobs || []
+    const shown = jobs.slice(0, 3).map(j => `${j.job_number} (${String(j.status || '').replace(/_/g, ' ')})`)
+    const more = jobs.length > 3 ? `, +${jobs.length - 3} more` : ''
+    return `\n\nSkyNet: ${Number(openJobs.qty).toLocaleString()} in open jobs`
+      + (shown.length ? ` — ${shown.join(', ')}${more}` : '')
+  }
+
+  if (!inv) {
+    return {
+      state: 'not_synced',
+      onHand: 0, allocated: 0, notAvailable: 0, onOrder: 0, free: 0,
+      tone: 'text-gray-500',
+      text: 'Not synced from Fishbowl',
+      compactText: '—',
+      title: 'No Fishbowl inventory row for this part — the bridge currently reads inventory only for parts on the sales orders it mirrors (D-FB-33).'
+        + openJobsSuffix(),
+      asOf: null,
+    }
+  }
+
+  const onHand = Number(inv.qty_on_hand || 0)
+  const allocated = Number(inv.qty_allocated || 0)
+  const notAvailable = Number(inv.qty_not_available || 0)
+  const onOrder = Number(inv.qty_on_order || 0)
+  const byLocEntries = Object.entries(inv.by_location || {})
+
+  const free = Number(inv.qty_available ?? 0)
+
+  const stale = !!(lastInventoryAt && inv.snapshot_at
+    && Date.parse(inv.snapshot_at) < Date.parse(lastInventoryAt) - 10 * 60 * 1000)
+  const state = stale ? 'stale' : 'current'
+
+  // Exactly the pre-D-FB-39 AvailCell rule; stale never reads as good news.
+  const tone = stale
+    ? 'text-gray-500'
+    : (free >= need && need > 0 ? 'text-green-300' : free > 0 ? 'text-amber-300' : 'text-gray-500')
+
+  let text
+  if (onHand <= 0) {
+    text = 'None on hand' + (allocated > 0 ? ` · ${allocated.toLocaleString()} allocated` : '')
+  } else if (free > 0) {
+    text = `${free.toLocaleString()} free of ${onHand.toLocaleString()} on hand`
+  } else {
+    text = free < 0
+      ? `${onHand.toLocaleString()} on hand, all allocated · ${(-free).toLocaleString()} short`
+      : `${onHand.toLocaleString()} on hand, none free`
+  }
+  if (onOrder > 0) text += ` · ${onOrder.toLocaleString()} on order`
+
+  // Byte-identical to the pre-D-FB-39 AvailCell tooltip: same expressions on the same
+  // raw fields, so a string quirk there is reproduced here rather than silently fixed.
+  const byLoc = byLocEntries
+    .map(([lg, v]) => `${FB_LOCATION_GROUPS[lg] || `LG ${lg}`}: ${Number(v.onHand || 0).toLocaleString()} on hand, ${Number(v.allocated || 0).toLocaleString()} allocated`)
+    .join('\n')
+  const head = `Available ${Number(inv.qty_available ?? 0).toLocaleString()} (on hand ${Number(inv.qty_on_hand || 0).toLocaleString()} − allocated ${Number(inv.qty_allocated || 0).toLocaleString()} − not available ${Number(inv.qty_not_available || 0).toLocaleString()}; available location groups only)`
+
+  let title = head
+    + (inv.qty_on_order ? `\nOn order ${Number(inv.qty_on_order).toLocaleString()}` : '')
+    + (byLoc ? `\n\n${byLoc}` : '')
+    + (inv.snapshot_at ? `\n\nsnapshot ${formatDateTime(inv.snapshot_at)}` : '')
+  if (stale) {
+    title += `\n\nNot refreshed since ${formatDateTime(inv.snapshot_at)} — the bridge reads inventory only for parts on the sales orders it mirrors (D-FB-33). These are the last known numbers.`
+  }
+  title += openJobsSuffix()
+
+  return {
+    state, onHand, allocated, notAvailable, onOrder, free, tone, text,
+    compactText: `${onHand.toLocaleString()} on hand`,
+    title,
+    asOf: inv.snapshot_at || null,
+  }
+}
+
 // ── Events: exceptions + recent changes (v_fb_recent_changes) ──────────────
 export async function getOpenExceptions() {
   const { data, error } = await supabase

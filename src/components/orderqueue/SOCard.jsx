@@ -4,7 +4,8 @@ import {
   FB_SO_STATUS, FB_SO_STATUS_COLORS, FB_LINE_STATUS, FB_LINE_TYPE, FB_PRIORITY, FB_PRIORITY_COLORS,
   DISPOSITION_LABELS, DISPOSITION_COLORS, RESOLUTION_LABELS, RESOLUTION_COLORS, MANUAL_DISPOSITIONS,
   PRODUCT_LINE_TYPES, formatDate, formatDateShort, formatDateTime, isSuspectDate, isSelectableLine, convertBlocker,
-  coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort, FB_LOCATION_GROUPS, isClosedLine,
+  coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort, isClosedLine,
+  summarizeFbInventory,
 } from '../../lib/fishbowl'
 
 function Chip({ className = '', children, title }) {
@@ -27,18 +28,14 @@ const fmtQty = (v) => (v === null || v === undefined ? '—' : Number(v).toLocal
 function AvailCell({ line, inv, isProduct }) {
   if (!isProduct) return <td className="px-2 py-2" />
   if (!inv) return <td className="px-2 py-2 text-right font-mono text-xs text-gray-600" title="No Fishbowl inventory record for this part">—</td>
+  // D-FB-39: the reading moved to summarizeFbInventory so this cell and Create WO share
+  // one definition. Ship basis with no lastInventoryAt/openJobs reproduces the old
+  // tone and tooltip exactly; the rendered number stays qty_available.
   const need = coQtyForLine(line)
   const avail = Number(inv.qty_available ?? 0)
-  const tone = avail >= need && need > 0 ? 'text-green-300' : avail > 0 ? 'text-amber-300' : 'text-gray-500'
-  const byLoc = Object.entries(inv.by_location || {})
-    .map(([lg, v]) => `${FB_LOCATION_GROUPS[lg] || `LG ${lg}`}: ${Number(v.onHand || 0).toLocaleString()} on hand, ${Number(v.allocated || 0).toLocaleString()} allocated`)
-    .join('\n')
-  const title = `Available ${avail.toLocaleString()} (on hand ${Number(inv.qty_on_hand || 0).toLocaleString()} − allocated ${Number(inv.qty_allocated || 0).toLocaleString()} − not available ${Number(inv.qty_not_available || 0).toLocaleString()}; available location groups only)`
-    + (inv.qty_on_order ? `\nOn order ${Number(inv.qty_on_order).toLocaleString()}` : '')
-    + (byLoc ? `\n\n${byLoc}` : '')
-    + (inv.snapshot_at ? `\n\nsnapshot ${formatDateTime(inv.snapshot_at)}` : '')
+  const summary = summarizeFbInventory(inv, { need, basis: 'ship' })
   return (
-    <td className={`px-2 py-2 text-right font-mono text-xs ${tone}`} title={title}>
+    <td className={`px-2 py-2 text-right font-mono text-xs ${summary.tone}`} title={summary.title}>
       {avail.toLocaleString()}
     </td>
   )

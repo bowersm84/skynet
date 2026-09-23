@@ -1,10 +1,43 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { getOpenCOLinesForPart, allocateStockRequests } from '../lib/customerOrders'
-import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown } from 'lucide-react'
+import { X, Plus, Trash2, Package, ShoppingCart, ChevronRight, Loader2, Wrench, GripVertical, Search, ChevronDown, AlertTriangle } from 'lucide-react'
 import { FEATURES } from '../config'
 import { fetchExplodedBom, submitNestedTree } from '../lib/nestedAssembly'
 import NestedBomTree from './NestedBomTree'
+import FbInventoryChip from './FbInventoryChip'
+import {
+  getInventoryFor, getSyncState, summarizeFbInventory,
+  formatDateTime, formatAge,
+} from '../lib/fishbowl'
+
+// D-FB-39: what SkyNet already has in flight for these parts. A Fishbowl number alone
+// misleads — SK-O read 6,426 short on PROD while J-000219 had 7,550 in progress.
+// lib/jobs.js has no constant for exactly this terminal set (EXCLUDED_STATUSES is
+// cancelled/merged only) and imports no supabase client, so both live here.
+const OPEN_JOB_TERMINAL_STATUSES = ['complete', 'cancelled', 'merged', 'incomplete']
+
+async function fetchOpenJobQtyByPart(supabase, partIds) {
+  const ids = [...new Set((partIds || []).filter(Boolean))]
+  if (ids.length === 0) return {}
+  const out = {}
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error } = await supabase
+      .from('jobs')
+      .select('component_id, job_number, status, quantity, is_maintenance')
+      .in('component_id', ids.slice(i, i + 200))
+      .not('status', 'in', `(${OPEN_JOB_TERMINAL_STATUSES.join(',')})`)
+      .order('job_number', { ascending: true })
+    if (error) { console.error('open job qty by part:', error); break }
+    for (const j of data || []) {
+      if (j.is_maintenance === true) continue
+      const entry = out[j.component_id] || (out[j.component_id] = { qty: 0, jobs: [] })
+      entry.qty += Number(j.quantity || 0)
+      entry.jobs.push({ job_number: j.job_number, status: j.status })
+    }
+  }
+  return out
+}
 
 // Searchable product picker — replaces native <select> for the Product field.
 // Filters by part_number + description + customer. Groups results by part_type.
@@ -156,6 +189,14 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   // qty 1); selections = { [nodeKey]: true } of chosen manufactured leaves.
   const [nestedTreeByIndex, setNestedTreeByIndex] = useState({})
   const [nestedSelectedByIndex, setNestedSelectedByIndex] = useState({})
+
+  // D-FB-39: Fishbowl inventory for the selected products and every BOM component under
+  // them, plus what SkyNet already has in open jobs. Read-only — nothing here feeds
+  // "+ Stock" or any other input (D-FB-20 stands).
+  const [fbInventory, setFbInventory] = useState({})
+
+  const [fbSyncState, setFbSyncState] = useState(null)
+  const [openJobsByPart, setOpenJobsByPart] = useState({})
 
   // Load the full BOM tree for a row's top assembly (top qty 1; the tree
   // multiplies by order+stock at render). Keyed by selectedAssemblies index.
@@ -489,6 +530,77 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
   const getAssemblyById = (assemblyId) => {
     return assemblies.find(a => a.id === assemblyId)
   }
+
+  // ─────────── D-FB-39: Fishbowl inventory for everything on screen ───────────
+  // The bridge's snapshot age, so the freshness line can say how old the numbers are.
+  useEffect(() => {
+    if (!isOpen) return
+    let cancelled = false
+    getSyncState()
+      .then(s => { if (!cancelled) setFbSyncState(s) })
+      .catch(e => console.error('fb sync state:', e))
+    return () => { cancelled = true }
+  }, [isOpen])
+
+  // Every part on screen: each selected product itself, plus its BOM — the exploded
+  // tree when nested assembly is on, the flat assembly_bom when it is not.
+  const fbPartList = useMemo(() => {
+    const byPartNumber = new Map()   // part number → component id (for the open-jobs read)
+    const add = (partNumber, componentId) => {
+      if (!partNumber) return
+      if (!byPartNumber.has(partNumber) || componentId) byPartNumber.set(partNumber, componentId || null)
+    }
+    ;(selectedAssemblies || []).forEach((sel, index) => {
+      const own = getAssemblyById(sel.assemblyId)
+      add(own?.part_number, own?.id)
+      if (FEATURES.NESTED_ASSEMBLY) {
+        for (const n of nestedTreeByIndex[index]?.nodes || []) add(n.part_number, n.component_id)
+      } else {
+        for (const bom of own?.assembly_bom || []) add(bom.component?.part_number, bom.component?.id)
+      }
+    })
+    return [...byPartNumber.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAssemblies, nestedTreeByIndex, assemblies])
+
+  const fbPartListKey = fbPartList.map(([partNumber]) => partNumber).join(',')
+
+  useEffect(() => {
+    if (!isOpen || fbPartList.length === 0) {
+      setFbInventory({}); setOpenJobsByPart({})
+      return
+    }
+    let cancelled = false
+    const partNums = fbPartList.map(([partNumber]) => partNumber)
+    const partIds = fbPartList.map(([, id]) => id).filter(Boolean)
+    Promise.all([
+      getInventoryFor(partNums).catch(e => { console.error('fb inventory:', e); return {} }),
+      fetchOpenJobQtyByPart(supabase, partIds),
+    ]).then(([inv, openJobs]) => {
+      if (cancelled) return
+      setFbInventory(inv)
+      setOpenJobsByPart(openJobs)
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, fbPartListKey])
+
+  // D-FB-39a: every line reads the same way — product and BOM row alike.
+  const fbSummaryFor = (partNumber, need) => summarizeFbInventory(
+    partNumber ? fbInventory[partNumber] : null,
+    {
+      need: Number(need) || 0,
+      lastInventoryAt: fbSyncState?.last_inventory_at || null,
+    }
+  )
+
+  // Freshness of the snapshot itself — amber past 15 min, since the bridge runs every 5.
+  const fbFreshness = useMemo(() => {
+    const at = fbSyncState?.last_inventory_at
+    if (!at) return null
+    const ageSec = Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000))
+    return { at, ageSec, stale: ageSec > 900 }
+  }, [fbSyncState])
 
   const addJobFromBOM = (assemblyIndex, bom) => {
     const updated = [...selectedAssemblies]
@@ -1312,6 +1424,20 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                   )}
                 </div>
 
+                {/* D-FB-39: how old the Fishbowl numbers below are. Hidden until it loads. */}
+                {fbFreshness && (
+                  fbFreshness.stale ? (
+                    <div className="flex items-center gap-1 text-[11px] text-amber-400 mb-2">
+                      <AlertTriangle size={11} className="flex-shrink-0" />
+                      Fishbowl inventory last refreshed {formatAge(fbFreshness.ageSec)} ago — check the bridge
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-gray-500 mb-2">
+                      Fishbowl inventory as of {formatDateTime(fbFreshness.at)} · refreshed every 5 min
+                    </div>
+                  )
+                )}
+
                 {loadingAssemblies ? (
                   <div className="text-center py-4 text-gray-500">Loading products...</div>
                 ) : assemblies.length === 0 ? (
@@ -1522,6 +1648,16 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                       </span>
                                     </div>
                                   </div>
+                                  {/* D-FB-39: what Fishbowl holds for the part being ordered. */}
+                                  <div className="pb-2">
+                                    <FbInventoryChip
+                                      summary={fbSummaryFor(
+                                        selectedPart.part_number,
+                                        (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
+                                      )}
+                                      openJobs={openJobsByPart[selectedPart.id] || null}
+                                    />
+                                  </div>
                                   {renderRoutingSteps(selectedPart.id)}
                                 </div>
                               </div>
@@ -1534,6 +1670,16 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                               <div className="flex items-center gap-2">
                                 <span className="text-xs px-2 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">Product (Assembly)</span>
                                 <span className="text-gray-400 text-sm">Select parts to add jobs</span>
+                                {/* D-FB-39: the assembly's own Fishbowl stock. */}
+                                {getAssemblyById(selected.assemblyId)?.part_number && (
+                                  <FbInventoryChip
+                                    summary={fbSummaryFor(
+                                      getAssemblyById(selected.assemblyId).part_number,
+                                      (selected.orderQuantity || 0) + (selected.additionalForStock || 0)
+                                    )}
+                                    openJobs={openJobsByPart[selected.assemblyId] || null}
+                                  />
+                                )}
                               </div>
                               {selected.jobs.length > 0 && (
                                 <span className="text-green-400 text-xs font-medium">
@@ -1575,6 +1721,10 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                 treeState={nestedTreeByIndex[assemblyIndex]}
                                 selected={nestedSelectedByIndex[assemblyIndex] || {}}
                                 onToggleLeaf={(node) => toggleNestedLeaf(assemblyIndex, node)}
+                                inventoryFor={(node, qty) => ({
+                                  summary: fbSummaryFor(node.partNumber, qty),
+                                  openJobs: openJobsByPart[node.componentId] || null,
+                                })}
                               />
                             ) : (
                             <div className="space-y-1 mb-3">
@@ -1596,9 +1746,18 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           <span className="text-gray-400">{bom.component.part_number}</span>
                                           <span className="text-gray-600">- {bom.component.description}</span>
                                         </div>
-                                        <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
-                                          📦 Part (Purchased)
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                          <FbInventoryChip
+                                            size="compact"
+                                            summary={fbSummaryFor(
+                                              bom.component.part_number,
+                                              (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
+                                            )}
+                                          />
+                                          <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">
+                                            📦 Part (Purchased)
+                                          </span>
+                                        </div>
                                       </div>
                                     )
                                   }
@@ -1621,6 +1780,13 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                         <span className="text-gray-500">- {bom.component.description}</span>
                                       </div>
                                       <div className="flex items-center gap-2">
+                                        <FbInventoryChip
+                                          size="compact"
+                                          summary={fbSummaryFor(
+                                            bom.component.part_number,
+                                            (bom.quantity || 0) * ((selected.orderQuantity || 0) + (selected.additionalForStock || 0))
+                                          )}
+                                        />
                                         <span className="text-gray-500">×{bom.quantity}</span>
                                         {isAdded ? (
                                           <span className="text-green-400">✓ Added</span>

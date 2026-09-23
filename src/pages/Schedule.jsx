@@ -1012,20 +1012,54 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       case 'wo_number':
         filtered.sort((a, b) => (a.work_order?.wo_number || '').localeCompare(b.work_order?.wo_number || ''))
         break
-      case 'due_date':
+      // D-CODATE-02c: natural order, so SK27CP9 sorts before SK27CP19 and SK4C4S
+      // before SK4C10S. Missing part numbers last; tie-break on WO number.
+      case 'part_number': {
+        const partOf = (j) => j.component?.part_number || ''
         filtered.sort((a, b) => {
-          const dateA = a.work_order?.due_date ? new Date(a.work_order.due_date) : new Date('9999-12-31')
-          const dateB = b.work_order?.due_date ? new Date(b.work_order.due_date) : new Date('9999-12-31')
-          return dateA - dateB
+          const pa = partOf(a)
+          const pb = partOf(b)
+          if (!pa !== !pb) return pa ? -1 : 1
+          const byPart = pa.localeCompare(pb, undefined, { numeric: true, sensitivity: 'base' })
+          if (byPart !== 0) return byPart
+          return (a.work_order?.wo_number || '').localeCompare(b.work_order?.wo_number || '')
         })
         break
+      }
+      // D-CODATE-02c: the date the pool card actually shows — the D-CODATE-02 SkyNet
+      // target when the WO has CO allocations, else the WO due date. Both are DATE
+      // values, so compare as strings; parsing them would reintroduce the D-CODATE-02b
+      // UTC-midnight shift. Undated jobs last.
+      case 'target_date': {
+        const dateOf = (j) => {
+          const d = j.work_order?.target_date || j.work_order?.due_date
+          return d ? String(d).slice(0, 10) : null
+        }
+        const partOf = (j) => j.component?.part_number || ''
+        filtered.sort((a, b) => {
+          const da = dateOf(a)
+          const db = dateOf(b)
+          if (da !== db) {
+            if (!da) return 1
+            if (!db) return -1
+            return da < db ? -1 : 1
+          }
+          const byWo = (a.work_order?.wo_number || '').localeCompare(b.work_order?.wo_number || '')
+          if (byWo !== 0) return byWo
+          return partOf(a).localeCompare(partOf(b), undefined, { numeric: true, sensitivity: 'base' })
+        })
+        break
+      }
       case 'customer':
         filtered.sort((a, b) => (a.work_order?.customer || 'zzz').localeCompare(b.work_order?.customer || 'zzz'))
         break
-      case 'priority':
+      // D-CODATE-02c: `|| 2` turned critical (0) into normal, so critical never sorted
+      // first. `?? 2` only defaults a genuinely unknown priority.
+      case 'priority': {
         const priorityOrder = { critical: 0, high: 1, normal: 2, low: 3 }
-        filtered.sort((a, b) => (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2))
+        filtered.sort((a, b) => (priorityOrder[a.priority] ?? 2) - (priorityOrder[b.priority] ?? 2))
         break
+      }
     }
 
     return filtered
@@ -2055,11 +2089,14 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     return `${startStr} - ${endStr}`
   }
 
+  // D-CODATE-02c: Due Date sorted on a date the card never shows; Target Date sorts on
+  // the one it does. Part # added; filterBy is plain state, so nothing to migrate.
   const filterOptions = [
-    { value: 'wo_number', label: 'Work Order #' },
-    { value: 'due_date', label: 'Due Date' },
-    { value: 'customer', label: 'Customer' },
-    { value: 'priority', label: 'Priority' }
+    { value: 'wo_number',   label: 'Work Order #' },
+    { value: 'part_number', label: 'Part #' },
+    { value: 'target_date', label: 'Target Date' },
+    { value: 'customer',    label: 'Customer' },
+    { value: 'priority',    label: 'Priority' }
   ]
 
   const filteredJobs = getFilteredJobs()

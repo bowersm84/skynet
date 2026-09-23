@@ -716,27 +716,148 @@ export function isAfterCommit(date, commitDate) {
   return d > new Date(String(commitDate).slice(0, 10) + 'T23:59:59')
 }
 
-// Bar affinity between the part being scheduled and what the machine is running now.
-// Matt, 2026-09-22: a material change means swapping scrap bins and pulling new bar —
-// "prefer to stick with what's running." Either side missing renders nothing.
-export function materialAffinity(partBar, runningBar) {
-  const norm = (b) => (b && b.material_type && b.bar_size)
-    ? { mat: String(b.material_type).trim(), size: String(b.bar_size).trim() }
-    : null
-  const part = norm(partBar)
-  const running = norm(runningBar)
-  if (!part || !running) return { kind: 'unknown', label: null }
+// ─────────── D-SCHED-27a: what material a job is, or will be, on the machine ───────────
+// A queued job has no job_materials row until the machinist loads it at the kiosk, so the
+// neighbour's material has to be resolved from the part. Ladder, strongest first:
+//   loaded   → the job_materials row
+//   observed → the part's primary observed bar, then its family's (D-SCHED-27 views)
+//   master   → parts.material_type (alloy only — master data carries no bar size)
+// bar_size 'N/A' is kept as written: it is the blank-stud marker, not a missing value.
+export function resolveJobMaterial({ loaded, partObserved, familyObserved, master } = {}) {
+  const clean = (v) => {
+    const s = v == null ? '' : String(v).trim()
+    return s || null
+  }
+  const fromBar = (row, source) => {
+    const material = clean(row?.material_type)
+    if (!material) return null
+    return { material_type: material, bar_size: clean(row?.bar_size), short_code: null, source }
+  }
+  const fromMaster = () => {
+    const name = clean(master?.name)
+    if (!name) return null
+    return { material_type: name, bar_size: null, short_code: clean(master?.short_code), source: 'master' }
+  }
+  return fromBar(loaded, 'loaded')
+    || fromBar(partObserved, 'part')
+    || fromBar(familyObserved, 'family')
+    || fromMaster()
+}
 
-  const sameMat = part.mat.toLowerCase() === running.mat.toLowerCase()
-  const sameSize = part.size.toLowerCase() === running.size.toLowerCase()
-  if (sameMat && sameSize) {
-    return { kind: 'same_bar', label: `Same bar loaded: ${running.size} ${running.mat}` }
+// Primary observed bar per part / per length family, for a batch of neighbours.
+// Chunked at 150 — the id list travels in the URL.
+export async function fetchObservedMaterialsForParts(supabase, partIds) {
+  const ids = [...new Set((partIds || []).filter(Boolean))]
+  if (!ids.length) return {}
+  const out = {}
+  for (let i = 0; i < ids.length; i += 150) {
+    const { data, error } = await supabase
+      .from('v_part_observed_material')
+      .select('part_id, material_type, bar_size, share_pct')
+      .eq('is_primary', true)
+      .in('part_id', ids.slice(i, i + 150))
+    if (error) { console.error('v_part_observed_material (batch):', error); break }
+    for (const r of data || []) out[r.part_id] = r
   }
+  return out
+}
+
+export async function fetchFamilyMaterials(supabase, familyKeys) {
+  const keys = [...new Set((familyKeys || []).filter(Boolean))]
+  if (!keys.length) return {}
+  const out = {}
+  for (let i = 0; i < keys.length; i += 150) {
+    const { data, error } = await supabase
+      .from('v_length_family_material')
+      .select('length_family_key, material_type, bar_size, share_pct')
+      .eq('is_primary', true)
+      .in('length_family_key', keys.slice(i, i + 150))
+    if (error) { console.error('v_length_family_material (batch):', error); break }
+    for (const r of data || []) out[r.length_family_key] = r
+  }
+  return out
+}
+
+// Batch variant of fetchJobFirstRun — { [job_id]: 'part_and_family' | 'part' | null }.
+export async function fetchJobFirstRuns(supabase, jobIds) {
+  const ids = [...new Set((jobIds || []).filter(Boolean))]
+  if (!ids.length) return {}
+  const out = {}
+  for (let i = 0; i < ids.length; i += 150) {
+    const { data, error } = await supabase
+      .from('v_job_first_run')
+      .select('job_id, first_run_kind')
+      .in('job_id', ids.slice(i, i + 150))
+    if (error) { console.error('v_job_first_run (batch):', error); break }
+    for (const r of data || []) out[r.job_id] = r.first_run_kind || null
+  }
+  return out
+}
+
+// Material affinity between the job being scheduled and the job it will land behind.
+// D-SCHED-27a: the neighbour is the QUEUE TAIL, not whatever happens to be running —
+// a new job lands behind the tail, so that is the changeover that costs anything — and
+// the label names it, because "material change" without a subject is unreadable.
+// Matt, 2026-09-22: a change means swapping scrap bins and pulling new bar; Bolt Master
+// parts run from blank studs, where "bar pull" is the wrong phrase entirely.
+// opts.neighbourLabel absent → the pre-27a wording, so any other caller is unaffected.
+export function materialAffinity(partBar, neighbourBar, opts = {}) {
+  const at = opts.neighbourLabel || null
+  const clean = (v) => {
+    const s = v == null ? '' : String(v).trim()
+    return s || null
+  }
+  const norm = (b) => {
+    const mat = clean(b?.material_type)
+    return mat ? { mat, size: clean(b?.bar_size) } : null
+  }
+  const part = norm(partBar)
+  const nb = norm(neighbourBar)
+  if (!part || !nb) return { kind: 'unknown', label: null }
+
+  const isBlank = (s) => /^blank studs/i.test(s)
+  const sameMat = part.mat.toLowerCase() === nb.mat.toLowerCase()
+
+  // Blank stock — nothing to pull, so neither "bar" nor "bar pull" belongs in the copy.
+  if (isBlank(part.mat) || isBlank(nb.mat)) {
+    if (sameMat) {
+      return {
+        kind: 'same_bar',
+        label: at ? `Same stock as ${at}: ${part.mat}` : `Same stock loaded: ${part.mat}`
+      }
+    }
+    return {
+      kind: 'change',
+      label: at ? `Stock change after ${at}: ${nb.mat} → ${part.mat}` : `Stock change: ${nb.mat} → ${part.mat}`
+    }
+  }
+
   if (sameMat) {
-    return { kind: 'same_material', label: `Same material, bar change: ${running.size} → ${part.size}` }
+    if (part.size && nb.size) {
+      if (part.size.toLowerCase() === nb.size.toLowerCase()) {
+        return {
+          kind: 'same_bar',
+          label: at ? `Same bar as ${at}: ${nb.size} ${nb.mat}` : `Same bar loaded: ${nb.size} ${nb.mat}`
+        }
+      }
+      return {
+        kind: 'same_material',
+        label: at
+          ? `Same material as ${at}, bar change: ${nb.size} → ${part.size}`
+          : `Same material, bar change: ${nb.size} → ${part.size}`
+      }
+    }
+    // Master data carries the alloy but no bar size — say so rather than implying a match.
+    return {
+      kind: 'same_material',
+      label: at ? `Same material as ${at} (bar size unknown)` : 'Same material (bar size unknown)'
+    }
   }
+
   return {
     kind: 'change',
-    label: `Material change: ${running.mat} → ${part.mat} (scrap bins + bar pull)`
+    label: at
+      ? `Material change after ${at}: ${nb.mat} → ${part.mat} (scrap bins + bar pull)`
+      : `Material change: ${nb.mat} → ${part.mat} (scrap bins + bar pull)`
   }
 }

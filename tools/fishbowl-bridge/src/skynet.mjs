@@ -116,6 +116,9 @@ export class SkyNet {
   }
 
   // Distinct Fishbowl part ids on product lines of open SOs (paged: PostgREST caps a request at 1000 rows).
+  // D-FB-40: ordered on fb_soitem_id, the table's primary key. Without a sort, .range() pages are not a
+  // partition — rows can shift between requests, so a part could be skipped at a page boundary and
+  // silently drop out of the inventory scope. Same fix as pagedDistinct below.
   async openPartIds() {
     await this.ensureSignedIn()
     const ids = new Set()
@@ -128,6 +131,7 @@ export class SkyNet {
         .not('fb_part_id', 'is', null)
         .in('type_id', [10, 12])
         .in('fb_sales_orders.status_id', [20, 25])
+        .order('fb_soitem_id')
         .range(from, from + page - 1)
       if (error) throw new Error(`fb_sales_order_lines part read failed: ${error.message}`)
       for (const r of data || []) if (r.fb_part_id) ids.add(Number(r.fb_part_id))
@@ -135,6 +139,32 @@ export class SkyNet {
     }
     return [...ids]
   }
+
+  // D-FB-40. Distinct values of one text column, trimmed and upper-cased, paged the same way
+  // openPartIds is (PostgREST caps a request at 1000 rows). Read-only; both tables are SELECT-able
+  // by `authenticated`, which is what the bridge's integration profile is.
+  async pagedDistinct(table, column) {
+    const out = new Set()
+    const page = 1000
+    for (let from = 0; ; from += page) {
+      // .order() is required with .range(): without a sort PostgREST pages are not a stable
+      // partition, so a row can be skipped between pages as well as repeated.
+      const { data, error } = await this.client.from(table).select(column).order(column).range(from, from + page - 1)
+      if (error) throw new Error(`${table}.${column} read failed: ${error.message}`)
+      for (const r of data || []) {
+        const v = String(r[column] ?? '').trim().toUpperCase()
+        if (v) out.add(v)
+      }
+      if (!data || data.length < page) break
+    }
+    return [...out]
+  }
+
+  // Every part SkyNet knows, and every part already mirrored — the two halves of the D-FB-40 scope
+  // that the open-SO set (openPartIds, D-FB-33) misses. Mirrored numbers are included so a part that
+  // has left every other set still gets a fresh row each cycle instead of freezing at its last values.
+  async skynetPartNums() { await this.ensureSignedIn(); return this.pagedDistinct('parts', 'part_number') }
+  async mirroredPartNums() { await this.ensureSignedIn(); return this.pagedDistinct('fb_part_inventory', 'part_num') }
 
   async openMirrorSos() {
     await this.ensureSignedIn()

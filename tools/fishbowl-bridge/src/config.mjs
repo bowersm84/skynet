@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.5.0',
+  version: '1.6.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -59,6 +59,10 @@ export const config = {
   reconcileMs: num('RECONCILE_MS', 900000),
   inventoryMs: num('INVENTORY_MS', 300000),
   usersMs: num('USERS_MS', 86400000),
+  // D-FB-40: build and log the inventory payload without writing it. Only the literal `true` turns it
+  // on. Deliberately the opposite default to KITS_SYNC_ENABLED, whose `?? 'true'` means a forgotten
+  // key silently enables a write: here a forgotten key can only ever leave the poller writing normally.
+  inventoryDryRun: String(process.env.INVENTORY_DRY_RUN ?? '').trim().toLowerCase() === 'true',
   // Fishbowl location groups whose stock counts as "available to ship" (D-FB-33). Default Main (1) + Warehouse (6).
   availableLocationGroups: String(process.env.AVAILABLE_LOCATION_GROUPS || '1,6')
     .split(',').map((x) => Number(x.trim())).filter(Number.isFinite),

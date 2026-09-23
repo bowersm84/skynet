@@ -10,6 +10,7 @@ import { ts, chunk } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
 import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
 import { syncPartCosts } from './partCosts.mjs'
+import { aggregateInventory, countZeroRows } from './inventory.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -37,39 +38,70 @@ async function syncUsers() {
   return n
 }
 
-// D-FB-33: inventory snapshot for the parts on open SO lines. qtyinventorytotals is per location group;
-// "available" sums only the configured groups (default Main + Warehouse) and every group is kept for the tooltip.
+// The parts Matt reads back against Fishbowl on a dry run before the first real write (D-FB-40).
+const INVENTORY_PROBES = ['SK-O', 'SK40S47-13S', 'SK26FB', 'SK4000-3S', 'SK4000CGP81', 'SK4C13C', 'SK4FB13S']
+
+// D-FB-33 / D-FB-40: the inventory snapshot. Scope is the union of the parts on open SO lines, every
+// SkyNet part number, and every part already mirrored — about 1,300 parts, resolved to Fishbowl parts
+// through part.num. Every in-scope part is sent every cycle, which is what keeps the D-FB-39 stale
+// test ("snapshot_at more than 10 min behind last_inventory_at") meaningful: a row only falls behind
+// if the poller genuinely stopped covering it. The arithmetic lives in inventory.mjs, with no I/O.
 async function syncInventory() {
-  const partIds = await sky.openPartIds()
-  if (partIds.length === 0) return 0
-  const avail = new Set(config.availableLocationGroups)
-  const byPart = new Map()
-  for (const ids of chunk(partIds, 300)) {
-    const rows = await fb.query(q.inventory(ids))
-    for (const r of rows) {
-      const partId = Number(r.partId)
-      const lg = Number(r.locationGroupId)
-      const onHand = Number(r.qtyOnHand) || 0
-      const allocated = Number(r.qtyAllocated) || 0
-      const notAvailable = Number(r.qtyNotAvailable) || 0
-      const onOrder = Number(r.qtyOnOrder) || 0
-      if (!byPart.has(partId)) {
-        byPart.set(partId, { partId, partNum: r.partNum, onHand: 0, allocated: 0, notAvailable: 0, onOrder: 0, available: 0, byLocation: {} })
-      }
-      const p = byPart.get(partId)
-      p.onHand += onHand
-      p.allocated += allocated
-      p.notAvailable += notAvailable
-      p.onOrder += onOrder
-      if (avail.has(lg)) p.available += onHand - allocated - notAvailable
-      p.byLocation[lg] = { onHand, allocated, notAvailable, onOrder }
+  const [openIds, skynetNums, mirroredNums] = await Promise.all([
+    sky.openPartIds(),
+    sky.skynetPartNums(),
+    sky.mirroredPartNums(),
+  ])
+
+  // Numbers are resolved to Fishbowl part ids; ids from the open-SO set are already Fishbowl's own.
+  const wanted = [...new Set([...skynetNums, ...mirroredNums])]
+  const ids = new Set(openIds.map(Number).filter(Number.isFinite))
+  const known = new Set()
+  for (const nums of chunk(wanted, 300)) {
+    for (const r of await fb.query(q.partsByNum(nums))) {
+      if (r.partId === null || r.partId === undefined) continue
+      const id = Number(r.partId)
+      if (!Number.isFinite(id)) continue
+      ids.add(id)
+      known.add(String(r.partNum ?? '').trim().toUpperCase())
     }
   }
-  let total = 0
-  for (const rows of chunk([...byPart.values()], 500)) {
-    total += Number(await sky.upsertInventory(rows)) || 0
+  // A number Fishbowl does not know gets no row at all, so "no row" keeps meaning "not a Fishbowl part".
+  // The numbers themselves are logged on a dry run only — on TEST they are mostly parts a refreshed
+  // copy of `parts` has and Fishbowl does not, which is worth reading once, not every 5 minutes.
+  const unknownNums = wanted.filter((nm) => !known.has(nm)).sort()
+  const unknown = unknownNums.length
+
+  const partIds = [...ids]
+  if (partIds.length === 0) return 0
+
+  const rows = []
+  for (const batch of chunk(partIds, 300)) rows.push(...await fb.query(q.inventory(batch)))
+
+  const payload = aggregateInventory(rows, config.availableLocationGroups)
+  const zero = countZeroRows(payload)
+  const line = `inventory: scope ${partIds.length} (open-SO ${openIds.length} · skynet ${skynetNums.length} · mirrored ${mirroredNums.length}) → rows ${payload.length} (zero ${zero}) · unknown-to-fishbowl ${unknown}`
+
+  if (config.inventoryDryRun) {
+    log.info(`${line} · DRY RUN — nothing written`)
+    const found = new Map(payload.map((p) => [String(p.partNum ?? '').toUpperCase(), p]))
+    for (const probe of INVENTORY_PROBES) {
+      const p = found.get(probe)
+      if (!p) { log.info(`  probe ${probe}: NO ROW — not in scope, or Fishbowl does not know the number`); continue }
+      const groups = Object.keys(p.byLocation).join(',') || 'none'
+      log.info(`  probe ${p.partNum}: on hand ${p.onHand} · allocated ${p.allocated} · not available ${p.notAvailable} · on order ${p.onOrder} · available ${p.available} · groups ${groups}`)
+    }
+    if (unknown > 0) {
+      const shown = unknownNums.slice(0, 100)
+      const more = unknown > shown.length ? ` +${unknown - shown.length} more` : ''
+      log.info(`  unknown to Fishbowl (${unknown}): ${shown.join(', ')}${more}`)
+    }
+    return 0
   }
-  log.info(`inventory: ${partIds.length} part(s) on open SOs, ${byPart.size} found in Fishbowl, ${total} upserted`)
+
+  let total = 0
+  for (const batch of chunk(payload, 500)) total += Number(await sky.upsertInventory(batch)) || 0
+  log.info(`${line} · ${total} upserted`)
   return total
 }
 

@@ -115,6 +115,8 @@ try {
   eq(stale.state, 'stale', 'a row three weeks behind the cycle is stale')
   eq(stale.tone, 'text-gray-500', 'stale never reads as good news, however much stock it claims')
   ok(stale.title.includes('Not refreshed since'), 'and the tooltip says why')
+  ok(/check the bridge on skyserver/i.test(stale.title), 'D-FB-41: stale now points at the bridge')
+  ok(!/sales orders it mirrors|scope/i.test(stale.title), 'not at a scope nothing can leave any more')
   eq(stale.asOf, fixtures.frozen.snapshot_at, 'asOf carries the frozen stamp for the chip to show')
 
   // The cycle timestamp is the test, not the row's age: a row stamped with the cycle is
@@ -125,14 +127,18 @@ try {
   eq(summarizeFbInventory({ ...fixtures.positive, snapshot_at: '2026-09-23T12:56:00Z' }, { lastInventoryAt: LAST }).state, 'current', '9 min behind the cycle is within tolerance')
   eq(summarizeFbInventory({ ...fixtures.positive, snapshot_at: '2026-09-23T12:50:00Z' }, { lastInventoryAt: LAST }).state, 'stale', '15 min behind it is not')
 
-  // D-FB-39a: no row is always "not synced" — never "not in Fishbowl". fb_products
-  // cannot prove absence (SK4FB13S: 53 on hand in Main, no Fishbowl product row).
+  // D-FB-41: with bridge 1.6.0 live (D-FB-40) the bridge keeps a row for every Fishbowl part
+  // SkyNet knows, so no row now means Fishbowl has no part with that number — or files it
+  // under another one. This reverses D-FB-39a, which was right only while the bridge read
+  // sales-order parts alone.
   const missing = summarizeFbInventory(null, { need: 100, lastInventoryAt: LAST })
-  eq(missing.state, 'not_synced', 'no row is not_synced')
-  eq(missing.text, 'Not synced from Fishbowl', 'and says so in those words')
-  eq(missing.compactText, '—', 'the compact chip shows an em dash')
+  eq(missing.state, 'not_in_fishbowl', 'no row is not_in_fishbowl')
+  eq(missing.text, 'Not in Fishbowl', 'and says so in those words')
+  eq(missing.compactText, 'not in FB', 'the compact chip spells it out rather than showing a bare dash')
   eq(missing.tone, 'text-gray-500', 'with no colour claim')
-  ok(!/not in Fishbowl/i.test(missing.title), 'the tooltip never claims the part is absent from Fishbowl')
+  ok(/not in Fishbowl/i.test(missing.title), 'the tooltip says the part is not in Fishbowl')
+  ok(/different part number/i.test(missing.title), 'and names the other reason a row can be missing')
+  ok(!/not synced/i.test(missing.title), 'the pre-D-FB-40 wording is gone')
 
   // ── 3. text branches ──────────────────────────────────────────────────────────────
   eq(summarizeFbInventory(fixtures.negative, {}).text, '874 on hand, all allocated · 6,426 short', 'SK-O reads as short, not as 874 available')
@@ -152,8 +158,8 @@ try {
   // shows "—", so without this the tooltip was the only place the open job could appear.
   const jobs2 = { qty: 150, jobs: [{ job_number: 'J-000292', status: 'pending_compliance' }] }
   const missingWithJobs = summarizeFbInventory(null, { need: 150, lastInventoryAt: LAST, openJobs: jobs2 })
-  ok(missingWithJobs.title.includes('SkyNet: 150 in open jobs — J-000292 (pending compliance)'), 'a not-synced part still reports its open SkyNet jobs')
-  ok(missingWithJobs.title.startsWith('No Fishbowl inventory row for this part'), 'after the not-synced explanation, not instead of it')
+  ok(missingWithJobs.title.includes('SkyNet: 150 in open jobs — J-000292 (pending compliance)'), 'a part Fishbowl does not have still reports its open SkyNet jobs')
+  ok(missingWithJobs.title.startsWith('No Fishbowl part with this number'), 'after the not-in-Fishbowl explanation, not instead of it')
 
   ok(summarizeFbInventory(fixtures.frozen, { lastInventoryAt: LAST, openJobs: jobs2 }).title.includes('SkyNet: 150 in open jobs'), 'a stale row reports them too')
 

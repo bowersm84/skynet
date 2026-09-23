@@ -376,12 +376,16 @@ export async function getInventoryFor(partNums) {
 // in Main and none in Material or Manufacturing, so it produced the same number under a
 // different explanation.
 //
-// state: no row → not_synced; row older than 10 min before the cycle's last_inventory_at
-//        → stale. Rows that leave the bridge's scope keep their last values (113 of 443
-//        on 2026-09-23), so the cycle timestamp — not the row's age — is the reliable
-//        test. D-FB-39a: there is no "not in Fishbowl" state. fb_products cannot prove
-//        absence — SK4FB13S had 53 on hand in Main with no Fishbowl product row — so a
-//        missing inventory row only ever means the bridge does not read this part yet.
+// state: no row → not_in_fishbowl; row older than 10 min before the cycle's
+//        last_inventory_at → stale.
+//
+// D-FB-41 (bridge 1.6.0 live on PROD, 2026-09-23): the bridge now keeps a row for every
+// Fishbowl part SkyNet knows and re-reads all of them every cycle (D-FB-40), so the two
+// states finally mean what they say. No row means Fishbowl has no part with that number,
+// or files it under a different one (SK244-116 is "SK241-16 OLD" in Fishbowl) — 22 SkyNet
+// numbers on 2026-09-23. Stale means the bridge itself is behind, not that the part left
+// its scope; nothing can leave scope now, which is why PROD went from 113 stale rows to 0.
+// D-FB-39a's "not synced" wording was true only while the bridge read sales-order parts.
 export function summarizeFbInventory(inv, opts = {}) {
   const { need = 0, lastInventoryAt = null, openJobs = null } = opts
 
@@ -396,12 +400,12 @@ export function summarizeFbInventory(inv, opts = {}) {
 
   if (!inv) {
     return {
-      state: 'not_synced',
+      state: 'not_in_fishbowl',
       onHand: 0, allocated: 0, notAvailable: 0, onOrder: 0, free: 0,
       tone: 'text-gray-500',
-      text: 'Not synced from Fishbowl',
-      compactText: '—',
-      title: 'No Fishbowl inventory row for this part — the bridge currently reads inventory only for parts on the sales orders it mirrors (D-FB-33).'
+      text: 'Not in Fishbowl',
+      compactText: 'not in FB',
+      title: 'No Fishbowl part with this number. The bridge keeps a row for every Fishbowl part SkyNet knows (D-FB-40), so a part with no row is not in Fishbowl — or Fishbowl files it under a different part number.'
         + openJobsSuffix(),
       asOf: null,
     }
@@ -448,7 +452,7 @@ export function summarizeFbInventory(inv, opts = {}) {
     + (byLoc ? `\n\n${byLoc}` : '')
     + (inv.snapshot_at ? `\n\nsnapshot ${formatDateTime(inv.snapshot_at)}` : '')
   if (stale) {
-    title += `\n\nNot refreshed since ${formatDateTime(inv.snapshot_at)} — the bridge reads inventory only for parts on the sales orders it mirrors (D-FB-33). These are the last known numbers.`
+    title += `\n\nNot refreshed since ${formatDateTime(inv.snapshot_at)} — the bridge has not updated this row in its latest cycle. If this persists, check the bridge on skyserver.`
   }
   title += openJobsSuffix()
 

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Wrench, ShoppingCart, Layers, ChevronRight, ChevronDown, AlertTriangle, Loader2 } from 'lucide-react'
 import { buildBomTree } from '../lib/nestedAssembly'
+import FbInventoryChip from './FbInventoryChip'
 
 // Multi-level BOM tree for an assembly in Create WO.
 //  - assembly / finished_good nodes: collapsible sub-assembly groups
@@ -12,7 +13,9 @@ import { buildBomTree } from '../lib/nestedAssembly'
 //   treeState     { loading, nodes, error }
 //   selected      { [nodeKey]: true }  selected manufactured-leaf keys
 //   onToggleLeaf  (node) => void
-export default function NestedBomTree({ topQty, treeState, selected, onToggleLeaf }) {
+//   inventoryFor  (node, qty) => { summary, openJobs } | null   D-FB-39, optional:
+//                 absent, the tree renders exactly as it did before.
+export default function NestedBomTree({ topQty, treeState, selected, onToggleLeaf, inventoryFor = null }) {
   const [collapsed, setCollapsed] = useState({})
 
   if (!treeState || treeState.loading) {
@@ -67,7 +70,10 @@ export default function NestedBomTree({ topQty, treeState, selected, onToggleLea
               <span className="text-gray-500 truncate">- {node.description}</span>
               <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50 flex-shrink-0">Sub-Assembly</span>
             </div>
-            <span className="text-gray-500 text-xs flex-shrink-0 ml-2">×{node.bomQuantity} · {qtyFor(node)} pcs</span>
+            <span className="flex items-center gap-2 flex-shrink-0 ml-2">
+              {inventoryFor && <FbInventoryChip size="compact" {...inventoryFor(node, qtyFor(node))} />}
+              <span className="text-gray-500 text-xs">×{node.bomQuantity} · {qtyFor(node)} pcs</span>
+            </span>
           </button>
           {isOpen && node.children.length > 0 && (
             <div className="space-y-1" style={{ marginLeft: 16 }}>
@@ -87,7 +93,10 @@ export default function NestedBomTree({ topQty, treeState, selected, onToggleLea
             <span className="text-gray-400 font-mono truncate">{node.partNumber}</span>
             <span className="text-gray-600 truncate">- {node.description}</span>
           </div>
-          <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50 flex-shrink-0 ml-2">📦 Purchased</span>
+          <span className="flex items-center gap-2 flex-shrink-0 ml-2">
+            {inventoryFor && <FbInventoryChip size="compact" {...inventoryFor(node, qtyFor(node))} />}
+            <span className="text-xs px-2 py-0.5 bg-orange-900/40 text-orange-400 rounded border border-orange-800/50">📦 Purchased</span>
+          </span>
         </div>
       )
     }
@@ -104,6 +113,7 @@ export default function NestedBomTree({ topQty, treeState, selected, onToggleLea
           <span className="text-gray-500 truncate">- {node.description}</span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+          {inventoryFor && <FbInventoryChip size="compact" {...inventoryFor(node, qtyFor(node))} />}
           <span className="text-gray-500 text-xs">×{node.bomQuantity} · {qtyFor(node)} pcs</span>
           {isSel ? <span className="text-green-400">✓ Job added</span> : <ChevronRight size={16} className="text-gray-500" />}
         </div>

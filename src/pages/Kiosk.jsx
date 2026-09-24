@@ -236,7 +236,7 @@ export default function Kiosk() {
     bar_size: '',
     bar_length: '',
     lot_number: '',
-    bars_loaded: 0
+    bars_loaded: ''
   })
   const [materialTypes, setMaterialTypes] = useState([])
   // Blank-lot kiosk capture (Bolt Masters): type/dash forced when the entered lot is not on hand;
@@ -2865,7 +2865,7 @@ export default function Kiosk() {
       bar_size: (matRow?.bar_size && matRow.bar_size !== 'N/A') ? matRow.bar_size : '',
       bar_length: matRow?.bar_length != null ? String(matRow.bar_length) : '',
       lot_number: matRow?.lot_number || '',
-      bars_loaded: 0
+      bars_loaded: ''
     })
     // Lot-change continuation: pre-fill carried material + new lot so the machinist
     // only logs bars and starts. Suppress the inventory lot-autofill so it isn't overwritten.
@@ -2879,7 +2879,7 @@ export default function Kiosk() {
         bar_size: pf.bar_size,
         bar_length: pf.bar_length,
         lot_number: pf.lot_number,
-        bars_loaded: 0
+        bars_loaded: ''
       })
     }
   }
@@ -3060,7 +3060,7 @@ export default function Kiosk() {
         bar_size: '',
         bar_length: '',
         lot_number: '',
-        bars_loaded: 0
+        bars_loaded: ''
       })
       await loadJobMaterials(activeJob.id)
 
@@ -7242,7 +7242,7 @@ export default function Kiosk() {
                     <input 
                       type="number" 
                       min="0"
-                      value={secondaryCompletionForm.good_pieces} 
+                      value={secondaryCompletionForm.good_pieces || ''} placeholder="0" 
                       onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, good_pieces: parseInt(e.target.value) || 0})} 
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-cyan-500 focus:outline-none"
                     />
@@ -7252,7 +7252,7 @@ export default function Kiosk() {
                     <input 
                       type="number" 
                       min="0"
-                      value={secondaryCompletionForm.bad_pieces} 
+                      value={secondaryCompletionForm.bad_pieces || ''} placeholder="0" 
                       onChange={(e) => setSecondaryCompletionForm({...secondaryCompletionForm, bad_pieces: parseInt(e.target.value) || 0})} 
                       className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-cyan-500 focus:outline-none"
                     />
@@ -7756,7 +7756,7 @@ export default function Kiosk() {
                                 <input 
                                   type="number" 
                                   min="0" 
-                                  value={edit.duration_hours || 0} 
+                                  value={edit.duration_hours || ''} placeholder="0" 
                                   onChange={(e) => setDowntimeEdits({
                                     ...downtimeEdits, 
                                     [dt.id]: {...edit, duration_hours: parseInt(e.target.value) || 0}
@@ -7772,7 +7772,7 @@ export default function Kiosk() {
                                   type="number" 
                                   min="0" 
                                   max="59"
-                                  value={edit.duration_mins || 0} 
+                                  value={edit.duration_mins || ''} placeholder="0" 
                                   onChange={(e) => setDowntimeEdits({
                                     ...downtimeEdits, 
                                     [dt.id]: {...edit, duration_mins: Math.min(59, parseInt(e.target.value) || 0)}
@@ -7853,7 +7853,7 @@ export default function Kiosk() {
                               type="number" 
                               min="0"
                               max={material.bars_loaded}
-                              value={materialRemaining[material.id] || 0}
+                              value={materialRemaining[material.id] || ''} placeholder="0"
                               onChange={(e) => setMaterialRemaining({
                                 ...materialRemaining, 
                                 [material.id]: Math.min(material.bars_loaded, Math.max(0, parseInt(e.target.value) || 0))
@@ -7999,7 +7999,7 @@ export default function Kiosk() {
                       <input
                         type="number"
                         min="0"
-                        value={extendDuration.hours}
+                        value={extendDuration.hours || ''} placeholder="0"
                         onChange={(e) => setExtendDuration({ ...extendDuration, hours: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:border-blue-500 focus:outline-none"
                       />
@@ -8013,7 +8013,7 @@ export default function Kiosk() {
                         min="0"
                         max="59"
                         step="15"
-                        value={extendDuration.minutes}
+                        value={extendDuration.minutes || ''} placeholder="0"
                         onChange={(e) => setExtendDuration({ ...extendDuration, minutes: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-center focus:border-blue-500 focus:outline-none"
                       />
@@ -8193,7 +8193,7 @@ export default function Kiosk() {
                         <input 
                           type="number" 
                           min="0" 
-                          value={editDowntimeForm.duration_hours} 
+                          value={editDowntimeForm.duration_hours || ''} placeholder="0" 
                           onChange={(e) => setEditDowntimeForm({...editDowntimeForm, duration_hours: parseInt(e.target.value) || 0})}
                           className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                         />
@@ -8206,7 +8206,7 @@ export default function Kiosk() {
                           type="number" 
                           min="0" 
                           max="59"
-                          value={editDowntimeForm.duration_mins} 
+                          value={editDowntimeForm.duration_mins || ''} placeholder="0" 
                           onChange={(e) => setEditDowntimeForm({...editDowntimeForm, duration_mins: Math.min(59, parseInt(e.target.value) || 0)})}
                           className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                         />
@@ -8313,7 +8313,7 @@ export default function Kiosk() {
                           <input 
                             type="number" 
                             min="0" 
-                            value={toolChangeForm.duration_hours} 
+                            value={toolChangeForm.duration_hours || ''} placeholder="0" 
                             onChange={(e) => setToolChangeForm({...toolChangeForm, duration_hours: parseInt(e.target.value) || 0})}
                             className="w-full px-2 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm text-center focus:border-yellow-500 focus:outline-none"
                           />
@@ -8326,7 +8326,7 @@ export default function Kiosk() {
                             type="number" 
                             min="0" 
                             max="59"
-                            value={toolChangeForm.duration_mins} 
+                            value={toolChangeForm.duration_mins || ''} placeholder="0" 
                             onChange={(e) => setToolChangeForm({...toolChangeForm, duration_mins: Math.min(59, parseInt(e.target.value) || 0)})}
                             className="w-full px-2 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm text-center focus:border-yellow-500 focus:outline-none"
                           />
@@ -8595,7 +8595,7 @@ export default function Kiosk() {
                         <input 
                           type="number" 
                           min="0" 
-                          value={downtimeForm.duration_hours} 
+                          value={downtimeForm.duration_hours || ''} placeholder="0" 
                           onChange={(e) => setDowntimeForm({...downtimeForm, duration_hours: parseInt(e.target.value) || 0})}
                           className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                         />
@@ -8608,7 +8608,7 @@ export default function Kiosk() {
                           type="number" 
                           min="0" 
                           max="59"
-                          value={downtimeForm.duration_mins} 
+                          value={downtimeForm.duration_mins || ''} placeholder="0" 
                           onChange={(e) => setDowntimeForm({...downtimeForm, duration_mins: Math.min(59, parseInt(e.target.value) || 0)})}
                           className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-center focus:border-skynet-accent focus:outline-none"
                         />

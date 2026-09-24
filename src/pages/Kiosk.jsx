@@ -659,6 +659,8 @@ export default function Kiosk() {
           .eq('machine_id', machine.id)
           .eq('device_id', deviceIdRef.current)
           .eq('is_active', true)
+          .order('logged_in_at', { ascending: false })
+          .limit(1)
           .maybeSingle()
 
         if (!session || !session.is_active) {
@@ -1752,17 +1754,35 @@ export default function Kiosk() {
   // Shared login completion — deactivate all sessions, create new one, set operator
   const completeLogin = async (profile) => {
     try {
-      // Step 1: Deactivate ALL sessions for this operator across every
-      // machine and device. Admins are exempt (multi-machine login OK).
-      // INTENTIONAL: no device_id filter here — when a non-admin PINs
-      // in, all of their other devices get force-logged-out so an
-      // operator is only "active" on one device at a time. Do not add
-      // a device_id filter; it would break single-operator enforcement.
+      // Step 1: Deactivate this operator's other MACHINE-kiosk sessions,
+      // on every device. Admins are exempt (multi-machine login OK).
+      // INTENTIONAL: no device_id filter — an operator runs one machine
+      // at a time, anywhere. D-KIOSK-04: Finishing sessions are a
+      // different station class and are left alone, so a machinist who
+      // also covers finishing is not bounced between the two screens.
       if (profile.role !== 'admin') {
-        await supabase
+        const { data: activeRows, error: selErr } = await supabase
           .from('kiosk_sessions')
-          .update({ is_active: false })
+          .select('id, machine:machines!machine_id(machine_type)')
           .eq('operator_id', profile.id)
+          .eq('is_active', true)
+        if (selErr) {
+          // Fall back to the pre-D-KIOSK-04 behaviour rather than skip enforcement.
+          await supabase
+            .from('kiosk_sessions')
+            .update({ is_active: false })
+            .eq('operator_id', profile.id)
+        } else {
+          const ids = (activeRows || [])
+            .filter(r => r.machine?.machine_type !== 'finishing')
+            .map(r => r.id)
+          if (ids.length > 0) {
+            await supabase
+              .from('kiosk_sessions')
+              .update({ is_active: false })
+              .in('id', ids)
+          }
+        }
       }
 
       // Step 2: Insert active session for current (machine, device).

@@ -910,14 +910,33 @@ export default function Finishing() {
         return
       }
 
-      // Session enforcement — deactivate all existing sessions, create finishing session
-      // Admin users are exempt — they can be logged into multiple machines
+      // Session enforcement — deactivate this operator's other FINISHING sessions,
+      // then create this one. Admin users are exempt. D-KIOSK-04: machine-kiosk
+      // sessions are left alone so a machinist covering finishing keeps their machine.
       try {
         if (data.role !== 'admin') {
-          await supabase
+          const { data: activeRows, error: selErr } = await supabase
             .from('kiosk_sessions')
-            .update({ is_active: false })
+            .select('id, machine:machines!machine_id(machine_type)')
             .eq('operator_id', data.id)
+            .eq('is_active', true)
+          if (selErr) {
+            // Fall back to the pre-D-KIOSK-04 behaviour rather than skip enforcement.
+            await supabase
+              .from('kiosk_sessions')
+              .update({ is_active: false })
+              .eq('operator_id', data.id)
+          } else {
+            const ids = (activeRows || [])
+              .filter(r => r.machine?.machine_type === 'finishing')
+              .map(r => r.id)
+            if (ids.length > 0) {
+              await supabase
+                .from('kiosk_sessions')
+                .update({ is_active: false })
+                .in('id', ids)
+            }
+          }
         }
 
         // Use first finishing machine as session anchor

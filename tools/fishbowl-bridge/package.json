@@ -1,9 +1,9 @@
 {
   "name": "skynet-fishbowl-bridge",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
-  "description": "Fishbowl -> SkyNet sales order + pricing bridge (read-only against Fishbowl)",
+  "description": "Fishbowl <-> SkyNet sales order + pricing bridge (reads Fishbowl; writes Fishbowl only through the D-PRICE-53 push queue)",
   "engines": {
     "node": ">=18"
   },
@@ -11,7 +11,9 @@
     "start": "node src/index.mjs",
     "once": "node src/index.mjs --once",
     "backfill": "node scripts/backfill.mjs",
-    "backfill:pricing": "node src/index.mjs --backfill"
+    "backfill:pricing": "node src/index.mjs --backfill",
+    "mirror:rules": "node src/index.mjs --mirror-rules",
+    "fb:columns": "node scripts/fb-columns.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"

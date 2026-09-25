@@ -2,8 +2,10 @@
 
 Mirrors Fishbowl Advanced sales orders (Issued + In Progress) into SkyNet's `fb_*` tables and keeps them current,
 and since v1.3 also mirrors the customer master, the product list and the SO history the Pricing Portal reads.
-Read-only against Fishbowl (login / data-query / logout only). Writes to SkyNet only through the `fb_*` RPCs,
-signed in as the `integration` profile with the anon key — no service-role key anywhere on the plant network.
+Reads Fishbowl through login / data-query / logout. Writes to SkyNet only through the `fb_*` RPCs, signed in as the
+`integration` profile with the anon key — no service-role key anywhere on the plant network. Since v1.7 (D-PRICE-53)
+it also carries SkyNet's price book INTO Fishbowl through one write path, the CSV import endpoint, and only when
+`FB_PUSH_ENABLED=true` on PROD — see "Fishbowl pricing link" below.
 
 Design: `Docs/Implementation_Plans/FB1_Implementation_Plan.md` and `S11_Implementation_Plan.md` §7.
 Field-level notes on what Fishbowl gives us: `Docs/Fishbowl_Data_Context.md`.
@@ -58,6 +60,29 @@ and instead runs immediately after each products poll. That keeps it nightly wit
 `paymentterms` and `accountgroup` are the two table names not confirmed on 25.9: if either read fails the poller
 logs one warning and carries on without that column for the life of the process, rather than guessing names. A poll that finds nothing to do still calls its RPC with an empty payload, so the three ages on /pricing mean "last polled", not "last time anything changed". A pricing failure never stops the SO tail: it is logged and the pollers stand down for 15 minutes.
 
+### Fishbowl pricing link (v1.7, D-PRICE-53)
+Two more nightly mirrors in the products slot, and an outbound queue:
+
+| Piece | When | Reads / writes |
+|---|---|---|
+| product tree | nightly, after part costs | `producttree` + `producttotree` ⋈ `product` → `fb_upsert_product_tree` → `fb_product_tree_nodes` / `fb_product_tree` (paths built in `rulesTree.mjs`) |
+| pricing rules | nightly, with the tree | `pricingrule` with its type ids resolved through `productincltype` / `customerincltype` / `patype` / `pabaseamounttype` / `rndtype` → `fb_upsert_pricing_rules` → `fb_pricing_rules` |
+| push auto | nightly, last | `fb_push_auto()`: when the book in effect is not the book of the last real prices/rules push, it QUEUES both (the Oct 1 case) |
+| push executor | every cycle | `fb_push_next` claims the oldest `fb_push_commands` row; `push.mjs` POSTs its payload to `/api/import/<name>`; `fb_push_finish` records status/body; the mirror the push touched is re-read at once |
+
+The payload is built server-side by `fb_push_enqueue` (from `pricing_fb_expected_*`) at enqueue time and stored on the
+command, so what was sent is auditable. Kinds: `prices` → Product (ProductNumber, Price); `rules` → Pricing-Rules
+(25 columns, upsert by name, every SkyNet rule named `SN …`; `retire_legacy` re-sends every other active rule with
+`isActive FALSE`); `tree` → Product-Tree-Categories then Product-Tree; `groups` → Customer-Group-Relations.
+The confirmation is `SELECT pricing_fb_sync_status();` (portal: Price Books › Fishbowl sync).
+
+**Safety.** A push is real only when `FB_PUSH_ENABLED=true` AND the bridge's `SB_URL` host is `FB_PUSH_SB_HOST`
+(default PROD). Otherwise a claimed command is a *forced dry run*: rows logged, nothing sent, `result.dry_run=true`,
+which `fb_push_auto` does not count as a push. The PC bridge on TEST therefore exercises the whole path without
+being able to write to Fishbowl. A command's own `dry_run` flag behaves the same way. A 0-row payload completes
+without calling Fishbowl. `npm run mirror:rules` runs one rules + tree mirror pass and exits (first load).
+`npm run fb:columns -- pricingrule producttree …` prints the columns Fishbowl actually has (read-only discovery).
+
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`
 2. Copy `.env.example` to `.env` and fill in `FB_PASS`, `SB_ANON_KEY`, `SB_BRIDGE_PASSWORD` (and `SB_URL` for PROD).
@@ -83,3 +108,6 @@ Manage: `nssm status|stop|start|restart SkyNetFishbowlBridge`. Logs: `logs\bridg
 - Reset the cursor (rare): `SELECT public.fb_set_cursor(<rev>)` in the SQL Editor — it only moves forward.
 - Seat usage: if Fishbowl shows the bridge consuming a user seat, set `SESSION_MODE=per_cycle` and restart.
 - Never point two bridges at the same Supabase project; one per project (TEST, PROD) is fine.
+- Push stuck `running`? The bridge crashed mid-import: `fb_push_next` fails it after 30 min and moves on. Check
+  `logs\bridge-YYYY-MM-DD.log` and `SELECT id, kind, status, error, result FROM fb_push_commands ORDER BY id DESC LIMIT 5;`.
+  Re-queue from the portal; every import is idempotent (Product updates by number, rules by name, tree/groups only add).

@@ -103,16 +103,29 @@ export class SkyNet {
     return data
   }
 
+  // D-PRICE-53 mirrors (full snapshots; each RPC stamps its own fb_sync_state clock).
+  upsertPricingRules(rows) { return this.rpc('fb_upsert_pricing_rules', { p_rows: rows }) }
+
+  upsertProductTree(nodes, members) { return this.rpc('fb_upsert_product_tree', { p_nodes: nodes, p_members: members }) }
+
+  // D-PRICE-53 push queue. pushNext claims the oldest queued command (null when there is none or one is
+  // already running); pushFinish records the outcome; pushAuto queues prices/rules when the book in effect changed.
+  pushNext(host) { return this.rpc('fb_push_next', { p_host: host }) }
+
+  pushFinish(id, ok, result = null, error = null) { return this.rpc('fb_push_finish', { p_id: id, p_ok: ok, p_result: result, p_error: error }) }
+
+  pushAuto() { return this.rpc('fb_push_auto', { p_as_of: new Date().toISOString().slice(0, 10) }) }
+
   // The pricing pollers' own clocks, read once at start-up. fb_sync_state is SELECT-able by authenticated.
   async pricingState() {
     await this.ensureSignedIn()
     const { data, error } = await this.client
       .from('fb_sync_state')
-      .select('last_customers_at, last_products_at, last_history_at, history_cursor')
+      .select('last_customers_at, last_products_at, last_history_at, history_cursor, last_rules_at, last_tree_at')
       .eq('id', 1)
       .maybeSingle()
     if (error) throw new Error(`fb_sync_state read failed: ${error.message}`)
-    return data || { last_customers_at: null, last_products_at: null, last_history_at: null, history_cursor: null }
+    return data || { last_customers_at: null, last_products_at: null, last_history_at: null, history_cursor: null, last_rules_at: null, last_tree_at: null }
   }
 
   // Distinct Fishbowl part ids on product lines of open SOs (paged: PostgREST caps a request at 1000 rows).

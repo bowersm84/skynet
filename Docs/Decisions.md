@@ -3838,3 +3838,74 @@ Migration `2026-09-22_D-SCHED-27_length_family_history.sql` v1.1 applied to PROD
 **Why:** On 2026-09-24 a machinist typed 4 bars on J-000230 and it saved as 40: the field displayed a real 0, the caret landed in front of it, and "4" became "40". The 36 phantom bars drove lot 2587's receipt negative and raised a negative_inventory flag (data corrected same day by 2026-09-24_PROD_material_corrections_J-000230_J-000267.sql). The same trap existed on every Kiosk count or duration box that displayed 0 when empty; bars remaining at completion also feeds inventory, and duration boxes turn 5 minutes into 50.
 **Note:** The Bars Loaded over-inventory warning exists but did not fire: it converts to bars via available inches ÷ entered bar length, and lot 2587's receipt is 144" bars loaded as 48" pieces, so it saw roughly three times the real headroom. Not changed here.
 **Files:** src/pages/Kiosk.jsx, Docs/Decisions.md.
+
+### D-PRICE-53 — Fishbowl pricing link: bridge v1.7.0 (push queue, rules + tree mirrors) — 2026-09-25
+
+**Context.** Phase F (D-PRICE-24) delivered. Until now the book reached Fishbowl by hand: D-PRICE-22 CSV → Data Import.
+On 2026-09-25 Fishbowl held 507 of 4,247 Rev 81 prices wrong (155 of them $0.00) and 150 legacy quantity-triggered
+rules that pre-date the tier model. Rev 82 goes live 2026-10-01.
+
+**Decision.** SkyNet is the source of truth for Fishbowl's product prices, pricing rules, the `Product:SkyNet:*` product
+tree and the `SkyNet Tier 1/2/3`, `SkyNet Premier`, `SkyNet Column 100/300/500` customer groups (D-PRICE-01 extended).
+Migration `2026-09-25_D-PRICE-53_fb_pricing_link_schema.sql` (applied by Matt) adds the mirrors, the queue
+(`fb_push_commands`, `fb_push_next/finish/cancel/auto/enqueue`), the expected-set generators
+(`pricing_fb_expected_products/tree/categories/groups/rules`), drift views and `pricing_fb_sync_status()`.
+Bridge 1.7.0 (this entry) adds: `rulesTree.mjs` (nightly full mirrors of `pricingrule` and the product tree, paths
+built in JS), `push.mjs` (claims queued commands every cycle, POSTs them to `/api/import/<name>`, records the result,
+re-mirrors what it touched), `Fishbowl.importRows` (the only write path), config `FB_PUSH_ENABLED` (literal `true`
+only) + `FB_PUSH_SB_HOST` (PROD) + `FB_PUSH_AUTO`, `--mirror-rules`, `scripts/fb-columns.mjs` (read-only discovery).
+
+**Rule model pushed** (all names `SN …`, ≤ 30 chars; Round to nearest 0.01 ± 0; retire_legacy deactivates every
+other active rule): quantity breaks = All-customer Percent rules on `Product:SkyNet:<rule>:<ladder>` with bounded
+ranges; tiers = Customer Group Percent rules with the RPC's tier3→tier2→tier1 fallback; Premier = Tier 3 rules plus
+tier3×premier_pct on the `:Premier` child node; column groups = the column or 100 %; sets/kits = Fixed price rules on
+the product (All bands from the kit ladder, one rule per group, banded only when quantity-dependent, priced with
+`pricing_get_price` semantics — hardware at Each); exceptions = Customer × Product rules.
+
+**Safety.** A push is real only when `FB_PUSH_ENABLED=true` AND the bridge's SkyNet host is `FB_PUSH_SB_HOST`; anything
+else is a forced dry run recorded with `result.dry_run=true`, which `fb_push_auto` ignores. Payloads are built and
+stored at enqueue time. A push that fails leaves the command `failed` with Fishbowl's body; nothing partial lands
+(Fishbowl applies a file whole or not at all). Resale rows stay Fishbowl-owned unless `include_resale` is passed.
+`fb_push_auto` never makes the first push of a kind: the first prices push and the rules cutover (`retire_legacy`) are always queued by hand, so deploying 1.7.0 to PROD cannot trigger either at 02:10. After that it re-pushes prices and rules only when the book in effect changes.
+
+**Verified before shipping.** Migration ran end to end in a scratch Postgres 16 on a 223-item PROD slice covering all
+38 (rule, ladder) combos; kit fixed prices equal `pricing_get_price` (SK2600FW-SET1 each 18.37 / q100 17.64 / T3
+10.97; AC500-C1 Q100 3,131.19, T3 1,946.87); exception `SN X 552 SK40R17-1` = 32.9808 % → 2.523; queue lifecycle and
+`in_sync` true only after legacy rules are retired and no drift remains. Fishbowl table/column names for `pricingrule`,
+`producttree`, `producttotree` and the five type tables are confirmed by `scripts/fb-columns.mjs` (see the CC log for
+this entry) — `accountgroup` is Fishbowl's customer group.
+API calls run under the `authenticated` role's 8 s statement timeout. Rev 82 rule generation (3,433 rules, 317 kits) first took ~10 s; kit prices are now computed once per distinct component and banded with window functions — output byte-identical (md5 on TEST for Rev 81 and Rev 82) in 1.24 s; the Oct 1 auto-push path (prices + rules for Rev 82) 2.25 s; `pricing_fb_sync_status` 1.03 s (one `pricing_item_prices` pass; the old version double-counted three Fishbowl products that differ only by a space, `SK-N114-2S` / `SK-N114 -2S`, -3S, -4S).
+
+**Knock-ons (told to CS before the first PROD push).** Rev 81 push raises 507 prices (155 from $0) and lowers 20
+(SK4002-xHS at Rev 81 × 1.385, SK-P3-1125; no sales since Jan 2025). Rule cutover: non-tiered customers lose the
+quantity-triggered tier prices (500+ paid 64 %, now 83 %); tiered customers get their tier at any quantity; the
+misfiled `Rule E | T1` and the K/N/P nodes stop mattering. Tier changes still need the OLD group membership removed
+in Fishbowl by hand (the relations import only adds) — `v_fb_group_drift` lists them.
+
+**Open.** Fishbowl precedence assumptions (Customer > Group > All; lower node > higher; Product rule > tree rule) are
+checked with an Estimate SO before rules go live on PROD (S12 §9). `pricing_item_prices` and `pricing_get_price`
+disagree on kits with `none`-ladder components (grid: no q100; RPC: hardware at Each) — the push follows the RPC;
+reconciling the grid is a follow-on.
+
+**Discovery (CC, 2026-09-25, Fishbowl via the PC `.env`, read-only).** `npm run fb:columns` confirmed every name the
+queries assumed, `isTier2` included: `pricingrule` has all 22 columns used (plus `spcApplies/spcBuyX/spcGetYFree/userId`,
+not read); `producttree(id, description, name, parentId)` — the root `Product` has `parentId = 0`, not NULL, which
+`buildPaths` already treats as "no parent"; `producttotree(id, productId, productTreeId)`; the five type tables and
+`accountgroup` are `(id, name)`. No column name changed. Type values: productincltype All / Product / Product Tree /
+Part Category; customerincltype All / Customer / Customer Group; rndtype Round to nearest / up / down. Counts: 7,606
+rules (150 active, all Product Tree × All), 430 nodes (66 under `Product:SkyNet`), 8,228 memberships, 0 orphans;
+every tree rule resolves to a path, all 30 group rules to an `accountgroup`. Rules payload ≈ 5.0 MB, tree ≈ 0.5 MB.
+
+**Two value translations added in `queries.mjs` (not in the prompt; approved by Matt 2026-09-25).** Checked against
+Matt's `PricingRules.csv` export (7,606 rows), which is the Pricing Rules import's format:
+1. `patype` id 6 is named **`Set price`** in the table but **`Fixed price`** in the export/import (6,989 rules each
+   way; every other patype / rndtype / pabaseamounttype label matches). The query now returns `Fixed price` for it.
+   Without this, every SkyNet kit and exception rule would read `Set price` in `fb_pricing_rules`, fail the exact
+   `pa_type` comparison in `v_fb_rule_drift` / `only_changed` / `pricing_fb_sync_status`, be re-sent on every push
+   and keep `in_sync` false.
+2. `pricingrule.paPercent` is stored as a **fraction** (`Rule A | T1 | 5` = 0.96) but exported as `96%`, and the
+   migration's expected set uses percent points (`round(mult * 100, 4)`). The query now returns `paPercent * 100`
+   (exact decimal in MySQL). Without this, all 150 legacy rules and every future SN Percent rule would compare 100×
+   off, and `retire_legacy` would re-send 0.96 where SkyNet's own rules send 96.
+
+**Import format.** `fb_push_enqueue` emits the Pricing Rules export's own spelling — percents `96%` / `58.2%`, money `$17.60` / `$0.01`, booleans lower-case — through `_fb_pct` / `_fb_money` (migration final revision, applied on TEST 2026-09-25). Acceptance is checked on PROD before the Batch C cutover by importing `2026-09-25_D-PRICE-53_import_format_probe.csv` (two inactive rules on SK2600-1) through Data Import, not by a bridge push. The mirror stores percents x 100 and maps `Set price` to `Fixed price` (`queries.mjs`), so mirror, export and payload agree.

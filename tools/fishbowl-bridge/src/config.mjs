@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.6.0',
+  version: '1.7.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -48,6 +48,8 @@ export const config = {
     appDescription: 'SkyNet MES sales order sync (read-only)',
     sessionMode: process.env.SESSION_MODE === 'per_cycle' ? 'per_cycle' : 'hold',
     timeoutMs: num('FB_TIMEOUT_MS', 30000),
+    // D-PRICE-53: an import of a few thousand rows is slower than any query; separate ceiling.
+    importTimeoutMs: num('FB_IMPORT_TIMEOUT_MS', 300000),
   },
   sb: {
     url: need('SB_URL'),
@@ -82,4 +84,26 @@ export const config = {
   overlapRevs: num('OVERLAP_REVS', 200),
   chunk: num('CHUNK', 50),
   logDir: resolve(ROOT, 'logs'),
+  // D-PRICE-53 Fishbowl pricing link. The rules/tree mirrors ride the products nightly slot (like part
+  // costs). The push executor runs every cycle but only WRITES when both of these hold — otherwise every
+  // command it claims becomes a forced dry run (rows logged, nothing sent, result.dry_run = true):
+  //   FB_PUSH_ENABLED  only the literal `true` enables writes (same opposite-default rule as INVENTORY_DRY_RUN)
+  //   FB_PUSH_SB_HOST  the one SkyNet host a real push may run against (default PROD). The PC bridge on TEST
+  //                    can never write to Fishbowl by accident: its SB_URL is not this host.
+  push: {
+    enabled: String(process.env.FB_PUSH_ENABLED ?? '').trim().toLowerCase() === 'true',
+    allowedSbHost: process.env.FB_PUSH_SB_HOST || 'luzungoqfuplspzbqctb.supabase.co',
+    // fb_push_auto: after the nightly products poll, queue prices + rules pushes when the book in effect changed
+    autoEnabled: String(process.env.FB_PUSH_AUTO ?? 'true').trim().toLowerCase() !== 'false',
+    maxPerCycle: num('FB_PUSH_MAX_PER_CYCLE', 3),
+  },
+  rulesTreeEnabled: String(process.env.RULES_TREE_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  // Fishbowl import names (the import's name with dashes). Only change if Fishbowl renames an import.
+  importNames: {
+    product: process.env.FB_IMPORT_PRODUCT || 'Product',
+    rules: process.env.FB_IMPORT_RULES || 'Pricing-Rules',
+    treeCategories: process.env.FB_IMPORT_TREE_CATEGORIES || 'Product-Tree-Categories',
+    tree: process.env.FB_IMPORT_TREE || 'Product-Tree',
+    groups: process.env.FB_IMPORT_GROUPS || 'Customer-Group-Relations',
+  },
 }

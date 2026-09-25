@@ -1,7 +1,9 @@
-// index.mjs — SkyNet Fishbowl Bridge. Read-only against Fishbowl; writes to SkyNet only through fb_* RPCs.
+// index.mjs — SkyNet Fishbowl Bridge. Reads Fishbowl; writes to SkyNet only through fb_* RPCs; writes to
+// Fishbowl only through the D-PRICE-53 push queue (push.mjs), and only when FB_PUSH_ENABLED is true on PROD.
 //   node src/index.mjs             run forever (this is what the Windows service runs)
 //   node src/index.mjs --once      one tail + one reconcile pass, then exit (smoke test)
 //   node src/index.mjs --backfill  one full customers + products + part costs + SO history load (v1.4)
+//   node src/index.mjs --mirror-rules  one pricing-rules + product-tree mirror pass, then exit (v1.7)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
@@ -11,6 +13,8 @@ import { ingestIds, revisionMap } from './sync.mjs'
 import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
 import { syncPartCosts } from './partCosts.mjs'
 import { aggregateInventory, countZeroRows } from './inventory.mjs'
+import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
+import { runPushCommands, canPushFor } from './push.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -142,6 +146,27 @@ async function pricingCycle({ force = false } = {}) {
         log.error(`kits site sync failed (mirrors unaffected): ${e.message}`)
       }
     }
+    // D-PRICE-53, same slot: the rules + tree mirrors, then the nightly book-change trigger. Each is
+    // logged and swallowed like the kits sync — a Fishbowl schema surprise must not stand the pricing
+    // pollers down. fb_push_auto only QUEUES; the command runs on the next cycle through runPushCommands.
+    if (config.rulesTreeEnabled) {
+      try {
+        const t = await syncProductTree(fb, sky, { log })
+        await syncPricingRules(fb, sky, { log, paths: t.paths })
+        pricing.last_tree_at = new Date().toISOString()
+        pricing.last_rules_at = pricing.last_tree_at
+      } catch (e) {
+        log.error(`rules/tree mirror failed (other mirrors unaffected): ${e.message}`)
+      }
+    }
+    if (config.push.autoEnabled) {
+      try {
+        const a = await sky.pushAuto()
+        if (a?.prices_cmd || a?.rules_cmd) log.info(`push auto: book in effect changed -> queued prices #${a.prices_cmd ?? '-'} rules #${a.rules_cmd ?? '-'}`)
+      } catch (e) {
+        log.error(`push auto failed: ${e.message}`)
+      }
+    }
   }
 
   if (force || nightlyDue(pricing.last_history_at, config.historyNightlyAt, now)) {
@@ -166,6 +191,21 @@ async function pricingCycleGuarded() {
   } catch (e) {
     pricingPausedUntil = Date.now() + PRICING_RETRY_MS
     log.error(`pricing cycle failed, retrying in ${PRICING_RETRY_MS / 60000} min: ${e.message}`)
+  }
+}
+
+// D-PRICE-53: claim and run queued import commands. Same stand-down pattern as the pricing pollers:
+// a failure that escapes push.mjs (which records per-command failures itself) pauses the executor for
+// PUSH_RETRY_MS and never touches the Order Queue's tail.
+let pushPausedUntil = 0
+const PUSH_RETRY_MS = 900000
+async function pushCycleGuarded() {
+  if (Date.now() < pushPausedUntil) return
+  try {
+    await runPushCommands(fb, sky, { cfg: config, log, max: config.push.maxPerCycle })
+  } catch (e) {
+    pushPausedUntil = Date.now() + PUSH_RETRY_MS
+    log.error(`push cycle failed, retrying in ${PUSH_RETRY_MS / 60000} min: ${e.message}`)
   }
 }
 
@@ -235,6 +275,7 @@ async function cycle() {
       lastInventoryAt = Date.now()
     }
     await pricingCycleGuarded()
+    await pushCycleGuarded()
     return { ...t, reconciled }
   })
   await sky.heartbeat({
@@ -254,18 +295,41 @@ async function backfillPricing() {
   log.info('pricing backfill complete')
 }
 
+// `--mirror-rules`: one rules + tree mirror pass and exit (first load, or after fixing a query). No push.
+async function mirrorRulesOnce() {
+  await fb.withSession(async () => {
+    const t = await syncProductTree(fb, sky, { log })
+    await syncPricingRules(fb, sky, { log, paths: t.paths })
+  })
+  log.info('rules/tree mirror complete')
+}
+
 async function main() {
   const once = process.argv.includes('--once')
   const backfill = process.argv.includes('--backfill')
+  const mirrorRules = process.argv.includes('--mirror-rules')
   log.info(`SkyNet Fishbowl Bridge v${config.version} starting on ${config.host} → ${config.fb.host}:${config.fb.port} (${config.fb.sessionMode}) → ${config.sb.url}`)
   await sky.signIn()
   pricing = await sky.pricingState()
-  log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'}`)
+  log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'} rules=${pricing.last_rules_at || 'never'} tree=${pricing.last_tree_at || 'never'}`)
+  const gate = canPushFor(config)
+  log.info(`fishbowl push: ${gate.ok ? 'ENABLED (real writes to Fishbowl)' : `dry run only (${gate.why})`}; auto=${config.push.autoEnabled}`)
   if (backfill) {
     try {
       await backfillPricing()
     } catch (e) {
       log.error(`pricing backfill failed: ${e.stack || e.message}`)
+      process.exitCode = 1
+    } finally {
+      await fb.logout()
+    }
+    return
+  }
+  if (mirrorRules) {
+    try {
+      await mirrorRulesOnce()
+    } catch (e) {
+      log.error(`rules/tree mirror failed: ${e.stack || e.message}`)
       process.exitCode = 1
     } finally {
       await fb.logout()

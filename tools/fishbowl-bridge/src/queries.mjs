@@ -145,6 +145,42 @@ export const q = {
     ORDER BY s.dateLastModified, si.id
     LIMIT ${Number(limit) || 2000}`,
 
+  // --- Bridge v1.7 pricing link mirrors (D-PRICE-53). Read-only. -----------------------------------
+  // Table and column names below were taken from scripts/fb-columns.mjs against Fishbowl 25.9 on the
+  // date in the v1.7 Decisions entry. If Fishbowl reports a column differently, fix it HERE (one place).
+
+  // Every category of the product tree; the path is assembled in rulesTree.mjs from parentId.
+  productTreeNodes: 'SELECT id, name, parentId FROM producttree',
+
+  // Product <-> category membership with the product number (a product can sit under several nodes).
+  productTreeMembers: `SELECT ptt.productId, p.num AS productNum, ptt.productTreeId AS nodeId
+    FROM producttotree ptt JOIN product p ON p.id = ptt.productId`,
+
+  // Every pricing rule with its type ids resolved to the names the Pricing Rules import uses. A rule's
+  // productInclId is a product id or a tree node id depending on productInclType; customerInclId is a
+  // customer id or an account-group id (Fishbowl's "customer groups") depending on customerInclType.
+  // patype id 6 is named 'Set price' in the table but 'Fixed price' in the Pricing Rules export/import
+  // (6,989 rules each way, 2026-09-25); it is translated so the mirror compares with the expected set.
+  // paPercent is stored as a fraction (0.96) but exported and expected as percent points (96%), so it is
+  // scaled here in exact decimal arithmetic.
+  pricingRules: `SELECT r.id, r.name, r.description, r.isActive,
+      pit.name AS productInclType, r.productInclId, CASE WHEN pit.name = 'Product' THEN p.num END AS productNum,
+      cit.name AS customerInclType, r.customerInclId,
+      CASE WHEN cit.name = 'Customer' THEN c.name WHEN cit.name = 'Customer Group' THEN ag.name END AS customerName,
+      r.paApplies, CASE WHEN pat.name = 'Set price' THEN 'Fixed price' ELSE pat.name END AS paType, r.paPercent * 100 AS paPercent, pbat.name AS paBaseAmountType, r.paAmount,
+      r.rndApplies, rt.name AS roundType, r.rndToAmount, r.rndIsMinus, r.rndPMAmount,
+      r.dateApplies, r.dateBegin, r.dateEnd, r.qtyApplies, r.qtyMin, r.qtyMax, r.isAutoApply, r.isTier2,
+      r.dateCreated, r.dateLastModified
+    FROM pricingrule r
+    LEFT JOIN productincltype pit ON pit.id = r.productInclTypeId
+    LEFT JOIN customerincltype cit ON cit.id = r.customerInclTypeId
+    LEFT JOIN patype pat ON pat.id = r.paTypeId
+    LEFT JOIN pabaseamounttype pbat ON pbat.id = r.paBaseAmountTypeId
+    LEFT JOIN rndtype rt ON rt.id = r.rndTypeId
+    LEFT JOIN product p ON p.id = r.productInclId AND pit.name = 'Product'
+    LEFT JOIN customer c ON c.id = r.customerInclId AND cit.name = 'Customer'
+    LEFT JOIN accountgroup ag ON ag.id = r.customerInclId AND cit.name = 'Customer Group'`,
+
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',
   statusOf: (ids) => `SELECT id, statusId, dateLastModified FROM so WHERE id IN (${idList(ids)})`,

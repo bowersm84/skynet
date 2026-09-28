@@ -565,6 +565,19 @@ export async function getWorkOrderTraceability(workOrderId) {
     if (!seenPart.has(pid)) { componentPartIds.push(pid); seenPart.add(pid) }
   }
 
+  // D-CERT-13: supplementary documents compliance attaches to a component line on
+  // this work order (work_order_component_documents) — not tied to a job or lot.
+  // Listed in the component's Documents panel and merged into cert packages; they
+  // never change sourceCount / documentedSourceCount / docsComplete. A load error
+  // (e.g. table not yet migrated) is logged and treated as no documents.
+  const { data: wocdRows, error: wocdErr } = await supabase
+    .from('work_order_component_documents')
+    .select('id, work_order_id, part_id, document_type, file_name, file_path, file_size, mime_type, notes, uploaded_by, uploaded_at')
+    .eq('work_order_id', workOrderId)
+    .order('uploaded_at', { ascending: true })
+  if (wocdErr) console.error('work_order_component_documents load failed (continuing):', wocdErr)
+  const additionalDocsByPart = groupBy(wocdRows, 'part_id')
+
   const components = componentPartIds.map((partId) => {
     const part = partsById[partId]
     const nativeSrcs = nativeJobSources.filter((s) => s.component_id === partId)
@@ -596,6 +609,7 @@ export async function getWorkOrderTraceability(workOrderId) {
       documentedSourceCount,
       sourceSummary: summaryParts.join(' + ') || 'no source',
       docsComplete: sourceCount > 0 && documentedSourceCount === sourceCount,
+      additionalDocs: additionalDocsByPart[partId] || [],
     }
   })
 
@@ -1037,4 +1051,44 @@ export async function deleteLotDocument(documentId, filePath) {
     .delete()
     .eq('id', documentId)
   return { error }
+}
+
+// D-CERT-13: upload a supplementary document onto one component line of a WO.
+// S3 key: wo-component-docs/<work_order_id>/<part_id>/<ts>_<name>. If the row is
+// refused (e.g. RLS), the just-uploaded object is removed so nothing is orphaned.
+export async function uploadWorkOrderComponentDocument(workOrderId, partId, file, documentType, notes, profileId) {
+  const { fileName, filePath, fileSize, mimeType } = await uploadDocument(file, `wo-component-docs/${workOrderId}/${partId}`)
+  const { data, error } = await supabase
+    .from('work_order_component_documents')
+    .insert({
+      work_order_id: workOrderId,
+      part_id: partId,
+      document_type: documentType || 'other',
+      file_name: file.name || fileName,
+      file_path: filePath,
+      file_size: fileSize,
+      mime_type: mimeType,
+      notes: notes || null,
+      uploaded_by: profileId || null,
+    })
+    .select('*')
+    .single()
+  if (error) {
+    try { await deleteDocument(filePath) } catch (e) { console.error('Orphan S3 cleanup failed:', e) }
+  }
+  return { data, error }
+}
+
+// Delete a supplementary document. Row first, then the S3 object (best-effort) —
+// so a refused delete never leaves a row pointing at a missing file.
+export async function deleteWorkOrderComponentDocument(documentId, filePath) {
+  const { error } = await supabase
+    .from('work_order_component_documents')
+    .delete()
+    .eq('id', documentId)
+  if (error) return { error }
+  if (filePath) {
+    try { await deleteDocument(filePath) } catch (e) { console.error('WO component doc S3 delete failed (row removed):', e) }
+  }
+  return { error: null }
 }

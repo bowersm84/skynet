@@ -21,6 +21,8 @@ import {
   findJobByLotNumber,
   linkJobToWorkOrder,
   unlinkJobFromWorkOrder,
+  uploadWorkOrderComponentDocument,
+  deleteWorkOrderComponentDocument,
 } from '../lib/certRepository'
 import {
   buildPackageDataset,
@@ -633,8 +635,18 @@ function JobDocs({ docs }) {
 // ---------------------------------------------------------------------------
 function ComponentDocGroup({ c, status, canWrite, profile, workOrderId, onChanged }) {
   const [open, setOpen] = useState(false)
+  const [addingDoc, setAddingDoc] = useState(false)
   const isPurchased = c.part_type === 'purchased'
-  const totalDocs = c.sources.reduce((n, s) => n + (s.docCount || 0), 0)
+  // D-CERT-13: supplementary documents count toward the header total but are not a
+  // source, so they never change documentedSourceCount / docsComplete.
+  const additionalCount = (c.additionalDocs || []).length
+  const totalDocs = c.sources.reduce((n, s) => n + (s.docCount || 0), 0) + additionalCount
+
+  const addDocButton = (
+    <button onClick={() => setAddingDoc(true)} disabled={addingDoc} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm text-gray-200 disabled:opacity-50">
+      <FilePlus size={14} /> Add Additional Documents
+    </button>
+  )
 
   return (
     <div className="border border-gray-800 rounded-lg overflow-hidden">
@@ -666,11 +678,108 @@ function ComponentDocGroup({ c, status, canWrite, profile, workOrderId, onChange
               : <LotCard key={s.key} lot={s} canWrite={canWrite} profile={profile} workOrderId={workOrderId} onChanged={onChanged} />
           ))}
 
+          <AdditionalDocsList c={c} canWrite={canWrite} onChanged={onChanged} />
+
           {canWrite && (
-            <ComponentLinkArea c={c} profile={profile} workOrderId={workOrderId} onChanged={onChanged} />
+            <ComponentLinkArea c={c} profile={profile} workOrderId={workOrderId} onChanged={onChanged} extra={addDocButton} />
+          )}
+          {canWrite && addingDoc && (
+            <AdditionalDocForm
+              c={c}
+              workOrderId={workOrderId}
+              profile={profile}
+              onClose={() => setAddingDoc(false)}
+              onUploaded={() => { setAddingDoc(false); onChanged() }}
+            />
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// D-CERT-13: supplementary documents on one component line of this work order —
+// not tied to a job or a lot. Deletable by compliance/admin.
+function AdditionalDocsList({ c, canWrite, onChanged }) {
+  const docs = c.additionalDocs || []
+  const handleDelete = async (d) => {
+    if (!confirm(`Remove "${d.file_name}" from ${c.part_number} on this work order?`)) return
+    const { error } = await deleteWorkOrderComponentDocument(d.id, d.file_path)
+    if (error) { alert('Delete failed: ' + error.message); return }
+    onChanged()
+  }
+  return (
+    <DocSection title="Additional Documents" count={docs.length}>
+      {docs.map((d) => (
+        <DocLink
+          key={d.id}
+          label={d.file_name}
+          sublabel={[docTypeLabel(d.document_type), d.notes].filter(Boolean).join(' · ')}
+          filePath={d.file_path}
+          onDelete={canWrite ? () => handleDelete(d) : null}
+        />
+      ))}
+    </DocSection>
+  )
+}
+
+// D-CERT-13: upload one or more supplementary documents onto a component line.
+// One type + optional note applies to every file in the batch.
+function AdditionalDocForm({ c, workOrderId, profile, onClose, onUploaded }) {
+  const [files, setFiles] = useState([])
+  const [docType, setDocType] = useState('other')
+  const [notes, setNotes] = useState('')
+  const [uploading, setUploading] = useState(false)
+
+  const handleUpload = async () => {
+    if (files.length === 0) return
+    setUploading(true)
+    const failed = []
+    for (const f of files) {
+      try {
+        const { error } = await uploadWorkOrderComponentDocument(workOrderId, c.part_id, f, docType, notes.trim() || null, profile?.id)
+        if (error) throw error
+      } catch (err) {
+        failed.push(`${f.name}: ${err.message || err}`)
+      }
+    }
+    setUploading(false)
+    if (failed.length) alert('Some documents did not upload:\n' + failed.join('\n'))
+    if (failed.length < files.length) onUploaded()
+  }
+
+  return (
+    <div className="bg-gray-800/40 border border-gray-800 rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm text-gray-200 inline-flex items-center gap-1.5">
+          <FilePlus size={14} className="text-sky-300" /> Add documents to {c.part_number} on this work order
+        </div>
+        <button onClick={onClose} disabled={uploading} className="text-gray-500 hover:text-white disabled:opacity-50"><X size={14} /></button>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <select value={docType} onChange={(e) => setDocType(e.target.value)} className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-white focus:outline-none focus:border-skynet-accent">
+          {DOC_TYPES.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
+        </select>
+        <input
+          type="text"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Note (optional)"
+          className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-white w-48 focus:outline-none focus:border-skynet-accent"
+        />
+        <input
+          type="file"
+          multiple
+          onChange={(e) => setFiles(Array.from(e.target.files || []))}
+          className="text-xs text-gray-400 file:mr-2 file:px-2 file:py-1 file:bg-gray-700 file:text-white file:border-0 file:rounded file:cursor-pointer"
+        />
+        <button onClick={handleUpload} disabled={files.length === 0 || uploading} className="inline-flex items-center gap-1 px-3 py-1.5 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white text-xs rounded">
+          {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} Upload{files.length > 1 ? ` ${files.length}` : ''}
+        </button>
+      </div>
+      <div className="text-xs text-gray-500">
+        Applies to this work order only. Included in cert packages built for it; does not change the component's documented status.
+      </div>
     </div>
   )
 }
@@ -718,7 +827,7 @@ function JobSourceBlock({ s, canWrite, onChanged }) {
 
 // Link controls that appear on every component. Purchased → lot linking only.
 // Manufactured → "Link SkyNet Job" (cross-WO) + "Manual Lot Record" (legacy).
-function ComponentLinkArea({ c, profile, workOrderId, onChanged }) {
+function ComponentLinkArea({ c, profile, workOrderId, onChanged, extra = null }) {
   const linkedLotIds = c.sources.filter((s) => s.kind === 'lot').map((s) => s.lot_id)
 
   if (c.part_type === 'purchased') {
@@ -730,6 +839,7 @@ function ComponentLinkArea({ c, profile, workOrderId, onChanged }) {
         profile={profile}
         linkedLotIds={linkedLotIds}
         onChanged={onChanged}
+        extra={extra}
       />
     )
   }
@@ -740,11 +850,12 @@ function ComponentLinkArea({ c, profile, workOrderId, onChanged }) {
       workOrderId={workOrderId}
       linkedLotIds={linkedLotIds}
       onChanged={onChanged}
+      extra={extra}
     />
   )
 }
 
-function LotLinkerToggle({ partId, partNumber, workOrderId, profile, linkedLotIds, onChanged, label = 'Link Lot', legacy = false }) {
+function LotLinkerToggle({ partId, partNumber, workOrderId, profile, linkedLotIds, onChanged, label = 'Link Lot', legacy = false, extra = null }) {
   const [show, setShow] = useState(false)
   if (show) {
     return (
@@ -761,14 +872,17 @@ function LotLinkerToggle({ partId, partNumber, workOrderId, profile, linkedLotId
     )
   }
   return (
-    <button onClick={() => setShow(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm text-gray-200">
-      <Link2 size={14} /> {label}
-    </button>
+    <div className="flex items-center gap-2 flex-wrap">
+      <button onClick={() => setShow(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm text-gray-200">
+        <Link2 size={14} /> {label}
+      </button>
+      {extra}
+    </div>
   )
 }
 
 // Manufactured component: two sourcing paths.
-function ManufacturedLinkPanel({ c, profile, workOrderId, linkedLotIds, onChanged }) {
+function ManufacturedLinkPanel({ c, profile, workOrderId, linkedLotIds, onChanged, extra = null }) {
   const [mode, setMode] = useState(null) // null | 'job' | 'lot'
 
   if (mode === 'job') {
@@ -804,6 +918,7 @@ function ManufacturedLinkPanel({ c, profile, workOrderId, linkedLotIds, onChange
       <button onClick={() => setMode('lot')} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm text-gray-200">
         <ClipboardList size={14} /> Manual Lot Record
       </button>
+      {extra}
     </div>
   )
 }

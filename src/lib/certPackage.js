@@ -401,6 +401,8 @@ async function buildMergeList(trace) {
         for (const d of s.documents || []) out.push({ component_part_number: cp, group: 'Lot Document', file_name: d.file_name, file_path: d.file_path, doc_id: d.id })
       }
     }
+    // D-CERT-13: supplementary documents on this component line (this WO only).
+    for (const d of c.additionalDocs || []) out.push({ component_part_number: cp, group: 'Additional Document', file_name: d.file_name, file_path: d.file_path, doc_id: d.id })
   }
   const list = out.filter((d) => d.file_path)
 

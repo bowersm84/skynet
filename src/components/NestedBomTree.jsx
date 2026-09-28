@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { Wrench, ShoppingCart, Layers, ChevronRight, ChevronDown, AlertTriangle, Loader2 } from 'lucide-react'
-import { buildBomTree } from '../lib/nestedAssembly'
+import { buildBomTree, isGroupNode } from '../lib/nestedAssembly'
 import FbInventoryChip from './FbInventoryChip'
 
 // Multi-level BOM tree for an assembly in Create WO.
-//  - assembly / finished_good nodes: collapsible sub-assembly groups
-//  - manufactured leaves: toggle buttons that become jobs
+//  - assembly nodes (and finished goods that have their own BOM): collapsible sub-assembly groups
+//  - manufactured leaves and childless finished goods (D-NEST-13): toggle buttons that become jobs
 //  - purchased leaves: shown for context (no job)
 //  - cycle nodes: flagged, not expanded
 // Props:
@@ -43,7 +43,7 @@ export default function NestedBomTree({ topQty, treeState, selected, onToggleLea
   const toggleCollapse = (key) => setCollapsed(prev => ({ ...prev, [key]: !prev[key] }))
 
   const renderNode = (node) => {
-    const isGroup = node.partType === 'assembly' || node.partType === 'finished_good'
+    const isGroup = isGroupNode(node)
     const isPurchased = node.partType === 'purchased'
     const isOpen = !collapsed[node.key]
 

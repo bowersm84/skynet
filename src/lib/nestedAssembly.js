@@ -70,12 +70,27 @@ export function buildBomTree(nodes) {
   return roots
 }
 
-// Keys of every selectable leaf (manufactured parts — the only nodes that become jobs).
+// D-NEST-13: node classification shared by the tree, the leaf-key helper and the
+// submit. A finished good with no BOM of its own is a machined part that is also
+// sold standalone (e.g. SK221-2A inside SK221-2AN) — it becomes a job like any
+// manufactured leaf. A finished good that has children stays a group.
+export function isJobLeafNode(node) {
+  return node.partType === 'manufactured' ||
+    (node.partType === 'finished_good' && (node.children?.length || 0) === 0)
+}
+
+export function isGroupNode(node) {
+  return node.partType === 'assembly' ||
+    (node.partType === 'finished_good' && (node.children?.length || 0) > 0)
+}
+
+// Keys of every selectable leaf (job leaves — manufactured parts and childless
+// finished goods; the only nodes that become jobs).
 export function manufacturedLeafKeys(roots) {
   const keys = []
   const walk = (list) => {
     for (const n of list) {
-      if (n.partType === 'manufactured') keys.push(n.key)
+      if (isJobLeafNode(n)) keys.push(n.key)
       walk(n.children)
     }
   }
@@ -179,7 +194,7 @@ export async function submitNestedTree({
   const visit = async (node) => {
     if (node.isCycle) return
 
-    if (node.partType === 'assembly' || node.partType === 'finished_good') {
+    if (isGroupNode(node)) {
       const parentWoaId = enclosingWoaId(node)
       const subQty = (node.unitQty || 0) * (multiplier || 0)
       const { data: subWoa, error } = await supabase
@@ -205,7 +220,7 @@ export async function submitNestedTree({
       return
     }
 
-    if (node.partType === 'manufactured') {
+    if (isJobLeafNode(node)) {
       if (!selectedKeys[node.key]) return
       const woaId = enclosingWoaId(node)
       const qty = (node.unitQty || 0) * (multiplier || 0)

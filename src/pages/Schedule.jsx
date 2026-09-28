@@ -190,6 +190,29 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   // D-JOBMERGE-02: active merge allocations keyed by host job id
   const [mergeAllocs, setMergeAllocs] = useState({})
 
+  // D-CODATE-03: SkyNet target + live Fishbowl due for the selected job's WO,
+  // from v_wo_dates (same source as the Job Pool cards and ScheduleJobModal).
+  // undefined = loading; null = no row (stock-only WO) or a fetch error → the
+  // modal falls back to work_orders.due_date. Never blocks the modal.
+  const selectedWoId = selectedJob?.work_order?.id || selectedJob?.work_order_id || null
+  const [selectedJobDates, setSelectedJobDates] = useState(undefined)
+  useEffect(() => {
+    if (!selectedWoId) { setSelectedJobDates(null); return }
+    let cancelled = false
+    setSelectedJobDates(undefined)
+    supabase
+      .from('v_wo_dates')
+      .select('work_order_id, target_date, fb_due_date')
+      .eq('work_order_id', selectedWoId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) console.error('v_wo_dates (job modal):', error)
+        setSelectedJobDates(error ? null : (data || null))
+      })
+    return () => { cancelled = true }
+  }, [selectedWoId])
+
   // D-OVS-01 in the job modal: orders vs. stock for the selected run, plus
   // pieces sent to finishing (the Kiosk's "made"). Lazy, one job at a time;
   // a failure leaves the bar off, never the modal.
@@ -4108,12 +4131,37 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                 </div>
               )}
 
-              {selectedJob.work_order?.due_date && (
+              {/* D-CODATE-03: SkyNet target + Fishbowl due when the WO has CO
+                  allocations; stock-only WOs keep the WO's own due date. FB Due
+                  is amber when earlier than the target (D-CODATE-01 cue). */}
+              {selectedJobDates?.target_date ? (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-gray-500 text-sm">Target Date</span>
+                    <p className="text-white">{formatDate(selectedJobDates.target_date)}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 text-sm">FB Due Date</span>
+                    {(() => {
+                      const fb = selectedJobDates.fb_due_date
+                      const early = fb && fb < selectedJobDates.target_date
+                      return (
+                        <p
+                          className={early ? 'text-amber-400' : 'text-white'}
+                          title={early ? 'Fishbowl due is earlier than the SkyNet target' : undefined}
+                        >
+                          {fb ? formatDate(fb) : '—'}
+                        </p>
+                      )
+                    })()}
+                  </div>
+                </div>
+              ) : selectedJobDates !== undefined && selectedJob.work_order?.due_date ? (
                 <div>
                   <span className="text-gray-500 text-sm">Due Date</span>
                   <p className="text-white">{formatDate(selectedJob.work_order.due_date)}</p>
                 </div>
-              )}
+              ) : null}
 
               <div className="flex items-center gap-4 pt-2">
                 {selectedJob.requires_attendance && (

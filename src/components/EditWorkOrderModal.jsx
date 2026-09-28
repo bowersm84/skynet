@@ -78,7 +78,8 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     }
 
     const components = (data || [])
-      .filter(row => row.component && row.component.part_type === 'manufactured')
+      // D-NEST-13: finished goods can be components (e.g. SK221-2A in SK221-2AN).
+      .filter(row => row.component && ['manufactured', 'finished_good'].includes(row.component.part_type))
       .map(row => ({
         id: row.component.id,
         part_number: row.component.part_number,

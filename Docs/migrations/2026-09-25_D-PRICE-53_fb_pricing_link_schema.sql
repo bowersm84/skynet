@@ -192,15 +192,17 @@ CREATE OR REPLACE FUNCTION public.fb_push_finish(p_id bigint, p_ok boolean, p_re
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
 AS $$
-DECLARE v_kind text;
+DECLARE v_kind text; v_dry boolean;
 BEGIN
   PERFORM public._fb_gate(ARRAY['integration','admin']);
   v_kind := (SELECT c.kind FROM public.fb_push_commands c WHERE c.id = p_id AND c.status = 'running');
   IF v_kind IS NULL THEN RAISE EXCEPTION 'fb_push_finish: command % is not running', p_id; END IF;
+  /* a dry run -- asked for, or forced by the bridge's gate (result.dry_run) -- is not a push */
+  v_dry := (SELECT c.dry_run FROM public.fb_push_commands c WHERE c.id = p_id) OR COALESCE((p_result->>'dry_run')::boolean, false);
   UPDATE public.fb_push_commands
      SET status = CASE WHEN p_ok THEN 'done' ELSE 'failed' END, finished_at = now(), result = p_result, error = left(p_error, 2000)
    WHERE id = p_id AND status = 'running';
-  IF p_ok THEN
+  IF p_ok AND NOT v_dry THEN
     UPDATE public.fb_sync_state SET last_push_at = now(), last_push_kind = v_kind, updated_at = now() WHERE id = 1;
   END IF;
 END $$;
@@ -803,10 +805,13 @@ BEGIN
       'extra_in_fb', (SELECT COUNT(*) FROM m WHERE NOT EXISTS (SELECT 1 FROM e WHERE m.fb_customer_id = e.fb_customer_id AND m.group_name = e.group_name))));
 
   v_q := (SELECT jsonb_build_object('queued', COUNT(*) FILTER (WHERE status = 'queued'), 'running', COUNT(*) FILTER (WHERE status = 'running')) FROM public.fb_push_commands);
+  /* last REAL push per kind: dry runs, asked for or forced by the bridge's gate, are history, not pushes */
   v_last := (SELECT jsonb_object_agg(x.kind, x.j) FROM (
-               SELECT DISTINCT ON (c.kind) c.kind, jsonb_build_object('id', c.id, 'status', c.status, 'dry_run', c.dry_run, 'rows', c.row_count,
+               SELECT DISTINCT ON (c.kind) c.kind, jsonb_build_object('id', c.id, 'status', c.status, 'rows', c.row_count,
                         'finished_at', c.finished_at, 'error', c.error, 'book_id', c.book_id) j
-               FROM public.fb_push_commands c WHERE c.status IN ('done','failed') ORDER BY c.kind, c.id DESC) x);
+               FROM public.fb_push_commands c
+               WHERE c.status IN ('done','failed') AND NOT (c.dry_run OR COALESCE((c.result->>'dry_run')::boolean, false))
+               ORDER BY c.kind, c.id DESC) x);
 
   v_in_sync := (v_products->>'mismatched')::int = 0 AND (v_products->>'fb_zero')::int = 0
            AND v_rules_loaded AND (v_rules->>'mismatched')::int = 0 AND (v_rules->>'missing')::int = 0 AND (v_rules->>'legacy_active')::int = 0

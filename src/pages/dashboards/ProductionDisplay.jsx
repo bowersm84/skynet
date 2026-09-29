@@ -73,7 +73,8 @@ export default function ProductionDisplay() {
   //   Passed Finishing = batches with status='finishing_complete' that completed that day.
   //                      Quantity = verified_count (the count after Dry-stage verification).
   //   Accepted         = batches that cleared compliance review with outcome='accepted' that day.
-  //                      Quantity = compliance_good_qty (qty Roger marked good).
+  //                      Quantity = compliance_good_qty (qty Roger marked good). Any Bad Quantity
+  //                      on an accepted batch is counted under Rejected (D-PRODDASH-QUALITY01).
   // Both metrics reflect actual flow through quality gates, not batch creation volume.
   const loadYesterday = useCallback(async () => {
     const { start, end } = dateBounds(selectedDate)
@@ -83,12 +84,14 @@ export default function ProductionDisplay() {
         .select('verified_count, job:jobs(is_standalone_finishing, component:parts!component_id(part_number))')
         .eq('status', 'finishing_complete')
         .gte('finishing_completed_at', start).lt('finishing_completed_at', end),
+      // D-PRODDASH-QUALITY01: compliance_bad_qty + the job's machine ride along on accepted
+      // batches — an Accept with a Bad Quantity is a partial reject (see below).
       supabase.from('finishing_sends')
-        .select('compliance_good_qty, job:jobs(is_standalone_finishing, component:parts!component_id(part_number))')
+        .select('compliance_outcome, compliance_good_qty, compliance_bad_qty, job:jobs(is_standalone_finishing, component:parts!component_id(part_number), machine:machines!assigned_machine_id(code))')
         .eq('compliance_outcome', 'accepted')
         .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
       supabase.from('finishing_sends')
-        .select('compliance_outcome, compliance_bad_qty, verified_count, job:jobs(is_standalone_finishing, component:parts!component_id(part_number)), machine:machines!machine_id(code)')
+        .select('compliance_outcome, compliance_bad_qty, verified_count, job:jobs(is_standalone_finishing, component:parts!component_id(part_number), machine:machines!assigned_machine_id(code))')
         .in('compliance_outcome', ['rejected', 'rework'])
         .gte('compliance_approved_at', start).lt('compliance_approved_at', end),
     ])
@@ -119,14 +122,19 @@ export default function ProductionDisplay() {
 
     // Quality: rejected + reworked for the same selected day, off the same compliance gate.
     // Reworked qty = compliance_bad_qty (the flagged portion). Rejected qty = bad_qty when
-    // present, else the whole verified batch (option B — forward-compatible with partial reject).
-    // Each list aggregates by part number + producing machine (machine null on standalone J-FIN -> "—").
+    // present, else the whole verified batch (option B).
+    // D-PRODDASH-QUALITY01: Rejected also counts the Bad Quantity on ACCEPTED batches — post-mfg
+    // Accept takes good + bad, and the bad portion is scrapped, so it is a partial reject.
+    // Machine = the job's machine (jobs.assigned_machine_id). finishing_sends.machine_id is
+    // overwritten with the finishing tank at the Treatment stage, so it is not the producer.
+    // Each list aggregates by part number + machine ("—" when none, e.g. standalone J-FIN).
     const qualityRows = (qualityRes.data || []).filter(isProduction)
+    const partialRejectRows = acceptedRows.filter(r => (r.compliance_bad_qty || 0) > 0)
     const aggregateQuality = (rows, qtyOf) => {
       const byKey = {}
       for (const r of rows) {
         const pn = r.job?.component?.part_number || '—'
-        const mc = r.machine?.code || '—'
+        const mc = r.job?.machine?.code || '—'
         const key = `${pn}|||${mc}`
         if (!byKey[key]) byKey[key] = { part_number: pn, machine: mc, qty: 0 }
         byKey[key].qty += qtyOf(r)
@@ -134,7 +142,7 @@ export default function ProductionDisplay() {
       return Object.values(byKey).sort((a, b) => b.qty - a.qty)
     }
     const rejectedParts = aggregateQuality(
-      qualityRows.filter(r => r.compliance_outcome === 'rejected'),
+      [...qualityRows.filter(r => r.compliance_outcome === 'rejected'), ...partialRejectRows],
       r => r.compliance_bad_qty ?? r.verified_count ?? 0
     )
     const reworkedParts = aggregateQuality(

@@ -411,6 +411,15 @@ export default function MaterialKiosk() {
     const addBars = parseInt(stageForm.add_bars)
     if (!addBars || addBars <= 0) { showToast(`Enter the number of ${isBlanks ? 'blanks' : 'bars'} staged`, 'error'); return }
 
+    // D-INV-07: every bar load carries a length and a lot (see Kiosk.jsx handleAddMaterial).
+    if (!isBlanks) {
+      const recordedLen = stageExisting?.bar_length != null ? Number(stageExisting.bar_length) : null
+      const loadLen = recordedLen ?? (parseFloat(stageForm.bar_length) || 0)
+      if (!loadLen || loadLen <= 0) { showToast('Enter the bar length in inches before staging (48 for 4 ft, 144 for 12 ft)', 'error'); return }
+      if (recordedLen == null && loadLen < 12) { showToast(`${loadLen}" looks like feet. Enter inches (48 for 4 ft, 144 for 12 ft)`, 'error'); return }
+      if (!(stageForm.lot_number || '').trim() && !(stageExisting?.lot_number || '').trim()) { showToast('Enter the material lot number before staging', 'error'); return }
+    }
+
     // D-KIOSK-03: machines with a bar-length limit hard-block longer bars (see Kiosk.jsx).
     const maxLen = selectedMachine?.max_bar_length != null ? Number(selectedMachine.max_bar_length) : null
     if (!isBlanks && maxLen) {
@@ -493,53 +502,18 @@ export default function MaterialKiosk() {
         staged_by: operator.id,
       }).then(() => {}, (err) => console.warn('material_loads write failed (non-fatal):', err))
 
-      // Fire-and-forget inventory usage (mirrors Kiosk.handleAddMaterial). Non-fatal in v1.
-      const savedType = stageForm.material_type
-      const savedSize = isBlanks ? 'N/A' : stageForm.bar_size
-      const savedLength = parseFloat(stageForm.bar_length) || 0
-      const savedJobId = stageJob.id
-      const savedOperatorId = operator.id
-      ;(async () => {
-        try {
-          let matchedReceiving = null
-          // FIFO receipt attribution (D-INV-01). Oldest receipt row with bars
-          // remaining wins; zero-quantity stub rows are never charged. If every
-          // row is exhausted, charge the newest stocked row so the
-          // over-consumption stays visible in one place for reconciliation.
-          if (newLot) {
-            const { data: recvRows } = await supabase
-              .from('material_receiving')
-              .select('id, material_id, quantity, received_at')
-              .eq('lot_number', newLot)
-              .eq('material_type', savedType)
-              .eq('bar_size', savedSize)
-              .gt('quantity', 0)
-              .order('received_at', { ascending: true })
-
-            if (recvRows?.length) {
-              const ids = recvRows.map(r => r.id)
-              const { data: usageRows } = await supabase
-                .from('material_usage')
-                .select('material_receiving_id, quantity_used')
-                .in('material_receiving_id', ids)
-              const usedById = {}
-              for (const u of (usageRows || [])) {
-                usedById[u.material_receiving_id] =
-                  (usedById[u.material_receiving_id] || 0) + (u.quantity_used || 0)
-              }
-              matchedReceiving =
-                recvRows.find(r => (r.quantity - (usedById[r.id] || 0)) > 0) ||
-                recvRows[recvRows.length - 1]
-            }
-          }
-          await supabase.from('material_usage').insert({
-            material_receiving_id: matchedReceiving?.id || null, material_id: matchedReceiving?.material_id || null,
-            lot_number: newLot || null, job_id: savedJobId, quantity_used: addBars,
-            quantity_used_inches: addBars * savedLength, used_by: savedOperatorId,
-            used_at: new Date().toISOString(), notes: 'rack staging',
-          })
-        } catch (err) { console.warn('Inventory usage write failed (non-fatal):', err) }
-      })()
+      // Fire-and-forget inventory charge (D-INV-07): the same server path as the machine
+      // kiosk. It reads the job's saved material record, so the charge always matches
+      // what the job records, whatever was typed on this form.
+      supabase.rpc('record_material_load', {
+        p_job_id: stageJob.id,
+        p_bars: addBars,
+        p_used_by: operator.id,
+        p_notes: 'rack staging',
+      }).then(
+        ({ error }) => { if (error) console.warn('Inventory charge failed (non-fatal):', error) },
+        (err) => console.warn('Inventory charge failed (non-fatal):', err)
+      )
 
       showToast(`Staged ${addBars} ${isBlanks ? 'blanks' : 'bars'} to ${stageJob.component?.part_number || stageJob.job_number}`)
       closeStage(); loadJobs(selectedMachine)

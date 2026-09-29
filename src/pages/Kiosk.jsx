@@ -45,6 +45,7 @@ import { summarizeWOAllocations } from '../lib/workOrderDisplay'
 import { fetchOrdersVsStock, ordersVsStockStatus } from '../lib/ordersVsStock'
 import { logPaperworkIssue, fetchOpenIssuesForJob, MIN_DESCRIPTION } from '../lib/paperworkIssues'
 import { fetchJobFirstRun } from '../lib/scheduling'
+import { aggregateLotStock, piecesAvailableAt } from '../lib/materialLengths'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
 
@@ -1202,14 +1203,10 @@ export default function Kiosk() {
         .from('material_availability')
         .select('material_type, bar_size, lot_number, bar_length_inches, available_bars, available_inches')
       if (error) throw error
-      setInventoryStock((data || []).map(r => ({
-        material_type: r.material_type,
-        bar_size: r.bar_size,
-        lot_number: r.lot_number,
-        bar_length_inches: r.bar_length_inches || 0,
-        available_bars: r.available_bars,
-        available_inches: r.available_inches,
-      })))
+      // D-INV-07: one entry per lot. A lot can hold 144" bars and 48" pieces on separate
+      // receipts; the banner and the over-inventory warning read the whole shelf, with
+      // the balance at each length kept for the cut count.
+      setInventoryStock(aggregateLotStock(data || []))
     } catch (err) {
       console.error('Error loading inventory stock:', err)
       setInventoryStock([])
@@ -2918,6 +2915,29 @@ export default function Kiosk() {
       return
     }
 
+    // D-INV-07: every bar load carries a length and a lot. The length decides how much
+    // of a bar each piece uses (a 48" piece is a third of a 144" bar); the lot decides
+    // which receipt is charged. Effective length = the job's recorded length if present,
+    // else the form entry, as in D-KIOSK-03 below. The feet check applies to a new entry
+    // only, so a job recorded before this rule is never stranded.
+    if (!isBlanks) {
+      const recordedLen = jobMaterials?.[0]?.bar_length != null ? Number(jobMaterials[0].bar_length) : null
+      const loadLen = recordedLen ?? (parseFloat(materialForm.bar_length) || 0)
+      if (!loadLen || loadLen <= 0) {
+        alert('Enter the bar length in inches before loading (48 for 4 ft, 144 for 12 ft).')
+        return
+      }
+      if (recordedLen == null && loadLen < 12) {
+        alert(`${loadLen}" looks like feet. Enter the bar length in inches (48 for 4 ft, 144 for 12 ft).`)
+        return
+      }
+      const recordedLot = jobMaterials.find(m => m.lot_number?.trim())?.lot_number
+      if (!materialForm.lot_number?.trim() && !recordedLot) {
+        alert('Enter the material lot number before loading.')
+        return
+      }
+    }
+
     // D-KIOSK-03: machines with a bar-length limit hard-block longer bars.
     // Effective length = the job's recorded bar length if present, else the form
     // entry — an inherited 144" can't slip past a limit via a blank field.
@@ -3044,14 +3064,9 @@ export default function Kiosk() {
         staged_by: operator.id,
       }).then(() => {}, (err) => console.warn('material_loads write failed (non-fatal):', err))
 
-      // Capture form values before reset for inventory deduction
-      const savedMaterialType = materialForm.material_type
-      const savedBarSize = isBlanks ? 'N/A' : materialForm.bar_size
-      const savedLotNumber = materialForm.lot_number || null
+      // Capture form values before reset for the inventory charge
       const savedBarsLoaded = parseInt(materialForm.bars_loaded)
-      const savedBarLength = parseFloat(materialForm.bar_length) || 0
       const savedJobId = activeJob.id
-      const savedMachineId = machine?.id || null
       const savedOperatorId = operator.id
 
       // Reset form and reload immediately — never wait for inventory steps
@@ -3064,100 +3079,21 @@ export default function Kiosk() {
       })
       await loadJobMaterials(activeJob.id)
 
-      // Fire-and-forget inventory deduction
-      ;(async () => {
-        try {
-          let matchedReceiving = null
-
-          // Step 1: FIFO receipt attribution (D-INV-01). Oldest receipt row with
-          // bars remaining wins; zero-quantity stub rows are never charged. If
-          // every row is exhausted, charge the newest stocked row so the
-          // over-consumption stays visible in one place for reconciliation.
-          if (savedLotNumber) {
-            const { data: recvRows } = await supabase
-              .from('material_receiving')
-              .select('id, material_id, quantity, received_at')
-              .eq('lot_number', savedLotNumber)
-              .eq('material_type', savedMaterialType)
-              .eq('bar_size', savedBarSize)
-              .gt('quantity', 0)
-              .order('received_at', { ascending: true })
-
-            if (recvRows?.length) {
-              const ids = recvRows.map(r => r.id)
-              const { data: usageRows } = await supabase
-                .from('material_usage')
-                .select('material_receiving_id, quantity_used')
-                .in('material_receiving_id', ids)
-              const usedById = {}
-              for (const u of (usageRows || [])) {
-                usedById[u.material_receiving_id] =
-                  (usedById[u.material_receiving_id] || 0) + (u.quantity_used || 0)
-              }
-              matchedReceiving =
-                recvRows.find(r => (r.quantity - (usedById[r.id] || 0)) > 0) ||
-                recvRows[recvRows.length - 1]
-            }
-          }
-
-          // Step 2: Always insert usage record
-          await supabase.from('material_usage').insert({
-            material_receiving_id: matchedReceiving?.id || null,
-            material_id: matchedReceiving?.material_id || null,
-            lot_number: savedLotNumber,
-            job_id: savedJobId,
-            quantity_used: savedBarsLoaded,
-            quantity_used_inches: savedBarsLoaded * savedBarLength,
-            used_by: savedOperatorId,
-            used_at: new Date().toISOString(),
-            notes: null
-          })
-
-          // Step 3: If no matching receiving record, log warning
-          if (savedLotNumber && !matchedReceiving) {
-            supabase.from('audit_logs').insert({
-              event_type: 'inventory_warning',
-              job_id: savedJobId,
-              machine_id: savedMachineId,
-              operator_id: savedOperatorId,
-              details: {
-                warning: 'No matching material_receiving record found',
-                material_type: savedMaterialType,
-                bar_size: savedBarSize,
-                lot_number: savedLotNumber,
-                bars_loaded: savedBarsLoaded
-              }
-            }).then()
-          }
-
-          // Step 4: Check if deduction goes negative
-          if (matchedReceiving) {
-            const { data: usageData } = await supabase
-              .from('material_usage')
-              .select('quantity_used')
-              .eq('material_id', matchedReceiving.material_id)
-              .eq('lot_number', savedLotNumber)
-
-            const totalUsed = (usageData || []).reduce((sum, u) => sum + (u.quantity_used || 0), 0)
-            if (totalUsed > matchedReceiving.quantity) {
-              supabase.from('audit_logs').insert({
-                event_type: 'inventory_warning',
-                job_id: savedJobId,
-                machine_id: savedMachineId,
-                operator_id: savedOperatorId,
-                details: {
-                  warning: 'Material usage exceeds received quantity',
-                  received_quantity: matchedReceiving.quantity,
-                  total_used_after: totalUsed,
-                  lot_number: savedLotNumber
-                }
-              }).then()
-            }
-          }
-        } catch (err) {
-          console.warn('Inventory deduction failed (non-fatal):', err)
-        }
-      })()
+      // Fire-and-forget inventory charge (D-INV-07). The server reads the job's saved
+      // material record (lot, material, size, bar length) and charges the lot: pieces of
+      // the loaded length first, then longer bars cut to it; oldest receipt first;
+      // count-created stock included; split across receipts when one runs out; any
+      // shortfall lands on the loaded length's line and is flagged. It also writes the
+      // inventory_warning audit rows this block used to write. Never blocks the floor.
+      supabase.rpc('record_material_load', {
+        p_job_id: savedJobId,
+        p_bars: savedBarsLoaded,
+        p_used_by: savedOperatorId,
+        p_notes: null,
+      }).then(
+        ({ error }) => { if (error) console.warn('Inventory charge failed (non-fatal):', error) },
+        (err) => console.warn('Inventory charge failed (non-fatal):', err)
+      )
     } catch (err) {
       console.error('Error adding material:', err)
       alert('Failed to add material: ' + err.message)
@@ -6443,20 +6379,18 @@ export default function Kiosk() {
 
                   const enteredLength = parseFloat(materialForm.bar_length)
                   const hasLength = enteredLength > 0
+                  const shelfInches = Math.round(match.available_inches)
 
                   let displayCount, displayLabel, displaySub
 
-                  if (hasLength && match.available_inches > 0) {
-                    displayCount = Math.floor(match.available_inches / enteredLength)
+                  // D-INV-07: the whole lot's stock at this length or longer, cut to size.
+                  if (hasLength) {
+                    displayCount = piecesAvailableAt(match, enteredLength)
                     displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available at ${enteredLength}"`
-                    displaySub = `${Math.round(match.available_inches)}" total · cuts to ${enteredLength}" each`
-                  } else if (hasLength && match.available_inches === 0) {
-                    displayCount = match.available_bars
-                    displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available`
-                    displaySub = `Bar length data not recorded for this lot`
+                    displaySub = `${Math.max(0, shelfInches).toLocaleString()}" total · cuts to ${enteredLength}" each`
                   } else {
-                    displayCount = match.available_bars
-                    displayLabel = `${displayCount} bar${displayCount !== 1 ? 's' : ''} available in inventory`
+                    displayCount = shelfInches
+                    displayLabel = `${Math.max(0, shelfInches).toLocaleString()}" of this lot in inventory`
                     displaySub = `Enter bar length above to see cut count`
                   }
 
@@ -6507,10 +6441,7 @@ export default function Kiosk() {
                     )
                     if (!match) return null
                     const enteredLength = parseFloat(materialForm.bar_length)
-                    const effectiveAvailable =
-                      enteredLength > 0 && match.available_inches > 0
-                        ? Math.floor(match.available_inches / enteredLength)
-                        : match.available_bars
+                    const effectiveAvailable = piecesAvailableAt(match, enteredLength)
                     if (parseInt(materialForm.bars_loaded) > effectiveAvailable) {
                       const over = parseInt(materialForm.bars_loaded) - effectiveAvailable
                       return (

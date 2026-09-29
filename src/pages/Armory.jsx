@@ -41,6 +41,7 @@ import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
 import { userRoles, hasRole, canWriteMasterData, canReceive } from '../lib/roles'
+import { FULL_BAR_IN, isPieceLength, fmtCount, shelfSplit, shelfValue, lengthRows, barEquivalents, countSystem } from '../lib/materialLengths'
 
 // Lots at or below this many available bars render as low stock (amber).
 const LOW_STOCK_BAR_THRESHOLD = 5
@@ -509,6 +510,10 @@ export default function Armory({ profile }) {
           bar_length_inches: r.bar_length_inches,
           used_bars: r.used_bars,
           used_inches: r.used_inches,
+          // D-INV-07: what the usage rows charged this receipt (in its own bar length) and
+          // its approved count adjustments - the two terms behind available_bars.
+          charged_bars: Number(r.charged_bars ?? r.used_bars ?? 0),
+          adjustment_delta: Number(r.adjustment_delta ?? 0),
           available_inches: Math.max(0, r.available_inches),
           // Signed (unclamped) so negative availability surfaces for chase-down.
           available_bars: availableBars,
@@ -778,9 +783,17 @@ export default function Armory({ profile }) {
     if (error) throw error
     await loadReconciliation()
     await loadInventory()
+    // D-INV-07: the link skips entries whose job ran another material or size; the flag
+    // stays open for them, and the banner says so.
+    const linkNotes = []
     if (data?.negative_flag_raised) {
-      setNegFlagToast(`Linked consumption exceeds receipt — negative inventory flag raised for lot ${lotNumber || ''}.`)
+      linkNotes.push(`Linked consumption exceeds the shelf — negative inventory flag raised for lot ${lotNumber || ''}.`)
     }
+    if (data?.skipped_mismatch > 0) {
+      const one = data.skipped_mismatch === 1
+      linkNotes.push(`${data.skipped_mismatch} entr${one ? 'y' : 'ies'} on lot ${lotNumber || ''} ${one ? 'was' : 'were'} keyed as a different material or size and ${one ? 'was' : 'were'} not linked; the flag stays open.`)
+    }
+    if (linkNotes.length) setNegFlagToast(linkNotes.join(' '))
     return data
   }
 
@@ -2165,18 +2178,16 @@ export default function Armory({ profile }) {
         || (a.lot_number || '').localeCompare(b.lot_number || '')
     })
 
-  // D-INV-03: one inventory line per (rack, material, size, length, lot). Separate
-  // receipts for the same lot on the same shelf are the same physical stock and
-  // read as duplicates. Bar length stays in the key deliberately — 48" and 144"
-  // bars of one lot are not interchangeable at the machine. Receipts are NOT
-  // merged in the database: each keeps its own PO, vendor, price, and cert, and
-  // stays reachable through the expander.
+  // D-INV-03 / D-INV-07: one inventory line per (rack, material, size, lot). A lot's
+  // 12 ft bars and 4 ft pieces sit on the same shelf and read as one line with a column
+  // for each (bar length left the key in D-INV-07; it is what split lot 2587 into two
+  // lines). Receipts are NOT merged in the database: each keeps its own PO, vendor,
+  // price, length and cert, and stays reachable through the expander.
   const groupedInventoryRows = (() => {
     const groups = new Map()
     for (const r of filteredInventoryRows) {
       const key = [
-        r.rack ?? '__staging__', r.material_type, r.bar_size,
-        r.bar_length_inches ?? '__nolen__', r.lot_number ?? '__nolot__'
+        r.rack ?? '__staging__', r.material_type, r.bar_size, r.lot_number ?? '__nolot__'
       ].join('|||')
       let g = groups.get(key)
       if (!g) {
@@ -2185,48 +2196,45 @@ export default function Armory({ profile }) {
           rack: r.rack,
           material_type: r.material_type,
           bar_size: r.bar_size,
-          bar_length_inches: r.bar_length_inches,
           lot_number: r.lot_number,
           _vendors: new Set(),
-          received_bars: 0,
-          used_bars: 0,
-          available_bars: 0,
-          available_inches: 0,
-          est_value: 0,
           doc_count: 0,
-          has_negative: false,
           _receipts: []
         }
         groups.set(key, g)
       }
       g._vendors.add(r.vendor || '\u2014')
-      g.received_bars    += Number(r.received_bars ?? 0)
-      g.used_bars        += Number(r.used_bars ?? 0)
-      g.available_bars   += Number(r.available_bars ?? 0)
-      g.available_inches += Number(r.available_inches ?? 0)
-      // Value basis unchanged from the per-receipt view: only positive balances
-      // carry value, so a negative receipt never subtracts from the group.
-      if (r.price_per_bar != null && r.available_bars > 0) {
-        g.est_value += r.available_bars * r.price_per_bar
-      }
       g.doc_count += materialDocCounts[r.id] || 0
-      // Netting can hide a negative receipt inside a positive group. Keep the
-      // signal (D-INV-01) so the summary strip and the row can both surface it.
-      if (Number(r.available_bars ?? 0) < 0) g.has_negative = true
       g._receipts.push(r)
     }
     const out = [...groups.values()]
     for (const g of out) {
       g.vendor = g._vendors.size === 1 ? [...g._vendors][0] : `${g._vendors.size} vendors`
       delete g._vendors
-      g._receipts.sort((x, y) => new Date(x.received_at || 0) - new Date(y.received_at || 0))
+      g._receipts.sort((x, y) =>
+        (new Date(x.received_at || 0) - new Date(y.received_at || 0))
+        || (Number(y.bar_length_inches || 0) - Number(x.bar_length_inches || 0)))
+      // Shelf figures: whole 12 ft bars, 4 ft pieces (including pieces already cut from
+      // bars) and total inches. A line is negative when a length on its shelf is short -
+      // the shelf, not a receipt: a receipt behind a stocked shelf can net below zero
+      // harmlessly, because bars are indistinguishable once racked.
+      g.shelf = shelfSplit(g._receipts)
+      g.total_inches = g.shelf.totalInches
+      g.bar_equivalents = g.shelf.totalInches / FULL_BAR_IN
+      g.has_negative = g.shelf.negative
+      // Value = net on hand x the lot's weighted-average cost (weighted by what each
+      // receipt brought in, per inch, so a 48" receipt weighs a third of a bar).
+      const v = shelfValue(g._receipts)
+      g.est_value = v.value
+      g.no_price = v.noPrice
+      g.lengths = lengthRows(g._receipts)
     }
     // Re-sort on group totals: sorting the receipts first would order a group by
     // whichever receipt happened to land first.
     return out.sort((x, y) => {
       const dir = invSortDir === 'desc' ? -1 : 1
       let primary = 0
-      if (invSortKey === 'available_bars') primary = (x.available_bars ?? 0) - (y.available_bars ?? 0)
+      if (invSortKey === 'available_bars') primary = (x.total_inches ?? 0) - (y.total_inches ?? 0)
       else if (invSortKey === 'bar_size') primary = cmpSize(x.bar_size, y.bar_size)
       else if (invSortKey === 'lot_number') primary = (x.lot_number || '').localeCompare(y.lot_number || '')
       else primary = (x.material_type || '').localeCompare(y.material_type || '')
@@ -2242,7 +2250,8 @@ export default function Armory({ profile }) {
   const rmGroupKey = (typeName, sizeStr) => `${typeName}|||${sizeStr}`
   const fullTotalsByGroup = inventoryRows.filter(r => (r.category || 'bar') === 'bar').reduce((m, r) => {
     const k = rmGroupKey(r.material_type, r.bar_size)
-    m[k] = (m[k] || 0) + (r.available_bars || 0)
+    // D-INV-07: in 12 ft bar-equivalents (min rules are set in bars; a 4 ft piece is a third).
+    m[k] = (m[k] || 0) + barEquivalents(r.available_bars, r.bar_length_inches)
     return m
   }, {})
   const typeNameById = Object.fromEntries(materialTypes.map(t => [t.id, t.name]))
@@ -3166,23 +3175,24 @@ export default function Armory({ profile }) {
             {(() => {
               const totalLots = groupedInventoryRows.length
               const stagingCount = groupedInventoryRows.filter(r => r.rack === null).length
-              const lowCount = groupedInventoryRows.filter(r => r.available_bars > 0 && r.available_bars <= LOW_STOCK_BAR_THRESHOLD).length
-              const outCount = groupedInventoryRows.filter(r => r.available_bars === 0).length
-              // A group whose receipts net positive can still contain a negative
-              // one. Count those too, or grouping silently retires the signal.
-              const negCount = groupedInventoryRows.filter(r => r.available_bars < 0 || r.has_negative).length
-              // Net available bars across the filtered lots. Negatives are included
-              // deliberately: the subtotal must reconcile with the forecast's ON HAND,
-              // which nets them too (D-INV-01).
-              const totalAvailBars = filteredInventoryRows.reduce(
-                (sum, r) => sum + Number(r.available_bars ?? 0), 0)
-              const totalValue = filteredInventoryRows.reduce((sum, r) => (
-                r.price_per_bar != null && r.available_bars > 0
-                  ? sum + r.available_bars * r.price_per_bar
+              // D-INV-07: low / out / negative are judged on the whole shelf (both lengths).
+              const lowCount = groupedInventoryRows.filter(r => r.bar_equivalents > 0.001 && r.bar_equivalents <= LOW_STOCK_BAR_THRESHOLD).length
+              const outCount = groupedInventoryRows.filter(r => Math.abs(r.total_inches) < 1).length
+              const negCount = groupedInventoryRows.filter(r => r.has_negative).length
+              // Whole 12 ft bars and 4 ft pieces across the filtered lines, netted the way
+              // the lines are (a short length subtracts), and the value at each lot's
+              // weighted-average cost.
+              const totalFull = groupedInventoryRows.reduce((sum, r) => (
+                r.shelf.hasFull && Math.abs((r.shelf.fullLen || FULL_BAR_IN) - FULL_BAR_IN) <= 1
+                  ? sum + r.shelf.full
                   : sum
               ), 0)
+              const totalPieces = groupedInventoryRows.reduce((sum, r) => sum + r.shelf.pieces, 0)
+              const totalFeet = groupedInventoryRows.reduce((sum, r) => sum + r.total_inches, 0) / 12
+              const totalValue = groupedInventoryRows.reduce((sum, r) => sum + (r.est_value > 0 ? r.est_value : 0), 0)
+              const noPriceCount = groupedInventoryRows.filter(r => r.no_price).length
               return (
-                <div className="flex items-center gap-3 text-xs text-gray-500">
+                <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
                   <span>{totalLots} Lots</span>
                   <span className="text-gray-700">·</span>
                   <span className={stagingCount > 0 ? 'text-blue-400' : ''}>{stagingCount} In Staging</span>
@@ -3194,10 +3204,16 @@ export default function Armory({ profile }) {
                   <span className={negCount > 0 ? 'text-red-400' : ''}>{negCount} Negative</span>
                   <span className="text-gray-700">·</span>
                   <span className="text-gray-300 font-medium">
-                    {totalAvailBars.toLocaleString(undefined, { maximumFractionDigits: 1 })} Bars Available
+                    {fmtCount(totalFull)} bars (12 ft) · {fmtCount(totalPieces)} pieces (4 ft) · {Math.round(totalFeet).toLocaleString()} ft on hand
                   </span>
                   <span className="text-gray-700">·</span>
                   <span>Est. Value ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {noPriceCount > 0 && (
+                    <>
+                      <span className="text-gray-700">·</span>
+                      <span className="text-amber-400">{noPriceCount} without a price</span>
+                    </>
+                  )}
                 </div>
               )
             })()}
@@ -3234,30 +3250,31 @@ export default function Armory({ profile }) {
                         </button>
                       </th>
                       <th className="px-4 py-3 text-left">Vendor</th>
-                      <th className="px-4 py-3 text-right">Rec'd</th>
-                      <th className="px-4 py-3 text-right">Used</th>
+                      <th className="px-4 py-3 text-right" title="Whole 12 ft bars on the shelf">12 ft</th>
+                      <th className="px-4 py-3 text-right" title="4 ft pieces, including pieces already cut from 12 ft bars">4 ft</th>
                       <th className="px-4 py-3 text-right">
                         <button onClick={() => toggleInvSort('available_bars')} className="inline-flex items-center gap-1 uppercase hover:text-white">
-                          Avail (bars)
+                          Total (ft)
                           {invSortKey === 'available_bars' && (invSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
                         </button>
                       </th>
-                      <th className="px-4 py-3 text-right">Avail (in)</th>
-                      <th className="px-4 py-3 text-right">Est. Value</th>
+                      <th className="px-4 py-3 text-right" title="Net on hand at the lot's weighted-average cost">Est. Value</th>
                       <th className="px-4 py-3 text-center">Docs</th>
                       <th className="px-4 py-3 text-center">Assign</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-700">
                     {groupedInventoryRows.map(group => {
-                      const isOut = group.available_bars === 0
-                      const isLow = group.available_bars > 0 && group.available_bars <= LOW_STOCK_BAR_THRESHOLD
-                      const isNeg = group.available_bars < 0
+                      const s = group.shelf
+                      const isOut = Math.abs(group.total_inches) < 1
+                      const isLow = group.bar_equivalents > 0.001 && group.bar_equivalents <= LOW_STOCK_BAR_THRESHOLD
+                      const isNeg = group.has_negative
                       const isStaging = group.rack === null
-                      const hasBarLength = group.bar_length_inches > 0
                       const multi = group._receipts.length > 1
                       const expanded = expandedInvGroups.has(group.id)
                       const only = group._receipts[0]
+                      const dim = isOut ? 'text-gray-500' : 'text-gray-300'
+                      const fullIsStd = !s.fullLen || Math.abs(s.fullLen - FULL_BAR_IN) <= 1
                       return (
                         <Fragment key={group.id}>
                         <tr
@@ -3272,45 +3289,57 @@ export default function Armory({ profile }) {
                               <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{group.rack}</span>
                             )}
                           </td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.material_type}</td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.bar_size}</td>
-                          <td className={`px-4 py-3 font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
+                          <td className={`px-4 py-3 ${dim}`}>{group.material_type}</td>
+                          <td className={`px-4 py-3 ${dim}`}>{group.bar_size}</td>
+                          <td className={`px-4 py-3 font-mono ${dim}`}>
                             <span className="inline-flex items-center gap-1.5">
                               {group.lot_number || '—'}
-                              {multi && (
-                                <button
-                                  onClick={() => toggleInvGroup(group.id)}
-                                  className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-300 hover:text-white rounded font-sans"
-                                  title={`${group._receipts.length} receipts on this shelf — show them`}
-                                >
-                                  {group._receipts.length} receipts
-                                  {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-                                </button>
-                              )}
+                              <button
+                                onClick={() => toggleInvGroup(group.id)}
+                                className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-300 hover:text-white rounded font-sans"
+                                title="Show received, used and adjusted at each length, and the receipts on this shelf"
+                              >
+                                {multi ? `${group._receipts.length} receipts` : 'details'}
+                                {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                              </button>
                             </span>
                           </td>
-                          <td className={`px-4 py-3 ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.vendor}</td>
-                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.received_bars}</td>
-                          <td className={`px-4 py-3 text-right ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>{group.used_bars}</td>
-                          <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
+                          <td className={`px-4 py-3 ${dim}`}>{group.vendor}</td>
+                          <td className={`px-4 py-3 text-right font-mono ${s.fullNegative ? 'text-red-400 font-semibold' : dim}`}>
+                            {s.hasFull ? (
+                              <span className="inline-flex items-center gap-1 justify-end">
+                                {fmtCount(s.full)}
+                                {!fullIsStd && (
+                                  <span className="text-[10px] px-1 py-0.5 bg-gray-700 text-gray-300 rounded font-sans" title="Full-bar length for this lot">{s.fullLen}"</span>
+                                )}
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td
+                            className={`px-4 py-3 text-right font-mono ${s.piecesNegative ? 'text-red-400 font-semibold' : dim}`}
+                            title={s.cutPieces > 0 ? `${s.cutPieces} of these ${s.cutPieces === 1 ? 'is' : 'are'} already cut from 12 ft bars${s.cutInches > 0 ? `, plus a ${s.cutInches}" offcut` : ''}` : undefined}
+                          >
+                            {(s.hasPieces || s.cutPieces > 0) ? fmtCount(s.pieces) : '—'}
+                            {s.cutInches > 0 && <span className="ml-1 text-[10px] text-gray-500 font-sans">+{s.cutInches}"</span>}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-mono ${group.total_inches < -0.5 ? 'text-red-400 font-semibold' : isOut ? 'text-gray-500' : isLow ? 'text-amber-300' : 'text-white'}`}>
                             <span className="inline-flex items-center gap-1 justify-end">
-                              {group.has_negative && !isNeg && (
+                              {isNeg && group.total_inches >= -0.5 && (
                                 <AlertTriangle
                                   size={12}
                                   className="text-red-400"
-                                  title="One of the receipts behind this line is negative — expand to see which"
+                                  title="One length on this shelf is short — see the 12 ft and 4 ft columns"
                                 />
                               )}
-                              {hasBarLength ? group.available_bars.toFixed(1) : '—'}
+                              {Math.round(group.total_inches / 12).toLocaleString()}
                             </span>
                           </td>
-                          <td className={`px-4 py-3 text-right font-mono ${isOut ? 'text-gray-500' : 'text-gray-300'}`}>
-                            {hasBarLength ? `${Math.round(group.available_inches).toLocaleString()}"` : '—'}
-                          </td>
                           <td className="px-4 py-3 text-right font-mono text-gray-300">
-                            {group.est_value > 0
-                              ? `$${group.est_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                              : '—'}
+                            {group.no_price
+                              ? <span className="text-xs text-amber-400 font-sans" title="No receipt on this lot carries a price">No price</span>
+                              : group.est_value > 0
+                                ? `$${group.est_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                : '—'}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <button
@@ -3355,7 +3384,24 @@ export default function Armory({ profile }) {
                             )}
                           </td>
                         </tr>
-                        {multi && expanded && group._receipts.map(r => (
+                        {/* D-INV-07: the arithmetic behind the line, one row per bar length:
+                            received - used (what usage charged, in that length) +/- approved
+                            count adjustments = on hand. */}
+                        {expanded && group.lengths.map(l => (
+                          <tr key={`len-${l.len}`} className="bg-gray-950/60 text-xs">
+                            <td className="px-4 py-2"></td>
+                            <td className="px-4 py-2 text-gray-400" colSpan={4}>
+                              {isPieceLength(l.len) ? '4 ft pieces' : Math.abs(l.len - FULL_BAR_IN) <= 1 ? '12 ft bars' : 'Bars'} ({l.len}")
+                              {l.receipts > 1 ? ` · ${l.receipts} receipts` : ''}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-gray-400" colSpan={4}>
+                              Rec'd {fmtCount(l.received)} − Used {fmtCount(l.used)} {l.adj < 0 ? '−' : '+'} Adj {fmtCount(Math.abs(l.adj))} ={' '}
+                              <span className={l.onHand < -0.001 ? 'text-red-400 font-semibold' : 'text-gray-200'}>{fmtCount(l.onHand)}</span>
+                            </td>
+                            <td className="px-4 py-2" colSpan={2}></td>
+                          </tr>
+                        ))}
+                        {expanded && group._receipts.map(r => (
                           <tr key={r.id} className="bg-gray-950/60 text-xs">
                             <td className="px-4 py-2"></td>
                             <td className="px-4 py-2 text-gray-500" colSpan={2}>
@@ -3364,13 +3410,15 @@ export default function Armory({ profile }) {
                             </td>
                             <td className="px-4 py-2 text-gray-500 font-mono">{r.lot_number || '—'}</td>
                             <td className="px-4 py-2 text-gray-500">{r.vendor}</td>
-                            <td className="px-4 py-2 text-right text-gray-400">{r.received_bars}</td>
                             {/* Availability is a property of the shelf, not of a receipt: bars are
                                 indistinguishable once racked, and per-receipt balances only mislead
                                 (a lot with stock on hand can show a negative receipt behind it).
                                 Receipt lines carry what is actually receipt-specific — when it
-                                landed, on what PO, how many bars, what it cost. */}
-                            <td className="px-4 py-2" colSpan={3}></td>
+                                landed, on what PO, how many bars of what length, what it cost. */}
+                            <td className="px-4 py-2 text-right text-gray-400" colSpan={2}>
+                              {r.received_bars} × {r.bar_length_inches != null ? `${r.bar_length_inches}"` : '—'}
+                            </td>
+                            <td className="px-4 py-2"></td>
                             <td className="px-4 py-2 text-right font-mono text-gray-500">
                               {r.price_per_bar != null && r.received_bars > 0
                                 ? `$${(r.received_bars * r.price_per_bar).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -3399,19 +3447,26 @@ export default function Armory({ profile }) {
 
             {/* Size roll-up (By Size view) */}
             {invViewMode === 'size' && (() => {
+              // D-INV-07: built from the lot lines, so a size reads what its lots read:
+              // whole 12 ft bars, 4 ft pieces (including pieces cut from bars), feet on
+              // hand, and value at each lot's weighted-average cost.
               const groups = {}
-              for (const r of filteredInventoryRows) {
-                const key = `${r.material_type}|||${r.bar_size}`
-                if (!groups[key]) groups[key] = { material_type: r.material_type, bar_size: r.bar_size, totalBars: 0, bars4: 0, bars12: 0, barsOther: 0, lotCount: 0, vendors: new Set(), value: 0 }
+              for (const line of groupedInventoryRows) {
+                const key = `${line.material_type}|||${line.bar_size}`
+                if (!groups[key]) groups[key] = { material_type: line.material_type, bar_size: line.bar_size, full: 0, pieces: 0, other: 0, totalInches: 0, lotCount: 0, vendors: new Set(), value: 0, noPrice: false, negative: false }
                 const g = groups[key]
-                g.totalBars += (r.available_bars || 0)
-                const len = Number(r.bar_length_inches)
-                if (len === 48) g.bars4 += (r.available_bars || 0)
-                else if (len === 144) g.bars12 += (r.available_bars || 0)
-                else g.barsOther += (r.available_bars || 0)
+                const s = line.shelf
+                if (s.hasFull) {
+                  if (!s.fullLen || Math.abs(s.fullLen - FULL_BAR_IN) <= 1) g.full += s.full
+                  else g.other += s.full
+                }
+                g.pieces += s.pieces
+                g.totalInches += line.total_inches
                 g.lotCount += 1
-                if (r.vendor && r.vendor !== '—') g.vendors.add(r.vendor)
-                if (r.price_per_bar != null && r.available_bars > 0) g.value += r.available_bars * r.price_per_bar
+                for (const r of line._receipts) if (r.vendor && r.vendor !== '—') g.vendors.add(r.vendor)
+                if (line.est_value > 0) g.value += line.est_value
+                if (line.no_price) g.noPrice = true
+                if (line.has_negative) g.negative = true
               }
               const rows = Object.values(groups).sort((a, b) =>
                 (a.material_type || '').localeCompare(b.material_type || '') || cmpSize(a.bar_size, b.bar_size)
@@ -3424,11 +3479,12 @@ export default function Armory({ profile }) {
                   </div>
                 )
               }
-              const grandBars = rows.reduce((s, g) => s + g.totalBars, 0)
-              const grand4 = rows.reduce((s, g) => s + g.bars4, 0)
-              const grand12 = rows.reduce((s, g) => s + g.bars12, 0)
-              const grandOther = rows.reduce((s, g) => s + g.barsOther, 0)
+              const grandFull = rows.reduce((s, g) => s + g.full, 0)
+              const grandPieces = rows.reduce((s, g) => s + g.pieces, 0)
+              const grandOther = rows.reduce((s, g) => s + g.other, 0)
+              const grandInches = rows.reduce((s, g) => s + g.totalInches, 0)
               const grandValue = rows.reduce((s, g) => s + g.value, 0)
+              const hasOther = rows.some(g => Math.abs(g.other) > 0.001)
               return (
                 <div className="overflow-x-auto rounded-lg border border-gray-700">
                   <table className="w-full text-sm">
@@ -3436,10 +3492,10 @@ export default function Armory({ profile }) {
                       <tr>
                         <th className="px-4 py-3 text-left">Material Type</th>
                         <th className="px-4 py-3 text-left">Bar Size</th>
-                        <th className="px-4 py-3 text-right">4 ft (bars)</th>
+                        <th className="px-4 py-3 text-right" title="Includes pieces already cut from 12 ft bars">4 ft (pieces)</th>
                         <th className="px-4 py-3 text-right">12 ft (bars)</th>
-                        {grandOther > 0 && <th className="px-4 py-3 text-right">Other (bars)</th>}
-                        <th className="px-4 py-3 text-right">Total Avail (bars)</th>
+                        {hasOther && <th className="px-4 py-3 text-right">Other (bars)</th>}
+                        <th className="px-4 py-3 text-right">Total (ft)</th>
                         <th className="px-4 py-3 text-right">Min</th>
                         <th className="px-4 py-3 text-right">Lots</th>
                         <th className="px-4 py-3 text-left">Vendors</th>
@@ -3452,15 +3508,18 @@ export default function Armory({ profile }) {
                         const minVal = ruleMinByGroup[gk]
                         const fullTotal = fullTotalsByGroup[gk] ?? 0
                         const isBelow = minVal != null && fullTotal < minVal
-                        const isNeg = g.totalBars < 0
+                        const isNeg = g.negative
                         return (
                           <tr key={`${g.material_type}|${g.bar_size}`} className="bg-gray-900 hover:bg-gray-800 transition-colors">
                             <td className="px-4 py-3 text-gray-300">{g.material_type}</td>
                             <td className="px-4 py-3 text-gray-300">{g.bar_size}</td>
-                            <td className="px-4 py-3 text-right font-mono text-gray-300">{g.bars4.toFixed(1)}</td>
-                            <td className="px-4 py-3 text-right font-mono text-gray-300">{g.bars12.toFixed(1)}</td>
-                            {grandOther > 0 && <td className="px-4 py-3 text-right font-mono text-gray-400">{g.barsOther.toFixed(1)}</td>}
-                            <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isBelow ? 'text-amber-300 font-semibold' : 'text-white'}`}>{g.totalBars.toFixed(1)}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">{fmtCount(g.pieces)}</td>
+                            <td className="px-4 py-3 text-right font-mono text-gray-300">{fmtCount(g.full)}</td>
+                            {hasOther && <td className="px-4 py-3 text-right font-mono text-gray-400">{fmtCount(g.other)}</td>}
+                            <td className={`px-4 py-3 text-right font-mono ${isNeg ? 'text-red-400 font-semibold' : isBelow ? 'text-amber-300 font-semibold' : 'text-white'}`}
+                                title={isNeg ? 'A lot in this size has a short length — see By Lot' : undefined}>
+                              {Math.round(g.totalInches / 12).toLocaleString()}
+                            </td>
                             <td className="px-4 py-3 text-right font-mono">
                               {minVal != null ? (
                                 <span className="inline-flex items-center gap-1.5 justify-end">
@@ -3473,6 +3532,7 @@ export default function Armory({ profile }) {
                             <td className="px-4 py-3 text-gray-400 text-xs">{[...g.vendors].sort().join(', ') || '—'}</td>
                             <td className="px-4 py-3 text-right font-mono text-gray-300">
                               {g.value > 0 ? `$${g.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                              {g.noPrice && <span className="ml-1 text-xs text-amber-400 font-sans" title="A lot in this size has no price, so its stock is not in the value">*</span>}
                             </td>
                           </tr>
                         )
@@ -3481,10 +3541,10 @@ export default function Armory({ profile }) {
                     <tfoot className="bg-gray-800/60 text-gray-200 text-xs uppercase">
                       <tr>
                         <td className="px-4 py-3 font-semibold" colSpan={2}>Total ({rows.length} size groups)</td>
-                        <td className="px-4 py-3 text-right font-mono font-semibold">{grand4.toFixed(1)}</td>
-                        <td className="px-4 py-3 text-right font-mono font-semibold">{grand12.toFixed(1)}</td>
-                        {grandOther > 0 && <td className="px-4 py-3 text-right font-mono font-semibold">{grandOther.toFixed(1)}</td>}
-                        <td className="px-4 py-3 text-right font-mono font-semibold">{grandBars.toFixed(1)}</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{fmtCount(grandPieces)}</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{fmtCount(grandFull)}</td>
+                        {hasOther && <td className="px-4 py-3 text-right font-mono font-semibold">{fmtCount(grandOther)}</td>}
+                        <td className="px-4 py-3 text-right font-mono font-semibold">{Math.round(grandInches / 12).toLocaleString()}</td>
                         <td className="px-4 py-3"></td>
                         <td className="px-4 py-3"></td>
                         <td className="px-4 py-3"></td>
@@ -4105,7 +4165,7 @@ export default function Armory({ profile }) {
             for (const r of countRows) {
               const key = `${r.rack || 'Staging'}|||${r.material_type}|||${r.bar_size}|||${r.lot_number || ''}`
               if (!m[key]) m[key] = { key, rack: r.rack, material_type: r.material_type, bar_size: r.bar_size, lot_number: r.lot_number, four: [], twelve: [], refId: r.id }
-              if (Number(r.bar_length_inches) === 48) m[key].four.push(r)
+              if (isPieceLength(r.bar_length_inches)) m[key].four.push(r)
               else m[key].twelve.push(r)
             }
             return Object.values(m).sort((a, b) =>
@@ -4119,9 +4179,14 @@ export default function Armory({ profile }) {
           // a length are sitting on the rack for a lot, not how they split across
           // receipts — nobody re-bundles steel to match a receiving history. One
           // input per length bucket, distributed across the receipts behind it.
+          //
+          // D-INV-07: the system figures are the shelf's — whole 12 ft bars, and 4 ft
+          // pieces including those already cut from bars (a 12 ft balance of 6.67 reads
+          // 6 bars + 2 pieces). A lot whose count differs posts BOTH lengths, so the
+          // fraction moves off the 12 ft receipt into the 4 ft count and is never counted
+          // twice; a blank length takes its displayed system figure; a short length has
+          // no figure to keep and must be counted. Deltas are against exact balances.
           const bucketKey = (g, len) => `bucket::${g.key}::${len}`
-          const bucketSystem = (bucket) =>
-            bucket.reduce((s, r) => s + Math.round(r.available_bars || 0), 0)
           // FIFO consumes oldest first, so whatever is physically left came from the
           // most recent deliveries: fill newest first, capped at what each receipt
           // actually received, remainder riding on the newest. A negative older
@@ -4139,29 +4204,42 @@ export default function Armory({ profile }) {
             if (left > 0 && out.length > 0) out[0].counted_bars += left
             return out
           }
-          // Adjustments to existing receipts (counted differs from system).
-          const existingAdjItems = countGroups.flatMap(g =>
-            [{ bucket: g.four, len: 48 }, { bucket: g.twelve, len: 144 }]
+          const countPlans = countGroups.map(g => {
+            const sys = countSystem(g.four, g.twelve)
+            const v12 = countInputs[bucketKey(g, 144)]
+            const v4 = countInputs[bucketKey(g, 48)]
+            const has12 = v12 !== undefined && v12 !== ''
+            const has4 = v4 !== undefined && v4 !== ''
+            if (!has12 && !has4) return null
+            const n12 = has12 ? Number(v12) : sys.sys12
+            const n4 = has4 ? Number(v4) : sys.sys4
+            if (!Number.isFinite(n12) || !Number.isFinite(n4)) return null
+            const differs = (has12 && Math.abs(n12 - sys.sys12) > 1e-6) || (has4 && Math.abs(n4 - sys.sys4) > 1e-6)
+            if (!differs) return null
+            const missing = []
+            if (!has12 && sys.fullNegative) missing.push('12 ft')
+            if (!has4 && sys.piecesNegative) missing.push('4 ft')
+            return { g, c12: Math.max(0, Math.round(n12)), c4: Math.max(0, Math.round(n4)), missing }
+          }).filter(Boolean)
+          const countBlocked = countPlans.filter(p => p.missing.length > 0)
+          const countReady = countPlans.filter(p => p.missing.length === 0)
+          // Adjustments to existing receipts: every receipt whose share of the count
+          // differs from its exact balance (fractions included).
+          const existingAdjItems = countReady.flatMap(p =>
+            [{ bucket: p.g.twelve, counted: p.c12 }, { bucket: p.g.four, counted: p.c4 }]
               .filter(({ bucket }) => bucket.length > 0)
-              .flatMap(({ bucket, len }) => {
-                const v = countInputs[bucketKey(g, len)]
-                if (v === undefined || v === '') return []
-                const counted = Number(v)
-                if (!Number.isFinite(counted) || counted === bucketSystem(bucket)) return []
-                return distributeCount(bucket, counted).filter(item => {
+              .flatMap(({ bucket, counted }) =>
+                distributeCount(bucket, counted).filter(item => {
                   const r = bucket.find(x => x.id === item.material_receiving_id)
-                  return item.counted_bars !== Math.round(r?.available_bars ?? 0)
-                })
-              })
+                  return Math.abs(item.counted_bars - Number(r?.available_bars ?? 0)) > 1e-6
+                }))
           )
-          // New-length discoveries: a length with no receipt that got a count > 0.
-          const newLengthEntries = countGroups.flatMap(g =>
-            [48, 144]
-              .filter(len => (len === 48 ? g.four : g.twelve).length === 0)
-              .map(len => ({ refId: g.refId, len, key: `new::${g.key}::${len}` }))
-          )
-            .filter(ne => { const v = countInputs[ne.key]; return v !== undefined && v !== '' && Number(v) > 0 })
-            .map(ne => ({ ...ne, counted: Number(countInputs[ne.key]) }))
+          // New-length discoveries: a length with no receipt that is counted above zero
+          // (usually a 4 ft count on a 12 ft-only lot: the pieces cut from its bars).
+          const newLengthEntries = countReady.flatMap(p => [
+            ...(p.g.twelve.length === 0 && p.c12 > 0 ? [{ refId: p.g.refId, len: 144, counted: p.c12 }] : []),
+            ...(p.g.four.length === 0 && p.c4 > 0 ? [{ refId: p.g.refId, len: 48, counted: p.c4 }] : []),
+          ])
           // Blanks (category='blank'): one count per lot, no 4ft/12ft and no discovery
           // receipts (a blank lot always has its own receipt). Shares countInputs[r.id].
           const blankCountRows = inventoryRows.filter(r => {
@@ -4182,7 +4260,7 @@ export default function Armory({ profile }) {
           const totalCountChanges = existingAdjItems.length + newLengthEntries.length + blankAdjItems.length
 
           const handleSubmitCountWithDiscovery = async () => {
-            if (totalCountChanges === 0) return
+            if (totalCountChanges === 0 || countBlocked.length > 0) return
             const createdItems = []
             if (newLengthEntries.length > 0) {
               setCountSubmitting(true); setAdjError('')
@@ -4205,7 +4283,8 @@ export default function Armory({ profile }) {
 
           const handlePrintCountSheet = () => {
             const sorted = countGroups
-            const lenSys = (receipts) => receipts.reduce((s, r) => s + Math.round(r.available_bars), 0)
+            // D-INV-07: the same shelf figures as the screen (4 ft includes cut pieces).
+            const sysOf = (g) => countSystem(g.four, g.twelve)
             const scopeBits = []
             if (countRack) scopeBits.push(`Rack: ${countRack}`)
             if (countMaterial) scopeBits.push(`Material: ${countMaterial}`)
@@ -4219,9 +4298,9 @@ export default function Armory({ profile }) {
                 <td>${esc(g.material_type)}</td>
                 <td>${esc(g.bar_size)}</td>
                 <td>${esc(g.lot_number || '—')}</td>
-                <td class="num">${g.four.length ? lenSys(g.four) : '—'}</td>
+                <td class="num">${(g.four.length || sysOf(g).sys4) ? fmtCount(sysOf(g).sys4) : '—'}</td>
                 <td class="blank"></td>
-                <td class="num">${g.twelve.length ? lenSys(g.twelve) : '—'}</td>
+                <td class="num">${g.twelve.length ? fmtCount(sysOf(g).sys12) : '—'}</td>
                 <td class="blank"></td>
                 <td class="blank"></td>
               </tr>`).join('')
@@ -4253,7 +4332,7 @@ export default function Armory({ profile }) {
                 </tr></thead>
                 <tbody>${rowsHtml}</tbody>
               </table>
-              <p class="foot">Write the physical count in the &ldquo;Counted&rdquo; column, then enter values in SkyNet &rarr; Armory &rarr; Adjustments &rarr; Cycle Count.</p>
+              <p class="foot">Count 4 ft pieces and 12 ft bars separately. 4 ft Sys includes pieces already cut from 12 ft bars. Write the physical count in the &ldquo;Count&rdquo; columns, then enter values in SkyNet &rarr; Armory &rarr; Adjustments &rarr; Cycle Count.</p>
               </body></html>`
             const w = window.open('', '_blank')
             if (!w) { setAdjError('Pop-up blocked — allow pop-ups for this site to print the count sheet.'); return }
@@ -4346,46 +4425,46 @@ export default function Armory({ profile }) {
                           </thead>
                           <tbody className="divide-y divide-gray-700">
                             {countGroups.map((g) => {
-                              const bucketInput = (bucket, lenInches) => {
+                              // D-INV-07: shelf system figures; one input per length whether or
+                              // not a receipt exists at it (a count at a new length creates one).
+                              const sys = countSystem(g.four, g.twelve)
+                              const plan = countPlans.find(p => p.g.key === g.key)
+                              const lenCell = (bucket, lenInches) => {
                                 const key = bucketKey(g, lenInches)
-                                const sys = bucketSystem(bucket)
+                                const isFull = lenInches === 144
+                                const s = isFull ? sys.sys12 : sys.sys4
+                                const neg = isFull ? sys.fullNegative : sys.piecesNegative
+                                const noReceipt = bucket.length === 0
                                 const v = countInputs[key]
                                 const hasVal = v !== undefined && v !== ''
-                                const delta = hasVal ? Number(v) - sys : null
+                                const delta = hasVal ? Number(v) - s : null
+                                const needsCount = !!plan?.missing.includes(isFull ? '12 ft' : '4 ft')
                                 return (
                                   <div className="flex items-center gap-2 justify-end">
-                                    <span className="text-xs text-gray-500 font-mono">{sys}</span>
+                                    <span
+                                      className={`text-xs font-mono ${neg ? 'text-red-400' : noReceipt && s === 0 ? 'text-gray-600' : 'text-gray-500'}`}
+                                      title={!isFull && sys.cutPieces > 0 ? `Includes ${sys.cutPieces} piece${sys.cutPieces === 1 ? '' : 's'} already cut from 12 ft bars${sys.cutInches > 0 ? ` (plus a ${sys.cutInches}" offcut)` : ''}` : undefined}
+                                    >
+                                      {fmtCount(s)}
+                                    </span>
                                     <input
                                       type="number"
                                       min="0"
                                       step="1"
                                       value={v ?? ''}
                                       onChange={e => setCountInputs(m => ({ ...m, [key]: e.target.value }))}
-                                      placeholder={String(sys)}
-                                      title={bucket.length > 1
-                                        ? `${bucket.length} receipts behind this shelf position — the count is spread across them, newest first`
-                                        : undefined}
-                                      className="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent"
+                                      placeholder={fmtCount(Math.max(0, s))}
+                                      title={noReceipt
+                                        ? 'No receipt at this length yet — entering a count creates it (pending approval)'
+                                        : bucket.length > 1
+                                          ? `${bucket.length} receipts behind this shelf position — the count is spread across them, newest first`
+                                          : undefined}
+                                      className={`w-16 px-2 py-1 bg-gray-800 border ${needsCount ? 'border-red-500' : noReceipt ? 'border-dashed border-gray-600' : 'border-gray-700'} rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent`}
                                     />
-                                    {delta != null && delta !== 0 && <span className={`text-xs font-mono ${delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta > 0 ? `+${delta}` : delta}</span>}
+                                    {delta != null && Math.abs(delta) > 1e-6 && <span className={`text-xs font-mono ${delta < 0 ? 'text-red-400' : 'text-amber-300'}`}>{delta > 0 ? `+${fmtCount(delta)}` : fmtCount(delta)}</span>}
                                   </div>
                                 )
                               }
-                              const newInput = (lenInches) => {
-                                const nk = `new::${g.key}::${lenInches}`
-                                const v = countInputs[nk]
-                                return (
-                                  <div className="flex items-center gap-2 justify-end">
-                                    <span className="text-xs text-gray-600 font-mono">0</span>
-                                    <input type="number" min="0" step="1" value={v ?? ''} onChange={e => setCountInputs(m => ({ ...m, [nk]: e.target.value }))} placeholder="0" title="No receipt at this length yet — entering a count creates it (pending approval)" className="w-16 px-2 py-1 bg-gray-800 border border-dashed border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:border-skynet-accent" />
-                                  </div>
-                                )
-                              }
-                              const lenCell = (bucket, lenInches) => (
-                                bucket.length > 0
-                                  ? bucketInput(bucket, lenInches)
-                                  : newInput(lenInches)
-                              )
                               return (
                                 <tr key={g.key} className="bg-gray-900 hover:bg-gray-800">
                                   <td className="px-4 py-3">{g.rack ? <span className="text-xs px-2 py-0.5 bg-gray-700 text-gray-300 rounded">{g.rack}</span> : <span className="text-xs px-2 py-0.5 bg-amber-900/50 text-amber-300 rounded">Staging</span>}</td>
@@ -4440,17 +4519,23 @@ export default function Armory({ profile }) {
                           </table>
                         </div>
                       )}
+                      {countBlocked.length > 0 && (
+                        <div className="text-sm text-red-300 bg-red-900/10 border border-red-800/40 rounded-lg px-3 py-2">
+                          {countBlocked.map(p => `Lot ${p.g.lot_number || '—'} (${p.g.material_type} ${p.g.bar_size}): count the ${p.missing.join(' and ')}`).join(' · ')}.
+                          {' '}A lot you count posts both lengths, and a short length has no system figure to keep.
+                        </div>
+                      )}
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <input type="text" value={countReason} onChange={e => setCountReason(e.target.value)} placeholder="Reason / note (optional)" className="flex-1 min-w-[200px] px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-skynet-accent" />
                         <button
                           onClick={handleSubmitCountWithDiscovery}
-                          disabled={countSubmitting || totalCountChanges === 0}
+                          disabled={countSubmitting || totalCountChanges === 0 || countBlocked.length > 0}
                           className="px-4 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
                         >
                           {countSubmitting ? 'Submitting…' : `Submit ${totalCountChanges} Adjustment${totalCountChanges === 1 ? '' : 's'}`}
                         </button>
                       </div>
-                      <p className="text-xs text-gray-600">Only lots whose counted value differs from system are submitted. Adjustments require approval before they affect inventory.</p>
+                      <p className="text-xs text-gray-600">Only lots whose counted value differs from system are submitted. A counted lot posts both lengths; a length left blank keeps its system figure. Adjustments require approval before they affect inventory.</p>
                     </>
                   )}
                 </div>
@@ -4520,9 +4605,9 @@ export default function Armory({ profile }) {
                                             )}
                                           </td>
                                           <td className="px-3 py-2 font-mono text-gray-300">{l.lot_number || '—'}</td>
-                                          <td className="px-3 py-2 text-right font-mono text-gray-400">{Number(l.system_bars_at_count)}</td>
-                                          <td className="px-3 py-2 text-right font-mono text-gray-200">{Number(l.counted_bars)}</td>
-                                          <td className={`px-3 py-2 text-right font-mono ${Number(l.adjustment_delta) < 0 ? 'text-red-400' : 'text-amber-300'}`}>{Number(l.adjustment_delta) > 0 ? `+${Number(l.adjustment_delta)}` : Number(l.adjustment_delta)}</td>
+                                          <td className="px-3 py-2 text-right font-mono text-gray-400">{fmtCount(l.system_bars_at_count)}</td>
+                                          <td className="px-3 py-2 text-right font-mono text-gray-200">{fmtCount(l.counted_bars)}</td>
+                                          <td className={`px-3 py-2 text-right font-mono ${Number(l.adjustment_delta) < 0 ? 'text-red-400' : 'text-amber-300'}`}>{Number(l.adjustment_delta) > 0 ? `+${fmtCount(l.adjustment_delta)}` : fmtCount(l.adjustment_delta)}</td>
                                           <td className="px-3 py-2 text-right font-mono text-gray-300">{l.financial_impact != null ? `${Number(l.financial_impact) < 0 ? '-' : ''}$${Math.abs(Number(l.financial_impact)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}</td>
                                           {!pending && (
                                             <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded ${l.status === 'approved' ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}`} title={l.review_notes || ''}>{l.status}</span></td>

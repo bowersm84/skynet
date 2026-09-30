@@ -9,6 +9,12 @@
 // Sync is ONE-WAY: CO line due dates push to linked WOs; WOs never write back
 // to CO lines. Shared by EditCustomerOrderModal (CO edit) and EditWorkOrderModal
 // (post-edit allocation resync).
+//
+// D-DATE-04: public._wo_resync_due_date is the SQL twin — trg_co_line_due_resync
+// runs it whenever a CO line's due_date changes (Fishbowl ingest included), and
+// co_cancel_line runs it after releasing allocations. Keep the two rules identical:
+// complete / cancelled WOs are left alone, and dates before 2000-01-01 (Fishbowl
+// typos, D-CODATE-02b) are ignored.
 
 /**
  * Recompute work_orders.due_date for each WO from its active CO allocations.
@@ -48,7 +54,7 @@ export async function resyncWODueDates(supabase, woIds) {
       // 3. Earliest non-null CO line due_date (ISO yyyy-mm-dd — string min is fine).
       const dueDates = allocs
         .map(a => a.customer_order_lines?.due_date)
-        .filter(Boolean)
+        .filter(d => d && d >= '2000-01-01')
       if (dueDates.length === 0) {
         result.skipped.push(woId)
         continue
@@ -58,10 +64,15 @@ export async function resyncWODueDates(supabase, woIds) {
       // 4. Only write when the value actually changed.
       const { data: wo, error: woErr } = await supabase
         .from('work_orders')
-        .select('due_date')
+        .select('due_date, status')
         .eq('id', woId)
         .single()
       if (woErr) throw woErr
+
+      if (wo?.status === 'complete' || wo?.status === 'cancelled') {
+        result.skipped.push(woId)
+        continue
+      }
 
       if ((wo?.due_date || null) === earliest) {
         result.skipped.push(woId)

@@ -311,7 +311,7 @@ const LINE_SELECT = `
   part_id, kit_sku_id, customer_order_line_id, removed_at, parent_fb_soitem_id,
   part:parts(part_number, part_type, is_active),
   kit:kit_skus(part_number),
-  co_line:customer_order_lines(line_number, status, quantity_ordered, components_needed, customer_order:customer_orders(co_number)),
+  co_line:customer_order_lines(line_number, status, quantity_ordered, quantity_fulfilled, components_needed, customer_order:customer_orders(co_number)),
   disposition_by_profile:profiles(full_name)
 `
 
@@ -424,6 +424,34 @@ export async function reresolveLines() {
 export async function ackEvent(eventId) {
   const { error } = await supabase.rpc('fb_ack_event', { p_event_id: eventId })
   if (error) throw error
+}
+
+// D-FB-48: resolve an exception where it is raised. action 'apply_qty' | 'cancel_lines'; the RPC does
+// the work (co_cancel_line for cancels), then acknowledges the event. Returns its result jsonb.
+export async function resolveException(eventId, action, note = null) {
+  const { data, error } = await supabase.rpc('fb_resolve_exception', {
+    p_event_id: eventId, p_action: action, p_note: note || null,
+  })
+  if (error) throw error
+  return data
+}
+
+// D-FB-48: which resolutions a v_fb_recent_changes exception row offers besides Acknowledge. Same
+// conditions fb_resolve_exception checks, so the tab never offers what the RPC will refuse outright
+// (it still refuses a cancel on a line combined before D-FB-43, and a quantity cut the WO still covers).
+export function exceptionActions(e) {
+  const c = e?.changes || {}
+  const openLine = !!e?.customer_order_line_id && ['not_started', 'in_progress'].includes(e?.co_line_status)
+  const qty = !!(c.qty_ordered && typeof c.qty_ordered === 'object')
+  const productChanged = e?.event_type === 'line_changed' && !!(c.product_num && typeof c.product_num === 'object')
+  const lineGone = ['line_removed', 'line_status_changed'].includes(e?.event_type)
+  const soGone = ['so_status_changed', 'so_removed'].includes(e?.event_type)
+  return {
+    applyQty: qty && openLine,
+    cancel: ((lineGone || productChanged) && openLine) || (soGone && !!e?.customer_order_id),
+    cancelLabel: soGone ? 'Cancel CO lines' : 'Cancel CO line',
+    requeue: productChanged,
+  }
 }
 
 // ── Inventory snapshot (D-FB-33) ───────────────────────────────────────────

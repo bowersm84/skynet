@@ -1,10 +1,12 @@
-import { AlertTriangle, ExternalLink, Loader2, Check } from 'lucide-react'
-import { EVENT_LABELS, EVENT_COLORS, formatDateTime, summarizeChanges } from '../../lib/fishbowl'
+import { AlertTriangle, ExternalLink, Loader2, Check, Ban, RefreshCw } from 'lucide-react'
+import { EVENT_LABELS, EVENT_COLORS, formatDateTime, summarizeChanges, exceptionActions } from '../../lib/fishbowl'
 
 // ExceptionsTab — D-FB-15. Fishbowl changes that touch a converted CO line and cannot be applied
 // automatically: line removed, line voided/cancelled, SO voided/cancelled/expired, quantity cut
-// below what is already allocated. Each is acknowledged here after the CO is fixed by hand.
-export default function ExceptionsTab({ events, loading, canAct, ackingId, onAck, onOpenCO }) {
+// below what is already allocated, and (D-FB-48) a product change on a linked line. D-FB-48: resolved
+// here — Apply Fishbowl qty (after the WO allocation is reduced) or Cancel CO line(s) — and acknowledged
+// in the same step; Acknowledge alone remains for anything resolved some other way.
+export default function ExceptionsTab({ events, loading, canAct, ackingId, onAck, onOpenCO, resolvingId, onResolve }) {
   if (loading && events.length === 0) {
     return (
       <div className="text-center py-12 bg-gray-900 rounded-lg border border-gray-800 text-gray-400 flex items-center justify-center gap-2">
@@ -44,10 +46,45 @@ export default function ExceptionsTab({ events, loading, canAct, ackingId, onAck
           <span className="text-xs text-gray-600 whitespace-nowrap">
             {formatDateTime(e.fb_timestamp || e.created_at)}{e.changed_by ? ` · ${e.changed_by}` : ''}
           </span>
+          {canAct && (() => {
+            const acts = exceptionActions(e)
+            const busy = resolvingId === e.id || ackingId === e.id
+            const target = e.co_number ? `${e.co_number}${e.co_line_number && acts.cancelLabel === 'Cancel CO line' ? ` #${e.co_line_number}` : ''}` : 'the CO line'
+            return (
+              <>
+                {acts.applyQty && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Apply the Fishbowl quantity to ${target}?\n\nIf the work order still has more allocated than Fishbowl now wants, reduce the allocation in Edit WO first — SkyNet will say by how much.`)) onResolve?.(e, 'apply_qty')
+                    }}
+                    disabled={busy}
+                    className="px-3 py-1.5 rounded text-xs bg-blue-900/40 hover:bg-blue-900/60 text-blue-200 border border-blue-800 disabled:opacity-50 inline-flex items-center gap-1"
+                    title="Set the CO line quantity to what Fishbowl now says, then acknowledge"
+                  >
+                    {resolvingId === e.id ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Apply Fishbowl qty
+                  </button>
+                )}
+                {acts.cancel && (
+                  <button
+                    onClick={() => {
+                      const msg = `${acts.cancelLabel === 'Cancel CO lines' ? 'Cancel every open CO line on' : 'Cancel'} ${target}?\n\nThe CO line is cancelled in SkyNet, its work-order allocation is released and the WO is flagged, and this exception is acknowledged.`
+                        + (acts.requeue ? '\n\nThe Fishbowl line goes back to the Queue as its new part, to convert again.' : '')
+                      if (window.confirm(msg)) onResolve?.(e, 'cancel_lines')
+                    }}
+                    disabled={busy}
+                    className="px-3 py-1.5 rounded text-xs bg-red-900/40 hover:bg-red-900/60 text-red-200 border border-red-800 disabled:opacity-50 inline-flex items-center gap-1"
+                    title="Cancel the CO line(s) this Fishbowl change leaves without an order, then acknowledge"
+                  >
+                    {resolvingId === e.id ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />} {acts.cancelLabel}
+                  </button>
+                )}
+              </>
+            )
+          })()}
           {canAct && (
             <button
               onClick={() => onAck(e.id)}
-              disabled={ackingId === e.id}
+              disabled={ackingId === e.id || resolvingId === e.id}
               className="px-3 py-1.5 rounded text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 disabled:opacity-50 inline-flex items-center gap-1"
               title="Acknowledge: the CO has been reviewed / corrected by hand"
             >

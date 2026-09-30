@@ -4136,3 +4136,55 @@ apply is resolved on the Order Queue's Exceptions tab. Demand (Create WO), Stock
 **Why:** Matt: every order is driven by the Fishbowl link and the Order Queue; nobody should create or change customer orders directly in
 SkyNet. PROD: no manual CO in the five weeks to 2026-09-30.
 **Files:** src/pages/CustomerOrders.jsx.
+
+### D-PRICE-53 — Fishbowl pricing link: PROD rollout record (2026-09-25 → 2026-09-28)
+
+**Applied.** Migration `2026-09-25_D-PRICE-53_fb_pricing_link_schema.sql` on PROD 2026-09-25 (psql), then three
+patches, all folded back into that file: `2026-09-25_D-PRICE-53_product_pricing_import_fix.sql`,
+`2026-09-25_D-PRICE-53_rules_live_groups_fix.sql`, `2026-09-28_D-PRICE-53_three_decimal_list_prices.sql`.
+Book corrections before the first push (Matt): the 19 SK4002-xHS rows and SK-P3-1125 aligned UP to Fishbowl in Rev 81
+(Rev 82 = new Rev 81 × 1.15); the 11 SK2018 tooling rows lost their guide asterisk and their Resale duplicates, so they
+take the Oct 1 uplift. Bridge 1.7.0 on skyserver 2026-09-25 by the zip routine, pushes off first, then `FB_PUSH_ENABLED=true`.
+
+**Found and fixed during the rollout.**
+- Prices go through Fishbowl's **Product Pricing** import (`Product`, `Price`). The **Product** import creates and edits
+  whole products and wants PartNumber first; PROD command #1 was rejected on line 1 and created nothing.
+- The **Customer Group Relations** import creates a group that does not exist. Rules are generated only for groups that
+  exist in Fishbowl (seen in the customer mirror): Column 100/300/500 have no members, so no column rules until someone
+  holds that tier (groups push, then rules push).
+- Every rules push switches off SkyNet's own `SN` rules the book no longer has (closed exceptions, kits gone, bands
+  renamed by a new book); `retire_legacy` also switches off every other active rule.
+- API calls run under the `authenticated` 8 s statement timeout: kit rule generation rewritten (Rev 82: 10 s → 1.2 s,
+  byte-identical output), the sync status reads `pricing_item_prices` once.
+- `fb_push_auto` never makes the first push of a kind; dry runs, asked for or forced by the bridge, never count as a push.
+- Pushed prices join Fishbowl products on the unique product NUMBER (`SK-N114-2S` and `SK-N114 -2S` share a key).
+
+**PROD pushes.** #2 smoke (ZG2600-21B $0 → $30.61) · #3 Rev 81 prices (499) · #4 tree (56 categories + 3,121) ·
+#5 groups (109; created SkyNet Tier 1/2/3 and Premier) · #6 SkyNet rules (286) · #7 legacy rules off (150) ·
+#8 each rules (38) · #9/#10 three-decimal prices (1 + 2,632). `pricing_fb_sync_status().in_sync = true` at
+2026-09-28 20:42 UTC: 3,137/3,137 prices, 324/324 rules, tree and 109 groups matching.
+
+**Fishbowl behaviour, verified with Estimates S19302–S19304 (deleted).** A Customer Group rule beats an All-customer
+quantity break; a rule on a tree node applies to products filed in its child node (Premier items get the breaks);
+Fixed-price rules on a product price a set; a Customer × Product exception applies; "Round to nearest 0.01" rounds a
+half cent up (1.705 → 1.71).
+
+**Operations.** `nssm restart` can return `SERVICE_STOP_PENDING` and never start the service: stop, check status, start.
+Bridge logs are named by UTC date. Oct 1 at 02:10: `fb_push_auto` queues the Rev 82 prices (~3,438) and rules (~2,956,
+mostly the ~300 kits; obsolete SN rules switched off). Bridge 1.7.1 makes `Product-Pricing` the built-in default
+(skyserver's `.env` already sets it, so deploying 1.7.1 changes nothing and can wait for the next bridge change).
+
+### D-PRICE-54 — Fishbowl list prices carry the book's three decimals (Matt, 2026-09-28)
+
+**Context.** Fishbowl applies a rule's percentage to its own list price. 2,630 book list prices have three decimals;
+with 2-decimal list prices in Fishbowl, 3,019 of 18,264 discounted prices came out one cent from the book.
+
+**Decision.** Items Fishbowl prices through the SkyNet percentage rules (catalog section, priced, a rule and a ladder
+with columns) get the book's list price to the last decimal; Fishbowl's Product Pricing import accepts up to four.
+A new `SN <rule> <ladder> EA` rule per node (Percent 100 %, Round to nearest 0.01, quantity 1 to the first break − 1;
+every quantity on a ladder without breaks) keeps quantity-1 lines in whole cents. Sets, kits and items without
+percentage rules keep a 2-decimal Each. The sync status compares list prices at 4 dp.
+
+**Verified** with one product first (82-11-080-20 at 1.705: $1.71 × 1, $1.53 × 300, $1.02 Tier 3), then pushed.
+**Knock-on:** Fishbowl's product screen and exports show 3-decimal list prices on those items; 1,786 items' discounted
+prices moved by a cent to match the price guide.

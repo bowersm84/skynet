@@ -67,14 +67,16 @@ Two more nightly mirrors in the products slot, and an outbound queue:
 |---|---|---|
 | product tree | nightly, after part costs | `producttree` + `producttotree` ⋈ `product` → `fb_upsert_product_tree` → `fb_product_tree_nodes` / `fb_product_tree` (paths built in `rulesTree.mjs`) |
 | pricing rules | nightly, with the tree | `pricingrule` with its type ids resolved through `productincltype` / `customerincltype` / `patype` / `pabaseamounttype` / `rndtype` → `fb_upsert_pricing_rules` → `fb_pricing_rules` |
-| push auto | nightly, last | `fb_push_auto()`: when the book in effect is not the book of the last real prices/rules push, it QUEUES both (the Oct 1 case) |
+| push auto | nightly, last | `fb_push_auto()`: never makes the first push of a kind; after that, when the book in effect is not the book of the last real prices/rules push, it QUEUES both (the Oct 1 case) |
 | push executor | every cycle | `fb_push_next` claims the oldest `fb_push_commands` row; `push.mjs` POSTs its payload to `/api/import/<name>`; `fb_push_finish` records status/body; the mirror the push touched is re-read at once |
 
 The payload is built server-side by `fb_push_enqueue` (from `pricing_fb_expected_*`) at enqueue time and stored on the
-command, so what was sent is auditable. Kinds: `prices` → Product (ProductNumber, Price); `rules` → Pricing-Rules
-(25 columns, upsert by name, every SkyNet rule named `SN …`; `retire_legacy` re-sends every other active rule with
-`isActive FALSE`); `tree` → Product-Tree-Categories then Product-Tree; `groups` → Customer-Group-Relations.
-The confirmation is `SELECT pricing_fb_sync_status();` (portal: Price Books › Fishbowl sync).
+command, so what was sent is auditable. Kinds: `prices` → Product-Pricing (Product, Price; items priced by the SkyNet
+percentage rules carry the book's list price to the last decimal, D-PRICE-54); `rules` → Pricing-Rules (25 columns,
+upsert by name, every SkyNet rule named `SN …`; every push switches off SkyNet's own rules the book no longer has, and
+`retire_legacy` also switches off every other active rule); `tree` → Product-Tree-Categories then Product-Tree;
+`groups` → Customer-Group-Relations (it creates a group that does not exist yet; rules are only built for groups that do).
+The confirmation is `SELECT pricing_fb_sync_status();` (portal: Pricing › Fishbowl Sync).
 
 **Safety.** A push is real only when `FB_PUSH_ENABLED=true` AND the bridge's `SB_URL` host is `FB_PUSH_SB_HOST`
 (default PROD). Otherwise a claimed command is a *forced dry run*: rows logged, nothing sent, `result.dry_run=true`,
@@ -110,4 +112,7 @@ Manage: `nssm status|stop|start|restart SkyNetFishbowlBridge`. Logs: `logs\bridg
 - Never point two bridges at the same Supabase project; one per project (TEST, PROD) is fine.
 - Push stuck `running`? The bridge crashed mid-import: `fb_push_next` fails it after 30 min and moves on. Check
   `logs\bridge-YYYY-MM-DD.log` and `SELECT id, kind, status, error, result FROM fb_push_commands ORDER BY id DESC LIMIT 5;`.
-  Re-queue from the portal; every import is idempotent (Product updates by number, rules by name, tree/groups only add).
+  Re-queue from the portal; every import is idempotent (Product Pricing updates by number, rules by name, tree/groups only add).
+- `nssm restart SkyNetFishbowlBridge` can answer `Unexpected status SERVICE_STOP_PENDING` and never start the service
+  (the bridge finishes its cycle before it stops). Use `nssm stop`, repeat `nssm status` until `SERVICE_STOPPED`, then `nssm start`.
+- Log files are named by UTC date: after 8 pm Eastern the newest `logs\bridge-YYYY-MM-DD.log` carries tomorrow's date.

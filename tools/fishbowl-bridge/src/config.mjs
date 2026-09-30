@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.7.0',
+  version: '1.7.1',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -100,7 +100,9 @@ export const config = {
   rulesTreeEnabled: String(process.env.RULES_TREE_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   // Fishbowl import names (the import's name with dashes). Only change if Fishbowl renames an import.
   importNames: {
-    product: process.env.FB_IMPORT_PRODUCT || 'Product',
+    // Product Pricing (columns Product, Price) is Fishbowl's list-price import. NOT "Product", which creates and
+    // edits whole products and wants PartNumber first (D-PRICE-53 rollout: PROD command #1 was rejected).
+    product: process.env.FB_IMPORT_PRODUCT || 'Product-Pricing',
     rules: process.env.FB_IMPORT_RULES || 'Pricing-Rules',
     treeCategories: process.env.FB_IMPORT_TREE_CATEGORIES || 'Product-Tree-Categories',
     tree: process.env.FB_IMPORT_TREE || 'Product-Tree',

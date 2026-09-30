@@ -522,7 +522,7 @@ export default function ScheduleJobModal({
           </>)}
           {woDates?.target_date ? (<>
             <span className="text-gray-600">·</span>
-            <span className="text-gray-200 text-sm" title="SkyNet target: entered + 45 business days (earliest across this WO's customer-order lines)">
+            <span className="text-gray-200 text-sm" title="SkyNet target: later of entered + 45 business days and the Fishbowl due date (earliest across this WO's customer-order lines)">
               Target {fmtDueShort(woDates.target_date)}
             </span>
             {woDates.fb_due_date && (

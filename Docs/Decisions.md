@@ -3972,3 +3972,118 @@ Matt's `PricingRules.csv` export (7,606 rows), which is the Pricing Rules import
 **Blanks:** a pallet of mixed dash numbers used to be labeled as one lot; that practice is discontinued. The 11 lots it left on PROD (47269, 47580, 47938, 48096, 48371, 49999, 50045, 50346, 50509, 50510, 51215) stay as history. An edit to one of their rows is refused only for a dash or material conflict the edit itself creates, so those rows can still be moved, noted, corrected or renumbered; vendor and category conflicts are never grandfathered. A new receipt on one of those lots is refused: new material gets its own lot number.
 **For Matt / Quality:** lot 2376's Aug 24 EMJ receipt (95 × 144") carries the 2021 PO and cert, whose shipment was 148 lb, about 92 bars of 3/8" 7075 at 12 ft; with the 15 bars from the opening load, SkyNet shows 110 received against that one delivery. Blank lot 50346's dash 7 receipt (5,000 pcs, 2026-09-16 09:30) was saved from the Armory under Matt's login but not by Matt; under review, not changed. Blank lot 48096's dash 9 receipt (7,950 pcs, 2026-09-29) was keyed as 2700 Steel and corrected to 2700 Stainless on PROD the same day (2026-09-29_PROD_blank_lot_48096_material_fix.sql, audit tag BLANK-48096-0929); its cost, keyed as a $0.11 total, was corrected to $0.11 per piece ($874.50) the same day (2026-09-29_PROD_blank_lot_48096_cost_fix.sql, audit tag BLANK-48096-COST-0929).
 **Files:** Docs/migrations/2026-09-29_D-INV-08_lot_vendor_guard.sql, Docs/migrations/2026-09-29_PROD_blank_lot_48096_material_fix.sql, Docs/migrations/2026-09-29_PROD_blank_lot_48096_cost_fix.sql, Docs/Decisions.md.
+
+### D-FB-42 — Components Needed is a structured pick from the BOM; Purchase names the components (2026-09-30)
+**What:** New table `customer_order_line_components` (one row per CO line × component; SELECT authenticated, writes only through
+RPCs). The Create CO modal replaces the free-text field with `ComponentPicker` (`src/components/orderqueue/ComponentPicker.jsx`):
+the choices are the job leaves of `explode_bom` — manufactured parts and childless finished goods, exactly the nodes Create WO turns
+into jobs (D-NEST-13, `isJobLeafNode`) — purchased leaves muted, sub-assemblies grouping their children, Fishbowl Avail per component.
+Nothing is pre-checked; the RPC refuses a new CO line without at least one component, and every component must be the part itself
+or a node of its BOM (`_co_line_component_ok`). A part with no BOM offers itself, pre-selected and locked ("machined part — this is
+what production makes"). The free-text `components_needed` survives as an optional note. Open lines on BOM-less parts were backfilled
+with themselves. The same picker in `purchase` mode backs `PurchaseComponentsModal`: when Purchase is chosen for a line whose part
+is an assembly or finished good, the order processor picks which BOM node(s) are being bought (any node — a sub-assembly can be bought
+complete); `fb_set_disposition` v2 stores them in `fb_line_purchase_components` and refuses a purchase on a BOM part with no list; any
+other disposition clears the list. The old 3-argument `fb_set_disposition` was dropped (D-FB-27 precedent). Demand, Orders and the
+Create WO pickup show the component list as chips beside the note. `co_line_set_components()` exists for the Edit CO modal (Batch C).
+**Why:** "Need cups and studs" / "Manu." told production nothing it could act on, and the Order Queue could not show which components
+an order was waiting on (Matt, 2026-09-30, annotated screenshots). Forcing the pick at the moment the order processor knows the answer
+is cheaper than reconstructing it later.
+**Files:** Docs/migrations/2026-09-30_D-FB-42_co_line_components_releases.sql (TEST applied by Claude 2026-09-30; PROD by Matt),
+src/components/orderqueue/ComponentPicker.jsx (new), src/components/orderqueue/PurchaseComponentsModal.jsx (new),
+src/components/orderqueue/ConvertToCOModal.jsx (rewritten), src/pages/OrderQueue.jsx, src/lib/fishbowl.js, src/lib/customerOrders.js,
+src/pages/CustomerOrders.jsx, src/components/CreateWorkOrderModal.jsx.
+
+### D-FB-43 — One CO line per Fishbowl line (supersedes D-FB-26 / D-FB-27) (2026-09-30)
+**What:** `fb_convert_to_co` v4 no longer groups by part and never adds to an existing CO line: every selected Fishbowl line becomes
+its own CO line with its own quantity (remaining), due date and `fb_qty_*`, in Fishbowl line order; `p_components` is keyed by part and
+applied to every line of that part. `groupLinesByPart` is replaced by `groupLinesForConversion` (grouped by part only so the picker is
+answered once per part). Data correction: CO-6256-19146 line 1 (SK-OS, 20,630 pcs, due 3/26/27 — five Fishbowl release lines merged by
+D-FB-26) split into lines 1 / 10 / 11 / 12 / 13 = 3,205 @ 3/26/27, 3,025 @ 6/30/27, 10,620 @ 12/31/27, 1,340 @ 6/30/27, 2,440 @ 12/31/27
+(guarded one-shot, audit tag SKOS-RELEASE-0930; TEST 2026-09-30, PROD by Matt). Four other open lines still carry D-FB-26 merges
+(CO-2311-19121 #1, CO-6256-19146 #4/#6/#8); each is fully allocated to a pending WO and stays as is by Matt's call.
+**Why:** A customer's release schedule was invisible in SkyNet — Demand showed 20,630 SK-OS due 3/26/27 and the 6/30/27 and 12/31/27
+releases were gone, so the first run would have been sized for the whole year. D-FB-26's kit-combination benefit moves to Create WO,
+where the scheduler can still allocate several CO lines of the same part to one run. Side effect fixed: D-FB-14's due-date propagation
+was last-writer-wins across the merged Fishbowl lines.
+**Files:** same migration as D-FB-42; Docs/migrations/2026-09-30_CO-6256-19146_SK-OS_release_split.sql; src/lib/fishbowl.js,
+src/components/orderqueue/ConvertToCOModal.jsx.
+
+### D-FB-44 — Order Queue line dropdown and Prod Due column (2026-09-30)
+**What:** Every CO-linked line (and every purchased line with a purchase list) gets a chevron in its # cell that opens
+`LineDetailPanel` (`src/components/orderqueue/LineDetailPanel.jsx`): the CO line's target / FB due / Prod Due, the work orders its
+demand is allocated to, and one row per component — the requested ones (D-FB-42) plus any the WO makes that nobody asked for ("on WO
+only") — with state chip, jobs (J-number, status, machine, qty) and "Ready by" (latest scheduled end, `+` when a job is unscheduled).
+New view `v_co_line_component_status` supplies the rows; `getLineDetail` reads it with `v_co_line_dates` and the allocations in three
+chunked selects when an SO expands. New "Prod Due" column after Due: scheduled finish from `v_co_line_dates` (the latest scheduled job
+end on the allocated WOs = the last component off the machine), red past the target, `+` when part of the work is unscheduled;
+"unsched." when a WO exists but nothing is scheduled; the SkyNet target muted and tagged T when nothing is scheduled at all.
+`prodDueForLine` in `lib/fishbowl.js` is the one definition. The legend and the panel both say assembly, plating and finishing are not
+included. Read-only, so Customer Service sees it. Both views now follow a merged job to its host for the scheduled end.
+**Why:** Customer Service could not answer "when will my parts be done" from the queue, and nobody could see which components an
+assembly was waiting on without opening the WO (Matt, 2026-09-30). The line's date is the latest component's date by definition.
+**Files:** src/components/orderqueue/LineDetailPanel.jsx (new), src/components/orderqueue/SOCard.jsx, src/pages/OrderQueue.jsx,
+src/lib/fishbowl.js; view in the D-FB-42 migration.
+
+### D-CODATE-04 — Target date is the later of the 45-business-day rule and a real Fishbowl due date (2026-09-30)
+**What:** `v_co_line_dates` v3: `target_date = GREATEST(add_business_days(entered_on, 45), fb_due_date)` where `fb_due_date` counts
+only when Fishbowl holds a real date (`fb_due_is_default = false`; a manual CO's own `due_date` counts as real). `v_wo_dates`, the Job
+Pool, ScheduleJobModal, the Command modal and the Demand / Orders tabs inherit it; tooltips now read "later of entered + 45 business
+days and the Fishbowl due date". The D-CODATE-01 amber cue (FB due earlier than target) is unchanged; when FB due is later, target now
+equals it. Nothing stored, nothing in the bridge.
+**Why:** A release due 12/31/27 carried a Nov-2026 target and would have sorted as urgent in the Job Pool for a year (D-FB-43). The
+customer's later date is the commitment. On TEST 26 open lines moved to a later target; PROD will move similarly — April should expect
+Job Pool target dates to shift later for orders with far-out Fishbowl dates.
+**Files:** D-FB-42 migration; src/pages/CustomerOrders.jsx, src/components/ScheduleJobModal.jsx, src/pages/Schedule.jsx (tooltip text).
+
+**Amendment (2026-09-30, D-FB-42a):** From CC's Batch A review. The exploded-BOM cache (`loadBom` / `clearBomCache`) moved from
+`ComponentPicker.jsx` to `src/lib/nestedAssembly.js` — the picker file now exports only its component, clearing two
+`react-refresh/only-export-components` errors. The picker's Fishbowl figure reads "avail / needed" and takes the D-FB-39 tone against
+unit qty × the pieces being converted (Create CO: the part's total across its lines; Purchase: the line's remaining), so it is green
+when stock covers the need instead of always amber. A Purchase save failure renders inside `PurchaseComponentsModal` (the page banner
+sits behind its overlay); a failed line-detail read marks the CO lines with the error so Prod Due shows "—" with the reason and the
+dropdown reports it, instead of "…" / "Loading…" indefinitely.
+
+### D-FB-45 — CO line number = Fishbowl line number, kept in step with Fishbowl (2026-09-30)
+**What:** For every customer-order line linked to a live Fishbowl line, `customer_order_lines.line_number` is that Fishbowl line's number
+(the lowest, for the D-FB-26 merges still in place). One rule, one function: `_co_sync_line_numbers(co_id)` computes the wanted numbers,
+steps the moving lines onto temporary negative numbers so swaps and shifts never trip UNIQUE (customer_order_id, line_number), moves any
+hand-keyed or orphaned line that sits on a wanted number to the next number above everything on the CO, then sets the Fishbowl numbers,
+and writes one `co_line_renumbered` audit row per CO with every from → to. `fb_convert_to_co` v5 calls it after inserting, so a new CO
+line lands on its Fishbowl number (the modal shows "→ CO line #n" per release; the success message counts any other line it moved).
+`fb_ingest_delta` calls it for every linked SO it ingests, inside its own exception block — a failure is logged as
+`co_line_renumber_failed` and never stalls the bridge. The patch to ingest was applied in place (guarded by the function's 2026-09-30 md5,
+identical on TEST and PROD, and a unique anchor) rather than re-typed. `co_sync_all_line_numbers(p_dry_run)` is the one-shot and can be
+re-run any time. The Order Queue labels kit children with their own Fishbowl line numbers (was 1a, 1b … — D-FB-29 display only), so the
+queue and the CO agree there too. Every screen that reads `line_number` needed no change.
+**Why:** Matt, 2026-09-30: "the line numbers should come from the Fishbowl line number and should be the same all the way through SkyNet."
+Under D-FB-26 they could not (several Fishbowl lines per CO line); D-FB-43 made it possible. Fishbowl renumbers lines when one above is
+deleted — PROD showed three shifts (SO 15548: Freight moved up to line 9 on 9/9 when line 9 was removed) — so copying the number once
+would drift; following it on every sync does not.
+**Known limits:** the D-FB-26 merges left in place (4 on TEST, 6 on PROD — each fully allocated to a pending WO) carry the lower of their
+Fishbowl numbers; the other Fishbowl line points at the same CO line. A line added by hand in Edit CO to a Fishbowl-linked CO takes the next
+free number and is moved if Fishbowl later uses that number. Travelers printed before the sweep show the old CO line numbers (CO number and
+part are unchanged); they are not flagged for reprint.
+**Files:** Docs/migrations/2026-09-30_D-FB-45_co_line_numbers_follow_fishbowl.sql (TEST applied and swept by Claude 2026-09-30: 45 COs,
+78 lines followed, 5 hand-keyed lines bumped; PROD by Matt), src/lib/fishbowl.js, src/components/orderqueue/SOCard.jsx,
+src/components/orderqueue/ConvertToCOModal.jsx, src/pages/OrderQueue.jsx.
+
+### D-FB-46 — Combined CO lines with no work order are split, one CO line per Fishbowl line (2026-09-30)
+**What:** `co_split_combined_lines(p_dry_run DEFAULT true)` (admin; SQL Editor passthrough) finds every CO line still linked to more than
+one live Fishbowl line — the D-FB-26 combinations — and splits the ones that are free to split: open, no active allocation, nothing
+fulfilled, every linked Fishbowl line open with something left, and the CO quantity equal to what those lines have left. The existing CO
+line keeps the lowest Fishbowl line (its quantity, due date and fb_qty_*); every other Fishbowl line gets a new CO line with its own
+quantity and due date, the same priority, note and Components Needed rows; the Fishbowl lines are relinked; then `_co_sync_line_numbers`
+(D-FB-45) puts every line on the CO on its Fishbowl number. Anything else is reported with its reason and not touched — "on a work order
+(WO-…) - left combined", a quantity mismatch or a shipped line ("split by hand"). One audit row per split (`co_line_release_split`, tag
+D-FB-46). Dry run performs the splits, reports the final CO line numbers, and rolls itself back.
+PROD on 2026-09-30: splits CO-6256-19146 #1 SK-OS (20,630 → 3,205 / 3,025 / 10,620 / 1,340 / 2,440 on FB lines 2, 3, 4, 26, 27) and
+CO-687-19325 #1 SK2600-3W (100 → 50 / 50 on FB lines 2 and 3); leaves CO-2311-19121 #1 SK215-4D (WO-2609-0027) and CO-6256-19146 #4
+SK4002-12S (WO-2609-0048), #6 SK4002-7 (WO-2609-0055), #8 SK4002-6W (WO-2609-0053) combined — 4 on PROD, not the 6 D-FB-45 counted before
+this ran. TEST: nothing to split (SK-OS was split there by hand; SO 19325 is not in TEST's copy); the same four are reported.
+It supersedes 2026-09-30_CO-6256-19146_SK-OS_release_split.sql for PROD — that file is NOT run on PROD; it stays in Docs/migrations as the
+record of what ran on TEST (D-FB-43). Going forward nothing new combines (D-FB-43), so this is a one-time cleanup that is safe to re-run.
+**Why:** Matt: fix every combined line that has no work order yet, like SK-OS, so each Fishbowl release is its own line in Demand and can be
+put on its own run. Lines already on a work order keep their allocation untouched.
+**Files:** Docs/migrations/2026-09-30_D-FB-46_split_combined_lines_without_wo.sql (TEST function installed by Claude 2026-09-30; PROD by
+Matt), Docs/Decisions.md.

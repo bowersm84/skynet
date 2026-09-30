@@ -27,6 +27,17 @@ export async function fetchExplodedBom(topPartId) {
   return { nodes: data || [], error: null }
 }
 
+// D-FB-42: one exploded BOM per part while a modal is open. Lives here rather than in
+// ComponentPicker.jsx so that file exports only a component (react-refresh/only-export-components).
+const bomCache = new Map() // part_id -> Promise<{ nodes, error }>
+export function loadBom(partId) {
+  if (!bomCache.has(partId)) bomCache.set(partId, fetchExplodedBom(partId))
+  return bomCache.get(partId)
+}
+export function clearBomCache() {
+  bomCache.clear()
+}
+
 // Convert the flat path-rows from explode_bom into a nested tree for rendering.
 // Each node: { key, componentId, partNumber, description, partType, sortOrder,
 //   bomQuantity, unitQty (cumulative at top=1), depth, isCycle, children: [] }.

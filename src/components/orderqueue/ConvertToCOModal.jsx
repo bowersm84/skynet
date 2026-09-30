@@ -2,24 +2,29 @@ import { useEffect, useMemo, useState } from 'react'
 import { X, Loader2, AlertTriangle } from 'lucide-react'
 import { formatCONumber, CO_STATUS_LABELS } from '../../lib/customerOrders'
 import {
-  FB_PRIORITY, convertBlocker, convertToCO, displayPartNumber, formatDateShort, formatDateTime, groupLinesByPart,
-  getCOSummary, isSuspectDate, coQtyForLine,
+  FB_PRIORITY, convertBlocker, convertToCO, displayPartNumber, formatDateShort, formatDateTime,
+  groupLinesForConversion, getCOSummary, isSuspectDate, coQtyForLine,
 } from '../../lib/fishbowl'
+import { clearBomCache } from '../../lib/nestedAssembly'
+import ComponentPicker from './ComponentPicker'
 
 const PRIORITY_FROM_FB = { 10: 'critical', 20: 'high', 30: 'normal', 40: 'low', 50: 'low' }
-const OPEN_CO_LINE = ['not_started', 'in_progress']
 
-// ConvertToCOModal — D-FB-12 / D-FB-26 / D-FB-27. One CO line per part; a part that already has an
-// open line on the target CO is added to, not duplicated; Components Needed is mandatory for every
-// NEW CO line and optional (appended) when adding to an existing one.
+// ConvertToCOModal — D-FB-42 / D-FB-43. One CO line per Fishbowl line (a release keeps its own
+// quantity and due date; like parts are combined later, at Create WO, if the scheduler wants one
+// run). Components Needed is a structured pick from the part's bill of materials, answered once per
+// part and applied to every line of that part; at least one component is required. The free-text
+// note is optional. Supersedes D-FB-26 (one line per part) and D-FB-27 (mandatory text).
 export default function ConvertToCOModal({ order, lines, onClose, onConverted }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
-  const [components, setComponents] = useState({})      // { [part_id]: text }
+  const [components, setComponents] = useState({})      // { [part_id]: Set(component uuid) }
+  const [notes, setNotes] = useState({})                // { [part_id]: text }
   const [coSummary, setCoSummary] = useState(null)
   const [coLoading, setCoLoading] = useState(!!order.customer_order_id)
 
   useEffect(() => {
+    clearBomCache()
     let cancelled = false
     if (!order.customer_order_id) { setCoLoading(false); return undefined }
     ;(async () => {
@@ -46,23 +51,16 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
     return { convertible, blocked }
   }, [lines])
 
-  // Per-part plan: new CO line, or add to the first open CO line for that part (mirrors the RPC).
-  const groups = useMemo(() => {
-    const openByPart = new Map()
-    for (const cl of coSummary?.customer_order_lines || []) {
-      if (!OPEN_CO_LINE.includes(cl.status)) continue
-      if (!openByPart.has(cl.part_id) || cl.line_number < openByPart.get(cl.part_id).line_number) openByPart.set(cl.part_id, cl)
-    }
-    return groupLinesByPart(convertible).map((g) => ({ ...g, existing: openByPart.get(g.part_id) || null }))
-  }, [convertible, coSummary])
+  // One card per part; every Fishbowl line under it becomes its own CO line.
+  const groups = useMemo(() => groupLinesForConversion(convertible), [convertible])
 
   const targetCO = coSummary?.co_number || order.linked_co_number || formatCONumber(order.fb_customer_id, order.so_number)
   const isNewCO = !coSummary && !order.linked_co_number
   const priority = PRIORITY_FROM_FB[order.priority_id] || 'normal'
   const totalQty = groups.reduce((s, g) => s + g.qty, 0)
-  const newLines = groups.filter((g) => !g.existing)
-  const missingComponents = newLines.filter((g) => !(components[g.part_id] || '').trim())
-  const canSubmit = groups.length > 0 && missingComponents.length === 0 && !submitting && !coLoading
+  const newLineCount = convertible.length
+  const missing = groups.filter((g) => !(components[g.part_id]?.size > 0))
+  const canSubmit = groups.length > 0 && missing.length === 0 && !submitting && !coLoading
 
   const handleConfirm = async () => {
     if (!canSubmit) return
@@ -71,8 +69,10 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
     try {
       const payload = {}
       for (const g of groups) {
-        const text = (components[g.part_id] || '').trim()
-        if (text) payload[g.part_id] = text
+        payload[g.part_id] = {
+          components: [...(components[g.part_id] || [])],
+          note: (notes[g.part_id] || '').trim() || null,
+        }
       }
       const result = await convertToCO(order.fb_so_id, convertible.map((l) => l.fb_soitem_id), payload)
       onConverted?.(result)
@@ -122,7 +122,7 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
             <div className="ml-auto text-xs text-gray-500">
               Priority <span className="text-gray-200 capitalize">{priority}</span> (Fishbowl {FB_PRIORITY[order.priority_id] || 'Normal'})
               <span className="mx-2">·</span>
-              <span className="font-mono text-gray-200">{groups.length}</span> CO line{groups.length === 1 ? '' : 's'} · <span className="font-mono text-gray-200">{totalQty.toLocaleString()}</span> pcs
+              <span className="font-mono text-gray-200">{newLineCount}</span> CO line{newLineCount === 1 ? '' : 's'} · <span className="font-mono text-gray-200">{totalQty.toLocaleString()}</span> pcs
             </div>
           </div>
 
@@ -130,32 +130,47 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
           {groups.length > 0 && (
             <div className="space-y-3">
               {groups.map((g) => {
-                const missing = !g.existing && !(components[g.part_id] || '').trim()
+                const picked = components[g.part_id]?.size || 0
                 return (
-                  <div key={g.key} className={`rounded border ${missing ? 'border-amber-800' : 'border-gray-800'} bg-gray-950/40`}>
-                    <div className="px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                  <div key={g.key} className={`rounded border ${picked === 0 ? 'border-amber-800' : 'border-gray-800'} bg-gray-950/40`}>
+                    <div className="px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm border-b border-gray-800/80">
                       <span className="font-mono text-gray-100">{g.part_number}</span>
+                      {g.part_type && <span className="text-[10px] px-1.5 py-0.5 rounded border border-gray-700 text-gray-400 capitalize">{String(g.part_type).replace('_', ' ')}</span>}
                       <span className="font-mono text-purple-300">{g.qty.toLocaleString()} pcs</span>
-                      <span className={`font-mono text-xs ${isSuspectDate(g.due) ? 'text-red-300' : 'text-gray-400'}`}>
-                        due {formatDateShort(g.due)}{g.hasDefaultDate && <span className="text-amber-400" title="No real date entered in Fishbowl">*</span>}
-                      </span>
-                      <span className="text-xs text-gray-500">
-                        from FB line{g.lines.length === 1 ? '' : 's'} {g.lines.map((l) => `#${l.line_number} (${coQtyForLine(l).toLocaleString()})`).join(', ')}
-                      </span>
-                      <span className={`ml-auto text-xs px-2 py-0.5 rounded border ${g.existing ? 'bg-gray-800 text-gray-300 border-gray-600' : 'bg-green-900/40 text-green-300 border-green-800'}`}>
-                        {g.existing ? `adds to line #${g.existing.line_number} (${Number(g.existing.quantity_ordered).toLocaleString()} → ${(Number(g.existing.quantity_ordered) + g.qty).toLocaleString()})` : 'new CO line'}
-                      </span>
+                      <span className="text-xs text-gray-500">{g.lines.length} release{g.lines.length === 1 ? '' : 's'} → {g.lines.length} new CO line{g.lines.length === 1 ? '' : 's'}</span>
                     </div>
-                    <div className="px-3 pb-3">
-                      <label className="block text-gray-500 text-xs mb-0.5">
-                        Components Needed {g.existing ? <span className="text-gray-600">(optional — appended to the existing line)</span> : <span className="text-red-400">*</span>}
-                      </label>
-                      <input
-                        value={components[g.part_id] || ''}
-                        onChange={(e) => setComponents((prev) => ({ ...prev, [g.part_id]: e.target.value }))}
-                        placeholder={g.existing ? (g.existing.components_needed ? `currently: ${g.existing.components_needed}` : 'add a note for this line') : 'what needs to be produced'}
-                        className={`w-full px-3 py-2 bg-gray-800 border rounded text-white text-sm focus:outline-none focus:border-skynet-accent ${missing ? 'border-amber-700' : 'border-gray-700'}`}
+                    <div className="px-3 py-2 space-y-1">
+                      {g.lines.map((l) => (
+                        <div key={l.fb_soitem_id} className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs">
+                          <span className="font-mono text-gray-400 w-16">FB line #{l.line_number}</span>
+                          <span className="font-mono text-gray-200">{coQtyForLine(l).toLocaleString()} pcs</span>
+                          <span className={`font-mono ${isSuspectDate(l.effective_due_date) ? 'text-red-300' : 'text-gray-400'}`}>
+                            due {formatDateShort(l.effective_due_date)}{l.due_date_is_default && <span className="text-amber-400" title="No real date entered in Fishbowl">*</span>}
+                          </span>
+                          {l.customer_part_num && <span className="text-gray-500">cust {l.customer_part_num}</span>}
+                          <span className="ml-auto px-2 py-0.5 rounded border bg-green-900/40 text-green-300 border-green-800" title="CO line numbers follow Fishbowl line numbers (D-FB-45)">→ CO line #{l.line_number}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="px-3 pb-3 space-y-2">
+                      <ComponentPicker
+                        partId={g.part_id}
+                        partNumber={g.part_number}
+                        partType={g.part_type}
+                        mode="manufacture"
+                        needQty={g.qty}
+                        selected={components[g.part_id] || new Set()}
+                        onChange={(next) => setComponents((prev) => ({ ...prev, [g.part_id]: next }))}
                       />
+                      <div>
+                        <label className="block text-gray-500 text-xs mb-0.5">Note <span className="text-gray-600">(optional — e.g. "we have the studs")</span></label>
+                        <input
+                          value={notes[g.part_id] || ''}
+                          onChange={(e) => setNotes((prev) => ({ ...prev, [g.part_id]: e.target.value }))}
+                          placeholder="anything production should know"
+                          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                        />
+                      </div>
                     </div>
                   </div>
                 )
@@ -182,8 +197,8 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
         </div>
 
         <div className="px-6 py-4 border-t border-gray-800 flex items-center gap-3 flex-shrink-0 bg-gray-900">
-          {missingComponents.length > 0 && groups.length > 0 && (
-            <span className="text-xs text-amber-300">Components Needed is required for {missingComponents.length} new line{missingComponents.length === 1 ? '' : 's'}.</span>
+          {missing.length > 0 && groups.length > 0 && (
+            <span className="text-xs text-amber-300">Pick at least one component for {missing.map((g) => g.part_number).join(', ')}.</span>
           )}
           <div className="ml-auto flex gap-2">
             <button type="button" onClick={onClose} disabled={submitting} className="px-4 py-2 text-gray-400 hover:text-white">
@@ -196,7 +211,7 @@ export default function ConvertToCOModal({ order, lines, onClose, onConverted })
               className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded disabled:opacity-50 flex items-center gap-2"
             >
               {submitting && <Loader2 size={14} className="animate-spin" />}
-              {submitting ? 'Creating...' : `Create ${newLines.length} · add to ${groups.length - newLines.length}`}
+              {submitting ? 'Creating...' : `Create ${newLineCount} CO line${newLineCount === 1 ? '' : 's'}`}
             </button>
           </div>
         </div>

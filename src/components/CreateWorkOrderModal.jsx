@@ -1601,10 +1601,13 @@ export default function CreateWorkOrderModal({ isOpen, onClose, onSuccess, profi
                                           <span className="text-gray-500 text-xs">/ {line.remaining}</span>
                                         </div>
                                       </div>
-                                      {line.components_needed && (
-                                        <div className="mt-1.5 pl-6 pr-2 text-xs">
-                                          <span className="text-purple-400 uppercase tracking-wide text-[10px] mr-2">Components Needed:</span>
-                                          <span className="text-gray-300 whitespace-pre-wrap">{line.components_needed}</span>
+                                      {(line.components_needed || (line.components || []).length > 0) && (
+                                        <div className="mt-1.5 pl-6 pr-2 text-xs flex flex-wrap items-center gap-1">
+                                          <span className="text-purple-400 uppercase tracking-wide text-[10px] mr-1">Components Needed:</span>
+                                          {(line.components || []).map(pn => (
+                                            <span key={pn} className="font-mono text-green-200 px-1.5 py-0.5 rounded border border-green-900 bg-green-900/20">{pn}</span>
+                                          ))}
+                                          {line.components_needed && <span className="text-gray-300 whitespace-pre-wrap">{line.components_needed}</span>}
                                         </div>
                                       )}
                                     </div>

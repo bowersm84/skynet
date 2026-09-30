@@ -1,12 +1,38 @@
-import { useMemo } from 'react'
-import { ChevronRight, Loader2, ExternalLink, AlertTriangle } from 'lucide-react'
+import { Fragment, useMemo } from 'react'
+import { ChevronRight, ChevronDown, Loader2, ExternalLink, AlertTriangle } from 'lucide-react'
+import LineDetailPanel from './LineDetailPanel'
 import {
   FB_SO_STATUS, FB_SO_STATUS_COLORS, FB_LINE_STATUS, FB_LINE_TYPE, FB_PRIORITY, FB_PRIORITY_COLORS,
   DISPOSITION_LABELS, DISPOSITION_COLORS, RESOLUTION_LABELS, RESOLUTION_COLORS, MANUAL_DISPOSITIONS,
   PRODUCT_LINE_TYPES, formatDate, formatDateShort, formatDateTime, isSuspectDate, isSelectableLine, convertBlocker,
   coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort, isClosedLine,
-  summarizeFbInventory,
+  summarizeFbInventory, prodDueForLine,
 } from '../../lib/fishbowl'
+
+// D-FB-44: the Prod Due cell for a CO-linked line. Scheduled finish (last component off the
+// machine) when there is one — red past the target, "+" when part of the work is unscheduled;
+// "unsched." when a WO exists but nothing is scheduled; the SkyNet target, muted and tagged T,
+// when no work is scheduled at all. Assembly, plating and finishing are not included.
+function ProdDueCell({ line, detail }) {
+  if (!line.customer_order_line_id) return <td className="px-2 py-2" />
+  if (detail === undefined) return <td className="px-2 py-2 text-xs text-gray-600">…</td>
+  if (detail?.error) return <td className="px-2 py-2 text-xs text-red-400/70" title={`Production detail could not be loaded: ${detail.error}`}>—</td>
+  const pd = prodDueForLine(detail?.dates)
+  if (!pd) return <td className="px-2 py-2 text-xs text-gray-600">—</td>
+  const targetText = pd.target ? `SkyNet target ${formatDateShort(pd.target)}` : 'no SkyNet target'
+  if (pd.kind === 'unsched') {
+    return <td className="px-2 py-2 font-mono text-xs text-amber-300 whitespace-nowrap" title={`A work order exists but nothing is scheduled yet · ${targetText}`}>unsched.</td>
+  }
+  if (pd.kind === 'target') {
+    return <td className="px-2 py-2 font-mono text-xs text-gray-500 whitespace-nowrap" title={`No scheduled work yet — ${targetText} (later of entered + 45 business days and the Fishbowl due date)`}>T {formatDateShort(pd.date)}</td>
+  }
+  return (
+    <td className={`px-2 py-2 font-mono text-xs whitespace-nowrap ${pd.late ? 'text-red-300' : 'text-gray-200'}`}
+      title={`Latest scheduled job end on the allocated work orders (last component off the machine) · ${targetText}${pd.late ? ' · finish is after the target' : ''}${pd.partial ? ' · some allocated work is not scheduled yet' : ''}`}>
+      {formatDateShort(pd.date)}{pd.partial && <span className="text-amber-300">+</span>}
+    </td>
+  )
+}
 
 function Chip({ className = '', children, title }) {
   return (
@@ -47,14 +73,17 @@ export default function SOCard({
   order, lines, linesLoading, expanded, onToggle,
   selected, onToggleLine, onSelectAll, onClearSelection,
   canAct, busy, onBulkDisposition, onConvert, onOpenCO, inventory = {},
+  lineDetail = {}, purchaseComps = {}, expandedLines, onToggleLineDetail,
 }) {
+  const openLines = expandedLines || new Set()
+  const detailColSpan = canAct ? 12 : 11
   const selectableLines = useMemo(() => (lines || []).filter(isSelectableLine), [lines])
   const selectedLines = useMemo(
     () => (lines || []).filter((l) => selected.has(l.fb_soitem_id)),
     [lines, selected],
   )
   const convertibleSelected = selectedLines.filter((l) => !convertBlocker(l))
-  // D-FB-29: kit components render indented under their kit header, labelled 1a, 1b …
+  // D-FB-29: kit components render indented under their kit header; D-FB-45: labelled with their Fishbowl line number
   const tree = useMemo(() => buildKitTree(lines || []), [lines])
   const allSelected = selectableLines.length > 0 && selectableLines.every((l) => selected.has(l.fb_soitem_id))
 
@@ -141,6 +170,7 @@ export default function SOCard({
                     <th className="px-2 py-2 text-right" title="Ordered − shipped">Remaining</th>
                     <th className="px-2 py-2 text-right" title="Fishbowl available to ship (configured location groups), refreshed every 5 min">Avail</th>
                     <th className="px-2 py-2 text-left">Due</th>
+                    <th className="px-2 py-2 text-left" title="Production due: latest scheduled job end on the allocated work orders (the last component off the machine); T = SkyNet target when nothing is scheduled yet. Assembly, plating and finishing are not included.">Prod Due</th>
                     <th className="px-2 py-2 text-left">FB status</th>
                     <th className="px-2 py-2 text-left">Disposition</th>
                   </tr>
@@ -151,8 +181,13 @@ export default function SOCard({
                     const selectable = isSelectableLine(l)
                     const muted = !isProduct && l.type_id !== 80
                     const coNumber = l.co_line?.customer_order?.co_number
+                    // D-FB-44: a dropdown for CO-linked lines (components + jobs + dates) and for
+                    // purchased lines that carry a purchase component list (D-FB-42).
+                    const hasDetail = !!l.customer_order_line_id || (l.disposition === 'purchased' && (purchaseComps[l.fb_soitem_id] || []).length > 0)
+                    const detailOpen = hasDetail && openLines.has(l.fb_soitem_id)
                     return (
-                      <tr key={l.fb_soitem_id} className={`${muted ? 'text-gray-600' : ''} ${selected.has(l.fb_soitem_id) ? 'bg-purple-900/10' : ''}`}>
+                      <Fragment key={l.fb_soitem_id}>
+                      <tr className={`${muted ? 'text-gray-600' : ''} ${selected.has(l.fb_soitem_id) ? 'bg-purple-900/10' : ''}`}>
                         {canAct && (
                           <td className="px-3 py-2">
                             {selectable && (
@@ -165,7 +200,16 @@ export default function SOCard({
                             )}
                           </td>
                         )}
-                        <td className={`px-2 py-2 font-mono text-xs ${depth ? 'text-gray-600 text-right' : 'text-gray-500'}`}>{label}</td>
+                        <td className={`px-2 py-2 font-mono text-xs ${depth ? 'text-gray-600 text-right' : 'text-gray-500'}`}>
+                          <span className="inline-flex items-center gap-1">
+                            {hasDetail ? (
+                              <button type="button" onClick={() => onToggleLineDetail?.(l.fb_soitem_id)} className="text-gray-500 hover:text-white" title={detailOpen ? 'Hide detail' : 'Show components, jobs and dates'}>
+                                {detailOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                              </button>
+                            ) : <span className="inline-block w-3" />}
+                            {label}
+                          </span>
+                        </td>
                         <td className="px-2 py-2">
                           <div className={`flex items-center gap-2 flex-wrap ${depth ? 'pl-6 border-l border-gray-800' : ''}`}>
                             <span className={`font-mono ${muted ? '' : 'text-gray-200'}`}>{displayPartNumber(l)}</span>
@@ -191,6 +235,7 @@ export default function SOCard({
                           {l.due_date_is_default && (isProduct || l.type_id === 80) && <span className="text-amber-400" title="No real date entered in Fishbowl">*</span>}
                           {l.remaining_parts_ship_date && <span className="text-cyan-400 ml-1" title="Remaining Parts Ship Date">R</span>}
                         </td>
+                        <ProdDueCell line={l} detail={l.customer_order_line_id ? lineDetail[l.customer_order_line_id] : null} />
                         <td className="px-2 py-2 text-xs whitespace-nowrap">{FB_LINE_STATUS[l.status_id] || l.status_id}</td>
                         <td className="px-2 py-2">
                           <div className="flex items-center gap-2 flex-wrap">
@@ -215,9 +260,24 @@ export default function SOCard({
                                 {coNumber} #{l.co_line?.line_number} <ExternalLink size={10} />
                               </span>
                             )}
+                            {l.disposition === 'purchased' && (purchaseComps[l.fb_soitem_id] || []).length > 0 && (
+                              <span className="text-xs text-blue-300/80 font-mono" title="Components being purchased (D-FB-42)">
+                                {(purchaseComps[l.fb_soitem_id] || []).map((c) => c.component?.part_number).filter(Boolean).join(', ')}
+                              </span>
+                            )}
                           </div>
                         </td>
                       </tr>
+                      {detailOpen && (
+                        <LineDetailPanel
+                          line={l}
+                          detail={l.customer_order_line_id ? lineDetail[l.customer_order_line_id] : null}
+                          purchaseComponents={purchaseComps[l.fb_soitem_id] || []}
+                          colSpan={detailColSpan}
+                          onOpenCO={onOpenCO}
+                        />
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>

@@ -2,14 +2,19 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Search, RefreshCw, Loader2, X } from 'lucide-react'
 import SOCard from '../components/orderqueue/SOCard'
 import ConvertToCOModal from '../components/orderqueue/ConvertToCOModal'
+import PurchaseComponentsModal from '../components/orderqueue/PurchaseComponentsModal'
 import SyncStatusBanner from '../components/orderqueue/SyncStatusBanner'
 import ExceptionsTab from '../components/orderqueue/ExceptionsTab'
 import RecentChangesTab from '../components/orderqueue/RecentChangesTab'
 import { canActOnOrderQueue } from '../lib/roles'
 import {
   getSyncState, getQueueOrders, getQueueLines, getInventoryFor, getOpenExceptions, getRecentEvents,
-  setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS,
+  setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS, getLineDetail, getPurchaseComponents,
 } from '../lib/fishbowl'
+
+// D-FB-42: a Purchase on one of these part types may need a component list — the modal loads the
+// BOM and passes a BOM-less part straight through. Manufactured and purchased parts never ask.
+const PURCHASE_ASKS_PART_TYPES = ['assembly', 'finished_good']
 
 // OrderQueue — FB1. Every Issued / In Progress Fishbowl sales order, mirrored live by the bridge,
 // waiting for a per-line call: ship from stock, purchase, assembly, covered, ignore — or Create CO,
@@ -33,6 +38,11 @@ export default function OrderQueue({ profile, onNavigate }) {
   const [actionStatus, setActionStatus] = useState(null)
   const [syncState, setSyncState] = useState(null)
   const [convertTarget, setConvertTarget] = useState(null) // { order, lines }
+  const [purchaseTarget, setPurchaseTarget] = useState(null) // { order, ids, askLines } — D-FB-42
+  const [purchaseError, setPurchaseError] = useState(null)   // shown inside the purchase modal, not on the banner behind it
+  const [lineDetail, setLineDetail] = useState({})        // { [co_line_id]: { dates, components, allocations } } — D-FB-44
+  const [purchaseComps, setPurchaseComps] = useState({})  // { [fb_soitem_id]: rows } — D-FB-42
+  const [expandedLines, setExpandedLines] = useState(() => new Set()) // fb_soitem_ids with the detail row open
   const [exceptions, setExceptions] = useState([])
   const [exceptionsLoading, setExceptionsLoading] = useState(false)
   const [events, setEvents] = useState([])
@@ -67,6 +77,24 @@ export default function OrderQueue({ profile, onNavigate }) {
         setInventory((prev) => ({ ...prev, ...upper }))
       } catch (e) {
         console.warn('inventory snapshot read failed:', e?.message || e)
+      }
+      // D-FB-44 / D-FB-42: production detail for linked lines, purchase lists for purchased lines
+      try {
+        const [detail, comps] = await Promise.all([
+          getLineDetail(rows.map((l) => l.customer_order_line_id).filter(Boolean)),
+          getPurchaseComponents(rows.filter((l) => l.disposition === 'purchased').map((l) => l.fb_soitem_id)),
+        ])
+        setLineDetail((prev) => ({ ...prev, ...detail }))
+        setPurchaseComps((prev) => {
+          const next = { ...prev }
+          for (const l of rows) delete next[l.fb_soitem_id]
+          return { ...next, ...comps }
+        })
+      } catch (e) {
+        console.warn('line detail read failed:', e?.message || e)
+        const failed = {}
+        for (const id of rows.map((l) => l.customer_order_line_id).filter(Boolean)) failed[id] = { error: e?.message || String(e) }
+        setLineDetail((prev) => ({ ...prev, ...failed }))
       }
     } catch (e) {
       console.error('Order Queue lines load failed:', e)
@@ -159,20 +187,41 @@ export default function OrderQueue({ profile, onNavigate }) {
     setSelectionFor(fbSoId, next)
   }
 
-  const handleBulkDisposition = async (order, disposition) => {
+  const toggleLineDetail = (fbSoitemId) => {
+    setExpandedLines((prev) => {
+      const next = new Set(prev)
+      if (next.has(fbSoitemId)) next.delete(fbSoitemId)
+      else next.add(fbSoitemId)
+      return next
+    })
+  }
+
+  const handleBulkDisposition = async (order, disposition, components = {}) => {
     const ids = [...selectionFor(order.fb_so_id)]
     if (ids.length === 0) return
+    if (disposition === 'purchased' && !purchaseTarget) {
+      const askLines = (linesBySo[order.fb_so_id] || []).filter((l) =>
+        ids.includes(l.fb_soitem_id) && l.part_id && PURCHASE_ASKS_PART_TYPES.includes(l.part?.part_type))
+      if (askLines.length > 0) {
+        setPurchaseError(null)
+        setPurchaseTarget({ order, ids, askLines })
+        return
+      }
+    }
     setBusySo(order.fb_so_id)
     try {
-      const n = await setDisposition(ids, disposition, null)
+      const n = await setDisposition(ids, disposition, null, components)
       setActionStatus({
         type: 'success',
         message: `SO ${order.so_number}: ${n} line${n === 1 ? '' : 's'} marked ${DISPOSITION_LABELS[disposition] || disposition}.`,
       })
       setSelectionFor(order.fb_so_id, new Set())
+      setPurchaseTarget(null)
+      setPurchaseError(null)
       await Promise.all([loadLines(order.fb_so_id), loadOrders()])
     } catch (e) {
-      setActionStatus({ type: 'error', message: e?.message || String(e) })
+      if (purchaseTarget) setPurchaseError(e?.message || String(e))
+      else setActionStatus({ type: 'error', message: e?.message || String(e) })
     } finally {
       setBusySo(null)
     }
@@ -194,6 +243,9 @@ export default function OrderQueue({ profile, onNavigate }) {
     const parts = []
     if (created) parts.push(`${created} new line${created === 1 ? '' : 's'}`)
     if (added) parts.push(`added to ${added} existing line${added === 1 ? '' : 's'}`)
+    // D-FB-45: a hand-keyed line sitting on a Fishbowl line number is moved out of the way
+    const renumbered = Array.isArray(result?.renumbered) ? result.renumbered.length : 0
+    if (renumbered) parts.push(`${renumbered} other line${renumbered === 1 ? '' : 's'} renumbered to match Fishbowl`)
     setActionStatus({
       type: 'success',
       message: `${result?.created ? 'Created' : 'Updated'} ${result?.co_number}: ${parts.join(', ') || 'no change'}${skipped ? ` (${skipped} skipped)` : ''}.`,
@@ -319,7 +371,7 @@ export default function OrderQueue({ profile, onNavigate }) {
             {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           <span className="text-xs text-gray-600">
-            Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship
+            Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship · Prod Due: last component off the machine (<span className="text-gray-500">T</span> = SkyNet target until scheduled; assembly, plating and finishing not included)
           </span>
         </div>
       )}
@@ -363,10 +415,25 @@ export default function OrderQueue({ profile, onNavigate }) {
                 onConvert={() => openConvert(o)}
                 onOpenCO={openCO}
                 inventory={inventory}
+                lineDetail={lineDetail}
+                purchaseComps={purchaseComps}
+                expandedLines={expandedLines}
+                onToggleLineDetail={toggleLineDetail}
               />
             ))}
           </div>
         )
+      )}
+
+      {purchaseTarget && (
+        <PurchaseComponentsModal
+          order={purchaseTarget.order}
+          lines={purchaseTarget.askLines}
+          busy={busySo === purchaseTarget.order.fb_so_id}
+          error={purchaseError}
+          onClose={() => { setPurchaseTarget(null); setPurchaseError(null) }}
+          onConfirm={(components) => handleBulkDisposition(purchaseTarget.order, 'purchased', components)}
+        />
       )}
 
       {convertTarget && (

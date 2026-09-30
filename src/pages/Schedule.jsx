@@ -3127,7 +3127,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
                       <div className="flex flex-col items-end gap-1">
                         <GripVertical size={16} className="text-gray-600" />
                         {job.work_order?.target_date ? (
-                          <span className="text-xs text-gray-400 text-right leading-tight" title="SkyNet target (entered + 45 business days)">
+                          <span className="text-xs text-gray-400 text-right leading-tight" title="SkyNet target (later of entered + 45 business days and the Fishbowl due date)">
                             Target: {formatDate(job.work_order.target_date)}
                             {job.work_order.fb_due_date && (
                               <span className="block text-[10px] text-gray-600" title="Fishbowl due date">FB {formatDate(job.work_order.fb_due_date)}</span>

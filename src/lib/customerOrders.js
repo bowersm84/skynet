@@ -68,6 +68,7 @@ export async function getOpenCOLinesForPart(supabase, partId) {
       priority,
       status,
       components_needed,
+      components:customer_order_line_components(component_id, component:parts(part_number)),
       customer_order_id,
       customer_orders!inner (
         id,
@@ -148,6 +149,7 @@ export async function getOpenCOLinesForPart(supabase, partId) {
     due_date: line.due_date || null,
     priority: line.priority,
     components_needed: line.components_needed || null,
+    components: (line.components || []).map(c => c.component?.part_number).filter(Boolean).sort(),
   }))
 }
 
@@ -255,6 +257,7 @@ export async function getAllOpenCOLines(supabase) {
       status,
       created_at,
       components_needed,
+      components:customer_order_line_components(component_id, component:parts(part_number)),
       part:parts(id, part_number, description, part_type, is_active),
       customer_order:customer_orders!inner(
         id, co_number, po_number, status,
@@ -284,6 +287,7 @@ export async function getAllOpenCOLines(supabase) {
         part_description: line.part?.description,
         part_is_active: line.part?.is_active !== false,
         components_needed: line.components_needed,
+        components: (line.components || []).map(c => c.component?.part_number).filter(Boolean).sort(),
         co_id: line.customer_order.id,
         co_number: line.customer_order.co_number,
         customer_name: line.customer_order.customer?.name,

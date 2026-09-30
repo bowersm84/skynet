@@ -203,7 +203,8 @@ export default function CustomerOrders({
           due_date, priority, status, notes, components_needed, cancel_reason, fulfilled_at,
           fb_qty_ordered, fb_qty_fulfilled, fb_qty_to_fulfill,
           part_id,
-          parts ( id, part_number, description, is_active )
+          parts ( id, part_number, description, is_active ),
+          components:customer_order_line_components ( component_id, component:parts ( part_number ) )
         `)
         .in('customer_order_id', coIds)
         .order('line_number', { ascending: true })
@@ -596,7 +597,7 @@ export default function CustomerOrders({
                 <th className="px-4 py-3 text-left">Salesperson</th>
                 <th className="px-4 py-3 text-left">PO #</th>
                 <th className="px-4 py-3 text-left">Lines</th>
-                <th className="px-4 py-3 text-left" title="Earliest SkyNet target (entered + 45 business days) over open lines; Fishbowl's earliest due beneath">Target / FB Due</th>
+                <th className="px-4 py-3 text-left" title="Earliest SkyNet target (later of entered + 45 business days and the Fishbowl due date) over open lines; Fishbowl's earliest due beneath">Target / FB Due</th>
                 <th className="px-4 py-3 text-left">Status</th>
                 <th className="px-4 py-3 text-left">Created</th>
                 <th className="px-4 py-3 text-right">Actions</th>
@@ -930,7 +931,7 @@ function CORow({
                       <th className="px-2 py-2 text-right">Fulfilled</th>
                       <th className="px-2 py-2 text-right">Remaining</th>
                       <th className="px-2 py-2 text-left" title="Day the order was entered (Fishbowl SO creation for Fishbowl-sourced lines)">Entered</th>
-                      <th className="px-2 py-2 text-left" title="SkyNet target: entered + 45 business days">Target</th>
+                      <th className="px-2 py-2 text-left" title="SkyNet target: the later of entered + 45 business days and the Fishbowl due date">Target</th>
                       <th className="px-2 py-2 text-left" title="Fishbowl's live due date (* = Fishbowl default, no real date entered)">FB Due</th>
                       <th className="px-2 py-2 text-left" title="Latest scheduled end across the allocated work orders' jobs">Finish</th>
                       <th className="px-2 py-2 text-left">Priority</th>
@@ -1093,11 +1094,18 @@ function CORow({
                               </td>
                             </tr>
                           )}
-                          {l.components_needed && (
+                          {(l.components_needed || (l.components || []).length > 0) && (
                             <tr className="border-t border-gray-900 bg-gray-950/60">
                               <td colSpan={13} className="px-3 py-2">
                                 <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Components Needed</div>
-                                <div className="text-xs text-gray-300 whitespace-pre-wrap">{l.components_needed}</div>
+                                {(l.components || []).length > 0 && (
+                                  <div className="flex flex-wrap gap-1 mb-1">
+                                    {(l.components || []).map(c => c.component?.part_number).filter(Boolean).sort().map(pn => (
+                                      <span key={pn} className="font-mono text-xs text-green-200 px-1.5 py-0.5 rounded border border-green-900 bg-green-900/20">{pn}</span>
+                                    ))}
+                                  </div>
+                                )}
+                                {l.components_needed && <div className="text-xs text-gray-300 whitespace-pre-wrap">{l.components_needed}</div>}
                               </td>
                             </tr>
                           )}
@@ -1744,7 +1752,7 @@ function DemandView({ profile, setActionStatus }) {
                       {group.line_count} line{group.line_count !== 1 ? 's' : ''}
                     </div>
                     <div className="text-xs whitespace-nowrap text-right">
-                      <div className="text-gray-300" title="Earliest SkyNet target (entered + 45 business days)">
+                      <div className="text-gray-300" title="Earliest SkyNet target (later of entered + 45 business days and the Fishbowl due date)">
                         {group.earliest_target ? `target ${formatDate(group.earliest_target)}` : '—'}
                       </div>
                       <div className="text-[10px] text-gray-500" title="Earliest Fishbowl due date">
@@ -1771,9 +1779,10 @@ function DemandView({ profile, setActionStatus }) {
                           <th className="px-3 py-2 text-left">Line</th>
                           <th className="px-3 py-2 text-left" title="Day the order was entered (Fishbowl SO creation for Fishbowl-sourced lines)">Entered</th>
                           <th className="px-3 py-2 text-right">Remaining</th>
-                          <th className="px-3 py-2 text-left" title="SkyNet target: entered + 45 business days">Target</th>
+                          <th className="px-3 py-2 text-left" title="SkyNet target: the later of entered + 45 business days and the Fishbowl due date">Target</th>
                           <th className="px-3 py-2 text-left" title="Fishbowl's live due date (* = Fishbowl default, no real date entered)">FB Due</th>
                           <th className="px-3 py-2 text-left">Priority</th>
+                          <th className="px-3 py-2 text-left" title="Components production needs to make for this line (D-FB-42)">Components</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1830,6 +1839,17 @@ function DemandView({ profile, setActionStatus }) {
                                 <span className={`px-1.5 py-0.5 text-[10px] rounded capitalize ${priorityClass}`}>
                                   {line.priority}
                                 </span>
+                              </td>
+                              <td className="px-3 py-2 text-xs" title={line.components_needed || undefined}>
+                                {(line.components || []).length > 0 ? (
+                                  <span className="flex flex-wrap gap-1">
+                                    {line.components.map(pn => (
+                                      <span key={pn} className="font-mono text-green-200 px-1.5 py-0.5 rounded border border-green-900 bg-green-900/20">{pn}</span>
+                                    ))}
+                                  </span>
+                                ) : line.components_needed ? (
+                                  <span className="text-gray-400 truncate inline-block max-w-[220px] align-middle">{line.components_needed}</span>
+                                ) : <span className="text-gray-600">—</span>}
                               </td>
                             </tr>
                           )

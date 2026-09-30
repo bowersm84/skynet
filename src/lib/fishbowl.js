@@ -230,7 +230,8 @@ export function displayPartNumber(line) {
   return line.part?.part_number || line.part_num || line.product_num || '—'
 }
 
-// Kit structure for display (D-FB-29): children sit under their kit header, labelled 1a, 1b …
+// Kit structure for display (D-FB-29): children sit indented under their kit header. D-FB-45: each
+// child is labelled with its own Fishbowl line number (was 1a, 1b …) — the same number its CO line carries.
 // Returns [{ line, depth, label, childCount }] in render order.
 export function buildKitTree(lines) {
   const byParent = new Map()
@@ -247,27 +248,42 @@ export function buildKitTree(lines) {
     const children = byParent.get(l.fb_soitem_id) || []
     out.push({ line: l, depth: 0, label: String(l.line_number), childCount: children.length })
     children.forEach((c, i) => {
-      out.push({ line: c, depth: 1, label: `${l.line_number}${String.fromCharCode(97 + (i % 26))}${i >= 26 ? Math.floor(i / 26) : ''}`, childCount: 0 })
+      out.push({ line: c, depth: 1, label: String(c.line_number), childCount: 0, kitIndex: i })
     })
   }
   return out
 }
 
-// One CO line per part (D-FB-26): what a conversion of these lines would produce.
-export function groupLinesByPart(lines) {
+// D-FB-43: one CO line per Fishbowl line — a release keeps its own quantity and due date, and like
+// parts are combined later at Create WO if the scheduler wants one run. Lines are grouped by part
+// here only so the Create CO modal asks the component question once per part (supersedes D-FB-26).
+export function groupLinesForConversion(lines) {
   const groups = new Map()
-  for (const l of lines) {
+  for (const l of [...lines].sort((a, b) => (a.line_number || 0) - (b.line_number || 0))) {
     const key = l.part_id || `nopart:${l.fb_soitem_id}`
     if (!groups.has(key)) {
-      groups.set(key, { key, part_id: l.part_id, part_number: displayPartNumber(l), lines: [], qty: 0, due: null, hasDefaultDate: false })
+      groups.set(key, { key, part_id: l.part_id, part_number: displayPartNumber(l), part_type: l.part?.part_type || null, lines: [], qty: 0 })
     }
     const g = groups.get(key)
     g.lines.push(l)
     g.qty += coQtyForLine(l)
-    if (l.effective_due_date && (!g.due || l.effective_due_date < g.due)) g.due = l.effective_due_date
-    if (l.due_date_is_default) g.hasDefaultDate = true
   }
   return [...groups.values()]
+}
+
+// D-FB-44: what the Order Queue shows as Prod Due for a CO-linked line, from a v_co_line_dates row.
+// finish = latest scheduled job end on the allocated work orders (the last component off the
+// machine; assembly, plating and finishing are not in it); unsched = a WO exists but nothing is
+// scheduled; target = no scheduled work at all, so the SkyNet target stands in.
+export function prodDueForLine(d) {
+  if (!d) return null
+  const target = d.target_date || null
+  if (d.scheduled_finish) {
+    return { kind: 'finish', date: d.scheduled_finish, partial: !!d.has_unscheduled_jobs, late: !!(target && d.scheduled_finish > target), target }
+  }
+  if (d.has_unscheduled_jobs) return { kind: 'unsched', date: null, partial: false, late: false, target }
+  if (target) return { kind: 'target', date: target, partial: false, late: false, target }
+  return null
 }
 
 // ── Data access ────────────────────────────────────────────────────────────
@@ -295,7 +311,7 @@ const LINE_SELECT = `
   part_id, kit_sku_id, customer_order_line_id, removed_at, parent_fb_soitem_id,
   part:parts(part_number, part_type, is_active),
   kit:kit_skus(part_number),
-  co_line:customer_order_lines(line_number, status, quantity_ordered, customer_order:customer_orders(co_number)),
+  co_line:customer_order_lines(line_number, status, quantity_ordered, components_needed, customer_order:customer_orders(co_number)),
   disposition_by_profile:profiles(full_name)
 `
 
@@ -311,15 +327,18 @@ export async function getQueueLines(fbSoId) {
 }
 
 // ── RPC wrappers (SECURITY DEFINER, gated server-side: order_processor / admin) ──
-export async function setDisposition(lineIds, disposition, note) {
+// components: { [fb_soitem_id]: [component uuid, …] } — required by the RPC when disposition is
+// 'purchased' and the line's part has a bill of materials (D-FB-42); ignored otherwise.
+export async function setDisposition(lineIds, disposition, note, components = {}) {
   const { data, error } = await supabase.rpc('fb_set_disposition', {
-    p_line_ids: lineIds, p_disposition: disposition, p_note: note || null,
+    p_line_ids: lineIds, p_disposition: disposition, p_note: note || null, p_components: components || {},
   })
   if (error) throw error
   return data
 }
 
-// components: { [part_id]: 'Components Needed text' } — required by the RPC for every NEW CO line (D-FB-27).
+// components: { [part_id]: { components: [uuid, …], note: text | null } } — at least one component per
+// part is required by the RPC (D-FB-42); every selected Fishbowl line becomes its own CO line (D-FB-43).
 export async function convertToCO(fbSoId, lineIds, components = {}) {
   const { data, error } = await supabase.rpc('fb_convert_to_co', {
     p_fb_so_id: fbSoId, p_line_ids: lineIds, p_components: components,
@@ -338,6 +357,62 @@ export async function getCOSummary(customerOrderId) {
     .maybeSingle()
   if (error) throw error
   return data
+}
+
+// D-FB-44: everything the line dropdown needs for a set of CO line ids, in three chunked reads —
+// dates (v_co_line_dates, the same view the Orders and Demand tabs read), per-component job state
+// (v_co_line_component_status) and active allocations with their work orders.
+// → { [co_line_id]: { dates, components: [], allocations: [] } }
+export async function getLineDetail(coLineIds) {
+  const ids = [...new Set((coLineIds || []).filter(Boolean))]
+  const out = {}
+  for (const id of ids) out[id] = { dates: null, components: [], allocations: [] }
+  for (let i = 0; i < ids.length; i += 150) {
+    const chunk = ids.slice(i, i + 150)
+    const [d, c, a] = await Promise.all([
+      supabase.from('v_co_line_dates')
+        .select('customer_order_line_id, entered_on, target_date, fb_due_date, fb_due_is_default, scheduled_finish, has_unscheduled_jobs')
+        .in('customer_order_line_id', chunk),
+      supabase.from('v_co_line_component_status')
+        .select('customer_order_line_id, component_id, part_number, description, part_type, requested, job_count, latest_scheduled_end, has_unscheduled, state, jobs')
+        .in('customer_order_line_id', chunk),
+      supabase.from('customer_order_allocations')
+        .select('customer_order_line_id, quantity_allocated, work_order:work_orders(id, wo_number, status, due_date)')
+        .in('customer_order_line_id', chunk).eq('is_active', true),
+    ])
+    if (d.error) throw d.error
+    if (c.error) throw c.error
+    if (a.error) throw a.error
+    for (const r of d.data || []) if (out[r.customer_order_line_id]) out[r.customer_order_line_id].dates = r
+    for (const r of c.data || []) if (out[r.customer_order_line_id]) out[r.customer_order_line_id].components.push(r)
+    for (const r of a.data || []) if (out[r.customer_order_line_id]) out[r.customer_order_line_id].allocations.push(r)
+  }
+  for (const v of Object.values(out)) {
+    // requested components first, then the WO-only ones, each alphabetical
+    v.components.sort((x, y) => (Number(y.requested) - Number(x.requested)) || String(x.part_number).localeCompare(String(y.part_number)))
+    v.allocations.sort((x, y) => String(x.work_order?.wo_number || '').localeCompare(String(y.work_order?.wo_number || '')))
+  }
+  return out
+}
+
+// D-FB-42: the components an order processor said are being bought, per Fishbowl line.
+// → { [fb_soitem_id]: [{ component_id, component: { part_number, part_type } }] }
+export async function getPurchaseComponents(fbSoitemIds) {
+  const ids = [...new Set((fbSoitemIds || []).filter(Boolean))]
+  const out = {}
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error } = await supabase
+      .from('fb_line_purchase_components')
+      .select('fb_soitem_id, component_id, component:parts(part_number, part_type)')
+      .in('fb_soitem_id', ids.slice(i, i + 200))
+    if (error) throw error
+    for (const r of data || []) {
+      if (!out[r.fb_soitem_id]) out[r.fb_soitem_id] = []
+      out[r.fb_soitem_id].push(r)
+    }
+  }
+  for (const v of Object.values(out)) v.sort((x, y) => String(x.component?.part_number || '').localeCompare(String(y.component?.part_number || '')))
+  return out
 }
 
 export async function reresolveLines() {

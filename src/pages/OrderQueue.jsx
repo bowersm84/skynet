@@ -10,6 +10,7 @@ import { canActOnOrderQueue } from '../lib/roles'
 import {
   getSyncState, getQueueOrders, getQueueLines, getInventoryFor, getOpenExceptions, getRecentEvents,
   setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS, getLineDetail, getPurchaseComponents,
+  resolveException,
 } from '../lib/fishbowl'
 
 // D-FB-42: a Purchase on one of these part types may need a component list — the modal loads the
@@ -48,6 +49,7 @@ export default function OrderQueue({ profile, onNavigate }) {
   const [events, setEvents] = useState([])
   const [eventsLoading, setEventsLoading] = useState(false)
   const [ackingId, setAckingId] = useState(null)
+  const [resolvingId, setResolvingId] = useState(null) // D-FB-48
   const reresolvedRef = useRef(false)
 
   const loadOrders = useCallback(async () => {
@@ -78,23 +80,30 @@ export default function OrderQueue({ profile, onNavigate }) {
       } catch (e) {
         console.warn('inventory snapshot read failed:', e?.message || e)
       }
-      // D-FB-44 / D-FB-42: production detail for linked lines, purchase lists for purchased lines
-      try {
-        const [detail, comps] = await Promise.all([
-          getLineDetail(rows.map((l) => l.customer_order_line_id).filter(Boolean)),
-          getPurchaseComponents(rows.filter((l) => l.disposition === 'purchased').map((l) => l.fb_soitem_id)),
-        ])
-        setLineDetail((prev) => ({ ...prev, ...detail }))
+      // D-FB-44 / D-FB-42: production detail for linked lines, purchase lists for purchased lines —
+      // settled separately so a failed purchase-list read never marks the production detail failed.
+      const coLineIds = rows.map((l) => l.customer_order_line_id).filter(Boolean)
+      const [detailRes, compsRes] = await Promise.allSettled([
+        getLineDetail(coLineIds),
+        getPurchaseComponents(rows.filter((l) => l.disposition === 'purchased').map((l) => l.fb_soitem_id)),
+      ])
+      if (detailRes.status === 'fulfilled') {
+        setLineDetail((prev) => ({ ...prev, ...detailRes.value }))
+      } else {
+        const msg = detailRes.reason?.message || String(detailRes.reason)
+        console.warn('line detail read failed:', msg)
+        const failed = {}
+        for (const id of coLineIds) failed[id] = { error: msg }
+        setLineDetail((prev) => ({ ...prev, ...failed }))
+      }
+      if (compsRes.status === 'fulfilled') {
         setPurchaseComps((prev) => {
           const next = { ...prev }
           for (const l of rows) delete next[l.fb_soitem_id]
-          return { ...next, ...comps }
+          return { ...next, ...compsRes.value }
         })
-      } catch (e) {
-        console.warn('line detail read failed:', e?.message || e)
-        const failed = {}
-        for (const id of rows.map((l) => l.customer_order_line_id).filter(Boolean)) failed[id] = { error: e?.message || String(e) }
-        setLineDetail((prev) => ({ ...prev, ...failed }))
+      } else {
+        console.warn('purchase component read failed:', compsRes.reason?.message || compsRes.reason)
       }
     } catch (e) {
       console.error('Order Queue lines load failed:', e)
@@ -268,6 +277,35 @@ export default function OrderQueue({ profile, onNavigate }) {
     }
   }
 
+  // D-FB-48: resolve an exception in one step — the RPC applies or cancels, then acknowledges.
+  const handleResolve = async (ev, action) => {
+    setResolvingId(ev.id)
+    try {
+      const r = await resolveException(ev.id, action)
+      let message
+      if (r?.action === 'apply_qty') {
+        message = `${r.co_number} #${r.line_number}: quantity ${Number(r.from).toLocaleString()} → ${Number(r.to).toLocaleString()} (Fishbowl). Exception resolved.`
+      } else {
+        const done = (r?.cancelled || []).filter((c) => !c.already_cancelled)
+        const wos = [...new Set(done.flatMap((c) => c.work_orders || []))]
+        message = `Cancelled ${done.map((c) => `${c.co_number} #${c.line_number}`).join(', ') || 'nothing new'}`
+          + (wos.length ? ` — allocation released on ${wos.join(', ')} (flagged)` : '')
+          + '. Exception resolved.'
+          + (r?.requeued_fb_line ? ` Fishbowl line ${r.requeued_fb_line} is back in the Queue${r.new_part_in_skynet ? '' : ' (its new part is not in SkyNet yet)'}.` : '')
+      }
+      setActionStatus({ type: 'success', message, coNumber: r?.co_number || (r?.cancelled || [])[0]?.co_number })
+      setExceptions((prev) => prev.filter((x) => x.id !== ev.id))
+      await Promise.all([
+        loadOrders(),
+        ...(ev.fb_so_id && linesBySo[ev.fb_so_id] ? [loadLines(ev.fb_so_id)] : []),
+      ])
+    } catch (e) {
+      setActionStatus({ type: 'error', message: e?.message || String(e) })
+    } finally {
+      setResolvingId(null)
+    }
+  }
+
   const openCO = (coNumber) => onNavigate?.('customer_orders', { coSearch: coNumber })
 
   const salesmen = useMemo(
@@ -377,7 +415,8 @@ export default function OrderQueue({ profile, onNavigate }) {
       )}
 
       {tab === 'exceptions' && (
-        <ExceptionsTab events={exceptions} loading={exceptionsLoading} canAct={canAct} ackingId={ackingId} onAck={handleAck} onOpenCO={openCO} />
+        <ExceptionsTab events={exceptions} loading={exceptionsLoading} canAct={canAct} ackingId={ackingId} onAck={handleAck} onOpenCO={openCO}
+          resolvingId={resolvingId} onResolve={handleResolve} />
       )}
 
       {tab === 'changes' && (

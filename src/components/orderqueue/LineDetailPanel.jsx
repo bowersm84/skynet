@@ -37,6 +37,10 @@ function ProdDue({ dates }) {
 export default function LineDetailPanel({ line, detail, purchaseComponents, colSpan, onOpenCO }) {
   const coLine = line.co_line
   const coNumber = coLine?.customer_order?.co_number
+  // D-FB-48: pieces on the CO line that no work order is making yet — typically a Fishbowl quantity
+  // increase, which SkyNet adds to the CO line but never to a WO on its own.
+  const allocatedQty = (detail?.allocations || []).reduce((s, a) => s + Number(a.quantity_allocated || 0), 0)
+  const unallocated = Math.max(Number(coLine?.quantity_ordered || 0) - Number(coLine?.quantity_fulfilled || 0) - allocatedQty, 0)
 
   return (
     <tr className="bg-gray-950/70">
@@ -68,6 +72,11 @@ export default function LineDetailPanel({ line, detail, purchaseComponents, colS
                   </span>
                 ) : (
                   <span className="text-amber-300/80">no work order yet</span>
+                )}
+                {detail.allocations.length > 0 && unallocated > 0 && (
+                  <span className="text-amber-300" title="On the CO line but not allocated to any work order — add it to a WO (Edit WO) or create one from Demand">
+                    +{unallocated.toLocaleString()} pcs not on a WO yet
+                  </span>
                 )}
               </div>
 

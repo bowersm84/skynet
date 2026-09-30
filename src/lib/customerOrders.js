@@ -406,6 +406,15 @@ export async function cancelStockRequest(supabase, id, reason) {
   if (error) throw error
 }
 
+// D-FB-48: cancel a CO line through co_cancel_line — line cancelled, active allocations released,
+// their WOs flagged has_cancelled_allocation, WO due dates re-derived (D-DATE-04), audited. Replaces
+// the four browser-side writes Customer Orders used to make. Admin / order_processor.
+export async function cancelCOLine(supabase, lineId, reason) {
+  const { data, error } = await supabase.rpc('co_cancel_line', { p_line_id: lineId, p_reason: reason })
+  if (error) throw error
+  return data
+}
+
 export async function allocateStockRequests(supabase, ids, workOrderId) {
   if (!ids || ids.length === 0) return 0
   const { data, error } = await supabase.rpc('allocate_stock_requests', { p_ids: ids, p_work_order_id: workOrderId })

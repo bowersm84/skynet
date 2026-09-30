@@ -4087,3 +4087,52 @@ record of what ran on TEST (D-FB-43). Going forward nothing new combines (D-FB-4
 put on its own run. Lines already on a work order keep their allocation untouched.
 **Files:** Docs/migrations/2026-09-30_D-FB-46_split_combined_lines_without_wo.sql (TEST function installed by Claude 2026-09-30; PROD by
 Matt), Docs/Decisions.md.
+
+### D-FB-48 — Fishbowl exceptions are resolved in the Order Queue; a product change is an exception (2026-09-30)
+**What:** The Exceptions tab offers the resolution next to Acknowledge, and resolving acknowledges in the same step
+(`fb_resolve_exception`, order_processor / admin). **Apply Fishbowl qty** — for a quantity cut that ingest held back (D-FB-14): refused,
+naming the WO and the figure to cut to, until the allocation has been reduced in Edit WO; then the CO line takes the Fishbowl quantity and
+its status is recalculated. **Cancel CO line(s)** — for a removed or voided line, a voided / cancelled / expired / deleted SO, or a product
+change: the open CO line(s) are cancelled through `co_cancel_line` with a reason built from the event ("Fishbowl line removed (SO 19276
+line 4)"); on a product change the live Fishbowl line goes back to the Queue resolved to its new part, to be converted again. A CO line that
+still carries other Fishbowl lines (a pre-D-FB-43 combination on a WO) is refused and handled by hand. `co_cancel_line` is the one cancel:
+the four writes Customer Orders made from the browser (line cancelled first, allocations read, released, WOs flagged
+has_cancelled_allocation) in the same order, then the WOs' due dates re-derived (D-DATE-04), audited `co_line_cancelled`; Customer Orders'
+own Cancel line / Cancel CO now call it. Ingest raises `requires_ack` for a product change on a linked open CO line (previously an event
+only; 1 on PROD in 5 weeks, on an already-cancelled line). The Order Queue line dropdown shows "+N pcs not on a WO yet" when a CO line
+carries more than its WOs are making — how a Fishbowl quantity increase (applied to the CO line, never to a WO) becomes visible. The
+line-detail and purchase-list reads settle independently (`Promise.allSettled`; CC, Batch A2).
+**Why:** Matt: nobody changes customer orders directly in SkyNet; the Order Queue and Fishbowl drive everything. Resolving an exception
+still required Customer Orders, and a part swap on a linked line would have gone unnoticed. SkyNet still never resizes or re-plans a WO on
+its own — jobs may be scheduled, running, or have material pulled — so the WO side stays a person's call in Edit WO; the CO side follows
+Fishbowl. PROD, 5 weeks to 2026-09-30: 66 lines added to SOs that already had a CO (normal Queue work), 84 due-date changes, 1 quantity cut,
+2 removals / voids.
+**Numbering:** D-FB-47 was issued to the Batch C Edit CO component picker, which Matt retired before it merged (Customer Orders is being
+phased out, so components are not edited there); its TEST-only gate change is undone by this migration.
+**Files:** Docs/migrations/2026-09-30_D-FB-48_exceptions_resolve_and_wo_due_follow.sql (TEST applied by Claude 2026-09-30; PROD by Matt
+before the push), Docs/migrations/2026-09-30_TEST_ONLY_D-FB-48_seed_exceptions.sql (TEST only), src/lib/fishbowl.js,
+src/lib/customerOrders.js, src/components/orderqueue/ExceptionsTab.jsx, src/components/orderqueue/LineDetailPanel.jsx,
+src/pages/OrderQueue.jsx, src/pages/CustomerOrders.jsx.
+
+### D-DATE-04 — work_orders.due_date follows its CO lines, automatically (2026-09-30)
+**What:** Trigger `trg_co_line_due_resync` (AFTER UPDATE OF due_date on customer_order_lines, only when the value changes) runs
+`_wo_resync_due_date` for every WO the line is actively allocated to — the SQL twin of `resyncWODueDates` (D-DATE-01 / 02): the earliest
+real due date across the WO's active allocations, skipped for stock-only WOs (no allocations), complete or cancelled WOs, and dates before
+2000-01-01 (D-CODATE-02b typos). Both twins gained the last two rules this round. So a Fishbowl date change (ingest updates the CO line,
+D-FB-14), a D-FB-46 split, or an admin edit all reach the WO's own due date — which Schedule sort / overdue, kiosks, dashboards and the
+traveler still read — not only the Target / FB Due views. The trigger never fails the statement that fired it (errors →
+`wo_due_date_resync_failed`); each move is audited `wo_due_date_followed_co`. `wo_resync_all_due_dates(p_dry_run)` is the one-shot: TEST
+moved 19 WOs; PROD had 35 of 101 open WOs stale.
+**Why:** The CO → WO sync was one-way from the browser only (Edit CO / Edit WO), so Fishbowl date changes — 84 in five weeks — never reached
+the WO. Once nobody edits customer orders by hand, nothing would have.
+**Files:** the D-FB-48 migration; src/lib/woDueDate.js.
+
+### D-FB-49 — Customer Orders is phased out; orders come from Fishbowl through the Order Queue (2026-09-30)
+**What:** On Customer Orders, New Customer Order, Edit, Cancel CO, Cancel line and Mark complete are admin-only (`canEdit =
+hasRole(admin)`; CAN_EDIT_ROLES removed), and the Orders tab carries a banner: change the order in Fishbowl; anything SkyNet cannot
+apply is resolved on the Order Queue's Exceptions tab. Demand (Create WO), Stock Requests, My Orders and manual fulfillment adjustment
+(its own narrower grant, D-COFUL-01) are unchanged. The admin escape hatch is temporary: remove Create / Edit Customer Order after
+2026-10-31 unless the audit log shows a reason to keep them.
+**Why:** Matt: every order is driven by the Fishbowl link and the Order Queue; nobody should create or change customer orders directly in
+SkyNet. PROD: no manual CO in the five weeks to 2026-09-30.
+**Files:** src/pages/CustomerOrders.jsx.

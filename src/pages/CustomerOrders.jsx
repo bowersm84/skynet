@@ -27,6 +27,7 @@ import {
   getOpenStockRequestLines,
   getStockRequests,
   cancelStockRequest,
+  cancelCOLine,
   STOCK_REQUEST_STATUS_LABELS,
   STOCK_REQUEST_STATUS_COLORS,
 } from '../lib/customerOrders'
@@ -43,7 +44,7 @@ const STATUS_FILTERS = [
   { value: 'cancelled', label: 'Cancelled' },
 ]
 
-const CAN_EDIT_ROLES = ['admin', 'scheduler', 'customer_service']
+
 
 export default function CustomerOrders({
   profile,
@@ -53,7 +54,9 @@ export default function CustomerOrders({
   navPayload = null,
   onNavPayloadConsumed = null,
 }) {
-  const canEdit = CAN_EDIT_ROLES.includes(profile?.role) && !isReadOnlyRole(profile?.role)
+  // D-FB-49: orders come from Fishbowl through the Order Queue; nobody edits customer orders here.
+  // Create / Edit / Cancel / Mark complete stay admin-only as an escape hatch until they are removed.
+  const canEdit = hasRole(profile, 'admin') && !isReadOnlyRole(profile?.role)
   // Manual fulfillment adjustment is a narrower grant than canEdit — it rewrites
   // a recorded fulfillment number, so customer_service is excluded (D-COFUL-01).
   const canAdjustFulfillment = hasRole(profile, 'admin', 'scheduler') && !isReadOnlyRole(profile?.role)
@@ -330,49 +333,10 @@ export default function CustomerOrders({
   //   2. Read distinct active WO IDs for that line
   //   3. Deactivate the allocations
   //   4. Mark those WOs has_cancelled_allocation = true
+  // D-FB-48: the four steps (line cancelled first, allocations read, released, WOs flagged) now run
+  // inside co_cancel_line, the same function the Order Queue's Exceptions tab uses.
   const cancelLine = async ({ lineId, reason }) => {
-    const now = new Date().toISOString()
-    // 1
-    const { error: lineErr } = await supabase
-      .from('customer_order_lines')
-      .update({
-        status: 'cancelled',
-        cancelled_at: now,
-        cancelled_by: profile?.id || null,
-        cancel_reason: reason,
-      })
-      .eq('id', lineId)
-    if (lineErr) throw lineErr
-
-    // 2
-    const { data: activeAllocs, error: allocReadErr } = await supabase
-      .from('customer_order_allocations')
-      .select('work_order_id')
-      .eq('customer_order_line_id', lineId)
-      .eq('is_active', true)
-    if (allocReadErr) throw allocReadErr
-    const woIds = Array.from(new Set((activeAllocs || []).map(a => a.work_order_id))).filter(Boolean)
-
-    // 3
-    const { error: deactivateErr } = await supabase
-      .from('customer_order_allocations')
-      .update({
-        is_active: false,
-        deactivated_at: now,
-        deactivated_by: profile?.id || null,
-      })
-      .eq('customer_order_line_id', lineId)
-      .eq('is_active', true)
-    if (deactivateErr) throw deactivateErr
-
-    // 4
-    if (woIds.length > 0) {
-      const { error: woErr } = await supabase
-        .from('work_orders')
-        .update({ has_cancelled_allocation: true })
-        .in('id', woIds)
-      if (woErr) throw woErr
-    }
+    await cancelCOLine(supabase, lineId, reason)
   }
 
   const handleCancelLine = async ({ lineId, lineNumber, reason }) => {
@@ -524,6 +488,11 @@ export default function CustomerOrders({
         />
       ) : (
       <>
+      <div className="mb-4 p-3 rounded border border-gray-700 bg-gray-800/60 text-xs text-gray-300">
+        Customer orders come from Fishbowl through the Order Queue. Change the order in Fishbowl; anything SkyNet
+        cannot apply on its own is resolved on the Order Queue&apos;s Exceptions tab. Creating, editing and cancelling
+        here is admin-only while this tab is retired.
+      </div>
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <div className="relative flex-1 min-w-[260px] max-w-md">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />

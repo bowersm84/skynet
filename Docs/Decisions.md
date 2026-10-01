@@ -4213,3 +4213,17 @@ lets admins push.
 
 **No SQL.** Uses `pricing_fb_sync_status`, `fb_push_enqueue`, `fb_push_cancel`, `fb_push_commands` and the four
 `v_fb_*_drift` views as D-PRICE-53 left them. `fb_push_commands.payload` is never selected (up to ~1 MB per command).
+
+### D-PRICE-56 — A superseded book still prices its own dates; books roll on the Eastern date
+
+**Context.** At 8:27 pm Eastern on 2026-09-30 the portal's book roll (`pricing_roll_books`, run on every portal load)
+used the database date — UTC, already Oct 1 — and made Rev 82 active and Rev 81 superseded. `pricing_book_for_date`
+and the portal's `bookContext` only counted scheduled and active books, so the portal's local date (2026-09-30) had no
+book: the Catalog spun forever and any price asked for that date came back empty, until local midnight.
+
+**Decision.** (1) The book in effect on a date is the latest published book (scheduled, active or superseded) that took
+effect on or before it — in `pricing_book_for_date` (SQL) and `bookContext` (`src/lib/pricing.js`). (2)
+`pricing_roll_books` rolls on the Eastern business date (`now() AT TIME ZONE 'America/New_York'`), so a book changes
+over at local midnight. (3) With no book in effect the Catalog says so instead of showing a spinner.
+SQL: `Docs/migrations/2026-09-30_D-PRICE-56_superseded_books_price_their_dates.sql`, applied TEST and PROD 2026-09-30.
+Server-side defaults (`CURRENT_DATE`) stay UTC; the portal passes its local date.

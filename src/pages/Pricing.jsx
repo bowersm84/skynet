@@ -144,7 +144,7 @@ export default function Pricing() {
       <main className="px-5 py-5">
         {error && <div className="mb-4 flex items-center gap-2 text-sm text-rose-300 bg-rose-950/40 border border-rose-900 rounded px-3 py-2"><AlertTriangle size={14} /> {error}</div>}
         {tab === 'quote' && <QuoteBuilder book={current} meta={meta} asOf={asOf} setAsOf={setAsOf} todayIso={today} nextBook={next} canEdit={canEdit} profile={profile} />}
-        {tab === 'catalog' && (meta ? <PriceCatalog book={current} meta={meta} nextBook={next} canEdit={canEdit} /> : <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div>)}
+        {tab === 'catalog' && (meta ? <PriceCatalog book={current} meta={meta} nextBook={next} canEdit={canEdit} /> : current ? <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div> : <div className="p-8 text-center text-sm text-gray-400">No price book is in effect on {asOf}.</div>)}
         {tab === 'customers' && <PriceCustomers asOf={asOf} canEdit={canEdit} canSetTier={canSetTier} book={current} nextBook={next} profile={profile} />}
         {tab === 'books' && <PriceBooks canEdit={canEdit} onBooksChanged={refresh} />}
         {tab === 'fishbowl' && <FishbowlSync canPush={canEdit} books={books} />}

@@ -73,7 +73,9 @@ export async function bookForDate(asOf) {
 }
 // Book in effect on a date + the next scheduled one, for the header.
 export function bookContext(books, asOf) {
-  const published = books.filter(b => ['scheduled', 'active'].includes(b.status) && b.effective_from)
+  // A superseded book still prices the dates before its successor took effect (D-PRICE-56): the book roll can
+  // supersede it before the portal's local date reaches the new book's effective date.
+  const published = books.filter(b => ['scheduled', 'active', 'superseded'].includes(b.status) && b.effective_from)
   const current = [...published].filter(b => b.effective_from <= asOf).sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1))[0] || null
   const next = [...published].filter(b => b.effective_from > asOf).sort((a, b) => (a.effective_from > b.effective_from ? 1 : -1))[0] || null
   return { current, next }

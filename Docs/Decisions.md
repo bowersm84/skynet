@@ -4227,3 +4227,18 @@ effect on or before it — in `pricing_book_for_date` (SQL) and `bookContext` (`
 over at local midnight. (3) With no book in effect the Catalog says so instead of showing a spinner.
 SQL: `Docs/migrations/2026-09-30_D-PRICE-56_superseded_books_price_their_dates.sql`, applied TEST and PROD 2026-09-30.
 Server-side defaults (`CURRENT_DATE`) stay UTC; the portal passes its local date.
+
+### D-FB-50 — "Covered by existing CO" is retired (2026-10-01)
+**What:** The Order Queue's bulk bar no longer offers "Covered by existing CO" (removed from MANUAL_DISPOSITIONS), and fb_set_disposition
+refuses 'covered' with a message pointing at Create CO. The value is not removed from the data model: the CHECK constraint, the queue
+view's covered_lines count, the "Covered by CO" badge and the SO header chip stay, because 46 open PROD lines carry it (21 of them
+SK2003-42A across 14 SOs; almost all set by order processing Aug 26 – Sep 18). They keep it until someone sends them Back to pending and
+converts them; nothing changes them automatically, because only the order processor knows which CO each was meant to be covered by and a
+blind conversion could double-count demand already on that CO.
+**Why:** Matt: production needs a CO line of its own now that like parts are combined at Create WO (D-FB-43). A covered line is linked to
+no CO line, so its quantity was invisible to Demand, Prod Due and the line dropdown.
+**How:** patched in place by two single-line anchors (no md5 guard — PROD's copy of fb_set_disposition has CRLF line endings and TEST's LF,
+so the fingerprints differ while the code is the same); marker D-FB-50 makes it re-run safe. Not yet in the Specification (v4.8);
+queued for the next revision.
+**Files:** Docs/migrations/2026-10-01_D-FB-50_retire_covered_disposition.sql (TEST applied by Claude 2026-10-01; PROD by Matt before the
+push), src/lib/fishbowl.js, src/pages/OrderQueue.jsx.

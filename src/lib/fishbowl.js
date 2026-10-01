@@ -111,11 +111,13 @@ export const DISPOSITION_COLORS = {
   unlisted: 'bg-gray-800 text-gray-500 border-gray-700',
 }
 // What a human may set by hand (production is only reachable through Create CO).
+// D-FB-50: "Covered by existing CO" is retired — a line that needs production is converted with Create CO
+// and like parts are combined at Create WO (D-FB-43). fb_set_disposition refuses 'covered'; the label and
+// colour above stay so lines that already carry it still read correctly until they go Back to pending.
 export const MANUAL_DISPOSITIONS = [
   { value: 'stock', label: 'Ship from stock' },
   { value: 'purchased', label: 'Purchase' },
   { value: 'assembly', label: 'Assembly' },
-  { value: 'covered', label: 'Covered by existing CO' },
   { value: 'ignore', label: 'Ignore' },
   { value: 'pending', label: 'Back to pending' },
 ]

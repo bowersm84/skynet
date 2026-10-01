@@ -18,7 +18,7 @@ import {
 const PURCHASE_ASKS_PART_TYPES = ['assembly', 'finished_good']
 
 // OrderQueue — FB1. Every Issued / In Progress Fishbowl sales order, mirrored live by the bridge,
-// waiting for a per-line call: ship from stock, purchase, assembly, covered, ignore — or Create CO,
+// waiting for a per-line call: ship from stock, purchase, assembly, ignore — or Create CO (D-FB-50 retired "covered"),
 // which drops the line into Customer Orders → Demand exactly like a hand-keyed CO (D-FB-12/13/26).
 // Exceptions (D-FB-15) and the change feed (fb_sync_events) live on their own tabs.
 export default function OrderQueue({ profile, onNavigate }) {

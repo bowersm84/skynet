@@ -328,6 +328,40 @@ export async function getQueueLines(fbSoId) {
   return data || []
 }
 
+// D-FB-51: the part numbers on each open SO, for the queue search — product, part and the customer's
+// own part number, lower-cased and space-joined per SO so `visible` can `includes()` them like the
+// header fields. 50 SO ids per request and paged within the request, because a chunk of large SOs
+// can exceed PostgREST's 1,000-row cap and a silently truncated page would hide a part from search.
+// Product and kit lines only (the isSelectableLine set): shipping lines carry "Freight" / "UPS ACCT ON
+// FILE" in product_num and their own codes in customer_part_num (153 of the 154 non-empty values on
+// PROD's open lines, 2026-10-01) — none of it a part number.
+export async function getQueuePartIndex(fbSoIds) {
+  const ids = [...new Set((fbSoIds || []).filter((v) => v !== null && v !== undefined))]
+  const sets = {}
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50)
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('fb_sales_order_lines')
+        .select('fb_so_id, product_num, part_num, customer_part_num')
+        .in('fb_so_id', chunk)
+        .in('type_id', [...PRODUCT_LINE_TYPES, 80])
+        .is('removed_at', null)
+        .order('fb_soitem_id', { ascending: true })
+        .range(from, from + 999)
+      if (error) throw error
+      for (const r of data || []) {
+        const s = (sets[r.fb_so_id] ||= new Set())
+        for (const v of [r.product_num, r.part_num, r.customer_part_num]) if (v) s.add(String(v).trim().toLowerCase())
+      }
+      if (!data || data.length < 1000) break
+    }
+  }
+  const out = {}
+  for (const [id, s] of Object.entries(sets)) out[id] = [...s].join(' ')
+  return out
+}
+
 // ── RPC wrappers (SECURITY DEFINER, gated server-side: order_processor / admin) ──
 // components: { [fb_soitem_id]: [component uuid, …] } — required by the RPC when disposition is
 // 'purchased' and the line's part has a bill of materials (D-FB-42); ignored otherwise.

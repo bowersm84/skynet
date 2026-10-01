@@ -8,7 +8,7 @@ import ExceptionsTab from '../components/orderqueue/ExceptionsTab'
 import RecentChangesTab from '../components/orderqueue/RecentChangesTab'
 import { canActOnOrderQueue } from '../lib/roles'
 import {
-  getSyncState, getQueueOrders, getQueueLines, getInventoryFor, getOpenExceptions, getRecentEvents,
+  getSyncState, getQueueOrders, getQueueLines, getQueuePartIndex, getInventoryFor, getOpenExceptions, getRecentEvents,
   setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS, getLineDetail, getPurchaseComponents,
   resolveException,
 } from '../lib/fishbowl'
@@ -26,6 +26,7 @@ export default function OrderQueue({ profile, onNavigate }) {
 
   const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes'
   const [orders, setOrders] = useState([])
+  const [partIndex, setPartIndex] = useState({})       // { [fb_so_id]: 'part numbers on the SO' } — D-FB-51 search
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
   const [search, setSearch] = useState('')
@@ -57,6 +58,14 @@ export default function OrderQueue({ profile, onNavigate }) {
       setLoadError(null)
       const rows = await getQueueOrders()
       setOrders(rows)
+      // D-FB-51: part numbers per SO for the search box. A failed read is logged, not shown — the
+      // SO / customer / PO / CO search keeps working and the part search matches nothing until the
+      // next refresh.
+      try {
+        setPartIndex(await getQueuePartIndex(rows.map((o) => o.fb_so_id)))
+      } catch (e) {
+        console.warn('queue part index read failed:', e?.message || e)
+      }
     } catch (e) {
       console.error('Order Queue load failed:', e)
       setLoadError(e?.message || String(e))
@@ -319,10 +328,10 @@ export default function OrderQueue({ profile, onNavigate }) {
       if (tab === 'queue' && !(o.pending_lines > 0)) return false
       if (salesmanFilter !== 'all' && o.salesman !== salesmanFilter) return false
       if (!q) return true
-      return [o.so_number, o.customer_name, o.customer_po, o.linked_co_number, o.salesman]
+      return [o.so_number, o.customer_name, o.customer_po, o.linked_co_number, o.salesman, partIndex[o.fb_so_id]]
         .some((v) => v && String(v).toLowerCase().includes(q))
     })
-  }, [orders, tab, salesmanFilter, search])
+  }, [orders, tab, salesmanFilter, search, partIndex])
 
   const queueCount = orders.filter((o) => o.pending_lines > 0).length
   const pendingLines = orders.reduce((s, o) => s + (o.pending_lines || 0), 0)
@@ -396,7 +405,7 @@ export default function OrderQueue({ profile, onNavigate }) {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="SO #, customer, PO, CO #"
+              placeholder="SO #, customer, PO, CO #, part #"
               className="w-full pl-9 pr-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
             />
           </div>

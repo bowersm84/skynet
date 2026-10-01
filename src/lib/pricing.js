@@ -510,36 +510,9 @@ export function diffBooks(baseItems, newItems, opts = null) {
   for (const k of Object.keys(a)) if (!b[k]) out.push({ kind: 'removed', part_number: a[k].part_number, from: a[k], fromEach: aEach.get(k) ?? null, toEach: null, pct: null })
   return out
 }
-// Fishbowl Products import CSV (ProductNumber, Price) from a book — interim write-back (D-PRICE-22).
-//
-// Carries `component_sum` rows as well as `priced` ones (D-PRICE-48). Until now only `priced` was
-// exported, so the 13 Common Sets never reached Fishbowl — their Fishbowl list has sat ~25% under book
-// since Rev 81 — and the 318 kits D-PRICE-46 added would not have reached it on Oct 1 either.
-//
-// `items` must already carry `_components` (see loadKitComponentsForItems). A set with none is treated
-// as UNRESOLVED, never as free: columnPrice() sums an empty component list to 0, and a 0 here would
-// import a $0.00 list price into Fishbowl for every kit. Same for a sum whose component is unpriced.
-// Pass `opts.stats` to receive { priced, sums, skipped_sums }.
-export function productsCsv(items, meta = null, book = null, opts = null) {
-  const byKey = new Map((items || []).map(i => [i.part_key, i]))
-  const resolve = (k) => byKey.get(k) || null
-  const stats = { priced: 0, sums: 0, skipped_sums: 0 }
-  const rows = []
-  for (const i of items || []) {
-    if (i.status === 'priced' && i.list_price !== null) {
-      rows.push([i.part_number, Number(i.list_price).toFixed(2)]); stats.priced++
-    } else if (i.status === 'component_sum') {
-      const each = i._components && i._components.length
-        ? columnPrice(i, 'each', meta, book, resolve)
-        : null
-      if (each === null || !Number.isFinite(Number(each))) { stats.skipped_sums++; continue }
-      rows.push([i.part_number, Number(each).toFixed(2)]); stats.sums++
-    }
-  }
-  if (opts && opts.stats) Object.assign(opts.stats, stats)
-  const esc = v => (/["\r\n,]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v)
-  return ['ProductNumber,Price', ...rows.map(r => r.map(esc).join(','))].join('\r\n') + '\r\n'
-}
+// The Fishbowl Product Pricing CSV (the manual fallback for the prices push) is fishbowlPricingCsv() in
+// fishbowlSync.js. It is built from pricing_fb_expected_products, so it carries the push's exact rows under
+// Fishbowl's own product numbers; the client-side productsCsv (D-PRICE-22/48) is gone (D-PRICE-55).
 
 // ---------------------------------------------------------------- price lists (C1, D-PRICE-21/29)
 // Rows for the builder: this customer's purchased parts priced on a date (RPC pricing_customer_sheet).

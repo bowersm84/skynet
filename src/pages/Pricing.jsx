@@ -1,7 +1,7 @@
 //
 // Pricing Portal — /pricing (S11, D-PRICE-17/25). Standalone route outside
 // MainApp, office session only (no PIN, no kiosk JWT): the SalesDashboard
-// auth pattern. Tabs: Lookup · Catalog · Customers · Price Books (Batch C).
+// auth pattern. Tabs: Lookup · Catalog · Customers · Price Books (Batch C) · Fishbowl Sync (D-PRICE-55).
 //
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -14,6 +14,7 @@ import PriceCatalog from '../components/pricing/PriceCatalog'
 import PriceCustomers from '../components/pricing/PriceCustomers'
 import PriceBooks from '../components/pricing/PriceBooks'
 import PriceDeviations from '../components/pricing/PriceDeviations'
+import FishbowlSync from '../components/pricing/FishbowlSync'
 import { Loader2, Tags, FileText, Layers, Users, BookOpen, Scale, LogOut, RefreshCw, AlertTriangle } from 'lucide-react'
 
 // Deviations names reps and what they quoted, so it is admin / pricing_manager only
@@ -22,6 +23,7 @@ const TABS = [
   { key: 'catalog', label: 'Catalog', icon: Layers },
   { key: 'customers', label: 'Customers', icon: Users },
   { key: 'books', label: 'Price Books', icon: BookOpen },
+  { key: 'fishbowl', label: 'Fishbowl Sync', icon: RefreshCw },
   { key: 'quote', label: 'Quote Builder', icon: FileText },
   { key: 'deviations', label: 'Deviations', icon: Scale, gate: canSeePricingDeviations },
 ]
@@ -145,6 +147,7 @@ export default function Pricing() {
         {tab === 'catalog' && (meta ? <PriceCatalog book={current} meta={meta} nextBook={next} canEdit={canEdit} /> : <div className="p-8 text-center"><Loader2 size={22} className="animate-spin text-gray-500 mx-auto" /></div>)}
         {tab === 'customers' && <PriceCustomers asOf={asOf} canEdit={canEdit} canSetTier={canSetTier} book={current} nextBook={next} profile={profile} />}
         {tab === 'books' && <PriceBooks canEdit={canEdit} onBooksChanged={refresh} />}
+        {tab === 'fishbowl' && <FishbowlSync canPush={canEdit} books={books} />}
         {tab === 'deviations' && (seeDeviations ? <PriceDeviations /> : <div className="text-sm text-gray-400">Deviations are visible to admin and pricing managers.</div>)}
       </main>
     </div>

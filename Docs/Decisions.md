@@ -4188,3 +4188,28 @@ percentage rules keep a 2-decimal Each. The sync status compares list prices at 
 **Verified** with one product first (82-11-080-20 at 1.705: $1.71 × 1, $1.53 × 300, $1.02 Tier 3), then pushed.
 **Knock-on:** Fishbowl's product screen and exports show 3-decimal list prices on those items; 1,786 items' discounted
 prices moved by a cent to match the price guide.
+
+### D-PRICE-55 — Pricing Portal: Fishbowl Sync tab (D-PRICE-53 Batch B)
+
+**Decision.** A **Fishbowl Sync** tab in the Pricing Portal (after Price Books) shows the D-PRICE-53 confirmation and
+lets admins push.
+- Everyone with portal access (admin, customer_service, president, viewer) sees: whether Fishbowl matches the book in
+  effect (or a preview of the next scheduled book); one row each for prices, pricing rules, product tree and customer
+  groups (matching, differences, last push, last read from Fishbowl); the difference lists from the four drift views
+  (first 500 rows, part numbers on every row); the last 20 pushes with Fishbowl's reply; the bridge heartbeat (the
+  Order Queue's SyncStatusBanner).
+- Admin only (`canEditPricing`, the same set `fb_push_enqueue` / `fb_push_cancel` enforce): Push buttons sized from the
+  status counts, a dry-run switch, "include resale" for prices and "also switch off non-SkyNet rules" for rules, a
+  confirmation that names what goes out, and Cancel on a command still queued. Pushes pass the portal's local date,
+  not the database's UTC date (which turns over at 8 pm Eastern). The page polls every 20 s while a push is queued or
+  running. Pushing is hidden while previewing a future book: `fb_push_auto` sends it at 02:10 on its first day.
+- Price Books' "Fishbowl Products CSV" becomes **"Fishbowl Product Pricing CSV"**, built from
+  `pricing_fb_expected_products(book, false)`: the rows a full prices push would send, under Fishbowl's own product
+  numbers (the book can spell a product differently, e.g. `Cloc2000Kit` / `CLoc 2000 Kit`, and 87 book items have no
+  Fishbowl product), header `Product,Price`, the book's three decimals for rule-priced items (D-PRICE-54), no resale
+  rows (the resale-kind Kit Hardware section included, as in the push). It is the manual fallback when the bridge is
+  down: Fishbowl Data › Import › Product Pricing. The client-side `productsCsv` (D-PRICE-22/48) is removed.
+- The push confirmation does not close on a backdrop click (D-UI-MODAL01).
+
+**No SQL.** Uses `pricing_fb_sync_status`, `fb_push_enqueue`, `fb_push_cancel`, `fb_push_commands` and the four
+`v_fb_*_drift` views as D-PRICE-53 left them. `fb_push_commands.payload` is never selected (up to ~1 MB per command).

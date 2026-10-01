@@ -3,18 +3,20 @@
 // clone (label / effective date / % uplift), edit a DRAFT (items, sections, rules,
 // bulk uplift of the whole book, set one section to a % over the in-effect book), diff
 // against another book, schedule / unschedule / publish, export the
-// Fishbowl Products CSV. Non-admins see the list and the diff, read-only.
+// Fishbowl Product Pricing CSV (the manual fallback for the Fishbowl Sync push, D-PRICE-55).
+// Non-admins see the list and the diff, read-only.
 //
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2, Copy, CalendarClock, Undo2, Percent, GitCompare, FileDown, Plus, Trash2, Save, AlertTriangle, BookOpen, Check, RefreshCw, ExternalLink } from 'lucide-react'
 import {
   loadBooks, loadBookMeta, loadBookItems, cloneBook, publishBook, unpublishBook, upliftBook, setSectionVsBase, upsertItem, deleteItem, upsertRule, upsertSection,
-  diffBooks, productsCsv, money, num, columnPrice,
+  diffBooks, money, num, columnPrice,
   loadKitComponentsForItems, refreshHardwareCosts, loadHardwareCostDrift, syncKitsSite,
 } from '../../lib/pricing'
 import { partitionKitSections } from '../../lib/pricingView'
 import { downloadBytes } from '../../lib/priceListDoc'
+import { fishbowlPricingCsv } from '../../lib/fishbowlSync'
 import { PartTypeahead } from './PricingTypeaheads'
 
 const STATUS_CLS = { active: 'bg-emerald-900 text-emerald-200', scheduled: 'bg-sky-900 text-sky-200', draft: 'bg-gray-700 text-gray-300', superseded: 'bg-gray-800 text-gray-500' }
@@ -172,7 +174,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
     try {
       const [m, its] = await Promise.all([loadBookMeta(bookId), loadBookItems(bookId)])
       // Sets and kits price as the sum of their components, so the book's components are loaded
-      // alongside its items — without them productsCsv would value every kit at zero (D-PRICE-48).
+      // alongside its items — without them every kit would price at zero (D-PRICE-48).
       const kitIds = its.filter(i => i.status === 'component_sum').map(i => i.id)
       const kc = kitIds.length ? await loadKitComponentsForItems(kitIds) : []
       setMeta(m); setItems(its); setComps(kc)
@@ -211,7 +213,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   }
   const run = async (fn, ok) => { setBusy(true); setError(null); try { await fn(); if (ok) note(ok) } catch (e) { setError(e.message || String(e)) } finally { setBusy(false) } }
 
-  // Items carrying their components, which is what productsCsv and any set/kit pricing needs.
+  // Items carrying their components, which any set/kit pricing needs.
   const compsByItem = useMemo(() => {
     const m = new Map()
     for (const c of comps) { const a = m.get(c.item_id); if (a) a.push(c); else m.set(c.item_id, [c]) }
@@ -374,12 +376,11 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
               </>
             )}
             {canEdit && book.status === 'scheduled' && <button onClick={() => { if (confirm(`Take ${book.rev_label} back to draft?`)) run(async () => { await unpublishBook(book.id); await refreshBooks() }, 'Back to draft') }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white"><Undo2 size={13} /> Unschedule (edit)</button>}
-            <button onClick={() => {
-              const stats = {}
-              const csv = productsCsv(enriched, meta, book, { stats })
-              downloadBytes(new TextEncoder().encode(csv), `Fishbowl_Products_${book.rev_label.replace(/[^A-Za-z0-9]+/g, '_')}.csv`, 'text/csv')
-              note(`Fishbowl Products CSV: ${num(stats.priced)} priced + ${num(stats.sums)} sets/kits${stats.skipped_sums ? ` (${num(stats.skipped_sums)} kits skipped — sum unresolved)` : ''}`)
-            }} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Fishbowl Products import (ProductNumber, Price) — priced parts plus every set and kit whose component sum resolves (D-PRICE-22/48)"><FileDown size={13} /> Fishbowl Products CSV</button>
+            <button onClick={() => run(async () => {
+              const r = await fishbowlPricingCsv(book.id)
+              downloadBytes(new TextEncoder().encode(r.csv), `Fishbowl_ProductPricing_${book.rev_label.replace(/[^A-Za-z0-9]+/g, '_')}.csv`, 'text/csv')
+              note(`Fishbowl Product Pricing CSV: ${num(r.rows)} products (${num(r.kits)} sets/kits, ${num(r.threeDp)} at the book's 3 decimals) under Fishbowl's own product numbers`)
+            })} className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-600 text-gray-200 text-xs hover:text-white" title="Fallback for the Fishbowl Sync push: the rows a full prices push would send, as a Product Pricing import file (Product, Price) — Data › Import › Product Pricing (D-PRICE-55)"><FileDown size={13} /> Fishbowl Product Pricing CSV</button>
           </div>
           {error && <div className="mb-3 flex items-center gap-2 text-sm text-rose-300 bg-rose-950/40 border border-rose-900 rounded px-3 py-2"><AlertTriangle size={14} /> {error}</div>}
           {flash && <div className="mb-3 flex items-center gap-2 text-sm text-emerald-300"><Check size={14} /> {flash}</div>}

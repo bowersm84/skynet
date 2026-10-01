@@ -104,16 +104,44 @@ export async function loadSectionItems(bookId, sectionId) {
   }
   return { items, comps }
 }
+// The one filter behind every book-wide search — part key, description and the xrefs — shared by
+// the parts list and the per-section counts (D-PRICE-60) so the two cannot match different things.
+// null when the term is empty after ilikeSafe.
+function itemSearchFilter(term) {
+  const t = ilikeSafe(term)
+  if (!t) return null
+  const key = partKey(t)
+  return `part_key.ilike.%${key}%,description.ilike.%${t}%,xref_arconic.ilike.%${t}%,xref_lisi.ilike.%${t}%,nsn.ilike.%${t}%,cessna.ilike.%${t}%`
+}
 // Items whose part number / description / xref matches, across the whole book.
 export async function searchItems(bookId, term, limit = 40) {
-  const t = ilikeSafe(term)
-  if (!t) return []
-  const key = partKey(t)
+  const f = itemSearchFilter(term)
+  if (!f) return []
   const { data, error } = await supabase.from('price_items')
     .select('id, section_id, part_number, part_key, description, list_price, rule_code, ladder_code, has_premier, dfar, status, xref_arconic, xref_lisi, nsn, cessna, range_of')
     .eq('book_id', bookId)
-    .or(`part_key.ilike.%${key}%,description.ilike.%${t}%,xref_arconic.ilike.%${t}%,xref_lisi.ilike.%${t}%,nsn.ilike.%${t}%,cessna.ilike.%${t}%`)
+    .or(f)
     .order('part_key').limit(limit)
+  if (error) throw error
+  return data || []
+}
+// Matching items per section over the WHOLE book, no limit — so a section's count, and the total,
+// are exact even when the parts list is capped (D-PRICE-60). One column, paged by fetchAll; a broad
+// stem over Rev 82 is a few thousand rows, the same shape as loadSectionItemCounts. Ordered by id so
+// the 1,000-row pages are stable and no row is counted twice or skipped between them.
+export async function searchItemSectionCounts(bookId, term) {
+  const f = itemSearchFilter(term)
+  if (!bookId || !f) return {}
+  const rows = await fetchAll(() => supabase.from('price_items').select('section_id').eq('book_id', bookId).or(f).order('id'))
+  const out = {}
+  for (const r of rows) out[r.section_id] = (out[r.section_id] || 0) + 1
+  return out
+}
+// Sections of one book, in book order — the Price List builder's "Add a section" picker (D-PRICE-57).
+// One narrow query; the builder has no use for the rules and ladders loadBookMeta carries.
+export async function loadBookSections(bookId) {
+  if (!bookId) return []
+  const { data, error } = await supabase.from('price_sections').select('id, name, sort, kind, source_row').eq('book_id', bookId).order('sort')
   if (error) throw error
   return data || []
 }

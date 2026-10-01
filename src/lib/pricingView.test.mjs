@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import {
   TIERS, LEVEL_TIERS, COLUMN_TIERS, TIER_LABELS, TIER_COLORS, isColumnTier,
   filterDeviations, summariseDeviations, deviationReps, DEVIATION_KINDS, DEVIATION_KIND_LABELS,
-  matchSections, partitionKitSections, pickKitsBook, kitRank,
+  matchSections, partitionKitSections, pickKitsBook, kitRank, findSectionInBook, sectionsForSearch,
 } from './pricingView.js'
 
 let n = 0
@@ -105,5 +105,50 @@ eq(pickKitsBook(noKits, null), { source: null, book: null, meta: null, sections:
 eq(pickKitsBook(null, null).source, null, 'no book at all does not throw')
 eq(pickKitsBook(noKits, { book: { id: 'b84' }, meta: null, sumSectionIds: new Set(['cowling']) }).source, null, 'a scheduled book whose meta has not loaded yet is not a source')
 eq(pickKitsBook({ ...noKits, meta: { sections: [{ id: 'hardware', name: 'Kit Hardware (cost-based)', sort: 1 }] } }, null).source, null, 'Kit Hardware on its own is not kits — it is what kits are built from')
+
+// ── findSectionInBook (D-PRICE-58): id, then source_row, then a UNIQUE name ──────────
+const r82 = [
+  { id: 'a', name: 'Flush Head Buttons', source_row: 10, sort: 1 },
+  { id: 'b', name: 'Flush Head Buttons', source_row: 11, sort: 2 },
+  { id: 'c', name: 'Stud Nut - Flat Head Series', source_row: 12, sort: 3 },
+  { id: 'd', name: 'Skybolt Kits — Cowling Kit', source_row: null, sort: 4 },
+]
+eq(findSectionInBook({ id: 'c', name: 'x', source_row: 99 }, r82)?.id, 'c', 'same book: the section itself, before any other rule')
+eq(findSectionInBook({ id: 'old', name: 'renamed', source_row: 11 }, r82)?.id, 'b', 'another book: source_row wins, whatever the name')
+eq(findSectionInBook({ id: 'old', name: 'stud nut - flat head series ', source_row: null }, r82)?.id, 'c', 'no source_row: a unique name matches, case and edge spaces ignored')
+eq(findSectionInBook({ id: 'old', name: 'Flush Head Buttons', source_row: null }, r82), null, 'a name carried by two sections is no match — never a guess')
+eq(findSectionInBook({ id: 'old', name: 'Flush Head Buttons', source_row: 500 }, r82), null, 'an unknown source_row does not fall through to a non-unique name')
+eq(findSectionInBook({ id: 'old', name: 'Skybolt Kits — Cowling Kit', source_row: null }, r82)?.id, 'd', 'a kit family with no source_row matches by its unique name')
+eq(findSectionInBook({ id: 'old', name: 'Not Here', source_row: null }, r82), null, 'absent is null')
+eq(findSectionInBook(null, r82), null, 'no section does not throw')
+eq(findSectionInBook({ id: 'x', name: 'y', source_row: 1 }, null), null, 'no sections does not throw')
+
+// ── sectionsForSearch (D-PRICE-60): name matches first, then sections that house matching parts ──
+const bookSecs = [
+  { id: 'plug', name: 'QL4 Plug Series - Cadmium Plated', sort: 1 },   // name match, 0 parts
+  { id: 'quad', name: 'Quad Lead Series - Cad Steel', sort: 2 },        // 30 matching parts
+  { id: 's1828', name: '1828 Series - Knurled Head Stud', sort: 3 },    // 22
+  { id: 'ql4x', name: 'QL4 External 2-Lead Series', sort: 4 },         // name match AND 14 parts
+  { id: 'caged', name: 'Quad Lead Series - Caged', sort: 5 },           // 3
+  { id: 'other', name: 'Safety Wire Pliers', sort: 6 },                 // nothing
+]
+const qlCounts = { quad: 30, s1828: 22, ql4x: 14, caged: 3, withdrawn: 9 }
+const ql = sectionsForSearch(bookSecs, 'ql', qlCounts)
+eq(ql.hits.map(s => s.id), ['quad', 's1828', 'ql4x', 'caged', 'plug'], 'ranked by matching parts whatever matched; a name match with no parts sinks to the bottom (D-PRICE-61)')
+eq(ql.hits.map(s => s.by), ['parts', 'parts', 'name', 'parts', 'name'], 'each hit says what matched')
+eq(ql.hits.map(s => s.matching), [30, 22, 14, 3, 0], 'a name match carries its own count, 0 when it houses nothing')
+const tie = sectionsForSearch(bookSecs, 'ql', { quad: 14, ql4x: 14, caged: 14 })
+eq(tie.hits.map(s => s.id), ['ql4x', 'quad', 'caged', 'plug'], 'on equal counts the name match leads, then book order')
+const sk = sectionsForSearch([...Array.from({ length: 25 }, (_, i) => ({ id: `sk${i}`, name: `Skybolt heading ${i}`, sort: i })), { id: 'holder', name: 'Buttons', sort: 99 }], 'sk', { holder: 7, sk3: 2 }, 20)
+eq(sk.hits.slice(0, 2).map(s => s.id), ['holder', 'sk3'], 'a bare stem matching many headings by name cannot bury the sections that hold its parts')
+eq(sk.more, 6, 'the name-only headings are still counted in the overflow')
+eq(ql.total_parts, 78, 'total is the whole-book sum, including sections not in the list')
+ok(!ql.hits.some(s => s.id === 'withdrawn'), 'a section not in the list (withdrawn into Kits) is never a hit')
+ok(!ql.hits.some(s => s.id === 'other'), 'no name match and no parts is not a hit')
+eq(sectionsForSearch(bookSecs, 'ql', null).hits.map(s => s.id), ['plug', 'ql4x'], 'without counts (still loading) the name matches stand alone')
+eq(sectionsForSearch(bookSecs, 'ql', null).total_parts, null, 'no counts, no total')
+eq(sectionsForSearch(bookSecs, 'ql', qlCounts, 2), { hits: ql.hits.slice(0, 2), more: 3, total_parts: 78 }, 'the limit cuts the merged list and reports the overflow')
+eq(sectionsForSearch(bookSecs, '  ', qlCounts).hits, [], 'whitespace is not a search')
+eq(sectionsForSearch(bookSecs, 'ql', {}).hits.map(s => s.id), ['plug', 'ql4x'], 'empty counts behave like name-only')
 
 console.log(`pricingView: ${n} assertions passed`)

@@ -87,6 +87,53 @@ export function matchSections(sections, term, limit = 8) {
   return { hits: all.slice(0, limit), more: Math.max(0, all.length - limit) }
 }
 
+// The section of another book that corresponds to `section` (D-PRICE-58 — exporting the open
+// section under the next revision). Same book: the section itself. Otherwise `source_row`, which
+// a clone carries across (Rev 81 → Rev 82: 196 of 196 matched, 0 renamed), and failing that the
+// name — but only when exactly one section of the target carries it, because names repeat
+// (Rev 82: Flush Head Buttons ×4, Skybolt CLoc® Tools ×6). No match is null, never a guess.
+export function findSectionInBook(section, sections) {
+  if (!section) return null
+  const list = sections || []
+  const same = list.find(s => s.id === section.id)
+  if (same) return same
+  if (section.source_row !== null && section.source_row !== undefined) {
+    const hit = list.find(s => s.source_row === section.source_row)
+    if (hit) return hit
+  }
+  const name = String(section.name || '').trim().toLowerCase()
+  if (!name) return null
+  const byName = list.filter(s => String(s.name || '').trim().toLowerCase() === name)
+  return byName.length === 1 ? byName[0] : null
+}
+
+// Sections for a search result (D-PRICE-60/61): the ones whose NAME matches (D-PRICE-52 A) and the
+// ones that HOUSE a matching part — reps type part-number stems ("QL"), and the section a stem lives
+// in is what they are after. One ranking for both: by matching-part count descending, ties name
+// before parts, then book order. A name match that houses no matching part has count 0 and sinks to
+// the bottom — a bare "SK" matches 145 "Skybolt…" headings by name, and without this they bury every
+// section that actually holds SK parts (D-PRICE-61). `partCounts` is { section_id: matching items }
+// from searchItemSectionCounts (exact, whole-book); null while it is still loading, which yields the
+// name matches alone in book order. Each hit carries `by` ('name' | 'parts') and `matching`. A
+// section absent from `sections` — a kit section withdrawn into the Kits tab — is left out, as
+// matchSections left it out. `total_parts` is the exact number of matching items across the book.
+export function sectionsForSearch(sections, term, partCounts, limit = 20) {
+  const t = String(term || '').trim().toLowerCase()
+  if (!t) return { hits: [], more: 0, total_parts: null }
+  const counts = partCounts || null
+  const list = sections || []
+  const all = []
+  for (const s of list) {
+    const byName = String(s.name || '').toLowerCase().includes(t)
+    const matching = counts ? Number(counts[s.id] || 0) : 0
+    if (byName) all.push({ ...s, by: 'name', matching })
+    else if (matching > 0) all.push({ ...s, by: 'parts', matching })
+  }
+  all.sort((a, b) => b.matching - a.matching || (a.by === b.by ? 0 : a.by === 'name' ? -1 : 1) || (a.sort ?? 0) - (b.sort ?? 0))
+  const total = counts ? Object.values(counts).reduce((a, n) => a + Number(n || 0), 0) : null
+  return { hits: all.slice(0, limit), more: Math.max(0, all.length - limit), total_parts: total }
+}
+
 // ---------------------------------------------------------------- kit sections
 // A section belongs to the Kits tab when it actually HOLDS a component_sum, plus the
 // Kit Hardware section (cost rows, not sums — matched by name). Partitioning by

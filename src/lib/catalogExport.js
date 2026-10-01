@@ -77,9 +77,13 @@ export function catalogRows({ items, sections, columns, price }) {
   return { rows: out.map(r => r.cells), stats }
 }
 
-export function catalogFilename(book, iso) {
-  const rev = String(book?.rev_label || 'book').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '')
-  return `Skybolt_Catalog_${rev}_${iso}.xlsx`
+// `section` (optional) scopes the name: Skybolt_Catalog_<rev>_<section>_<date>.xlsx (D-PRICE-58).
+// The section slug is capped so a long catalog heading cannot push the name past what Windows accepts.
+export function catalogFilename(book, iso, section = null) {
+  const slug = (s) => String(s || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '')
+  const rev = slug(book?.rev_label || 'book')
+  const sec = section?.name ? `_${slug(section.name).slice(0, 64).replace(/_$/, '')}` : ''
+  return `Skybolt_Catalog_${rev}${sec}_${iso}.xlsx`
 }
 
 // Excel sheet names: 31 chars, none of : \ / ? * [ ].

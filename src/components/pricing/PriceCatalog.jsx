@@ -8,17 +8,18 @@
 // Two views (D-PRICE-52): Catalog, and Kits — the same grid over the book's kit
 // sections, reading the SCHEDULED book while the book in effect has no kits.
 // Whole-book search matches section names as well as parts, and Export… writes
-// the whole book in effect to an internal XLSX.
+// the open section or the whole book, in the book in effect or the next scheduled
+// one, to an internal XLSX (D-PRICE-52 B, D-PRICE-58).
 //
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2, Search, ChevronRight, Layers, PanelLeftClose, PanelLeftOpen, ImagePlus, X, Package, FileDown, ExternalLink, CalendarClock } from 'lucide-react'
 import {
-  loadSectionItems, loadItemsByKeys, loadPartImages, loadSectionImages, addImage, deleteImage, searchItems,
+  loadSectionItems, loadItemsByKeys, loadPartImages, loadSectionImages, addImage, deleteImage, searchItems, searchItemSectionCounts,
   loadBookMeta, loadBookItems, loadKitComponentsForItems, loadSumSectionIds, loadSectionItemCounts, loadFbListPrices,
   bookPricer, sumDetail, itemColumns, money, num, round2, partKey, todayIso,
 } from '../../lib/pricing'
-import { matchSections, pickKitsBook } from '../../lib/pricingView'
+import { sectionsForSearch, pickKitsBook, findSectionInBook } from '../../lib/pricingView'
 import { catalogColumns, catalogRows, buildCatalogXlsx, catalogFilename } from '../../lib/catalogExport'
 import { downloadBytes } from '../../lib/priceListDoc'
 import ImageLightbox from './ImageLightbox'
@@ -111,24 +112,45 @@ function ItemGrid({ items, comps, extra, meta, book, sectionKind, kits, fbPrices
   )
 }
 
-// Export… — the whole book in effect as one internal XLSX (D-PRICE-52 B). Everything is
-// priced by the client engine over one whole-book load; pricing_customer_sheet's `all` mode
-// prices 4,800 rows one at a time and is not what this is for.
-function ExportDialog({ book, meta, onClose }) {
+// One option of the Export dialog's What / Revision pickers.
+function Choice({ on, disabled = false, onPick, title, children }) {
+  return (
+    <button type="button" onClick={onPick} disabled={disabled} title={title}
+      className={`w-full text-left px-2.5 py-1.5 rounded border text-xs leading-snug ${on ? 'border-skynet-accent text-white bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'} disabled:opacity-40 disabled:cursor-not-allowed`}>
+      {children}
+    </button>
+  )
+}
+
+// Export… — the open section or the whole book as one internal XLSX (D-PRICE-52 B, D-PRICE-58).
+// Everything is priced by the client engine over ONE whole-book load; a section is a filter on
+// that load, never a separate query, so a kit in the section still resolves its components from
+// the other sections. Revision: the book in effect, or the next scheduled one — never an earlier
+// book. pricing_customer_sheet's `all` mode prices 4,800 rows one at a time and is not what this is for.
+//   section     — the section open in the grid (null while a search is showing)
+//   sectionBook — the book that section belongs to (the Kits tab may be reading the scheduled book)
+function ExportDialog({ book, meta, nextBook, section, sectionBook, onClose }) {
+  const hasNext = !!nextBook?.id && nextBook.id !== book?.id
+  // Defaults follow the grid: the open section, in the book the grid is reading.
+  const [rev, setRev] = useState(() => (hasNext && section && sectionBook?.id === nextBook.id ? 'next' : 'current'))
+  const [scope, setScope] = useState(section ? 'section' : 'book')
+  const targetBook = rev === 'next' && hasNext ? nextBook : book
   const [busy, setBusy] = useState(true)
   const [err, setErr] = useState(null)
-  const [data, setData] = useState(null)        // { items, price }
-  const columns = useMemo(() => catalogColumns(meta), [meta])
-  const [picked, setPicked] = useState(() => new Set(columns.map(c => c.key)))
+  const [data, setData] = useState(null)        // { bookId, meta, items, price } of targetBook
+  // Keys the rep has UNticked, so a change of book — whose ladders may carry other columns — needs no reset.
+  const [unpicked, setUnpicked] = useState(() => new Set())
   const [writing, setWriting] = useState(false)
 
   useEffect(() => {
-    if (!book?.id) return
+    if (!targetBook?.id) return
     let cancelled = false
-    setBusy(true); setErr(null)
+    setBusy(true); setErr(null); setData(null)
     ;(async () => {
       try {
-        const items = await loadBookItems(book.id)
+        // The book in effect arrives with its meta; the scheduled book's is read here (three small queries).
+        const m = targetBook.id === book?.id ? meta : await loadBookMeta(targetBook.id)
+        const items = await loadBookItems(targetBook.id)
         // loadBookItems returns bare rows: a set with no `_components` sums to 0, not null,
         // so components must be attached before anything prices a kit (D-PRICE-48).
         const sumIds = items.filter(i => i.status === 'component_sum').map(i => i.id)
@@ -137,22 +159,34 @@ function ExportDialog({ book, meta, onClose }) {
         for (const c of comps) { const a = byItem.get(c.item_id); if (a) a.push(c); else byItem.set(c.item_id, [c]) }
         const enriched = items.map(i => (i.status === 'component_sum' ? { ...i, _components: byItem.get(i.id) || [] } : i))
         const byKey = new Map(enriched.map(i => [i.part_key, i]))
-        if (!cancelled) setData({ items: enriched, price: bookPricer(meta, book, k => byKey.get(k) || null) })
+        if (!cancelled) setData({ bookId: targetBook.id, meta: m, items: enriched, price: bookPricer(m, targetBook, k => byKey.get(k) || null) })
       } catch (e) { if (!cancelled) setErr(e.message || String(e)) } finally { if (!cancelled) setBusy(false) }
     })()
     return () => { cancelled = true }
-  }, [book, meta])
+  }, [targetBook, book, meta])
 
-  const selected = useMemo(() => columns.filter(c => picked.has(c.key)), [columns, picked])
-  const stats = useMemo(() => (data ? catalogRows({ items: data.items, sections: meta.sections, columns: [], price: data.price }).stats : null), [data, meta])
-  const toggle = (key) => setPicked(p => { const n = new Set(p); if (n.has(key)) n.delete(key); else n.add(key); return n })
+  const columns = useMemo(() => catalogColumns(data?.meta || meta), [data, meta])
+  const selected = useMemo(() => columns.filter(c => !unpicked.has(c.key)), [columns, unpicked])
+  const toggle = (key) => setUnpicked(p => { const n = new Set(p); if (n.has(key)) n.delete(key); else n.add(key); return n })
+
+  // The section to export, in the target book: itself when that is the book it belongs to, else its
+  // counterpart there (source_row, then a unique name — findSectionInBook). No counterpart: say so.
+  const targetSection = useMemo(() => (scope === 'section' && section && data ? findSectionInBook(section, data.meta.sections) : null), [scope, section, data])
+  const sectionMissing = scope === 'section' && !!section && !!data && !targetSection
+  const exportItems = useMemo(() => {
+    if (!data) return null
+    if (scope !== 'section') return data.items
+    return targetSection ? data.items.filter(i => i.section_id === targetSection.id) : []
+  }, [data, scope, targetSection])
+  const stats = useMemo(() => (data && exportItems ? catalogRows({ items: exportItems, sections: data.meta.sections, columns: [], price: data.price }).stats : null), [data, exportItems])
+  const canGo = !busy && !writing && !!data && !!selected.length && !sectionMissing && !!exportItems?.length
 
   const go = () => {
-    if (!data || !selected.length) return
+    if (!canGo) return
     setWriting(true); setErr(null)
     try {
-      const { rows } = catalogRows({ items: data.items, sections: meta.sections, columns: selected, price: data.price })
-      downloadBytes(buildCatalogXlsx({ book, columns: selected, rows }), catalogFilename(book, todayIso()), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      const { rows } = catalogRows({ items: exportItems, sections: data.meta.sections, columns: selected, price: data.price })
+      downloadBytes(buildCatalogXlsx({ book: targetBook, columns: selected, rows }), catalogFilename(targetBook, todayIso(), scope === 'section' ? targetSection : null), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       onClose()
     } catch (e) { setErr(e.message || String(e)) } finally { setWriting(false) }
   }
@@ -160,25 +194,47 @@ function ExportDialog({ book, meta, onClose }) {
   return (
     <div className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl p-5 space-y-3" onClick={e => e.stopPropagation()}>
-        <div className="text-white font-semibold flex items-center gap-2"><FileDown size={16} className="text-skynet-accent" /> Export the catalog — {book?.rev_label}</div>
-        <div className="text-[11px] text-gray-500">Internal working copy: every section of the book in effect, one sheet, no letterhead and no terms. A customer&apos;s document is the price list on the Customers tab.</div>
+        <div className="text-white font-semibold flex items-center gap-2"><FileDown size={16} className="text-skynet-accent" /> Export the catalog — {targetBook?.rev_label}</div>
+        <div className="text-[11px] text-gray-500">Internal working copy: one sheet, no letterhead and no terms. A customer&apos;s document is the price list on the Customers tab.</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">What</div>
+            <div className="flex flex-col gap-1.5">
+              <Choice on={scope === 'section'} disabled={!section} onPick={() => setScope('section')} title={section ? undefined : 'Open a section first — a search result has no section to export'}>
+                This section{section ? <span className="block text-gray-500 truncate" title={section.name}>{section.name}</span> : <span className="block text-gray-600">none open</span>}
+              </Choice>
+              <Choice on={scope === 'book'} onPick={() => setScope('book')}>Entire book<span className="block text-gray-500">every section, in book order</span></Choice>
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Revision</div>
+            <div className="flex flex-col gap-1.5">
+              <Choice on={rev === 'current'} onPick={() => setRev('current')}>{book?.rev_label}<span className="block text-gray-500">in effect from {book?.effective_from}</span></Choice>
+              {hasNext
+                ? <Choice on={rev === 'next'} onPick={() => setRev('next')}><span className="inline-flex items-center gap-1"><CalendarClock size={12} /> {nextBook.rev_label}</span><span className="block text-gray-500">scheduled — effective {nextBook.effective_from}</span></Choice>
+                : <div className="px-2.5 py-1.5 text-[11px] text-gray-600">No revision is scheduled after this one. Earlier revisions are not offered.</div>}
+            </div>
+          </div>
+        </div>
         <div>
           <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Columns</div>
           <div className="flex flex-wrap gap-2">
             {columns.map(c => (
-              <label key={c.key} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer ${picked.has(c.key) ? 'border-skynet-accent text-white bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'}`}>
-                <input type="checkbox" checked={picked.has(c.key)} onChange={() => toggle(c.key)} /> {c.label}
+              <label key={c.key} className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer ${!unpicked.has(c.key) ? 'border-skynet-accent text-white bg-skynet-accent/10' : 'border-gray-700 text-gray-400 hover:text-white'}`}>
+                <input type="checkbox" checked={!unpicked.has(c.key)} onChange={() => toggle(c.key)} /> {c.label}
               </label>
             ))}
           </div>
           <div className="mt-1 flex gap-3 text-[11px] text-gray-500">
-            <button onClick={() => setPicked(new Set(columns.map(c => c.key)))} className="hover:text-white">All</button>
-            <button onClick={() => setPicked(new Set(['each']))} className="hover:text-white">Each only</button>
+            <button onClick={() => setUnpicked(new Set())} className="hover:text-white">All</button>
+            <button onClick={() => setUnpicked(new Set(columns.filter(c => c.key !== 'each').map(c => c.key)))} className="hover:text-white">Each only</button>
           </div>
         </div>
-        {busy && <div className="flex items-center gap-2 text-sm text-gray-400"><Loader2 size={15} className="animate-spin" /> Reading {book?.rev_label}…</div>}
-        {stats && (
+        {busy && <div className="flex items-center gap-2 text-sm text-gray-400"><Loader2 size={15} className="animate-spin" /> Reading {targetBook?.rev_label}…</div>}
+        {sectionMissing && <div className="text-amber-300 text-xs">&quot;{section.name}&quot; is not a section of {targetBook?.rev_label}. Export the entire book, or open the section in that revision and export from there.</div>}
+        {stats && !sectionMissing && (
           <div className="text-sm text-gray-300">
+            {scope === 'section' && targetSection ? <span className="text-gray-400">{targetSection.name} · </span> : ''}
             {num(stats.priced)} priced parts · {num(stats.sums)} sets/kits · {num(selected.length)} column{selected.length === 1 ? '' : 's'}
             {stats.skipped ? <span className="text-rose-300"> · {num(stats.skipped)} kit{stats.skipped === 1 ? '' : 's'} skipped (a component has no price)</span> : ''}
             {stats.no_price ? <span className="text-gray-500"> · {num(stats.no_price)} without a price, left out</span> : ''}
@@ -187,7 +243,7 @@ function ExportDialog({ book, meta, onClose }) {
         {err && <div className="text-rose-300 text-xs">{err}</div>}
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">Cancel</button>
-          <button onClick={go} disabled={busy || writing || !selected.length} className="px-3 py-1.5 text-sm rounded bg-skynet-accent text-gray-900 font-medium disabled:opacity-50">{writing ? 'Building…' : 'Export XLSX'}</button>
+          <button onClick={go} disabled={!canGo} className="px-3 py-1.5 text-sm rounded bg-skynet-accent text-gray-900 font-medium disabled:opacity-50">{writing ? 'Building…' : scope === 'section' ? 'Export section' : 'Export book'}</button>
         </div>
       </div>
     </div>
@@ -216,6 +272,7 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
   const [hits, setHits] = useState(null)   // search mode when non-null
   const [filter, setFilter] = useState('')
   const [counts, setCounts] = useState(null)   // { bookId, bySection } — section sizes for the search results
+  const [partSecs, setPartSecs] = useState(null)   // { bookId, term, bySection } — matching items per section for the term (D-PRICE-60)
 
   // ── which book the Kits tab reads ───────────────────────────────────────────────
   // The book in effect as soon as it carries kits (Oct 1); until then the scheduled book,
@@ -296,14 +353,18 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
     return () => { cancelled = true }
   }, [onKits, kits.showFishbowl, items])
 
-  // Book-wide search → a synthetic "results" grid.
+  // Book-wide search → a synthetic "results" grid. The parts list (capped at 200) and the exact
+  // per-section counts (D-PRICE-60) are read together, so the Sections panel never shows name
+  // matches alone for a term whose counts are still on their way.
   useEffect(() => {
     if (!activeBook?.id) return
     const t = term.trim()
-    if (t.length < 2) { setHits(null); return }
+    if (t.length < 2) { setHits(null); setPartSecs(null); return }
     let cancelled = false
     const h = setTimeout(() => {
-      searchItems(activeBook.id, t, 200).then(r => { if (!cancelled) setHits(r) }).catch(err => console.error('catalog search', err))
+      Promise.all([searchItems(activeBook.id, t, 200), searchItemSectionCounts(activeBook.id, t)])
+        .then(([r, c]) => { if (!cancelled) { setPartSecs({ bookId: activeBook.id, term: t, bySection: c }); setHits(r) } })
+        .catch(err => console.error('catalog search', err))
     }, 250)
     return () => { cancelled = true; clearTimeout(h) }
   }, [activeBook?.id, term])
@@ -314,8 +375,13 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
     loadSectionItemCounts(activeBook.id).then(c => { if (!cancelled) setCounts({ bookId: activeBook.id, bySection: c }) }).catch(() => {})
     return () => { cancelled = true }
   }, [activeBook?.id, hits, counts?.bookId])
-  // Searching the whole book matches SECTION NAMES as well as parts (D-PRICE-52 A).
-  const sectionHits = useMemo(() => matchSections(sections, term.trim().length >= 2 ? term : ''), [sections, term])
+  // Searching the whole book matches SECTION NAMES (D-PRICE-52 A) and lists the sections that HOUSE
+  // matching parts (D-PRICE-60). Counts are used only when they belong to this term and this book.
+  const sectionHits = useMemo(() => {
+    const t = term.trim()
+    const c = partSecs && partSecs.term === t && partSecs.bookId === activeBook?.id ? partSecs.bySection : null
+    return sectionsForSearch(sections, t.length >= 2 ? t : '', c)
+  }, [sections, term, partSecs, activeBook?.id])
 
   const visible = useMemo(() => {
     const f = partKey(filter)
@@ -358,7 +424,7 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
 
   return (
     <div className="space-y-3">
-      {showExport && meta && book && <ExportDialog book={book} meta={meta} onClose={() => setShowExport(false)} />}
+      {showExport && meta && book && <ExportDialog book={book} meta={meta} nextBook={nextBook} section={hits !== null ? null : section} sectionBook={activeBook} onClose={() => setShowExport(false)} />}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex gap-1">
           {VIEWS.map(v => (
@@ -409,7 +475,7 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
             {hits !== null ? (
               <>
                 <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-white font-semibold flex items-center gap-2"><Search size={16} className="text-skynet-accent" /> {sectionHits.hits.length ? `${sectionHits.hits.length} section${sectionHits.hits.length === 1 ? '' : 's'} · ` : ''}{hits.length} part{hits.length === 1 ? '' : 's'} for &quot;{term}&quot;</h2>
+                  <h2 className="text-white font-semibold flex items-center gap-2"><Search size={16} className="text-skynet-accent" /> {sectionHits.hits.length + sectionHits.more ? `${num(sectionHits.hits.length + sectionHits.more)} section${sectionHits.hits.length + sectionHits.more === 1 ? '' : 's'} · ` : ''}{num(sectionHits.total_parts ?? hits.length)} part{(sectionHits.total_parts ?? hits.length) === 1 ? '' : 's'} for &quot;{term}&quot;</h2>
                   <button onClick={() => setTerm('')} className="text-xs text-gray-400 hover:text-white">Back to sections</button>
                 </div>
                 {sectionHits.hits.length > 0 && (
@@ -420,14 +486,18 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
                         <button key={s.id} onClick={() => { pickSection(s.id); setTerm(''); setFilter('') }} className="w-full text-left px-3 py-2 text-sm flex items-center gap-2 border-b border-gray-800 last:border-b-0 text-gray-200 hover:bg-gray-800/60">
                           <Layers size={13} className="text-skynet-accent shrink-0" />
                           <span className="min-w-0 truncate">{s.name}</span>
-                          <span className="ml-auto text-xs text-gray-500 shrink-0">{counts?.bookId === activeBook?.id ? `${num(counts.bySection[s.id] || 0)} items` : '…'}</span>
+                          <span className="ml-auto text-xs text-gray-500 shrink-0">
+                            {counts?.bookId !== activeBook?.id ? '…'
+                              : s.matching ? <>{num(s.matching)} of {num(counts.bySection[s.id] || 0)} items match</>
+                              : <>name · {num(counts.bySection[s.id] || 0)} items</>}
+                          </span>
                         </button>
                       ))}
-                      {sectionHits.more > 0 && <div className="px-3 py-1.5 text-xs text-gray-500">+{num(sectionHits.more)} more section{sectionHits.more === 1 ? '' : 's'} match &quot;{term}&quot;</div>}
+                      {sectionHits.more > 0 && <div className="px-3 py-1.5 text-xs text-gray-500">+{num(sectionHits.more)} more section{sectionHits.more === 1 ? '' : 's'} match &quot;{term}&quot; — narrow the search</div>}
                     </div>
                   </div>
                 )}
-                <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Parts</div>
+                <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Parts{sectionHits.total_parts !== null && hits.length < sectionHits.total_parts ? <span className="normal-case tracking-normal text-gray-600"> · showing the first {num(hits.length)} of {num(sectionHits.total_parts)} — open a section above for the rest</span> : ''}</div>
                 {hits.length ? (
                   <div className="overflow-auto rounded-xl border border-gray-700">
                     <table className="min-w-full text-sm">

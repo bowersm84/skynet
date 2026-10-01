@@ -69,6 +69,16 @@ ok(!noEach.rows.some(r => r[1] === 'RV1014J-C1P'), 'resolution is judged on Each
 
 // ── filename ──────────────────────────────────────────────────────────────────────
 eq(catalogFilename({ rev_label: 'Rev 82 — Oct 2026' }, '2026-09-16'), 'Skybolt_Catalog_Rev_82_Oct_2026_2026-09-16.xlsx', 'filename carries the revision and the date')
+eq(catalogFilename({ rev_label: 'Rev 82 — Oct 2026' }, '2026-10-01', { name: 'Stud Nut - Flat Head Series - 300 Stainless - #8-32 4 Lead Thread' }),
+  'Skybolt_Catalog_Rev_82_Oct_2026_Stud_Nut_Flat_Head_Series_300_Stainless_8_32_4_Lead_Thread_2026-10-01.xlsx', 'a section export carries the section between revision and date (D-PRICE-58)')
+eq(catalogFilename({ rev_label: 'Rev 82' }, '2026-10-01', { name: 'A'.repeat(80) }), `Skybolt_Catalog_Rev_82_${'A'.repeat(64)}_2026-10-01.xlsx`, 'the section slug is capped at 64 characters')
+eq(catalogFilename({ rev_label: 'Rev 82' }, '2026-10-01', null), 'Skybolt_Catalog_Rev_82_2026-10-01.xlsx', 'no section, no slug')
+
+// ── a section export is a filter on the whole-book load (D-PRICE-58) ───────────────
+// The kit in s2 resolves its component from s1 even though only s2's rows are exported.
+const onlyKits = catalogRows({ items: items.filter(i => i.section_id === 's2'), sections: meta.sections, columns: cols, price })
+eq(onlyKits.stats, { priced: 0, sums: 1, skipped: 1, no_price: 0 }, 'section scope counts only that section\'s rows')
+eq(onlyKits.rows.map(r => r[1]), ['AC500-C1'], 'the resolved kit exports with its component priced from another section')
 
 // ── the workbook: header set, number format, frozen top row ───────────────────────
 const bytes = buildCatalogXlsx({ book: { rev_label: 'Rev 82 — Oct 2026' }, columns: picked, rows: two.rows })

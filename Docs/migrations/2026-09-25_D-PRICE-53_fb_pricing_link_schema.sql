@@ -362,8 +362,9 @@ END $$;
 /* ============================================================================================ */
 /* BLOCK 5 -- expected Fishbowl state, derived from a book                                        */
 /* ============================================================================================ */
-/* Product prices: every priced catalog row and every resolved set/kit Each (round half-up to 2 dp
-   in SQL -- the D-PRICE-22 client export used toFixed(2), which rounds 48.355 to 48.35). Resale rows
+/* Product prices: the list price Fishbowl should hold for every priced catalog row and every resolved
+   set/kit -- the book's list price to the last decimal for items priced by the SkyNet percentage rules,
+   otherwise the Each at 2 dp (round half-up in SQL; the D-PRICE-22 export used toFixed(2)). Resale rows
    are Fishbowl-owned (D-PRICE-13) and are included only on request. kind: catalog | kit | resale.
    Only products Fishbowl knows (fb_products, not removed) are returned; the rest is reported by
    pricing_fb_sync_status as not_in_fishbowl. */
@@ -374,13 +375,21 @@ AS $$
   WITH each AS (
     SELECT p.item_id, p.unit_price FROM public.pricing_item_prices(p_book) p WHERE p.col_key = 'each'
   )
-  SELECT f.product_num, round(e.unit_price, 2) AS price,
+  SELECT f.product_num,
+         /* items Fishbowl prices through the SkyNet percentage rules carry the book's list price to the last
+            decimal (Fishbowl takes up to 4), so every percentage lands on SkyNet's cent; their each band is
+            rounded to the cent by the 'SN .. EA' rule. Everything else carries its Each at 2 dp.
+            (Matt 2026-09-28: three decimals.) */
+         CASE WHEN s.kind = 'catalog' AND i.status = 'priced' AND jsonb_array_length(COALESCE(l.columns, '[]'::jsonb)) > 0 AND EXISTS (SELECT 1 FROM public.price_rules r WHERE r.book_id = i.book_id AND r.code = i.rule_code)
+              THEN trim_scale(round(i.list_price, 4))
+              ELSE round(e.unit_price, 2) END AS price,
          CASE WHEN i.status = 'component_sum' THEN 'kit' WHEN s.kind = 'resale' THEN 'resale' ELSE 'catalog' END AS kind,
          i.part_key
   FROM public.price_items i
   JOIN public.price_sections s ON s.id = i.section_id
   JOIN each e ON e.item_id = i.id
   JOIN public.fb_products f ON f.product_key = i.part_key AND f.removed_at IS NULL
+  LEFT JOIN public.price_ladders l ON l.book_id = i.book_id AND l.code = i.ladder_code
   WHERE i.book_id = p_book
     AND i.status IN ('priced','component_sum')
     AND e.unit_price IS NOT NULL
@@ -443,7 +452,7 @@ AS $$
 $$;
 
 /* The rule set. One row per Fishbowl pricing rule the book implies, in the Pricing Rules import's
-   column order. kind: break | tier | premier | column | kit_break | kit_tier | kit_column | exception.
+   column order. kind: each | break | tier | premier | column | kit_break | kit_tier | kit_column | exception.
    Names are unique and <= 30 chars (asserted). No temp tables, no SELECT INTO: one CTE chain
    collected into jsonb, guarded, then returned. */
 CREATE OR REPLACE FUNCTION public.pricing_fb_expected_rules(p_book uuid, p_as_of date DEFAULT CURRENT_DATE)
@@ -510,6 +519,16 @@ BEGIN
 
   v_rows := (
     WITH
+    /* customer groups that exist in Fishbowl (a member of each is in the customer mirror). Group rules are
+       generated only for these: Fishbowl's Pricing Rules import cannot point a rule at a group that does
+       not exist, and the Customer Group Relations push is what creates a group (PROD 2026-09-25). A tier
+       assigned in SkyNet therefore reaches Fishbowl as: groups push -> the group exists -> rules push. */
+    live_groups AS (
+      SELECT g.tier, g.group_name
+      FROM public.fb_group_map g
+      WHERE EXISTS (SELECT 1 FROM public.fb_customers c
+                    WHERE c.removed_at IS NULL AND g.group_name = ANY (COALESCE(c.account_groups, '{}')))
+    ),
     /* ---- catalog combos: (rule, ladder) pairs that price at least one catalog item ------------- */
     combos AS (
       SELECT i.rule_code, i.ladder_code, 'Product:SkyNet:' || i.rule_code || ':' || i.ladder_code AS path,
@@ -520,6 +539,19 @@ BEGIN
       JOIN public.price_rules r ON r.book_id = i.book_id AND r.code = i.rule_code
       WHERE i.book_id = p_book AND i.status = 'priced'
       GROUP BY i.rule_code, i.ladder_code, l.columns
+    ),
+    /* each band: 100% of the list price rounded to the cent, below the first quantity break (all quantities
+       on a ladder without breaks). List prices go to Fishbowl with the book's three decimals, so without it
+       a 1-99 line would charge 1.705. */
+    eaches AS (
+      SELECT 'each'::text AS kind, 'SN ' || c.rule_code || ' ' || public._fb_ladder_abbrev(c.ladder_code) || ' EA' AS name,
+             'SkyNet rule ' || c.rule_code || ' / ' || c.ladder_code || ' each, list price to the cent' AS description,
+             'Product Tree'::text AS product_incl_type, c.path AS product, 'Percent'::text AS pa_type, 100::numeric AS pa_percent, 0::numeric AS pa_amount,
+             'All'::text AS customer_incl_type, ''::text AS customer, fq.first_min IS NOT NULL AS qty_applies,
+             (CASE WHEN fq.first_min IS NOT NULL THEN 1 ELSE 0 END)::numeric AS qty_min, COALESCE(fq.first_min - 1, 0)::numeric AS qty_max, 5 AS sort
+      FROM combos c
+      CROSS JOIN LATERAL (SELECT MIN((q.col->>'min')::numeric) AS first_min FROM jsonb_array_elements(c.columns) q(col) WHERE q.col->>'kind' = 'qty') fq
+      WHERE fq.first_min IS NULL OR fq.first_min > 1
     ),
     /* quantity breaks: All customers, bounded ranges */
     breaks AS (
@@ -542,7 +574,7 @@ BEGIN
              'SkyNet rule ' || c.rule_code || ' / ' || c.ladder_code || ' ' || g.tier,
              'Product Tree'::text, c.path, 'Percent'::text, round(m.mult * 100, 4), 0::numeric, 'Customer Group'::text, g.group_name, false, 0::numeric, 0::numeric, 20
       FROM combos c
-      JOIN public.fb_group_map g ON g.tier IN ('tier1','tier2','tier3','premier')
+      JOIN live_groups g ON g.tier IN ('tier1','tier2','tier3','premier')
       CROSS JOIN LATERAL (
         SELECT public._pricing_multiplier(p_book, c.rule_code, c.ladder_code, t.k) AS mult
         FROM unnest(ARRAY['tier3','tier2','tier1']) WITH ORDINALITY AS t(k, o)
@@ -562,6 +594,7 @@ BEGIN
              'Customer Group'::text, (SELECT g.group_name FROM public.fb_group_map g WHERE g.tier = 'premier'), false, 0::numeric, 0::numeric, 30
       FROM combos c
       WHERE c.has_premier AND public._pricing_multiplier(p_book, c.rule_code, c.ladder_code, 'tier3') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM live_groups lg WHERE lg.tier = 'premier')
     ),
     /* column groups: that column regardless of quantity, or Each (100%) where the ladder lacks it */
     cols AS (
@@ -572,7 +605,7 @@ BEGIN
                        WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(c.columns) e WHERE e->>'key' = g.tier)), 100)::numeric,
              0::numeric, 'Customer Group'::text, g.group_name, false, 0::numeric, 0::numeric, 40
       FROM combos c
-      JOIN public.fb_group_map g ON g.tier IN ('q100','q300','q500')
+      JOIN live_groups g ON g.tier IN ('q100','q300','q500')
     ),
     /* ---- sets and kits, step 2: Fixed price rules on the product, from step 1's prices. Window functions
        give each row its kit's Each, the next quantity of its band and whether the group's price varies
@@ -601,7 +634,7 @@ BEGIN
              p.banded, CASE WHEN p.banded THEN p.qty ELSE 0 END,
              CASE WHEN p.banded THEN COALESCE(p.next_qty - 1, 0) ELSE 0 END, 60
       FROM kit_prices p
-      JOIN public.fb_group_map g ON g.tier = p.tier
+      JOIN live_groups g ON g.tier = p.tier
       WHERE p.tier IN ('tier1','tier2','tier3','premier') AND p.price IS NOT NULL AND (p.banded OR p.qty = 1)
     ),
     /* column groups on kits: quantity-free by construction */
@@ -609,7 +642,7 @@ BEGIN
       SELECT 'kit_column'::text, 'SN K ' || p.product_num || ' C' || substr(p.tier, 2), 'SkyNet kit ' || p.product_num || ' column ' || p.tier,
              'Product'::text, p.product_num, 'Fixed price'::text, 0::numeric, round(p.price, 2), 'Customer Group'::text, g.group_name, false, 0::numeric, 0::numeric, 70
       FROM kit_prices p
-      JOIN public.fb_group_map g ON g.tier = p.tier
+      JOIN live_groups g ON g.tier = p.tier
       WHERE p.tier IN ('q100','q300','q500') AND p.qty = 1 AND p.price IS NOT NULL
     ),
     /* ---- customer x part exceptions open on the date --------------------------------------- */
@@ -629,7 +662,7 @@ BEGIN
         AND (e.mode = 'fixed' OR public._pricing_multiplier(p_book, i.rule_code, i.ladder_code, 'tier3') IS NOT NULL)
     ),
     all_rows (kind, name, description, product_incl_type, product, pa_type, pa_percent, pa_amount, customer_incl_type, customer, qty_applies, qty_min, qty_max, sort) AS (
-      SELECT * FROM breaks UNION ALL SELECT * FROM tiers UNION ALL SELECT * FROM premier UNION ALL SELECT * FROM cols
+      SELECT * FROM eaches UNION ALL SELECT * FROM breaks UNION ALL SELECT * FROM tiers UNION ALL SELECT * FROM premier UNION ALL SELECT * FROM cols
       UNION ALL SELECT * FROM kit_breaks UNION ALL SELECT * FROM kit_tiers UNION ALL SELECT * FROM kit_cols UNION ALL SELECT * FROM exceptions
     )
     SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.sort, a.name), '[]'::jsonb) FROM all_rows a
@@ -659,10 +692,10 @@ END $$;
 CREATE OR REPLACE VIEW public.v_fb_price_drift AS
 WITH b AS (SELECT public.pricing_book_for_date(CURRENT_DATE) AS id),
 e AS (SELECT * FROM public.pricing_fb_expected_products((SELECT id FROM b), true))
-SELECT e.product_num, e.kind, e.price AS book_price, round(f.list_price, 2) AS fb_price,
-       round(f.list_price, 2) - e.price AS delta,
-       CASE WHEN round(f.list_price, 2) = e.price THEN 'in_sync' WHEN f.list_price = 0 THEN 'fb_zero' ELSE 'mismatch' END AS state
-FROM e JOIN public.fb_products f ON f.product_key = e.part_key AND f.removed_at IS NULL
+SELECT e.product_num, e.kind, e.price AS book_price, trim_scale(round(f.list_price, 4)) AS fb_price,
+       round(f.list_price, 4) - e.price AS delta,
+       CASE WHEN round(f.list_price, 4) = e.price THEN 'in_sync' WHEN f.list_price = 0 THEN 'fb_zero' ELSE 'mismatch' END AS state
+FROM e JOIN public.fb_products f ON f.product_num = e.product_num AND f.removed_at IS NULL
 UNION ALL
 SELECT i.part_number, CASE WHEN i.status = 'component_sum' THEN 'kit' WHEN s.kind = 'resale' THEN 'resale' ELSE 'catalog' END, round(p.unit_price, 2), NULL, NULL, 'not_in_fishbowl'
 FROM public.price_items i
@@ -735,15 +768,18 @@ BEGIN
   v_rules_loaded := v_state.last_rules_at IS NOT NULL;
   v_tree_loaded := v_state.last_tree_at IS NOT NULL;
 
-  /* one pricing_item_prices pass (it is the expensive part): the same rows pricing_fb_expected_products returns */
+  /* one pricing_item_prices pass (it is the expensive part): the same rows and prices pricing_fb_expected_products returns */
   v_products := (
     WITH all_each AS MATERIALIZED (
-           SELECT i.id, i.part_number, i.part_key, i.status, s.kind AS section_kind, p.unit_price
+           SELECT i.id, i.part_number, i.part_key, i.status, s.kind AS section_kind, p.unit_price,
+                  CASE WHEN s.kind = 'catalog' AND i.status = 'priced' AND jsonb_array_length(COALESCE(l.columns, '[]'::jsonb)) > 0 AND EXISTS (SELECT 1 FROM public.price_rules r WHERE r.book_id = i.book_id AND r.code = i.rule_code)
+                       THEN trim_scale(round(i.list_price, 4)) ELSE round(p.unit_price, 2) END AS exp_price
            FROM public.price_items i JOIN public.price_sections s ON s.id = i.section_id
            JOIN public.pricing_item_prices(v_book) p ON p.item_id = i.id AND p.col_key = 'each'
+           LEFT JOIN public.price_ladders l ON l.book_id = i.book_id AND l.code = i.ladder_code
            WHERE i.book_id = v_book AND i.status IN ('priced','component_sum') AND p.unit_price IS NOT NULL),
          fbj AS MATERIALIZED (
-           SELECT a.part_key, a.status, a.section_kind, round(a.unit_price, 2) AS price, f.product_num, f.list_price, round(f.list_price, 2) AS fb_price
+           SELECT a.part_key, a.status, a.section_kind, a.exp_price AS price, f.product_num, f.list_price, trim_scale(round(f.list_price, 4)) AS fb_price
            FROM all_each a JOIN public.fb_products f ON f.product_key = a.part_key AND f.removed_at IS NULL),
          e AS (SELECT * FROM fbj WHERE section_kind <> 'resale'),
          r AS (SELECT * FROM fbj WHERE section_kind = 'resale' AND status <> 'component_sum')
@@ -831,7 +867,7 @@ BEGIN
 END $$;
 
 /* Enqueue: builds the payload from the expected-set functions at enqueue time (what was pushed is stored).
-   kind prices -> Product import (ProductNumber, Price); rules -> Pricing-Rules; tree -> Product-Tree-Categories
+   kind prices -> Product-Pricing import (Product, Price); rules -> Pricing-Rules; tree -> Product-Tree-Categories
    then Product-Tree (two payloads, one command: categories first); groups -> Customer-Group-Relations.
    options: {"include_resale": bool, "retire_legacy": bool, "only_changed": bool (default true),
              "only_products": ["SK2600-1", ...] (prices only)}. Edit roles or the bridge. */
@@ -854,12 +890,17 @@ BEGIN
   v_resale := COALESCE((p_options->>'include_resale')::boolean, false);
 
   IF p_kind = 'prices' THEN
-    v_import := 'Product';
+    /* Fishbowl's Product Pricing import (list prices only): columns Product, Price -- the same header as its
+       Product Pricing export. NOT the Product import, which creates/edits whole products and needs PartNumber
+       first (PROD 2026-09-25: it read a ProductNumber header as a part number and rejected the file). */
+    v_import := 'Product-Pricing';
     v_payload := (
-      SELECT jsonb_build_array(jsonb_build_array('ProductNumber', 'Price')) || COALESCE(jsonb_agg(jsonb_build_array(e.product_num, e.price::text) ORDER BY e.product_num), '[]'::jsonb)
+      SELECT jsonb_build_array(jsonb_build_array('Product', 'Price')) || COALESCE(jsonb_agg(jsonb_build_array(e.product_num, trim_scale(e.price)::text) ORDER BY e.product_num), '[]'::jsonb)
       FROM public.pricing_fb_expected_products(v_book, v_resale) e
-      JOIN public.fb_products f ON f.product_key = e.part_key AND f.removed_at IS NULL
-      WHERE (NOT v_only_changed OR round(f.list_price, 2) IS DISTINCT FROM e.price)
+      /* join on the product NUMBER, which Fishbowl keeps unique: two products can share a key
+         ('SK-N114-2S' / 'SK-N114 -2S'), and a key join would send each of them twice */
+      JOIN public.fb_products f ON f.product_num = e.product_num AND f.removed_at IS NULL
+      WHERE (NOT v_only_changed OR round(f.list_price, 4) IS DISTINCT FROM e.price)
         /* only_products: an explicit list (smoke tests: push one product) */
         AND (p_options->'only_products' IS NULL
              OR e.part_key IN (SELECT upper(regexp_replace(x, '\s', '', 'g')) FROM jsonb_array_elements_text(p_options->'only_products') x)));
@@ -884,14 +925,17 @@ BEGIN
            OR (e.rnd_applies AND (m.round_type IS DISTINCT FROM e.round_type OR round(COALESCE(m.rnd_to_amount,0),4) IS DISTINCT FROM e.rnd_to_amount
                                   OR round(COALESCE(m.rnd_pm_amount,0),4) IS DISTINCT FROM e.rnd_pm_amount))
         UNION ALL
-        /* retire: every active rule Fishbowl holds that SkyNet does not own, re-sent unchanged with isActive FALSE */
+        /* deactivate, re-sent unchanged with isActive false: every active 'SN ' rule SkyNet no longer expects
+           (a closed exception, a kit gone from the book, a band that changed name on a new book) -- always,
+           because SkyNet owns those names -- and, with retire_legacy, every other active rule */
         SELECT 'zz ' || m.name, jsonb_build_array(m.name, COALESCE(m.description, ''), 'false', m.product_incl_type, COALESCE(m.product, ''), CASE WHEN m.pa_applies THEN 'true' ELSE 'false' END, m.pa_type,
                  public._fb_pct(COALESCE(m.pa_percent, 0)), COALESCE(m.pa_base_amount_type, 'Product Price'), public._fb_money(COALESCE(m.pa_amount, 0)),
                  CASE WHEN m.rnd_applies THEN 'true' ELSE 'false' END, COALESCE(m.round_type, 'Round to nearest'), public._fb_money(COALESCE(m.rnd_to_amount, 0.01)), CASE WHEN m.rnd_is_minus THEN 'true' ELSE 'false' END, public._fb_money(COALESCE(m.rnd_pm_amount, 0)),
                  m.customer_incl_type, COALESCE(m.customer, ''), 'false', '01/01/1000', '01/01/3000',
                  CASE WHEN m.qty_applies THEN 'true' ELSE 'false' END, COALESCE(m.qty_min, 0)::text, COALESCE(m.qty_max, 0)::text, CASE WHEN m.is_auto_apply THEN 'true' ELSE 'false' END, 'false')
         FROM public.fb_pricing_rules m
-        WHERE v_retire AND m.removed_at IS NULL AND m.is_active AND m.name NOT LIKE 'SN %' AND NOT EXISTS (SELECT 1 FROM e WHERE e.name = m.name))
+        WHERE m.removed_at IS NULL AND m.is_active AND NOT EXISTS (SELECT 1 FROM e WHERE e.name = m.name)
+          AND (m.name LIKE 'SN %' OR v_retire))
       SELECT jsonb_build_array(jsonb_build_array('name','description','isActive','productInclType','product','paApplies','paType','paPercent','paBaseAmountType','paAmount',
                                                  'rndApplies','roundType','rndToAmount','rndIsMinus','rndPMAmount','customerInclType','customer','dateApplies','dateBegin','dateEnd',
                                                  'qtyApplies','qtyMin','qtyMax','isAutoApply','isTier2'))

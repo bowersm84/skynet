@@ -16,6 +16,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import * as XLSX from 'xlsx'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 const shims = []
@@ -128,18 +129,29 @@ try {
   ]
   const lText = pdfText(await buildPriceListPdf(list, listLines))
   ok(lText.includes('PL-2609-0007') && lText.includes('Irwin Aerospace'), 'the price list rendered')
-  ok(lText.includes('10/01/2026'), 'Effective prints 10/01/2026')
+  ok(!lText.includes('10/01/2026'), 'the as-of (Effective) date is not printed (D-PRICE-64)')
   ok(lText.includes('09/16/2026'), 'Issued prints 09/16/2026')
   const lIso = lText.match(/\d{4}-\d{2}-\d{2}/g)
   eq(lIso, null, `no ISO date is left anywhere on the price list (found ${lIso && lIso.join(', ')})`)
   const lDates = lText.split('\n').filter(s => usDate.test(s))
-  eq(lDates.length, 2, 'exactly two dates are drawn as cells: Effective and Issued')
+  eq(lDates.length, 1, 'exactly one date is drawn as a cell: Issued (D-PRICE-64)')
   ok(!/FOB/i.test(lText), 'FOB appears nowhere on the rendered price list')
+  ok(!/pricing level/i.test(lText) && !/tier\s*[123]/i.test(lText) && !/premier/i.test(lText), 'no pricing level and no tier label anywhere on the price list (D-PRICE-64)')
+  ok(!/\bEFFECTIVE\b/.test(lText) && !/effective date/i.test(lText), 'the EFFECTIVE label and the terms\' "effective date" are gone (the rep\'s notes may still say effective) (D-PRICE-64)')
+  ok(/Quantity breaks do not apply/.test(lText), 'a tiered list (fixture is tier3) prints the quantity-breaks sentence (D-PRICE-64b)')
+  const noTier = pdfText(await buildPriceListPdf({ ...list, tier: 'none' }, listLines))
+  ok(!/Quantity breaks/.test(noTier) && /issue date shown/.test(noTier) && /Return Authorization/.test(noTier), 'a no-tier list omits the quantity-breaks sentence and keeps the rest of the terms (D-PRICE-64b)')
+  const colTier = pdfText(await buildPriceListPdf({ ...list, tier: 'q300' }, listLines))
+  ok(/Quantity breaks do not apply/.test(colTier), 'a column-tier list prints it too — that customer already stands past the breaks (D-PRICE-64b)')
+  ok(!/pricing level/i.test(qText) && !/tier\s*[123]/i.test(qText), 'no pricing level and no tier label anywhere on the quote (D-PRICE-64)')
 
   // ── the builders still work ─────────────────────────────────────────────────────
   ok(lText.includes('SK2600-1SFW') && lText.includes('SK213-2'), 'every line still prints')
   ok(qText.includes('SK2600-1SFW') && qText.includes('SK213-2'), 'on both documents')
-  ok(buildPriceListXlsx(list, listLines).byteLength > 0, 'the price-list XLSX still builds (untouched by this change: its header keeps the ISO date)')
+  const xl = XLSX.utils.sheet_to_json(XLSX.read(buildPriceListXlsx(list, listLines), { type: 'array' }).Sheets['PL-2609-0007'], { header: 1 })
+  ok(xl.length > 0, 'the price-list XLSX still builds')
+  ok(!xl.flat().some(c => /pricing level|effective|tier\s*[123]/i.test(String(c))), 'the XLSX header carries no pricing level, effective date or tier label either (D-PRICE-64)')
+  ok(xl.flat().includes('09/16/2026') && xl.flat().includes('Rev 82 — Oct 2026'), 'the XLSX header shows Issued and the price book')
 
   console.log(`pdfDocs: ${n} assertions passed`)
 } finally {

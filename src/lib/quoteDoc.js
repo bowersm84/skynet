@@ -5,7 +5,7 @@
 // line table (Number, Description, Unit, Qty, Total), subtotal, returns terms.
 //
 import { PDFDocument, StandardFonts } from 'pdf-lib'
-import { money, num, fmtUsDate, TIER_LABELS } from './pricing'
+import { money, num, fmtUsDate } from './pricing'
 import { BRAND, safe, drawLetterhead } from './pdfText'
 
 const LETTER = [612, 792]
@@ -56,12 +56,13 @@ export async function buildQuotePdf(q, lines) {
       page.drawText('Quote To:', { x: M + 4, y: y - 3, size: 8, font: bold, color: INK })
       const who = [q.customer_name + (q.customer_number ? `  (#${q.customer_number})` : ''), q.contact_name || '', q.contact_email || ''].filter(Boolean)
       who.forEach((t, i) => page.drawText(safe(t), { x: M + 4, y: y - 20 - i * 11, size: 9, font, color: INK }))
-      // pricing level / PO on the right
+      // reference (PO / price book) on the right
       const rx = M + (W - 2 * M) / 2 + 8
       page.drawRectangle({ x: rx, y: y - 52, width: (W - 2 * M) / 2 - 8, height: 60, borderColor: LINE, borderWidth: 0.8 })
       page.drawRectangle({ x: rx, y: y - 6, width: (W - 2 * M) / 2 - 8, height: 14, color: BAND })
       page.drawText('Reference:', { x: rx + 4, y: y - 3, size: 8, font: bold, color: INK })
-      const ref = [`Pricing level: ${TIER_LABELS[q.tier] || 'List / quantity breaks'}`, q.customer_po ? `Customer PO / RFQ: ${q.customer_po}` : '', `Price book: ${q.rev_label || ''} (as of ${fmtUsDate(q.as_of)})`].filter(Boolean)
+      // No pricing level on the customer's copy (D-PRICE-64): tier labels never go on an external document.
+      const ref = [q.customer_po ? `Customer PO / RFQ: ${q.customer_po}` : '', `Price book: ${q.rev_label || ''} (as of ${fmtUsDate(q.as_of)})`].filter(Boolean)
       ref.forEach((t, i) => page.drawText(safe(t), { x: rx + 4, y: y - 20 - i * 11, size: 9, font, color: INK }))
       y -= 64
       // strip: Sales rep | Payment terms | Prepared. FOB Point dropped (Matt, 2026-09-16);

@@ -5,13 +5,22 @@
 //
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import * as XLSX from 'xlsx'
-import { money, fmtUsDate, TIER_LABELS } from './pricing'
+import { money, fmtUsDate } from './pricing'
 import { BRAND, safe, drawLetterhead } from './pdfText'
 
 const LETTER = [612, 792]
 const MARGIN = 40
 const INK = BRAND.ink, GREY = BRAND.grey, LINE = BRAND.line, ACCENT = BRAND.red, BAND = BRAND.band
-const TERMS = 'Prices are in US dollars, per piece, and are subject to change without notice after the effective date shown. Quantity breaks do not apply to tiered pricing. Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
+// The quantity-breaks sentence is printed only for a tiered list (level or column tier): those
+// customers already stand past the breaks. A no-tier list prints Each prices and its customer does
+// get the 100/300/500 breaks on an order, so the sentence would be false there (D-PRICE-64b).
+const TERMS_HEAD = 'Prices are in US dollars, per piece, and are subject to change without notice after the issue date shown.'
+const TERMS_BREAKS = 'Quantity breaks do not apply to the prices shown.'
+const TERMS_TAIL = 'Returns must be within 30 days after prior approval from Skybolt; customer is responsible for freight and a 30% restocking fee; all returns must have a Return Authorization Number and be in the original packaging.'
+function termsFor(list) {
+  const tiered = !!list?.tier && list.tier !== 'none'
+  return [TERMS_HEAD, tiered ? TERMS_BREAKS : '', TERMS_TAIL].filter(Boolean).join(' ')
+}
 
 function wrap(text, font, size, width) {
   const words = safe(text).split(/\s+/); const lines = []; let cur = ''
@@ -51,12 +60,14 @@ export async function buildPriceListPdf(list, lines) {
     page.drawLine({ start: { x: MARGIN, y }, end: { x: W - MARGIN, y }, thickness: 1.2, color: ACCENT })
     y -= 14
     if (pageNo === 1) {
-      const left = [['Customer', `${list.customer_name}${list.customer_number ? `  (#${list.customer_number})` : ''}`], ['Pricing level', TIER_LABELS[list.tier] || 'List / quantity breaks'], ['Prepared by', list.created_by_name || '']]
-      const right = [['Effective', fmtUsDate(list.as_of)], ['Price book', list.rev_label || ''], ['Issued', fmtUsDate(list.created_at)]]
+      // No pricing level and no effective date on the customer's copy (D-PRICE-64): tier labels
+      // never go on an external document, and the as-of date is the rep's book selector, not a term.
+      const left = [['Customer', `${list.customer_name}${list.customer_number ? `  (#${list.customer_number})` : ''}`], ['Prepared by', list.created_by_name || '']]
+      const right = [['Price book', list.rev_label || ''], ['Issued', fmtUsDate(list.created_at)]]
       const rowH = 13
       left.forEach(([k, v], i) => { page.drawText(k.toUpperCase(), { x: MARGIN, y: y - i * rowH, size: 7, font: bold, color: GREY }); page.drawText(safe(v), { x: MARGIN + 70, y: y - i * rowH, size: 9, font, color: INK }) })
       right.forEach(([k, v], i) => { page.drawText(k.toUpperCase(), { x: W / 2 + 20, y: y - i * rowH, size: 7, font: bold, color: GREY }); page.drawText(safe(v), { x: W / 2 + 90, y: y - i * rowH, size: 9, font, color: INK }) })
-      y -= rowH * 3 + 6
+      y -= rowH * 2 + 6
       if (list.notes) { for (const ln of wrap(list.notes, font, 8, W - 2 * MARGIN)) { page.drawText(ln, { x: MARGIN, y, size: 8, font, color: INK }); y -= 10 } y -= 4 }
     }
     // table head
@@ -83,7 +94,7 @@ export async function buildPriceListPdf(list, lines) {
   // terms on the last page
   if (y < MARGIN + 80) { pageNo += 1; await header(pageNo) }
   y -= 10
-  for (const ln of wrap(TERMS, font, 7, W - 2 * MARGIN)) { page.drawText(ln, { x: MARGIN, y, size: 7, font, color: GREY }); y -= 9 }
+  for (const ln of wrap(termsFor(list), font, 7, W - 2 * MARGIN)) { page.drawText(ln, { x: MARGIN, y, size: 7, font, color: GREY }); y -= 9 }
   pdf.setTitle(`Skybolt Price List ${list.list_number}`); pdf.setAuthor('Skybolt Aeromotive Corp')
   return pdf.save()
 }
@@ -91,12 +102,12 @@ export async function buildPriceListPdf(list, lines) {
 export function buildPriceListXlsx(list, lines) {
   const rows = [
     ['Skybolt Aeromotive Corp — Customer Price List', list.list_number],
-    ['Customer', list.customer_name, 'Effective', String(list.as_of)],
-    ['Pricing level', TIER_LABELS[list.tier] || 'List / quantity breaks', 'Price book', list.rev_label || ''],
+    ['Customer', list.customer_name, 'Price book', list.rev_label || ''],
+    ['Prepared by', list.created_by_name || '', 'Issued', fmtUsDate(list.created_at)],
     [],
     ['Part Number', 'Description', 'List (Each)', 'Your Price'],
     ...lines.map(l => [l.part_number, l.description || '', l.each_price === null ? '' : Number(l.each_price), Number(l.customer_price)]),
-    [], [TERMS],
+    [], [termsFor(list)],
   ]
   const ws = XLSX.utils.aoa_to_sheet(rows)
   ws['!cols'] = [{ wch: 20 }, { wch: 66 }, { wch: 12 }, { wch: 12 }]

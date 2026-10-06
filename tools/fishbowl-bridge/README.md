@@ -20,8 +20,9 @@ Decisions: `Docs/Decisions.md` (D-FB-*, D-PRICE-19/20/26).
 - Every `INVENTORY_MS` (5 min): on-hand / allocated / available per part, from `qtyinventorytotals` summed per
   location group; `AVAILABLE_LOCATION_GROUPS` decides which groups count as available (default Main + Warehouse).
   Shown as the "Avail" column in the Order Queue and as the inventory chips in Create Work Order (D-FB-39).
-  **Scope (D-FB-40, v1.6):** the union of every part on an open SO line, every SkyNet `parts.part_number`, and every
-  part already in `fb_part_inventory` — about 1,300 parts, resolved to Fishbowl parts through `part.num`.
+  **Scope (D-FB-40, v1.6; widened D-FB-52, v1.8):** the union of every part on an open SO line, every SkyNet
+  `parts.part_number`, every part already in `fb_part_inventory`, every part classed Product in `fb_part_valuation`
+  and every `fb_reorder_points` part — a few thousand parts, resolved to Fishbowl parts through `part.num`.
   **Zero rows:** the query starts from `part` and LEFT JOINs the totals, so a Fishbowl part with no stock record is
   written with every quantity 0 and `by_location = {}`. Before v1.6 such a part was skipped, and because the poller
   sends nothing for a part it did not read, its mirrored row kept its last values indefinitely (113 of 443 rows on
@@ -85,6 +86,21 @@ being able to write to Fishbowl. A command's own `dry_run` flag behaves the same
 without calling Fishbowl. `npm run mirror:rules` runs one rules + tree mirror pass and exits (first load).
 `npm run fb:columns -- pricingrule producttree …` prints the columns Fishbowl actually has (read-only discovery).
 
+### Inventory valuation mirror and month-end snapshot (v1.8, D-FB-52 / D-FB-53)
+Two more pieces in the products nightly slot, after part costs:
+
+| Piece | When | Reads / writes |
+|---|---|---|
+| valuation | nightly, after part costs | the opening-valuation query: every `part` with `typeId = 10`, its class (`customFields '$."33".value'`), `SUM(tag.qty)`, `partcost.avgCost / totalCost / qty`, the product and BOM flags → `fb_upsert_part_valuation` in batches → `fb_part_valuation`; then `fb_finish_part_valuation` retires rows that were not in tonight's read (cutoff from the DB clock). Stamps `fb_sync_state.last_valuation_at`. Skipped when `VALUATION_ENABLED=false` |
+| month-end snapshot | nightly, right after the valuation | `inventory_snapshot_take()` — the RPC decides whether a snapshot is due (the 1st of the month, or a month-end missed while the bridge was down) and freezes Product parts + SkyNet bars and blanks into `inventory_valuation_snapshots`. Until the S13 Batch C migration exists the call answers PGRST202 and the bridge logs one `month-end snapshot skipped` warning per night |
+
+Every class is mirrored (so a product part nobody has classed yet shows up in SkyNet's QA list); SkyNet filters
+to `Product` for Stock Levels, the reorder rules and the month-end. The valuation also widens the 5-minute
+inventory scope: every Product-class part and every reorder-point part gets a row (D-FB-52). A failure in
+either piece is logged and swallowed; the mirrors and the SO tail are unaffected.
+`npm run mirror:valuation` runs one valuation pass and exits (first load, or after fixing the query).
+`npm test` runs the unit tests (the three `node --test` files plus the inventory arithmetic test).
+
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`
 2. Copy `.env.example` to `.env` and fill in `FB_PASS`, `SB_ANON_KEY`, `SB_BRIDGE_PASSWORD` (and `SB_URL` for PROD).
@@ -93,7 +109,9 @@ without calling Fishbowl. `npm run mirror:rules` runs one rules + tree mirror pa
 4. First run only, after the pricing schema is applied: `npm run backfill:pricing` (`node src/index.mjs --backfill`)
    — one full customers + products + SO history load from scratch, then exits. Expect ≈ 6.5k customers,
    10,980 products and ≈ 35k history lines over ~20 pages. Idempotent, safe to re-run.
-5. Smoke test: `npm run once` (one tail + one reconcile, then exits). Then `npm start`.
+5. First run only, after the S13 Batch A migration (v1.8): `npm run mirror:valuation` — one full read of every
+   typeId-10 part into `fb_part_valuation`, so the next inventory cycle already covers every Product-class part.
+6. Smoke test: `npm run once` (one tail + one reconcile, then exits). Then `npm start`.
 
 ## Windows service (Fishbowl server)
 Install NSSM (https://nssm.cc) and Node.js >= 18, then as Administrator:
@@ -105,6 +123,8 @@ Manage: `nssm status|stop|start|restart SkyNetFishbowlBridge`. Logs: `logs\bridg
   tail resumes from the stored cursor and the reconciler covers anything missed.
 - Re-run either backfill any time: both are idempotent (`npm run backfill`, `npm run backfill:pricing`).
 - Pricing mirror stale? Check `SELECT last_customers_at, last_products_at, last_history_at, history_cursor FROM fb_sync_state;`.
+- Valuation mirror stale (Stock Levels costs older than a day)? `SELECT last_valuation_at FROM fb_sync_state;` then
+  `npm run mirror:valuation`; the month-end snapshot only runs from the nightly slot, never from the one-shot.
   Re-reading history from a date is `UPDATE fb_sync_state SET history_cursor = '<date>' WHERE id = 1;` then wait for
   02:20, or run `npm run backfill:pricing` for a full reload.
 - Reset the cursor (rare): `SELECT public.fb_set_cursor(<rev>)` in the SQL Editor — it only moves forward.

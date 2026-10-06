@@ -58,6 +58,8 @@ export class SkyNet {
         await this.signIn()
       } else if (/42501|Not authorized/i.test(msg)) {
         throw new Error(`rpc ${name} rejected: ${msg}`) // permission problems do not heal by retrying
+      } else if (/PGRST202|Could not find the function/i.test(msg)) {
+        throw new Error(`rpc ${name} missing: ${msg}`) // D-FB-53: a function SkyNet does not have yet is not a transient fault
       }
       this.log.warn(`rpc ${name} attempt ${attempt} failed: ${msg}`)
       await sleep(1000 * attempt)
@@ -90,6 +92,17 @@ export class SkyNet {
   // last_part_costs_at column — so the poller rides the products nightly slot instead (see index.mjs).
   upsertPartCosts(rows) { return this.rpc('fb_upsert_part_costs', { p_rows: rows }) }
 
+  // D-FB-52 (bridge 1.8) nightly valuation mirror. fb_upsert_part_valuation stamps fb_sync_state.last_valuation_at;
+  // fb_finish_part_valuation retires rows that were not in tonight's read, with a cutoff taken from the DB clock.
+  upsertPartValuation(rows) { return this.rpc('fb_upsert_part_valuation', { p_rows: rows }) }
+
+  finishPartValuation() { return this.rpc('fb_finish_part_valuation', {}) }
+
+  // D-FB-53. Month-end valuation snapshot (S13 Batch C). The RPC decides whether one is due and returns either
+  // { skipped: true, reason } or { id, kind, period_end, product_value, raw_value }. Until Batch C is applied
+  // PostgREST answers PGRST202, which rpc() turns into a single immediate throw for the caller to log.
+  takeInventorySnapshot() { return this.rpc('inventory_snapshot_take', {}) }
+
   // D-PRICE-49. Pushes the book's kit prices to the public skybolt-kits site. This is what makes
   // Oct 1 work without anyone present: the book flips by date at midnight and the nightly cycle
   // publishes it. The bridge signs in as the integration profile, which the function accepts.
@@ -121,11 +134,11 @@ export class SkyNet {
     await this.ensureSignedIn()
     const { data, error } = await this.client
       .from('fb_sync_state')
-      .select('last_customers_at, last_products_at, last_history_at, history_cursor, last_rules_at, last_tree_at')
+      .select('last_customers_at, last_products_at, last_history_at, history_cursor, last_rules_at, last_tree_at, last_valuation_at')
       .eq('id', 1)
       .maybeSingle()
     if (error) throw new Error(`fb_sync_state read failed: ${error.message}`)
-    return data || { last_customers_at: null, last_products_at: null, last_history_at: null, history_cursor: null, last_rules_at: null, last_tree_at: null }
+    return data || { last_customers_at: null, last_products_at: null, last_history_at: null, history_cursor: null, last_rules_at: null, last_tree_at: null, last_valuation_at: null }
   }
 
   // Distinct Fishbowl part ids on product lines of open SOs (paged: PostgREST caps a request at 1000 rows).
@@ -178,6 +191,32 @@ export class SkyNet {
   // has left every other set still gets a fresh row each cycle instead of freezing at its last values.
   async skynetPartNums() { await this.ensureSignedIn(); return this.pagedDistinct('parts', 'part_number') }
   async mirroredPartNums() { await this.ensureSignedIn(); return this.pagedDistinct('fb_part_inventory', 'part_num') }
+
+  // D-FB-52. The two sets that widen the inventory scope: every part classed Product in last night's valuation
+  // mirror, and every reorder-point part - so Stock Levels and the reorder rules always have a 5-minute row.
+  // Product parts are filtered server-side; paged and ordered exactly like pagedDistinct.
+  async productClassPartNums() {
+    await this.ensureSignedIn()
+    const out = new Set()
+    const page = 1000
+    for (let from = 0; ; from += page) {
+      const { data, error } = await this.client
+        .from('fb_part_valuation')
+        .select('part_num')
+        .eq('valuation_class', 'Product')
+        .is('removed_at', null)
+        .order('part_num')
+        .range(from, from + page - 1)
+      if (error) throw new Error(`fb_part_valuation read failed: ${error.message}`)
+      for (const r of data || []) {
+        const v = String(r.part_num ?? '').trim().toUpperCase()
+        if (v) out.add(v)
+      }
+      if (!data || data.length < page) break
+    }
+    return [...out]
+  }
+  async reorderPartNums() { await this.ensureSignedIn(); return this.pagedDistinct('fb_reorder_points', 'part_num') }
 
   async openMirrorSos() {
     await this.ensureSignedIn()

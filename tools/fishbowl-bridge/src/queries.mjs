@@ -64,6 +64,22 @@ export const q = {
     FROM part p LEFT JOIN qtyinventorytotals q ON q.PARTID = p.id
     WHERE p.id IN (${idList(partIds)})`,
 
+  // D-FB-52 (bridge 1.8). The opening-valuation query of 2026-10-06, verbatim apart from three things:
+  // p.id is added, the on-hand/cost WHERE filter is dropped so every typeId-10 part is mirrored (the class
+  // filter happens in SkyNet, S13 Decision 7), and the rounding is left to SkyNet. Aliases = mapper fields.
+  partValuation: `SELECT p.id AS partId, p.num AS partNum, p.description, p.activeFlag,
+      COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.customFields, '$."33".value')), '(unclassified)') AS valuationClass,
+      COALESCE(oh.qtyOnHand, 0) AS qtyOnHand,
+      pc.avgCost, pc.totalCost, pc.qty AS costLayerQty,
+      CASE WHEN pr.partId IS NOT NULL THEN 'Y' ELSE 'N' END AS hasProduct,
+      CASE WHEN bi.partId IS NOT NULL THEN 'Y' ELSE 'N' END AS usedInBoms
+    FROM part p
+    LEFT JOIN partcost pc ON pc.partId = p.id
+    LEFT JOIN (SELECT t.partId, SUM(t.qty) AS qtyOnHand FROM tag t GROUP BY t.partId) oh ON oh.partId = p.id
+    LEFT JOIN (SELECT DISTINCT partId FROM product) pr ON pr.partId = p.id
+    LEFT JOIN (SELECT DISTINCT partId FROM bomitem) bi ON bi.partId = p.id
+    WHERE p.typeId = 10`,
+
   // --- Bridge v1.3 pricing mirrors (D-PRICE-26). All read-only, all in Fishbowl's own local time. ---
 
   // Customers. `since` is a 'YYYY-MM-DD HH:MM:SS' local string, or null for a full backfill.

@@ -1,6 +1,6 @@
 {
   "name": "skynet-fishbowl-bridge",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "private": true,
   "type": "module",
   "description": "Fishbowl <-> SkyNet sales order + pricing bridge (reads Fishbowl; writes Fishbowl only through the D-PRICE-53 push queue)",
@@ -13,6 +13,8 @@
     "backfill": "node scripts/backfill.mjs",
     "backfill:pricing": "node src/index.mjs --backfill",
     "mirror:rules": "node src/index.mjs --mirror-rules",
+    "mirror:valuation": "node src/index.mjs --mirror-valuation",
+    "test": "node --test src/push.test.mjs src/rulesTree.test.mjs src/valuation.test.mjs && node src/inventory.test.mjs",
     "fb:columns": "node scripts/fb-columns.mjs"
   },
   "dependencies": {

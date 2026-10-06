@@ -4,6 +4,7 @@
 //   node src/index.mjs --once      one tail + one reconcile pass, then exit (smoke test)
 //   node src/index.mjs --backfill  one full customers + products + part costs + SO history load (v1.4)
 //   node src/index.mjs --mirror-rules  one pricing-rules + product-tree mirror pass, then exit (v1.7)
+//   node src/index.mjs --mirror-valuation  one valuation mirror pass (fb_part_valuation), then exit (v1.8)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
@@ -12,6 +13,7 @@ import { ts, chunk } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
 import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
 import { syncPartCosts } from './partCosts.mjs'
+import { syncPartValuation } from './valuation.mjs'
 import { aggregateInventory, countZeroRows } from './inventory.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { runPushCommands, canPushFor } from './push.mjs'
@@ -43,7 +45,9 @@ async function syncUsers() {
 }
 
 // The parts Matt reads back against Fishbowl on a dry run before the first real write (D-FB-40).
-const INVENTORY_PROBES = ['SK-O', 'SK40S47-13S', 'SK26FB', 'SK4000-3S', 'SK4000CGP81', 'SK4C13C', 'SK4FB13S']
+const INVENTORY_PROBES = ['SK-O', 'SK40S47-13S', 'SK26FB', 'SK4000-3S', 'SK4000CGP81', 'SK4C13C', 'SK4FB13S',
+  // S13 / D-FB-52: reorder-point parts that only the widened scope reaches
+  'SK2600CGP174', 'SK241-16', 'SK40R17-244', 'SK4FW2SE']
 
 // D-FB-33 / D-FB-40: the inventory snapshot. Scope is the union of the parts on open SO lines, every
 // SkyNet part number, and every part already mirrored — about 1,300 parts, resolved to Fishbowl parts
@@ -51,14 +55,17 @@ const INVENTORY_PROBES = ['SK-O', 'SK40S47-13S', 'SK26FB', 'SK4000-3S', 'SK4000C
 // test ("snapshot_at more than 10 min behind last_inventory_at") meaningful: a row only falls behind
 // if the poller genuinely stopped covering it. The arithmetic lives in inventory.mjs, with no I/O.
 async function syncInventory() {
-  const [openIds, skynetNums, mirroredNums] = await Promise.all([
+  const [openIds, skynetNums, mirroredNums, productNums, reorderNums] = await Promise.all([
     sky.openPartIds(),
     sky.skynetPartNums(),
     sky.mirroredPartNums(),
+    sky.productClassPartNums(),
+    sky.reorderPartNums(),
   ])
 
   // Numbers are resolved to Fishbowl part ids; ids from the open-SO set are already Fishbowl's own.
-  const wanted = [...new Set([...skynetNums, ...mirroredNums])]
+  // D-FB-52 adds every Product-class part (last night's valuation mirror) and every reorder-point part.
+  const wanted = [...new Set([...skynetNums, ...mirroredNums, ...productNums, ...reorderNums])]
   const ids = new Set(openIds.map(Number).filter(Number.isFinite))
   const known = new Set()
   for (const nums of chunk(wanted, 300)) {
@@ -84,7 +91,7 @@ async function syncInventory() {
 
   const payload = aggregateInventory(rows, config.availableLocationGroups)
   const zero = countZeroRows(payload)
-  const line = `inventory: scope ${partIds.length} (open-SO ${openIds.length} · skynet ${skynetNums.length} · mirrored ${mirroredNums.length}) → rows ${payload.length} (zero ${zero}) · unknown-to-fishbowl ${unknown}`
+  const line = `inventory: scope ${partIds.length} (open-SO ${openIds.length} · skynet ${skynetNums.length} · mirrored ${mirroredNums.length} · product-class ${productNums.length} · reorder ${reorderNums.length}) → rows ${payload.length} (zero ${zero}) · unknown-to-fishbowl ${unknown}`
 
   if (config.inventoryDryRun) {
     log.info(`${line} · DRY RUN — nothing written`)
@@ -135,6 +142,25 @@ async function pricingCycle({ force = false } = {}) {
     // fb_sync_state has no last_part_costs_at column, so nightlyDue() has nothing to read — it would
     // return true on every 20 s cycle after the target time and re-read the whole PO history each pass.
     if (config.partCostsEnabled) await syncPartCosts(fb, sky, { log, batch: config.pricingBatch })
+    // D-FB-52, same slot, after part costs: the nightly valuation mirror (every typeId-10 part with its class,
+    // tag quantity and partcost average). Logged and swallowed like the kits sync - a Fishbowl schema surprise
+    // must not stand the pricing pollers down. D-FB-53: then the month-end snapshot RPC, which decides for itself
+    // whether one is due (the 1st of the month, or a month-end that was missed while the bridge was down).
+    if (config.valuationEnabled) {
+      try {
+        await syncPartValuation(fb, sky, { log, batch: config.pricingBatch })
+        pricing.last_valuation_at = new Date().toISOString()
+        try {
+          const s = await sky.takeInventorySnapshot()
+          if (s && s.skipped) log.info(`month-end snapshot: not due (${s.reason || 'no month-end pending'})`)
+          else if (s) log.info(`month-end snapshot: ${s.kind || 'month_end'} ${s.period_end || ''} id ${s.id || '?'} · product ${s.product_value ?? '?'} · raw ${s.raw_value ?? '?'}`)
+        } catch (e) {
+          log.warn(`month-end snapshot skipped: ${e.message}`)
+        }
+      } catch (e) {
+        log.error(`valuation mirror failed (other mirrors unaffected): ${e.message}`)
+      }
+    }
     // D-PRICE-49, last in the nightly slot: costs are in, so the book's kit sums are final for today.
     // A failure here is logged and swallowed — the mirrors are the bridge's job, and the kits site
     // going a night without an update must not stand the pricing pollers down for 15 minutes.
@@ -304,14 +330,22 @@ async function mirrorRulesOnce() {
   log.info('rules/tree mirror complete')
 }
 
+// `--mirror-valuation`: one valuation mirror pass and exit - the first load after the S13 migration, or after
+// fixing the query. No snapshot: that stays with the nightly slot (D-FB-53).
+async function mirrorValuationOnce() {
+  await fb.withSession(() => syncPartValuation(fb, sky, { log, batch: config.pricingBatch }))
+  log.info('valuation mirror complete')
+}
+
 async function main() {
   const once = process.argv.includes('--once')
   const backfill = process.argv.includes('--backfill')
   const mirrorRules = process.argv.includes('--mirror-rules')
+  const mirrorValuation = process.argv.includes('--mirror-valuation')
   log.info(`SkyNet Fishbowl Bridge v${config.version} starting on ${config.host} → ${config.fb.host}:${config.fb.port} (${config.fb.sessionMode}) → ${config.sb.url}`)
   await sky.signIn()
   pricing = await sky.pricingState()
-  log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'} rules=${pricing.last_rules_at || 'never'} tree=${pricing.last_tree_at || 'never'}`)
+  log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'} rules=${pricing.last_rules_at || 'never'} tree=${pricing.last_tree_at || 'never'} valuation=${pricing.last_valuation_at || 'never'}`)
   const gate = canPushFor(config)
   log.info(`fishbowl push: ${gate.ok ? 'ENABLED (real writes to Fishbowl)' : `dry run only (${gate.why})`}; auto=${config.push.autoEnabled}`)
   if (backfill) {
@@ -330,6 +364,17 @@ async function main() {
       await mirrorRulesOnce()
     } catch (e) {
       log.error(`rules/tree mirror failed: ${e.stack || e.message}`)
+      process.exitCode = 1
+    } finally {
+      await fb.logout()
+    }
+    return
+  }
+  if (mirrorValuation) {
+    try {
+      await mirrorValuationOnce()
+    } catch (e) {
+      log.error(`valuation mirror failed: ${e.stack || e.message}`)
       process.exitCode = 1
     } finally {
       await fb.logout()

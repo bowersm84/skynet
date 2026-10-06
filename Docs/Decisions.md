@@ -4314,3 +4314,40 @@ push), src/lib/fishbowl.js, src/pages/OrderQueue.jsx.
 **Why:** CC's finding on D-PRICE-64: a no-tier list prints Each prices and its customer does get the 100/300/500 breaks on an order, so the sentence read as a promise that they would not.
 **Verified:** `node src/lib/pdfDocs.test.mjs` 39 assertions (3 new: tier3 and q300 lists print the sentence, a no-tier list omits it and keeps the issue-date and returns text); eslint 0 problems on both files; `npm run build` clean.
 **Files:** src/lib/priceListDoc.js, src/lib/pdfDocs.test.mjs. No SQL.
+
+### D-FB-52 — Bridge 1.8.0: nightly valuation mirror and Product-class inventory scope (2026-10-07)
+**What:** A nightly poller in the products slot, after part costs, reads Matt's 2026-10-06 opening-valuation query
+for every Fishbowl `part` with `typeId = 10` — class from `customFields '$."33".value'` ('(unclassified)' when
+missing), quantity = `SUM(tag.qty)`, `partcost.avgCost / totalCost / qty`, product and BOM flags — and writes it to
+`fb_part_valuation` through `fb_upsert_part_valuation` (batches of PRICING_BATCH); `fb_finish_part_valuation` then
+retires rows absent from tonight's read, with the cutoff taken from the DB clock (max synced_at − 15 min) so a bridge
+PC whose clock is off can never retire fresh rows. `fb_sync_state.last_valuation_at` is the clock. The inventory
+poller's scope (D-FB-40 union) gains every Product-class part of the mirror and every `fb_reorder_points` part, so
+Stock Levels and the reorder rules always have a 5-minute row. `VALUATION_ENABLED` (only the literal `false`
+disables), `npm run mirror:valuation` one-shot first load, `npm test`. Every class is mirrored; SkyNet filters to
+Product (S13 Decision 7) — a product part nobody has classed yet shows up in a QA list instead of silently
+dropping out of month-end.
+**Why:** Matt, 2026-10-06: SkyNet becomes the repository for Fishbowl Product inventory (Stock Levels, reorder
+points seeded from Purchasing's critical-parts sheet, month-end valuation for the QBO entry). The month-end needs the
+same basis the Sept opening entry used — tag quantity × partcost average — and the 5-minute mirror covered only
+~1,300 parts, none of them with a cost.
+**Files:** tools/fishbowl-bridge/src/valuation.mjs (new), src/valuation.test.mjs (new), src/queries.mjs,
+src/skynet.mjs, src/index.mjs, src/config.mjs (1.8.0), package.json, .env.example, README.md. SkyNet side:
+Docs/migrations/2026-10-07_S13_A_fb_valuation_reorder.sql (TEST applied 2026-10-07 by Claude; PROD by Matt before
+the deploy). Review route per cheatsheet §11: PC against TEST with INVENTORY_DRY_RUN=true first (probe list now
+includes SK2600CGP174, SK241-16, SK40R17-244, SK4FW2SE), then a real cycle and `npm run mirror:valuation`, then
+2026-10-07_DIAG_S13_A_READONLY.sql.
+
+### D-FB-53 — The bridge calls the month-end snapshot after the nightly valuation (2026-10-07)
+**What:** Right after a successful valuation mirror the bridge calls `inventory_snapshot_take()` with no arguments.
+The RPC (S13 Batch C) decides whether a snapshot is due — the 1st of the month in America/New_York, or a month-end
+missed while the bridge was down — and returns `{ skipped, reason }` or `{ id, kind, period_end, product_value,
+raw_value }`, which the bridge logs. Until Batch C is applied PostgREST answers PGRST202; `SkyNet.rpc()` now
+throws immediately on PGRST202 / "Could not find the function" (like 42501) instead of retrying three times, and
+the nightly slot logs one `month-end snapshot skipped` warning. A snapshot failure never affects the mirrors.
+**Why:** the snapshot must follow the 02:10 valuation read on the 1st, whatever the UTC offset, and the bridge's
+local-clock nightly slot is the one place that ordering is guaranteed. The one-shot `--mirror-valuation` never
+takes a snapshot.
+**Files:** tools/fishbowl-bridge/src/index.mjs, src/skynet.mjs, README.md.
+
+**Notes from the build (CC, 2026-10-06):** (1) The contract was checked on TEST before coding, read-only: both RPCs exist as the prompt describes — `fb_finish_part_valuation(p_window interval DEFAULT '00:15:00')`, so the bridge's `{}` call takes the 15-minute default — `fb_sync_state.last_valuation_at` exists, the 55 reorder rules include all four new probe parts, and `authenticated` can SELECT `fb_part_valuation` and `fb_reorder_points`. Posting `{}` as anon to `/rpc/fb_finish_part_valuation` answers `42501 permission denied` (PostgREST resolved the zero-argument call; only the privilege stopped it), and `/rpc/inventory_snapshot_take` answers HTTP 404 `PGRST202 Could not find the function public.inventory_snapshot_take without parameters in the schema cache` — both alternatives of the new check match it, and the JWT/401 retry check does not. (2) The deploy order is hard: 1.8.0 selects `last_valuation_at` at start-up (`pricingState`), so against a database without the S13 Batch A migration it exits before the first cycle; and the two new scope reads, like the D-FB-40 ones, are unguarded inside the cycle. PROD migration first, then skyserver. (3) TEST's `fb_part_valuation` holds 3 smoke rows from the migration's own check (SK2600CGP174, SK2FW2SE, SK4000-3S; synced 2026-10-06 19:28 UTC); the first `npm run mirror:valuation` overwrites them. (4) `--backfill` forces the products slot, so it also runs the valuation and calls the snapshot RPC — harmless, because the RPC decides whether a month-end is due and is idempotent per period.

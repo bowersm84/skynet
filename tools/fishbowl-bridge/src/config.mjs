@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.7.1',
+  version: '1.8.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -81,6 +81,9 @@ export const config = {
   // D-PRICE-47 part costs. No nightly time of its own: it runs immediately after the products poll, in
   // the same nightly slot, because fb_sync_state has no last_part_costs_at column to schedule it from.
   partCostsEnabled: String(process.env.PART_COSTS_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  // D-FB-52 nightly valuation mirror (bridge 1.8): rides the products slot after part costs, then calls the
+  // month-end snapshot RPC (D-FB-53). Only the literal `false` disables it, like PART_COSTS_ENABLED.
+  valuationEnabled: String(process.env.VALUATION_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   overlapRevs: num('OVERLAP_REVS', 200),
   chunk: num('CHUNK', 50),
   logDir: resolve(ROOT, 'logs'),

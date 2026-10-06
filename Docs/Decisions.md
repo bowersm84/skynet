@@ -4351,3 +4351,93 @@ takes a snapshot.
 **Files:** tools/fishbowl-bridge/src/index.mjs, src/skynet.mjs, README.md.
 
 **Notes from the build (CC, 2026-10-06):** (1) The contract was checked on TEST before coding, read-only: both RPCs exist as the prompt describes — `fb_finish_part_valuation(p_window interval DEFAULT '00:15:00')`, so the bridge's `{}` call takes the 15-minute default — `fb_sync_state.last_valuation_at` exists, the 55 reorder rules include all four new probe parts, and `authenticated` can SELECT `fb_part_valuation` and `fb_reorder_points`. Posting `{}` as anon to `/rpc/fb_finish_part_valuation` answers `42501 permission denied` (PostgREST resolved the zero-argument call; only the privilege stopped it), and `/rpc/inventory_snapshot_take` answers HTTP 404 `PGRST202 Could not find the function public.inventory_snapshot_take without parameters in the schema cache` — both alternatives of the new check match it, and the JWT/401 retry check does not. (2) The deploy order is hard: 1.8.0 selects `last_valuation_at` at start-up (`pricingState`), so against a database without the S13 Batch A migration it exits before the first cycle; and the two new scope reads, like the D-FB-40 ones, are unguarded inside the cycle. PROD migration first, then skyserver. (3) TEST's `fb_part_valuation` holds 3 smoke rows from the migration's own check (SK2600CGP174, SK2FW2SE, SK4000-3S; synced 2026-10-06 19:28 UTC); the first `npm run mirror:valuation` overwrites them. (4) `--backfill` forces the products slot, so it also runs the valuation and calls the snapshot RPC — harmless, because the RPC decides whether a month-end is due and is idempotent per period.
+
+### D-FBINV-01 — Fishbowl Inventory module: Product class only, on-hand basis (2026-10-06)
+**What:** The Fishbowl Inventory module (Stock Levels, Reorder Points, Month-End Valuation) covers only Fishbowl
+parts whose valuation class — part custom field 33 — is "Product". Non-Product, Tooling - MRO and Raw - SkyNet
+Inventory are ignored; raw material stays in SkyNet (bars + blanks). Reorder minimums compare against ON HAND summed
+across every Fishbowl location group, not available. Fishbowl's own reorder-point feature is not used — SkyNet owns
+the minimums. A part with stock but no valuation class shows in a banner on Stock Levels instead of silently
+dropping in or out.
+**Why:** Product class is exactly the population the opening QBO entry valued as Finished Goods ($1,236,249.94), so
+the screen, the reorder list and the month-end read one set of parts. On hand is what Purchasing's critical-parts
+sheet means by "level"; allocations sit beside it.
+**Evidence:** 2026-10-06 mirror (bridge 1.8.0): 10,627 typeId-10 parts — Product 5,754 · Non-Product 4,184 ·
+Tooling - MRO 574 · Raw 115 · unclassified 0. Tag-sum vs 5-minute qtyinventorytotals: 5,754 compared, 0 mismatches
+on TEST and PROD.
+
+### D-FBINV-02 — Reorder points table and the below-minimum bell (2026-10-06)
+**What:** `fb_reorder_points` — one row per part (`part_key` generated `upper(btrim(part_num))`, unique), category,
+`min_qty` (null = no minimum yet, rule parked as `no_min`), vendor, notes, is_active, `alert_state`
+ok | below | no_min | no_row. `fb_reorder_evaluate()` (SECURITY DEFINER; admin, purchaser, integration)
+recomputes every active rule after each 5-minute inventory upsert — a fenced PERFORM inside `fb_upsert_inventory`,
+so a failure never blocks the inventory write — and after every edit in the UI. On the crossing into `below` only,
+it writes a `user_notifications` row of type `reorder_below_min` to every purchaser and admin, payload
+`{part_num, min_qty, on_hand, available, on_order, armory_tab:'fb_reorder'}`; recovery is silent; no email in S13.
+Seeded with 55 rules from Purchasing's critical-parts sheet (Critical_Parts_Reorder_Seed_v0_1.xlsx — six part
+numbers corrected to Fishbowl's, two wings parked with no minimum). RLS authenticated; writes are UI-gated to admin +
+purchaser (`canEditReorderPoints`).
+**Why:** Purchasing kept minimums on paper; the bell reaches the people who place the PO at the moment a part
+first drops below, and only then, so it is never noise.
+**Evidence:** PROD first evaluation 2026-10-06: 55 rules → after bridge 1.8.0, 52 ok · 1 below (SK2600CGP174,
+126,985 on hand vs 150,000, 100,000 on order) · 2 no_min · 0 no_row. Three bells (one per purchaser/admin); a second
+evaluation sent none. Migration: Docs/migrations/2026-10-07_S13_A_fb_valuation_reorder.sql (TEST and PROD 2026-10-06).
+
+### D-RPT-16 — Registry views for Fishbowl inventory (2026-10-06)
+**What:** `v_report_fb_stock_on_hand` — one row per Product part: 5-minute on hand / allocated / available / on order
+(nightly tag quantity as fallback, flagged), average cost, est. value, the rule's min and status ('inactive rule'
+when deactivated), flags `zero_cost` / `inactive` / `count_first` (100,000+) / `nightly_qty`, `inventory_as_of`,
+`cost_as_of`. `v_report_fb_reorder_status` — one row per rule: status ('inactive' when deactivated), shortfall,
+`on_order_covers`, vendor, notes, `alert_changed_at`, `inventory_as_of`. Registry rows `fb-stock-on-hand` (130) and
+`fb-reorder-status` (131): view admin, compliance, purchaser, president, viewer, customer_service, scheduler; export
+admin, president, scheduler, compliance, purchaser. The Armory tabs read these same views (D-FBINV-03), so the
+screen and the report cannot disagree. D-RPT-15 is held for the month-end valuation report (S13 Batch C).
+
+### D-FBINV-03 — Armory › Fishbowl Inventory group: Stock Levels and Reorder Points (2026-10-06)
+**What:** A third Armory dropdown group, "Fishbowl Inventory", after Finished Goods and Raw Materials, holding
+Stock Levels (read-only) and Reorder Points; Batch C adds Month-End Valuation. Tab ids `fb_stock` / `fb_reorder` are
+appended LAST in TAB_ACCESS_BY_ROLE for admin, compliance, purchaser, president, viewer, customer_service and
+scheduler, so no role's default tab moves; finishing and machinist do not see the group. Both tabs read the D-RPT-16
+views through `runReport` (exhaustive fetch, D-RPT-04).
+Stock Levels: default filter "In stock", plus All / Critical / Below min / Zero stock / $0 cost, search, sortable
+columns, first 250 rows then "show all", CSV. A freshness line from `fb_sync_state` (amber past 15 minutes) and a
+row-level clock when a snapshot is more than 10 minutes older than the last cycle (the D-FB-39 window). Est. value
+is labelled an estimate — the month-end figure is frozen separately. A banner names any part with stock and no class.
+Reorder Points: rules grouped in the sheet's category order; the status chip is the stored `alert_state`, never
+re-derived in the browser; shortfall and "on order covers it" beside it. Admin + purchaser add (typeahead over
+Product parts), edit, activate/deactivate, delete and re-evaluate; every write calls `fb_reorder_evaluate()`, so the
+status is current at once and raising a minimum above on hand rings the bell right then. A badge on the tab and the
+group counts active rules below minimum. A reorder bell opens Armory › Reorder Points: NotificationsBell sends
+`payload.armory_tab` through App's `handleNavigate` as `navPayload.armoryTab` (D-NAV-01), and Armory opens it only
+if the user can see that tab. CSV gates match the registry's export_roles (`canExportFbInventory`). Pure helpers in
+`src/lib/fbStock.js`, tested by `node src/lib/fbStock.test.mjs`.
+**Why:** Matt, 2026-10-06 — SkyNet is the one place to look at Fishbowl Product inventory, and Purchasing maintains
+critical-part minimums in SkyNet instead of a spreadsheet.
+**Files:** new src/lib/fbStock.js, src/lib/fbStock.test.mjs, src/components/fbinventory/fbInventoryData.js,
+src/components/fbinventory/StockLevelsTab.jsx, src/components/fbinventory/ReorderPointsTab.jsx; modified
+src/pages/Armory.jsx, src/App.jsx, src/components/NotificationsBell.jsx, src/lib/roles.js.
+
+**Notes from the build (CC, 2026-10-06):** (1) Contract checked read-only before coding. The two views' columns on TEST equal `STOCK_CSV_COLUMNS` / `REORDER_CSV_COLUMNS` exactly, in order (the stock view also on PROD); the registry rows' view and export roles equal `FB_INVENTORY_VIEW_ROLES` / `FB_INVENTORY_EXPORT_ROLES`; `_fb_gate` checks through `user_has_role`, so a purchaser held as an additional role (customer_service + purchaser) passes `fb_reorder_evaluate`; and every `reorder_below_min` row already delivered carries `armory_tab` (TEST 4, PROD 3), so the bells already sent for SK2600CGP174 deep-link too. (2) As anon, `v_report_fb_stock_on_hand`, `v_report_fb_reorder_status` and `fb_reorder_points` answer `42501 permission denied` rather than the expected empty 200, because the Batch A migration revokes everything from anon; the names resolve (an unknown name answers `PGRST205`), and `rpc/fb_reorder_evaluate` answers `42501`, not `PGRST202`. (3) The deepest Stock Levels page (`ORDER BY part_number OFFSET 5000 LIMIT 1000`) runs in 200 ms on PROD, so the six-page exhaustive read stays far inside the `authenticated` 8 s statement timeout.
+
+### D-FBINV-04 — Excel extracts and a 1280-px layout for Stock Levels and Reorder Points (2026-10-06)
+**What:** Both tabs gain an Excel button beside CSV, behind the same gate (`canExportFbInventory`). The workbook is
+what is on screen — the current filter, search and sort, every row, not just the 250 the table draws. Sheet 1 is the
+data: numbers stored as numbers (quantities `#,##0`, average cost `$#,##0.0000`, value `$#,##0.00`), frozen header
+(`catalogExport.freezeTopRow`), autofilter. Sheet 2, "About": when it was generated, the Fishbowl inventory and cost
+clocks, the view and search that produced it, counts (Stock Levels' part count and est. value are COUNTA / SUM
+formulas over the data), and how to read the columns. Timestamps are local text, so they never shift with the time
+zone of whoever opens the file. Files `Skybolt_Fishbowl_Stock_Levels_<date>.xlsx` and
+`Skybolt_Reorder_Points_<date>.xlsx`. Built in `src/lib/fbStockExport.js` (SheetJS only, no Supabase import), tested
+by `node src/lib/fbStockExport.test.mjs`; downloaded through `priceListDoc.downloadBytes`.
+Layout: the Armory's content box is `max-w-7xl` — about 1,230 px of table at any screen width — and the Batch B
+tables needed 1,543 px (Stock Levels, with the longest real part numbers) and 1,376 px (Reorder Points). Now: cell
+padding `px-2`; part numbers wrap (max 11rem / 10rem) instead of forcing the column wide; descriptions truncate at
+13rem with the full text on hover; Stock Levels' minimum moves under the Reorder chip ("min 200,000"); flags stack;
+the shortfall note stacks under its status chip; vendor truncates at 10rem with vendor and notes on hover. Measured in
+headless Chromium inside the `max-w-7xl` wrapper with the widest PROD part numbers: natural widths 1,134 px and
+1,100 px, no horizontal scroll at 1280 px or wider.
+**Why:** Matt, 2026-10-06 quick test of Batch B: add an Excel extract; the Flags column was cut off.
+**Files:** new src/lib/fbStockExport.js, src/lib/fbStockExport.test.mjs; replaced whole (both new this branch, not
+yet committed) src/components/fbinventory/StockLevelsTab.jsx and src/components/fbinventory/ReorderPointsTab.jsx.
+
+**Notes from the build (CC, 2026-10-06):** (1) The pre-replacement check found Batch B's `StockLevelsTab.jsx` one character off the Batch B prompt: the "Nightly qty" tooltip carried the character `’` where the prompt has the escape `’` — a transcription slip in the Batch B build, the same string at runtime, and the only `\u` escape in that prompt. Neither tab file had been touched since the Batch B build (both last modified at its CRLF conversion), so nothing was lost by the replacement, which restores the escape. The four files of this round were written straight from the prompt file and compared byte for byte: identical, CRLF. (2) The 1280-px widths above are the prompt author's measurement; this build did not re-measure them — Matt's quick test step 1 checks them on screen.

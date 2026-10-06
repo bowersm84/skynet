@@ -94,3 +94,23 @@ export function canSetPricingTier(profile) {
 export function canSeePricingDeviations(profile) {
   return hasRole(profile, ...PRICING_TIER_ROLES)
 }
+
+// Fishbowl Inventory group in the Armory (S13, D-FBINV-03): Stock Levels + Reorder Points.
+// View matches the 'fb_stock' / 'fb_reorder' entries in Armory's TAB_ACCESS_BY_ROLE. Reorder
+// rule writes (add / edit / activate / delete / re-evaluate) are admin + purchaser — the same
+// set fb_reorder_evaluate() admits server-side, plus the bridge's `integration` role.
+// CSV export matches export_roles on the fb-stock-on-hand / fb-reorder-status registry rows.
+export const FB_INVENTORY_VIEW_ROLES = ['admin', 'compliance', 'purchaser', 'president', 'viewer', 'customer_service', 'scheduler']
+export const FB_INVENTORY_EXPORT_ROLES = ['admin', 'president', 'scheduler', 'compliance', 'purchaser']
+
+export function canViewFbInventory(profile) {
+  return hasRole(profile, ...FB_INVENTORY_VIEW_ROLES)
+}
+
+export function canEditReorderPoints(profile) {
+  return hasRole(profile, 'admin', 'purchaser') && !isReadOnlyRole(profile?.role)
+}
+
+export function canExportFbInventory(profile) {
+  return hasRole(profile, ...FB_INVENTORY_EXPORT_ROLES)
+}

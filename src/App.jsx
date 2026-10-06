@@ -514,7 +514,11 @@ function MainApp() {
           <Schedule user={user} profile={profile} onNavigate={setCurrentPage} canEdit={canEditSchedule} />
         )}
         {currentPage === 'armory' && canAccessArmory && (
-          <Armory profile={profile} />
+          <Armory
+            profile={profile}
+            navPayload={navPayload}
+            onNavPayloadConsumed={() => setNavPayload(null)}
+          />
         )}
         {currentPage === 'customer_orders' && canAccessCustomerOrders && (
           <CustomerOrders

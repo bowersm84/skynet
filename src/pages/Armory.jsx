@@ -32,11 +32,16 @@ import {
   Paperclip,
   ExternalLink,
   TrendingUp,
-  History
+  History,
+  PackageOpen,
+  LayoutGrid,
+  Flag
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import PartHistoryModal from '../components/PartHistoryModal'
 import RMForecastSection from '../components/rmforecast/RMForecastSection'
+import StockLevelsTab from '../components/fbinventory/StockLevelsTab'
+import ReorderPointsTab from '../components/fbinventory/ReorderPointsTab'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
@@ -50,23 +55,25 @@ const LOW_STOCK_BAR_THRESHOLD = 5
 const BLANK_LOW_THRESHOLD = 5000
 const BLANK_CRITICAL_THRESHOLD = 3000
 
-export default function Armory({ profile }) {
+export default function Armory({ profile, navPayload = null, onNavPayloadConsumed = null }) {
   const canWrite = canWriteMasterData(profile)
   // Per-role tab visibility. Single source of truth.
   // Order in each array determines the default tab for that role (first item).
   // Read-only roles (president, viewer) get the read-relevant tab set
   // (no Users, no Receiving); write buttons inside these tabs are gated on canWrite.
   const TAB_ACCESS_BY_ROLE = {
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment'],
+    // S13 D-FBINV-03: 'fb_stock' / 'fb_reorder' (Fishbowl Inventory group) go LAST in every
+    // array so no role's default tab moves. Writes inside Reorder Points: admin + purchaser.
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users', 'fb_stock', 'fb_reorder'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'fb_stock', 'fb_reorder'],
     finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
     machinist:        ['inventory', 'adjustments', 'reconciliation', 'rmforecast'],
     // 'customers' stays first so the scheduler's default Armory tab is unchanged.
-    scheduler:        ['customers', 'rmforecast'],
-    customer_service: ['customers'],
-    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
-    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers'],
-    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment'],
+    scheduler:        ['customers', 'rmforecast', 'fb_stock', 'fb_reorder'],
+    customer_service: ['customers', 'fb_stock', 'fb_reorder'],
+    president:        ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers', 'fb_stock', 'fb_reorder'],
+    viewer:           ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'reconciliation', 'replenishment', 'customers', 'fb_stock', 'fb_reorder'],
+    purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'fb_stock', 'fb_reorder'],
   }
   const visibleTabIds = [...new Set(userRoles(profile).flatMap(r => TAB_ACCESS_BY_ROLE[r] || []))]
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
@@ -250,7 +257,9 @@ export default function Armory({ profile }) {
   const [adjError, setAdjError] = useState('')
   const [invSortDir, setInvSortDir] = useState('asc')
   const [assigningRack, setAssigningRack] = useState(null)
-  const [openMenu, setOpenMenu] = useState(null) // which tab-group dropdown is open ('finished_goods' | 'raw_materials' | null)
+  const [openMenu, setOpenMenu] = useState(null) // which tab-group dropdown is open ('finished_goods' | 'raw_materials' | 'fishbowl_inventory' | null)
+  // Reorder Points badge (S13 D-FBINV-03): active rules below minimum.
+  const [fbBelowCount, setFbBelowCount] = useState(0)
   // material_receiving_id → cert document count (single batched query)
   const [materialDocCounts, setMaterialDocCounts] = useState({})
   // Lot Documents modal (after-the-fact uploads from the Inventory tab)
@@ -928,6 +937,37 @@ export default function Armory({ profile }) {
   useEffect(() => {
     loadPendingAdjCount()
   }, [loadPendingAdjCount])
+
+  // S13 D-FBINV-03: Reorder Points badge, loaded on mount so it shows from any tab. The state
+  // is evaluated server-side after every 5-minute inventory refresh (fb_reorder_evaluate); the
+  // tab pushes a fresh count back through onBelowCountChange after it loads or saves.
+  const canSeeFbReorder = canSeeTab('fb_reorder')
+  useEffect(() => {
+    if (!canSeeFbReorder) return undefined
+    let cancelled = false
+    supabase
+      .from('fb_reorder_points')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_active', true)
+      .eq('alert_state', 'below')
+      .then(({ count, error }) => {
+        if (cancelled) return
+        if (error) { console.error('Error loading reorder below-min count:', error); return }
+        setFbBelowCount(count || 0)
+      })
+    return () => { cancelled = true }
+  }, [canSeeFbReorder])
+
+  // S13 D-FBINV-03: a reorder bell deep-links here — NotificationsBell sends payload.armory_tab,
+  // App.jsx routes it through handleNavigate as navPayload.armoryTab (D-NAV-01). Only a tab this
+  // user can see is opened; the payload is consumed either way.
+  const visibleTabKey = visibleTabIds.join('|') // string, so the effect below has a stable dependency
+  useEffect(() => {
+    const tab = navPayload?.armoryTab
+    if (!tab) return
+    if (visibleTabKey.split('|').includes(tab)) setActiveTab(tab)
+    onNavPayloadConsumed?.()
+  }, [navPayload, onNavPayloadConsumed, visibleTabKey])
 
   useEffect(() => {
     if (activeTab === 'adjustments') { loadAdjustments(); loadInventory() }
@@ -2336,15 +2376,20 @@ export default function Armory({ profile }) {
                 { id: 'rmforecast', label: 'RM Forecast', icon: TrendingUp, count: null },
                 { id: 'receiving', label: 'Receiving', icon: PackageCheck, count: null },
                 { id: 'replenishment', label: 'Replenishment Rules', icon: Bell, count: belowMinCount || null },
+                { id: 'fb_stock', label: 'Stock Levels', icon: LayoutGrid, count: null },
+                { id: 'fb_reorder', label: 'Reorder Points', icon: Flag, count: fbBelowCount || null },
                 { id: 'customers', label: 'Customers', icon: Users, count: null },
                 { id: 'users', label: 'Users', icon: Users, count: null },
               ]
               const FINISHED_GOODS_TAB_IDS = ['assemblies', 'components', 'routing']
+              // S13 D-FBINV-03: Fishbowl Inventory group. Batch C adds 'fb_monthend' here.
+              const FB_INVENTORY_TAB_IDS = ['fb_stock', 'fb_reorder']
               const TAB_GROUPS = [
                 { key: 'finished_goods', label: 'Finished Goods', icon: Package, ids: FINISHED_GOODS_TAB_IDS },
                 { key: 'raw_materials', label: 'Raw Materials', icon: Layers, ids: RAW_MATERIALS_TAB_IDS },
+                { key: 'fishbowl_inventory', label: 'Fishbowl Inventory', icon: PackageOpen, ids: FB_INVENTORY_TAB_IDS },
               ]
-              const groupedIds = new Set([...FINISHED_GOODS_TAB_IDS, ...RAW_MATERIALS_TAB_IDS])
+              const groupedIds = new Set([...FINISHED_GOODS_TAB_IDS, ...RAW_MATERIALS_TAB_IDS, ...FB_INVENTORY_TAB_IDS])
               const standaloneTabs = allTabs.filter(t => !groupedIds.has(t.id) && canSeeTab(t.id))
               const renderTopBtn = (t) => (
                 <button
@@ -3872,6 +3917,12 @@ export default function Armory({ profile }) {
             materialTypes={materialTypes}
             barSizes={barSizes}
           />
+        )}
+
+        {/* Fishbowl Inventory group (S13, D-FBINV-03). Fishbowl parts classed Product only (D-FBINV-01). */}
+        {activeTab === 'fb_stock' && <StockLevelsTab profile={profile} />}
+        {activeTab === 'fb_reorder' && (
+          <ReorderPointsTab profile={profile} onBelowCountChange={setFbBelowCount} />
         )}
 
         {/* Receiving Tab */}

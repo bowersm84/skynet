@@ -5,7 +5,8 @@ import { Bell, Loader2, CheckCheck } from 'lucide-react'
 /**
  * Header notifications bell (D-NOTIF-01). Backed by user_notifications, which
  * is a generic per-user primitive — this component knows nothing about who
- * produced a row beyond an optional payload.co_number deep link.
+ * produced a row beyond two optional deep links: payload.co_number (My Orders)
+ * and payload.armory_tab (an Armory tab — reorder bells, S13 D-FBINV-03).
  *
  * RLS scopes reads to the recipient; the explicit recipient_id filter here
  * mirrors that so the realtime subscription and the query agree.
@@ -119,6 +120,14 @@ export default function NotificationsBell({ profile, onNavigate }) {
 
   const handleClick = async (row) => {
     await markRead(row)
+    // S13 D-FBINV-03: reorder bells carry payload.armory_tab = 'fb_reorder'. Armory opens the
+    // tab only if this user can see it (its own TAB_ACCESS_BY_ROLE check).
+    const armoryTab = row?.payload?.armory_tab
+    if (armoryTab && onNavigate) {
+      setOpen(false)
+      onNavigate('armory', { armoryTab })
+      return
+    }
     const coNumber = row?.payload?.co_number
     if (coNumber && canDeepLinkToMyOrders && onNavigate) {
       setOpen(false)

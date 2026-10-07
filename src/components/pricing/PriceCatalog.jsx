@@ -107,7 +107,7 @@ function ItemGrid({ items, comps, extra, meta, book, sectionKind, kits, fbPrices
           })}
         </tbody>
       </table>
-      {kits && <div className="px-3 py-2 text-[11px] text-gray-500 border-t border-gray-800">Kit price = sum of components at book price · hardware at 2× cost (D-PRICE-46/47). A kit with any unpriced component shows Σ — and never a part price.</div>}
+      {kits && <div className="px-3 py-2 text-[11px] text-gray-500 border-t border-gray-800">Kit Each = sum of components at book price · hardware at 2× cost (D-PRICE-46/47) · Distributor = Each − 30% for any customer with a tier, no quantity breaks (D-PRICE-66); Common Sets keep their per-column sums. A kit with any unpriced component shows Σ — and never a part price.</div>}
     </div>
   )
 }

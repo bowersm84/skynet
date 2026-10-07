@@ -25,7 +25,7 @@ const ok = (cond, msg) => { assert.ok(cond, msg); n++ }
 const eq = (a, b, msg) => { assert.deepEqual(a, b, msg); n++ }
 
 try {
-  const { columnPrice, bookPricer, sumDetail, multiplierFor, BASIS_LABELS, TIERS, TIER_LABELS } = await import(pathToFileURL(shimPath).href)
+  const { columnPrice, bookPricer, sumDetail, multiplierFor, columnFactor, BASIS_LABELS, TIERS, TIER_LABELS } = await import(pathToFileURL(shimPath).href)
 
   const book = { id: 'b', rev_label: 'Rev 82', premier_pct: 0.97 }
   const meta = {
@@ -36,6 +36,7 @@ try {
         { key: 'q500', kind: 'qty', min: 500, label: '500' }, { key: 'tier1', kind: 'tier', label: 'Tier 1' },
         { key: 'tier2', kind: 'tier', label: 'Tier 2' }, { key: 'tier3', kind: 'tier', label: 'Tier 3' }] },
       q100: { code: 'q100', columns: [{ key: 'q100', kind: 'qty', min: 100, label: '100' }] },
+      kit: { code: 'kit', columns: [{ key: 'distributor', kind: 'tier', label: 'Distributor', factor: 0.70 }] },   // D-PRICE-66
       none: { code: 'none', columns: [] },
     },
   }
@@ -73,6 +74,21 @@ try {
   const withNarrow = { ...kit, _components: [...kit._components, { component_key: 'N1', component_part_number: 'N1', qty: 1 }] }
   eq(columnPrice(withNarrow, 'each', meta, book, resolve), 108, 'a component on a shorter ladder still prices at Each')
   eq(columnPrice(withNarrow, 'q300', meta, book, resolve), null, 'but at a column it does not carry, the kit has no price at that column either')
+
+  // ── a factor column: Each sum × factor (D-PRICE-66) ─────────────────────────────
+  const distKit = { ...kit, ladder_code: 'kit' }                       // same components as `kit`, on the kit ladder
+  eq(columnFactor(distKit, 'distributor', meta), 0.7, 'the kit ladder’s Distributor column carries its factor')
+  eq(columnFactor(distKit, 'each', meta), null, 'Each has no factor')
+  eq(columnFactor(kit, 'tier3', meta), null, 'a column without a factor (Common Sets stay on their old ladder) has none')
+  eq(columnPrice(distKit, 'each', meta, book, resolve), 100, 'a kit on the kit ladder still sums to Each like any kit')
+  eq(columnPrice(distKit, 'distributor', meta, book, resolve), 70, 'Distributor = the Each sum × 0.70 — components summed at Each, not at a column they do not carry')
+  eq(columnPrice({ ...withUnpriced, ladder_code: 'kit' }, 'distributor', meta, book, resolve), null, 'one unpriced component and there is no Distributor price either — all-or-nothing survives the factor')
+  const dp = bookPricer(meta, book, resolve)
+  eq(dp(distKit, 'distributor'), 70, 'bookPricer prices the Distributor column the same way')
+  eq(dp(distKit, 'tier3'), null, 'and a kit on the kit ladder has no Tier 3 column — Each and Distributor are its only two')
+  eq(dp(distKit, 'q100'), null, 'nor a quantity column')
+  eq(dp({ ...kit, ladder_code: 'standard' }, 'tier3'), 65, 'a kit on the standard ladder (a Common Set) still sums per column, unchanged')
+  ok(BASIS_LABELS.kit_distributor, 'the RPC’s new basis has a label')
 
   // The $0.00 trap (D-PRICE-48): the raw mirror sums an empty component list to 0.
   const bare = { status: 'component_sum', part_key: 'AC500-C1', _components: [] }

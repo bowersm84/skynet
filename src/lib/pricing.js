@@ -18,7 +18,7 @@ const PAGE = 1000
 export { TIERS, LEVEL_TIERS, COLUMN_TIERS, TIER_LABELS, TIER_COLORS, COLUMN_TIER_NOTE, isColumnTier } from './pricingView'
 export const BASIS_LABELS = {
   list: 'List (Each)', qty_break: 'Quantity break', tier: 'Customer tier', premier: 'Premier',
-  exception: 'Customer-part exception', kit_sum: 'Sum of components', no_price: 'No pricing available',
+  exception: 'Customer-part exception', kit_sum: 'Sum of components', kit_distributor: 'Kit · distributor (Each − 30%)', no_price: 'No pricing available',
   column: 'Customer column', manual: 'Manual price',
 }
 
@@ -229,19 +229,31 @@ export function itemColumns(item, ladder) {
   if (item?.has_premier) cols.push({ key: 'premier', kind: 'tier', label: 'Premier' })
   return cols
 }
+// A ladder column with a `factor` (D-PRICE-66: the kit ladder's single Distributor column, 0.70)
+// prices as the item's EACH × factor instead of through a rule multiplier. Returns the factor as a
+// number, or null when the item's ladder has no such column — the same test pricing_item_prices and
+// pricing_get_price apply.
+export function columnFactor(item, colKey, meta) {
+  const col = ((meta?.ladders?.[item?.ladder_code]?.columns) || []).find(c => c.key === colKey)
+  return col && col.factor !== null && col.factor !== undefined && Number.isFinite(Number(col.factor)) ? Number(col.factor) : null
+}
 // Price for one item at one column. `resolveComponent(partKey)` supplies a
 // component item for sets (returns {item} or null). One level deep, like the RPC.
 export function columnPrice(item, colKey, meta, book, resolveComponent) {
   if (!item || item.status === 'no_price') return null
   if (item.status === 'component_sum') {
+    // A factor column sums the components at EACH and scales the sum (D-PRICE-66); any other
+    // column sums the components at that same column, as before.
+    const factor = columnFactor(item, colKey, meta)
+    const sumKey = factor === null ? colKey : 'each'
     let sum = 0
     for (const kc of item._components || []) {
       const comp = resolveComponent?.(kc.component_key)
-      const v = comp ? columnPrice(comp, colKey, meta, book, null) : null
+      const v = comp ? columnPrice(comp, sumKey, meta, book, null) : null
       if (v === null) return null
       sum += v * Number(kc.qty || 1)
     }
-    return sum
+    return factor === null ? sum : sum * factor
   }
   const list = Number(item.list_price)
   if (colKey === 'each') return list
@@ -275,14 +287,17 @@ export function bookPricer(meta, book, resolve) {
     if (item.status === 'component_sum') {
       const comps = item._components || []
       if (!comps.length) return null
+      // A factor column (the kit ladder's Distributor, D-PRICE-66) is the Each sum × factor.
+      const factor = columnFactor(item, colKey, meta)
+      const sumKey = factor === null ? colKey : 'each'
       let sum = 0
       for (const kc of comps) {
         const c = resolve?.(kc.component_key) || null
-        const v = c ? price(c, colKey) : null
+        const v = c ? price(c, sumKey) : null
         if (v === null || !Number.isFinite(Number(v))) return null
         sum += Number(v) * Number(kc.qty || 1)
       }
-      return sum
+      return factor === null ? sum : sum * factor
     }
     return columnPrice(item, colKey, meta, book, null)
   }

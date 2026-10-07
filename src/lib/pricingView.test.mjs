@@ -51,7 +51,7 @@ ok(DEVIATION_KINDS.every(k => DEVIATION_KIND_LABELS[k]), 'every kind the view ca
 const sections = [
   { id: 's1', name: 'Skybolt CLoc® 2600 Protruding Head Series - Steel', sort: 3 },
   { id: 's2', name: 'Skybolt CLoc® 2600 Protruding Head Series - Stainless', sort: 4 },
-  { id: 's3', name: 'Skybolt Kits — Cowling', sort: 90 },
+  { id: 's3', name: 'Cowling Kits', sort: 90 },
   { id: 's4', name: 'Kit Hardware (cost-based)', sort: 95 },
   { id: 's5', name: 'Resale Items', sort: 99 },
 ]
@@ -66,22 +66,23 @@ ok(capped.more > 0, 'the overflow is reported rather than silently dropped')
 // ── kit sections ──────────────────────────────────────────────────────────────────
 const sumSections = new Set(['s3'])
 const part = partitionKitSections(sections, s => sumSections.has(s.id))
-eq(part.kitSections.map(s => s.id), ['s3', 's4'], 'a section holding a sum, plus Kit Hardware by name, move to Kits')
-eq(part.plainSections.map(s => s.id), ['s1', 's2', 's5'], 'Resale Items stays on the catalog side — it carries cost rows but no sums')
-ok(kitRank('Skybolt Kits — Cowling') < kitRank('Kit Hardware (cost-based)'), 'Kit Hardware sorts last of the kit sections')
-ok(kitRank('Something else') >= kitRank('Kit Hardware (cost-based)'), 'an unknown family falls to the bottom, never to the top')
+eq(part.kitSections.map(s => s.id), ['s3'], 'only a section holding a sum moves to Kits (Kit Hardware no longer goes by name, D-PRICE-68)')
+eq(part.plainSections.map(s => s.id), ['s1', 's2', 's4', 's5'], 'Kit Hardware and Resale Items stay on the catalog side — cost rows, no sums')
+const order = ['Skybolt CLoc® Sets', 'Conversion Kits', 'Cowling Kits', 'Option Kits', 'RV Kits', 'Lancair Kits', 'Tooling & Accessory Kits'].map(kitRank)
+eq(order, [0, 1, 2, 3, 4, 5, 6], 'the seven kit sections rank in Matt\'s reading order (D-PRICE-68)')
+ok(kitRank('Something else') > kitRank('Tooling & Accessory Kits'), 'an unknown section falls to the bottom, never to the top')
 
 // ── which book the Catalog Kits tab reads ─────────────────────────────────────────
 // PROD shape, 2026-09-16: Rev 81 (active) carries ONE sum-bearing section — the 16 CLoc 2000
 // Common Sets — and Rev 82 (scheduled 2026-10-01) carries five plus Kit Hardware.
 const bookSections = [
-  { id: 'common', name: 'Skybolt CLoc® 2000 Series Common Sets', sort: 2 },
   { id: 'plain', name: 'Skybolt CLoc® 2600 Protruding Head Series - Steel', sort: 3 },
-  { id: 'hardware', name: 'Kit Hardware (cost-based)', sort: 198 },
-  { id: 'cowling', name: 'Skybolt Kits — Cowling Kit', sort: 199 },
-  { id: 'option', name: 'Skybolt Kits — Option Kit', sort: 200 },
-  { id: 'rv', name: 'Skybolt Kits — RV Kit', sort: 201 },
-  { id: 'lancair', name: 'Skybolt Kits — Lancair Kit', sort: 202 },
+  { id: 'hardware', name: 'Kit Hardware (cost-based)', sort: 200 },
+  { id: 'common', name: 'Skybolt CLoc® Sets', sort: 201 },
+  { id: 'cowling', name: 'Cowling Kits', sort: 203 },
+  { id: 'option', name: 'Option Kits', sort: 204 },
+  { id: 'rv', name: 'RV Kits', sort: 205 },
+  { id: 'lancair', name: 'Lancair Kits', sort: 206 },
 ]
 const rev81 = { book: { id: 'b81', rev_label: 'Rev 81 — Jun 2026' }, meta: { sections: bookSections.filter(s => ['common', 'plain'].includes(s.id)) }, sumSectionIds: new Set(['common']) }
 const rev82 = { book: { id: 'b82', rev_label: 'Rev 82 — Oct 2026', effective_from: '2026-10-01' }, meta: { sections: bookSections }, sumSectionIds: new Set(['common', 'cowling', 'option', 'rv', 'lancair']) }
@@ -90,7 +91,7 @@ const today = pickKitsBook(rev81, rev82)
 eq(today.source, 'scheduled', 'Rev 81 already holds the Common Sets, so the tab follows the book with MORE kit sections — the scheduled one')
 eq(today.book.id, 'b82', 'and it reads the scheduled book itself, not the one in effect')
 ok(today.showFishbowl, 'a book shown ahead of its date is shown beside what Fishbowl lists today')
-eq(today.sections.map(s => s.id), ['common', 'cowling', 'option', 'rv', 'lancair', 'hardware'], 'the kit sections in Matt’s reading order, Kit Hardware last')
+eq(today.sections.map(s => s.id), ['common', 'cowling', 'option', 'rv', 'lancair'], 'the kit sections in Matt’s reading order; Kit Hardware is a catalog section now (D-PRICE-68)')
 
 const oct1 = pickKitsBook(rev82, null)
 eq(oct1.source, 'current', 'once Rev 82 is the book in effect the tab reads it like every other Catalog tab')

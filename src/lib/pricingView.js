@@ -135,11 +135,12 @@ export function sectionsForSearch(sections, term, partCounts, limit = 20) {
 }
 
 // ---------------------------------------------------------------- kit sections
-// A section belongs to the Kits tab when it actually HOLDS a component_sum, plus the
-// Kit Hardware section (cost rows, not sums — matched by name). Partitioning by
-// content means a new kit family needs no rename and no list here (D-PRICE-48 add. 2).
-export const KIT_HARDWARE_RE = /kit hardware/i
-const KIT_ORDER = ['common set', 'cowling', 'option', 'rv kit', 'lancair', 'kit hardware']
+// A section belongs to the Kits tab when it actually HOLDS a component_sum. Partitioning by
+// content means a new kit family needs no rename and no list here (D-PRICE-48 add. 2). Kit
+// Hardware (cost rows, no sums) left the Kits tab for the Catalog with D-PRICE-68.
+// KIT_ORDER is Matt's reading order (D-PRICE-68): Sets, Conversion, Cowling, Option, RV, Lancair,
+// Tooling & Accessory — matched as substrings of the section names the book carries.
+const KIT_ORDER = ['sets', 'conversion', 'cowling', 'option', 'rv kit', 'lancair', 'tooling']
 export function kitRank(name) {
   const n = String(name || '').toLowerCase()
   const i = KIT_ORDER.findIndex(k => n.includes(k))
@@ -149,7 +150,7 @@ export function kitRank(name) {
 export function partitionKitSections(sections, hasSums) {
   const kit = [], plain = []
   for (const s of sections || []) {
-    if (hasSums(s) || KIT_HARDWARE_RE.test(s.name)) kit.push(s); else plain.push(s)
+    if (hasSums(s)) kit.push(s); else plain.push(s)
   }
   kit.sort((a, b) => kitRank(a.name) - kitRank(b.name) || a.sort - b.sort)
   return { kitSections: kit, plainSections: plain }

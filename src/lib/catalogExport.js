@@ -27,7 +27,7 @@ function qtyLabel(label) {
 // Column labels come from the book's own ladders, so a book that adds a column gets it
 // in the picker with no code change. Order: Each, quantity columns by break ascending,
 // tier columns, Premier last — the reading order of the printed book.
-const TIER_ORDER = ['tier1', 'tier2', 'tier3']
+const TIER_ORDER = ['tier1', 'tier2', 'tier3', 'distributor']   // distributor: the kit ladder's single column (D-PRICE-66)
 export function catalogColumns(meta) {
   const qty = new Map(), tier = new Map()
   for (const l of Object.values(meta?.ladders || {})) {

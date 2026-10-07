@@ -258,8 +258,10 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
   // Kits tab = every section that actually holds a sum, plus Kit Hardware. Partitioned by CONTENT,
   // so a future kit family needs no rename and no list here (addendum 2). Kit Hardware is matched by
   // name because it holds cost rows, not sums. Order is Matt's reading order, not the book's sort.
+  // The Catalog's Kits tab dropped Kit Hardware (D-PRICE-68); the editor keeps it here, beside the
+  // section's Refresh costs button and where the cost-drift pill lands — hence the name test inline.
   const { kitSections, plainSections } = useMemo(
-    () => partitionKitSections(meta?.sections || [], s => (sectionCounts.get(s.id)?.sums || 0) > 0),
+    () => partitionKitSections(meta?.sections || [], s => (sectionCounts.get(s.id)?.sums || 0) > 0 || /kit hardware/i.test(s.name)),
     [meta, sectionCounts])
   const visibleSections = view === 'kits' ? kitSections : plainSections
   const sectionId = view === 'kits' ? secByTab.kits : secByTab.items

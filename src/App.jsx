@@ -11,6 +11,7 @@ import Mainframe from './pages/Mainframe'
 import Schedule from './pages/Schedule'
 import Kiosk from './pages/Kiosk'
 import MaterialKiosk from './pages/MaterialKiosk'
+import TravelerKiosk from './pages/TravelerKiosk'
 import Finishing from './pages/Finishing'
 import KitKiosk from './pages/KitKiosk'
 import Pricing from './pages/Pricing'
@@ -596,6 +597,10 @@ function App() {
 
         {/* Raw Material Checkout Kiosk — machine-agnostic rack staging device. PIN auth; self-gated by FEATURES.MATERIAL_KIOSK inside the page. */}
         <Route path="/material-kiosk" element={<MaterialKiosk />} />
+
+        {/* Traveler Kiosk — the machinists' print station (S14, D-TKIOSK). PIN auth via
+            kiosk-authenticate; self-gated by FEATURES.TRAVELER_KIOSK inside the page. */}
+        <Route path="/traveler-kiosk" element={<TravelerKiosk />} />
 
         {/* Finishing station route */}
         <Route path="/finishing" element={<Finishing />} />

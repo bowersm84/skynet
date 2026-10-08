@@ -39,6 +39,16 @@ export const FEATURES = {
   MATERIAL_KIOSK: true,
 
   /**
+   * Traveler Kiosk (S14, D-TKIOSK-12) — the machinists' print station at
+   * /traveler-kiosk: PIN in, tap a machine, print the travel pack (and the
+   * blank production card) at the last moment instead of Roger printing into
+   * bins at compliance accept. When false: the route renders a "not enabled"
+   * page and nothing else changes. TEST: true from Batch A. PROD: flip on
+   * cutover day, after the kiosk PC is set up and Roger has been told.
+   */
+  TRAVELER_KIOSK: true,
+
+  /**
    * Nested Assembly (assembly-within-assembly). When false: Create WO renders
    * the existing single-level BOM list and submits flat — no behavior change.
    * When true: Create WO loads the full BOM tree via explode_bom and renders it

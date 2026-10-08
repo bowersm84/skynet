@@ -1052,17 +1052,22 @@ export default function Kiosk() {
       // Bolt Masters run blanks (no job_materials load row). Hydrate the active job's blank
       // type/dash from its receipt/stub so the Materials panel can always show something.
       if (active && machine?.code?.toLowerCase().startsWith('bm') && active.blank_lot_number) {
-        const { data: blankRcv } = await supabase
+        // D-BLANKS-10: one lot can hold several dashes (e.g. 47269 = dash 1 + dash 6), so match
+        // the job's own dash — the same lot + dash rule consume_blank_lot uses at finishing.
+        // Jobs with no dash recorded fall back to the lot's newest blank receipt, as before.
+        let blankRcvQuery = supabase
           .from('material_receiving')
           .select('material_type, bar_size, lot_number')
           .eq('category', 'blank')
           .eq('lot_number', active.blank_lot_number)
+        if (active.blank_dash) blankRcvQuery = blankRcvQuery.eq('bar_size', active.blank_dash)
+        const { data: blankRcv } = await blankRcvQuery
           .order('received_at', { ascending: false })
           .limit(1)
         setActiveBlankInfo(
           blankRcv && blankRcv.length > 0
             ? blankRcv[0]
-            : { material_type: null, bar_size: null, lot_number: active.blank_lot_number }
+            : { material_type: null, bar_size: active.blank_dash || null, lot_number: active.blank_lot_number }
         )
       } else {
         setActiveBlankInfo(null)

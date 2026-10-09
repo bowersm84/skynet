@@ -81,6 +81,9 @@ export function isScheduleStale(job, activeAllocations = []) {
 // Staleness is derived from three timestamps — never a flag to clear.
 export function isPaperworkStale(job) {
   if (!job?.paperwork_changed_at) return false
+  // D-TKIOSK-10: a job that was never printed has no paper to be wrong — it
+  // prints current at the Traveler Kiosk. Only printed-then-changed is stale.
+  if (!job?.traveler_printed_at) return false
   const changed = new Date(job.paperwork_changed_at).getTime()
   const printed = job.traveler_printed_at ? new Date(job.traveler_printed_at).getTime() : -Infinity
   const acked = job.paperwork_ack_at ? new Date(job.paperwork_ack_at).getTime() : -Infinity

@@ -1,4 +1,4 @@
-// src/pages/TravelerKiosk.jsx — Traveler Kiosk (S14, D-TKIOSK-01 … 07, 09, 12, 13; 04a, 06a, 13a; 06b, 13b).
+// src/pages/TravelerKiosk.jsx — Traveler Kiosk (S14, D-TKIOSK-01 … 10, 12, 13; 04a, 06a, 13a; 06b, 13b).
 //
 // A dedicated PC near the machinists' office. PIN → tap your machine → the
 // lineup → Print Travel Pack (or Print Production Card) → done. Printing moves
@@ -8,7 +8,8 @@
 // Shell mirrors MaterialKiosk.jsx (shared PinPad, kiosk-authenticate anchored on
 // any commissioned machine, no kiosk_sessions row so a PIN here never displaces a
 // tablet session, inactivity sign-out). Lineup mirrors Kiosk.jsx loadJobs.
-// Batch B adds the setup prompt after the print (D-TKIOSK-08).
+// After a travel pack prints for a queued job, the machinist is offered Start
+// Setup — the same write as the machine kiosk, via lib/jobSetup (D-TKIOSK-08).
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { FEATURES } from '../config'
@@ -19,9 +20,10 @@ import {
   buildTravelPack, buildProductionCard, printHtmlJob,
   recordTravelPackPrint, recordProductionCardPrint, recordPrintFailed,
 } from '../lib/travelPack'
+import { startJobSetup, fetchActiveJobOnMachine } from '../lib/jobSetup'
 import {
   Printer, LogOut, ArrowLeft, Loader2, CheckCircle, AlertTriangle,
-  FileText, RefreshCw, ClipboardList, X,
+  FileText, RefreshCw, ClipboardList, X, Wrench,
 } from 'lucide-react'
 
 const KIOSK_DEVICE_ID_KEY = 'skynet.kiosk.device_id'
@@ -43,6 +45,8 @@ function getKioskDeviceId() {
 const LINEUP_STATUSES = ['pending_compliance', 'assigned', 'in_setup', 'in_progress']
 const STATUS_RANK = { in_progress: 0, in_setup: 1, assigned: 2, pending_compliance: 3 }
 const INACTIVITY_TIMEOUT = 2 * 60 * 1000 // D-TKIOSK-09: 2 minutes
+// D-TKIOSK-09: anyone with a PIN can print; starting setup is for machinists and admins.
+const canStartSetup = (op) => op?.role === 'machinist' || op?.role === 'admin'
 
 const isMaintenance = (job) => job?.is_maintenance || job?.work_order?.order_type === 'maintenance' || !!job?.work_order?.maintenance_type
 
@@ -105,7 +109,7 @@ export default function TravelerKiosk() {
 
   // --- Printing ---
   const [busy, setBusy] = useState(null)        // { job, kind: 'pack' | 'card', progress }
-  const [result, setResult] = useState(null)    // { job, kind, printed, skipped, pageCount, how, errors }
+  const [result, setResult] = useState(null)    // { job, kind, printed, skipped, pageCount, how, errors, setup }
   const [toast, setToast] = useState(null)
 
   const showToast = (msg, kind = 'ok') => {
@@ -305,8 +309,18 @@ export default function TravelerKiosk() {
         await loadJobs(selectedMachine)
         throw failure
       }
+      // D-TKIOSK-08: offer setup for a queued job when the machine is free.
+      let setup = null
+      if (job.status === 'assigned' && canStartSetup(operator)) {
+        let active = null
+        try { active = await fetchActiveJobOnMachine(supabase, selectedMachine.id) } catch (e) { console.error('Active-job check failed:', e) }
+        const nextQueued = jobs.find(j => j.status === 'assigned')
+        setup = active && active.id !== job.id
+          ? { status: 'blocked', message: `${selectedMachine.code} is still running ${active.job_number} — start this one at the machine when it's free.` }
+          : { status: 'offer', outOfOrderNext: nextQueued && nextQueued.id !== job.id ? nextQueued.job_number : null }
+      }
       setResult({
-        job: pack.job, kind: 'pack', how: printed.how,
+        job: pack.job, kind: 'pack', how: printed.how, setup,
         printed: pack.docs, skipped: pack.skipped, pageCount: pack.pageCount,
         errors: [
           rec.stampError && `print stamp (${rec.stampError.message || 'unknown error'})`,
@@ -348,6 +362,22 @@ export default function TravelerKiosk() {
       showToast("Couldn't print the production card: " + (err.message || 'unknown error'), 'error')
     } finally {
       setBusy(null)
+      setLastActivity(Date.now())
+    }
+  }
+
+  // ---------- Start Setup (D-TKIOSK-08) ----------
+  const handleStartSetup = async () => {
+    if (!result?.job || result.setup?.status !== 'offer') return
+    setResult(prev => ({ ...prev, setup: { ...prev.setup, status: 'starting' } }))
+    try {
+      const r = await startJobSetup(supabase, { job: result.job, machine: selectedMachine, operator })
+      setResult(prev => ({ ...prev, setup: r.ok ? { status: 'done' } : { status: 'blocked', message: r.reason } }))
+      await loadJobs(selectedMachine)
+    } catch (err) {
+      console.error('Start setup failed:', err)
+      setResult(prev => ({ ...prev, setup: { status: 'blocked', message: 'Could not start setup: ' + (err.message || 'unknown error') } }))
+    } finally {
       setLastActivity(Date.now())
     }
   }
@@ -478,9 +508,8 @@ export default function TravelerKiosk() {
               const waiting = job.status === 'pending_compliance'
               const canPrint = !waiting
               const wasPrinted = !!job.traveler_printed_at
-              // Batch B moves this rule into isPaperworkStale itself (D-TKIOSK-10);
-              // until then a never-printed job is never flagged here.
-              const changedSincePrint = wasPrinted && isPaperworkStale(job)
+              // D-TKIOSK-10: isPaperworkStale itself treats a never-printed job as current.
+              const changedSincePrint = isPaperworkStale(job)
               const runTarget = getRunTarget(job, allocsByJob[job.id] || [])
               const printedBy = job.traveler_printed_by ? namesById[job.traveler_printed_by] : null
               const isNext = job.id === firstQueuedId
@@ -560,7 +589,7 @@ export default function TravelerKiosk() {
         </div>
       )}
 
-      {/* Confirmation (Batch B adds the setup prompt here — D-TKIOSK-08) */}
+      {/* Confirmation, then the setup prompt for a queued job (D-TKIOSK-08) */}
       {result && !busy && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-40 p-6">
           <div className="bg-gray-900 border border-gray-700 rounded-2xl p-8 w-full max-w-lg">
@@ -588,10 +617,37 @@ export default function TravelerKiosk() {
             {result.errors.length > 0 && (
               <p className="mt-3 text-xs text-amber-300">The pack printed, but SkyNet could not record the {result.errors.join(' and ')}. Tell Matt.</p>
             )}
-            <div className="mt-6 flex flex-col sm:flex-row gap-3">
-              <button onClick={() => setResult(null)} className="flex-1 px-5 py-3 rounded-lg bg-gray-700 hover:bg-gray-600 text-white font-semibold">Back to lineup</button>
-              <button onClick={handleLogout} className="flex-1 px-5 py-3 rounded-lg bg-skynet-accent hover:bg-blue-600 text-white font-semibold">Done — sign out</button>
-            </div>
+            {result.setup && (
+              <div className={`mt-5 rounded-xl border p-4 ${result.setup.status === 'done' ? 'border-green-700 bg-green-950/40' : result.setup.status === 'blocked' ? 'border-gray-700 bg-gray-800/60' : 'border-skynet-accent/50 bg-skynet-accent/10'}`}>
+                {(result.setup.status === 'offer' || result.setup.status === 'starting') && (
+                  <>
+                    <p className="text-white font-semibold flex items-center gap-2"><Wrench size={18} className="text-skynet-accent" /> Put {result.job.job_number} in setup on {selectedMachine.name}?</p>
+                    {result.setup.outOfOrderNext && (
+                      <p className="mt-2 text-sm text-amber-300 flex items-center gap-2"><AlertTriangle size={14} /> {result.job.job_number} isn't next in line — {result.setup.outOfOrderNext} is.</p>
+                    )}
+                  </>
+                )}
+                {result.setup.status === 'done' && (
+                  <p className="text-green-300 font-semibold flex items-center gap-2"><CheckCircle size={18} /> {result.job.job_number} is in setup on {selectedMachine.name} — head to the machine.</p>
+                )}
+                {result.setup.status === 'blocked' && (
+                  <p className="text-gray-300 text-sm flex items-center gap-2"><AlertTriangle size={14} className="text-amber-300 flex-shrink-0" /> {result.setup.message}</p>
+                )}
+              </div>
+            )}
+            {result.setup && (result.setup.status === 'offer' || result.setup.status === 'starting') ? (
+              <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                <button onClick={() => setResult(null)} disabled={result.setup.status === 'starting'} className="flex-1 px-5 py-3 rounded-lg bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-semibold">Not yet</button>
+                <button onClick={handleStartSetup} disabled={result.setup.status === 'starting'} className="flex-1 px-5 py-3 rounded-lg bg-skynet-accent hover:bg-blue-600 disabled:opacity-50 text-white font-semibold flex items-center justify-center gap-2">
+                  {result.setup.status === 'starting' ? <><Loader2 size={18} className="animate-spin" /> Starting…</> : <><Wrench size={18} /> {result.setup.outOfOrderNext ? 'Start Setup anyway' : 'Start Setup'}</>}
+                </button>
+              </div>
+            ) : (
+              <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                <button onClick={() => setResult(null)} className="flex-1 px-5 py-3 rounded-lg bg-gray-700 hover:bg-gray-600 text-white font-semibold">Back to lineup</button>
+                <button onClick={handleLogout} className="flex-1 px-5 py-3 rounded-lg bg-skynet-accent hover:bg-blue-600 text-white font-semibold">Done — sign out</button>
+              </div>
+            )}
           </div>
         </div>
       )}

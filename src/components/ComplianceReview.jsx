@@ -2728,7 +2728,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
                 return acc
               }, {})).map(([label, n]) => `${n} ${label.toLowerCase()}`).join(' · ')}
             </span>
-            <span className="text-blue-300/70 text-xs ml-auto">Reprint or acknowledge — not a gate</span>
+            <span className="text-blue-300/70 text-xs ml-auto">Printed before a change — reprint or acknowledge, not a gate</span>
           </div>
           <div className="p-3 space-y-2">
             {staleTravelers.map(job => {

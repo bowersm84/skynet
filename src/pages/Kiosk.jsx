@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { resolveCompletionStatus } from '../lib/finishingCompletion'
 import { getRunTarget, isPaperworkStale, fetchActiveMembers } from '../lib/jobMerge'
+import { setupUpdateData, logMachineIdle } from '../lib/jobSetup'
 import { 
   Lock,
   ArrowLeft,
@@ -2106,13 +2107,8 @@ export default function Kiosk() {
           updated_at: now
         }
       } else {
-        // Normal production job - start setup
-        updateData = {
-          status: 'in_setup',
-          setup_start: now,
-          assigned_user_id: operator.id,
-          updated_at: now
-        }
+        // Normal production job - start setup (fields shared with the Traveler Kiosk, D-TKIOSK-08)
+        updateData = setupUpdateData(operator.id, now)
       }
       
       const { error } = await supabase
@@ -2122,36 +2118,8 @@ export default function Kiosk() {
 
       if (error) throw error
 
-      // B3: Track idle time — fire-and-forget, don't block setup
-      try {
-        const { data: prevJob } = await supabase
-          .from('jobs')
-          .select('id, actual_end')
-          .eq('assigned_machine_id', machine.id)
-          .not('actual_end', 'is', null)
-          .neq('id', job.id)
-          .order('actual_end', { ascending: false })
-          .limit(1)
-          .single()
-
-        if (prevJob?.actual_end) {
-          const idleStart = new Date(prevJob.actual_end)
-          const idleEnd = new Date()
-          const idleMinutes = Math.round((idleEnd - idleStart) / 60000)
-          if (idleMinutes > 0) {
-            await supabase.from('machine_idle_logs').insert({
-              machine_id: machine.id,
-              previous_job_id: prevJob.id,
-              next_job_id: job.id,
-              idle_start: idleStart.toISOString(),
-              idle_end: idleEnd.toISOString(),
-              idle_minutes: idleMinutes
-            })
-          }
-        }
-      } catch (idleErr) {
-        console.error('Idle time logging failed (non-blocking):', idleErr)
-      }
+      // B3: Track idle time — fire-and-forget, don't block setup (shared helper, D-TKIOSK-08)
+      await logMachineIdle(supabase, { machineId: machine.id, jobId: job.id })
 
       await loadJobs()
       setSelectedJob(null)
@@ -4995,7 +4963,7 @@ export default function Kiosk() {
                             Traveler in folder is out of date
                           </div>
                           <div className="text-gray-300 text-xs mt-1">
-                            {activeJob.paperwork_changed_reason || 'Job quantity changed.'} Get a current printout from the office, or compliance sign-off, before relying on the paper copy.
+                            {activeJob.paperwork_changed_reason || 'Job quantity changed.'} Reprint it at the Traveler Kiosk, or get compliance sign-off, before relying on the paper copy.
                           </div>
                           <button
                             onClick={handlePaperworkReceived}

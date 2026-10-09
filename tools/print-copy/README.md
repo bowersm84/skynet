@@ -4,22 +4,23 @@ SkyNet S14 · D-TKIOSK-11a · October 7, 2026
 
 Production cards stay Excel files — that is what Roger uploads and what SkyNet keeps. This AWS Lambda function makes a PDF **print copy** beside each Excel file in the documents bucket (`<file>.xlsx` → `<file>.xlsx.print.pdf`), and the Traveler Kiosk prints the copy. The Excel file is only ever read, never changed.
 
-**What prints:** the sheet that was showing when the workbook was last saved — the sheet Excel prints on Ctrl+P — with its own print area, orientation, margins and fit-to-page. Other sheets are hidden for the copy (not deleted), so formulas that read them still calculate. Macros never run; external links never update. **Tell Roger: save each card with the card's tab showing.**
+**What prints:** the sheet that was showing when the workbook was last saved — the sheet Excel prints on Ctrl+P — with its own print area, orientation, margins and fit-to-page, **always on one page**: a sheet that would run longer is shrunk to fit one page. Other sheets are hidden for the copy (not deleted), so formulas that read them still calculate. Macros never run; external links never update. **Tell Roger: save each card with the card's tab showing.**
 
 **Everything below is clicking and pasting in the AWS console.** AWS CodeBuild builds the software image inside AWS, so nothing is installed on your PC. Work in region **US East (N. Virginia) us-east-1** (top-right of the console). Screen labels can drift a little as AWS updates the console; the field names below are what to look for. Allow about an hour, most of it waiting on the build.
 
-**Tested before delivery** (sandbox, LibreOffice 24.2.7 — the same build the image installs): a card whose formula reads a second "data" sheet, with the card not the first tab, as `.xlsx` and `.xls` → only the card printed, one landscape letter page, formula value correct; a 180-row card → 4 pages, every row; uppercase `.XLSX`; a corrupt file → clean "failed"; cards whose footer sits at the bottom margin (like the real Form 10-150 cards) → footer visible, as `.xlsx` and `.xls`; the function against a stand-in bucket for the upload trigger, single cards, the backfill sweep and the review PDF. **Not run here:** CodeBuild and AWS itself — step 5 is the first build and step 9 is the first real card.
+**Tested before delivery** (sandbox, LibreOffice 24.2.7 — the same build the image installs): a card whose formula reads a second "data" sheet, with the card not the first tab, as `.xlsx` and `.xls` → only the card printed, one landscape letter page, formula value correct; a 180-row card → one page, every row; uppercase `.XLSX`; a corrupt file → clean "failed"; cards whose footer sits at the bottom margin (like the real Form 10-150 cards) → footer visible, as `.xlsx` and `.xls`; a fixed-scale card that spills one row onto page 2 → one page, every row, frame and footer intact, while cards that already fit come out identical to before; the function against a stand-in bucket for the upload trigger, single cards, the backfill sweep and the review PDF. **Not run here:** CodeBuild and AWS itself — step 5 is the first build and step 9 is the first real card.
 
 ---
 
-## Already set up on 1.0? Update to 1.1 (Oct 7) — four steps
+## Already set up? Update to 1.2 (Oct 8) — five steps
 
-Version 1.0's copies hid the form's controlled footer (`REV 004 … Form 10-150`) on cards whose footer sits at the bottom margin. 1.1 fixes it.
+1.2 makes every print copy exactly one page. A card set to a fixed print scale that fills Excel's page with no slack could spill its last row and bottom border onto a second page (J-000203's `223 SK2003-10C1` card). Now, if a copy runs past one page, the card is shrunk to fit one page, as Excel's "Fit Sheet on One Page" does. Cards that already fit are unchanged. (1.1, Oct 7, fixed the hidden `REV 004 … Form 10-150` footer.)
 
 1. **S3** → **skynet-files-skybolt** → `build/` → **Upload** the new `skynet-print-copy.zip` (same name, replaces the old one).
-2. **CodeBuild** → **skynet-print-copy-build** → **Start build** → wait for **Succeeded**; the log ends `PUSHED …:1.1`.
-3. **Lambda** → **skynet-print-copy** → **Image** tab → **Deploy new image** → **Browse images** → tag `1.1` → **Save**. Wait until the banner says the update finished.
-4. **Test** tab → your saved `smoke` event → **Test**. Download both `.print.pdf` files again (step 9) and check the bottom line now reads `REV 004 … S:/QC Handbook AS9100 QMS-10 Form 10-150`. Then carry on from step 10.
+2. **CodeBuild** → **skynet-print-copy-build** → **Start build** → wait for **Succeeded**; the log ends `PUSHED …:1.2`.
+3. **Lambda** → **skynet-print-copy** → **Image** tab → **Deploy new image** → **Browse images** → tag `1.2` → **Save**. Wait until the banner says the update finished.
+4. **Test** tab → `sweep-count`: `needs_copy` should be every copy on file (about 392), because each was made by an older version. Then run `sweep-run`, and again, until `"remaining": 0` — about 15 minutes in two runs. Each run's `fit_one_page` is how many cards were spilling and are now one page.
+5. Reprint J-000203's production card at the kiosk: one page, frame closed, `QMS Form 10-150` at the bottom.
 
 ---
 
@@ -70,7 +71,7 @@ Version 1.0's copies hid the form's controlled footer (`REV 004 … Form 10-150`
 
 ## 5. Build the image
 
-**CodeBuild** → **skynet-print-copy-build** → **Start build**. Wait for **Succeeded** (5–15 minutes — it installs LibreOffice). The last lines of the build log say `PUSHED …:1.1`.
+**CodeBuild** → **skynet-print-copy-build** → **Start build**. Wait for **Succeeded** (5–15 minutes — it installs LibreOffice). The last lines of the build log say `PUSHED …:1.2`.
 
 If it says **Failed**: open the build → **Build logs** → copy the last 30 lines and send them to Claude.
 
@@ -78,7 +79,7 @@ If it says **Failed**: open the build → **Build logs** → copy the last 30 li
 
 **Lambda** → **Create function** → **Container image**.
 - Function name: `skynet-print-copy`
-- Container image URI: **Browse images** → repository `skynet-print-copy` → image tag `1.1` (the newest) → **Select image**
+- Container image URI: **Browse images** → repository `skynet-print-copy` → image tag `1.2` (the newest) → **Select image**
 - Architecture: **x86_64**
 - Permissions: **Create a new role with basic Lambda permissions**
 

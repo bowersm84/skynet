@@ -18,6 +18,14 @@ of - the controlled-form line "REV 004 ... Form 10-150" vanished from the first
 real print copies (Oct 7 2026). Turning on dynamic height for the printed
 sheet's header and footer brings it back; the body re-fits by a hair.
 
+A production card always prints on ONE page (Matt, Oct 8). If the export comes
+out longer - typically a card set to a fixed print scale that fits Excel's page
+with no slack, where LibreOffice's slightly taller rows push the last bordered
+row onto page 2 (J-000203's 223 SK2003-10C1 card) - the printed sheet is set to
+fit 1 page wide by 1 page tall, exactly like Excel's "Fit Sheet on One Page",
+and exported again. Cards that already fit on one page are left exactly as they
+were.
+
 The active sheet is read from the FILE (xlrd for .xls, openpyxl for .xlsx/.xlsm),
 not from LibreOffice: headless LibreOffice does not load an .xls file's saved
 view, reports the first sheet as active, and will still print a sheet the file
@@ -101,6 +109,25 @@ def _fit_header_footer(doc, sheet) -> list:
         except Exception:
             pass
     return changed
+
+
+def _fit_to_one_page(doc, sheet) -> bool:
+    """Scale the printed sheet to 1 page wide x 1 page tall. True if it took."""
+    try:
+        style = doc.StyleFamilies.getByName("PageStyles").getByName(sheet.PageStyle)
+        style.ScaleToPagesX = 1
+        style.ScaleToPagesY = 1
+        return True
+    except Exception:
+        return False
+
+
+def _count_pages(path: Path):
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(path)).pages)
+    except Exception:
+        return None
 
 
 def _prop(name, value):
@@ -230,7 +257,14 @@ def convert(src_path: str, out_path: str) -> dict:
                 sheets.getByName(n).IsVisible = False
         fitted = _fit_header_footer(doc, sheets.getByName(active))
 
-        doc.storeToURL(out.as_uri(), (_prop("FilterName", "calc_pdf_Export"),))
+        export = (_prop("FilterName", "calc_pdf_Export"),)
+        doc.storeToURL(out.as_uri(), export)
+        pages = _count_pages(out)
+        fit_one_page = False
+        if pages and pages > 1 and _fit_to_one_page(doc, sheets.getByName(active)):
+            doc.storeToURL(out.as_uri(), export)
+            pages = _count_pages(out)
+            fit_one_page = True
     except ConversionError:
         raise
     except Exception as err:
@@ -249,18 +283,11 @@ def convert(src_path: str, out_path: str) -> dict:
 
     if not out.exists() or out.stat().st_size == 0:
         raise ConversionError("LibreOffice produced no PDF")
-
-    pages = None
-    try:
-        from pypdf import PdfReader
-        pages = len(PdfReader(str(out)).pages)
-    except Exception:
-        pass
     if pages == 0:
         raise ConversionError("the printed sheet is empty (0 pages)")
 
     return {"sheets": names, "printed_sheet": active, "active_from": active_source,
-            "fitted": fitted, "pages": pages}
+            "fitted": fitted, "fit_one_page": fit_one_page, "pages": pages}
 
 
 if __name__ == "__main__":

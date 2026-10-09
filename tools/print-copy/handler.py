@@ -38,7 +38,7 @@ import convert as converter
 
 BUCKET = os.environ.get("BUCKET", "skynet-files-skybolt")
 PRINT_SUFFIX = ".print.pdf"
-VERSION = "skynet-print-copy 1.1"   # 1.1: headers/footers no longer clipped
+VERSION = "skynet-print-copy 1.2"   # 1.1: headers/footers no longer clipped; 1.2: always one page
 SAFETY_MS = 60_000
 
 s3 = boto3.client("s3")
@@ -82,6 +82,7 @@ def convert_key(bucket: str, key: str) -> dict:
                     "printed-sheet": _meta(info["printed_sheet"]),
                     "sheets": _meta("; ".join(info["sheets"])),
                     "pages": str(info["pages"] or ""),
+                    "fit-one-page": "yes" if info.get("fit_one_page") else "no",
                     "converter": _meta(f"{VERSION} / {_office_version}"),
                 },
             },
@@ -89,7 +90,8 @@ def convert_key(bucket: str, key: str) -> dict:
     result = {
         "key": key, "status": "converted", "print_copy": key + PRINT_SUFFIX,
         "printed_sheet": info["printed_sheet"], "sheets": info["sheets"],
-        "pages": info["pages"], "seconds": round(time.time() - started, 1),
+        "pages": info["pages"], "fit_one_page": bool(info.get("fit_one_page")),
+        "seconds": round(time.time() - started, 1),
     }
     _log(event="converted", **result)
     return result
@@ -210,8 +212,10 @@ def build_review(bucket: str, prefix: str, remaining_ms) -> dict:
 
 
 def _tally(results):
-    out = {"converted": 0, "failed": 0, "skipped": 0}
+    out = {"converted": 0, "failed": 0, "skipped": 0, "fit_one_page": 0}
     for r in results:
         if r["status"] in out:
             out[r["status"]] += 1
+        if r.get("fit_one_page"):
+            out["fit_one_page"] += 1
     return out

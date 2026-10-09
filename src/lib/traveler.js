@@ -1,6 +1,7 @@
-// src/lib/traveler.js — shared HTML builder for the Job Traveler popup.
-// Used by Kiosk, Finishing, ComplianceReview. (PrintPackageModal has its own
-// inner-page builder for embedding inside the Print Hub.)
+// src/lib/traveler.js — the canonical Job Traveler builder (D-JOBMERGE-05).
+// Every surface renders it: Kiosk, Finishing, ComplianceReview, Mainframe and
+// PrintTraveler via buildTravelerHTML; PrintPackageModal and the Traveler Kiosk's
+// travel pack embed buildTravelerBodyHTML.
 
 const _esc = (str) => {
   if (!str) return ''
@@ -421,6 +422,8 @@ export function buildTravelerBodyHTML(travelerData) {
   const headerLabelCSS = 'padding:4px 8px; font-weight:bold; background-color:#f0f0f0; border:1px solid #ccc; width:15%; white-space:nowrap;'
   const headerValueCSS = 'padding:4px 8px; border:1px solid #ccc; width:35%;'
   const routingHeaderCSS = 'padding:6px 8px; background-color:#222; color:#fff; font-weight:bold; border:1px solid #000; text-align:left;'
+  // Step, Type, Qty and Operator cells are centred; their headers match.
+  const routingHeaderCenterCSS = routingHeaderCSS + ' text-align:center;'
   const routingCellCSS = 'padding:8px; border:1px solid #000; height:28px; vertical-align:middle;'
 
   const customerDisplay = _esc(model.customer) || '&mdash;'
@@ -429,14 +432,14 @@ export function buildTravelerBodyHTML(travelerData) {
 
   const stepsHTML = model.rows.map(r => `
     <tr>
-      <td style="${routingCellCSS} text-align:center; width:40px;">${r.step_order}</td>
+      <td style="${routingCellCSS} text-align:center;">${r.step_order}</td>
       <td style="${routingCellCSS}">${_esc(r.step_name)}${r.is_added_step ? ' *' : ''}${r.batch_label ? ' ' + r.batch_label : ''}</td>
-      <td style="${routingCellCSS} width:90px;">${_esc(r.station)}</td>
-      <td style="${routingCellCSS} text-align:center; width:45px;">${r.type}</td>
-      <td style="${routingCellCSS} width:240px;">${_esc(r.lot)}</td>
-      <td style="${routingCellCSS} width:55px; text-align:center;">${_esc(r.qty)}</td>
-      <td style="${routingCellCSS} width:80px;">${_esc(r.date)}</td>
-      <td style="${routingCellCSS} width:90px; text-align:center;">${_esc(r.operator)}</td>
+      <td style="${routingCellCSS}">${_esc(r.station)}</td>
+      <td style="${routingCellCSS} text-align:center;">${r.type}</td>
+      <td style="${routingCellCSS}">${_esc(r.lot)}</td>
+      <td style="${routingCellCSS} text-align:center;">${_esc(r.qty)}</td>
+      <td style="${routingCellCSS}">${_esc(r.date)}</td>
+      <td style="${routingCellCSS} text-align:center;">${_esc(r.operator)}</td>
     </tr>
   `).join('')
 
@@ -454,7 +457,7 @@ export function buildTravelerBodyHTML(travelerData) {
         ? 'Stock build &mdash; no customer orders.'
         : 'No active customer order allocations.'
       return `
-    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+    <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
       </thead>
@@ -477,7 +480,7 @@ export function buildTravelerBodyHTML(travelerData) {
         </tr>`
     }).join('')
     return `
-    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+    <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="5" style="${cellHeaderCSS}">Customer Orders Fulfilled by this Job</th></tr>
         <tr>
@@ -552,7 +555,7 @@ export function buildTravelerBodyHTML(travelerData) {
           <td style="${cellCSS}">${_esc(a.assembly_lot_number) || '&mdash;'}</td>
         </tr>`).join('')
     return `
-    <table style="width:100%; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+    <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
       <thead>
         <tr><th colspan="4" style="${cellHeaderCSS}">Assembly Genealogy &mdash; this part is a component of</th></tr>
         <tr>
@@ -577,9 +580,9 @@ export function buildTravelerBodyHTML(travelerData) {
   return `
   <div class="print-page">
     <div style="text-align:center; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:16px;">
-      <h1 style="margin:0; font-size:28px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
+      <h1 style="margin:0; font-size:24px; font-weight:bold; letter-spacing:2px;">SKYBOLT AEROMOTIVE &mdash; JOB TRAVELER</h1>
     </div>
-    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:17px;">
+    <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:15px;">
       <tbody>
         <tr><td style="${headerLabelCSS}">Part Number</td><td style="${headerValueCSS}">${_esc(comp?.part_number) || '&mdash;'}</td>
             <td style="${headerLabelCSS}">Job Number</td><td style="${headerValueCSS}">${_esc(job.job_number)}</td></tr>
@@ -595,21 +598,21 @@ export function buildTravelerBodyHTML(travelerData) {
     </table>
     ${mergeSectionHTML}
     ${assemblyChainHTML}
-    <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:16px; margin-bottom:16px;">
+    <table style="width:100%; table-layout:fixed; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
       <colgroup>
-        <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%) -->
-        <col style="width:4%" /><col style="width:25%" /><col style="width:19%" /><col style="width:5%" /><col style="width:23%" /><col style="width:6%" /><col style="width:9%" /><col style="width:9%" />
+        <!-- Step, Process, Station, Type, Lot #, Qty, Date, Operator (sums to 100%). Step is 6% so its header fits (S14). -->
+        <col style="width:6%" /><col style="width:23%" /><col style="width:19%" /><col style="width:5%" /><col style="width:23%" /><col style="width:6%" /><col style="width:9%" /><col style="width:9%" />
       </colgroup>
       <thead>
-        <tr><th style="${routingHeaderCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>
-            <th style="${routingHeaderCSS}">Type</th><th style="${routingHeaderCSS}">Lot #</th><th style="${routingHeaderCSS}">Qty</th>
-            <th style="${routingHeaderCSS}">Date</th><th style="${routingHeaderCSS}">Operator</th></tr>
+        <tr><th style="${routingHeaderCenterCSS}">Step</th><th style="${routingHeaderCSS}">Process</th><th style="${routingHeaderCSS}">Station</th>
+            <th style="${routingHeaderCenterCSS}">Type</th><th style="${routingHeaderCSS}">Lot #</th><th style="${routingHeaderCenterCSS}">Qty</th>
+            <th style="${routingHeaderCSS}">Date</th><th style="${routingHeaderCenterCSS}">Operator</th></tr>
       </thead>
       <tbody>${stepsHTML}${blankRows}</tbody>
     </table>
     ${coSectionHTML}
-    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:16px;"><strong>Notes:</strong></div>
-    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:13px; color:#666;">
+    <div style="border:1px solid #000; padding:8px; margin-bottom:16px; min-height:60px; font-size:14px;"><strong>Notes:</strong></div>
+    <div style="border-top:1px solid #999; padding-top:8px; display:flex; justify-content:space-between; font-size:12px; color:#666;">
       <span>Generated from SkyNet MES &mdash; ${printTime}</span><span>Skybolt Aeromotive Corp</span>
     </div>
   </div>`

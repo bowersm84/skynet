@@ -156,19 +156,23 @@ function bytesToDataUrl(bytes, mime) {
 
 // ---------------------------------------------------------------------------
 // Pack CSS — named pages, inch units only (viewport units misbehave when page
-// sizes mix). Content boxes: portrait 8 x 10.5 in, landscape 10.5 x 8 in at
-// 0.25 in margins; the traveler keeps its 0.5 in margins as it prints today.
+// sizes mix). Page margins are ZERO so Chrome has no room to print its own
+// header and footer (date, title, URL, "1/4" — on the Oct 9 test prints); each
+// section carries its margin as padding instead (D-TKIOSK-06c). The traveler
+// keeps 0.5 in on every page it runs to (box-decoration-break: clone); document
+// pages keep 0.25 in, so the image boxes are exactly what they were:
+// portrait 8 x 10.4 in, landscape 10.5 x 7.9 in.
 // ---------------------------------------------------------------------------
 export const PACK_CSS = `
-@page trav { size: letter landscape; margin: 0.5in; }
-@page docp { size: letter portrait; margin: 0.25in; }
-@page docl { size: letter landscape; margin: 0.25in; }
+@page trav { size: letter landscape; margin: 0; }
+@page docp { size: letter portrait; margin: 0; }
+@page docl { size: letter landscape; margin: 0; }
 html, body { margin: 0; padding: 0; background: #fff; font-family: Arial, Helvetica, sans-serif; color: #000; }
-section { break-after: page; page-break-after: always; overflow: hidden; box-sizing: border-box; }
+section { break-after: page; page-break-after: always; box-sizing: border-box; }
 section:last-of-type { break-after: auto; page-break-after: auto; }
-section.trav { page: trav; }
-section.docp { page: docp; width: 8in; height: 10.4in; }
-section.docl { page: docl; width: 10.5in; height: 7.9in; }
+section.trav { page: trav; padding: 0.5in; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+section.docp { page: docp; width: 8.5in; height: 10.9in; padding: 0.25in; overflow: hidden; }
+section.docl { page: docl; width: 11in; height: 8.4in; padding: 0.25in; overflow: hidden; }
 section.docp img, section.docl img { display: block; width: 100%; height: 100%; object-fit: contain; }
 section.notice { padding: 0.5in; }
 section.notice h2 { margin: 0 0 8px; font-size: 20px; }

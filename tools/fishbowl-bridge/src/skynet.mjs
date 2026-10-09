@@ -98,6 +98,13 @@ export class SkyNet {
 
   finishPartValuation() { return this.rpc('fb_finish_part_valuation', {}) }
 
+  // D-FB-54 (bridge 1.9) shipments poller. fb_upsert_shipment_lots upserts on (fb_shipitem_id, lot_number) and
+  // stamps fb_sync_state.last_shipments_at; kit_attach_fb_shipment_lots attaches every Shipped kit-member lot to
+  // the kit lots logged on that SO (D-KSTC-37) — dry run (self-rolling-back) unless p_dry_run is false.
+  upsertShipmentLots(rows) { return this.rpc('fb_upsert_shipment_lots', { p_rows: rows }) }
+
+  attachShipmentLots(dryRun = false) { return this.rpc('kit_attach_fb_shipment_lots', { p_dry_run: dryRun }) }
+
   // D-FB-53. Month-end valuation snapshot (S13 Batch C). The RPC decides whether one is due and returns either
   // { skipped: true, reason } or { id, kind, period_end, product_value, raw_value }. Until Batch C is applied
   // PostgREST answers PGRST202, which rpc() turns into a single immediate throw for the caller to log.

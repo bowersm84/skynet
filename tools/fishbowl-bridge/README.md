@@ -99,7 +99,25 @@ to `Product` for Stock Levels, the reorder rules and the month-end. The valuatio
 inventory scope: every Product-class part and every reorder-point part gets a row (D-FB-52). A failure in
 either piece is logged and swallowed; the mirrors and the SO tail are unaffected.
 `npm run mirror:valuation` runs one valuation pass and exits (first load, or after fixing the query).
-`npm test` runs the unit tests (the three `node --test` files plus the inventory arithmetic test).
+
+### Shipments poller (v1.9, D-FB-54 / D-KSTC-37)
+Every logged kit gets its component lots from Fishbowl's own shipment records — no packing slip (D-KSTC-38).
+
+| Piece | When | Reads / writes |
+|---|---|---|
+| queue | every cycle | every SO the tail touched (picking, packing and shipping all touch `soitem`) and every SO the reconciler refetched; at start-up and nightly (products slot), every SO with a shipment shipped in the last `SHIPMENTS_SWEEP_DAYS` (14) |
+| read | every cycle, up to `SHIPMENTS_MAX_SOS` (100) queued SOs | `so` ⋈ `soitem` ⋈ `shipitem` ⋈ `ship` ⋈ `shipstatus`; the lot from `trackinginfo` (`recordId = shipitem.id`, `tableId = 1555030112`, tracking type `Lot Number`); kit membership from `kititem`, contiguous under the nearest kit header (the packing slip's indentation) → `fb_upsert_shipment_lots` → `fb_shipment_lots` (stamps `last_shipments_at`) |
+| attach | after a cycle that wrote rows, and at least every `SHIPMENTS_ATTACH_MS` (15 min) | `kit_attach_fb_shipment_lots(false)`: every Shipped kit-member lot onto the kit lots logged on that SO with that kit part number; idempotent; logs one summary line |
+
+The query is the 2026-10-09 calibrated pull (`Docs/migrations/2026-10-09_FISHBOWL_kit_component_lots_READONLY.sql`
+rev 5) scoped by SO id — do not change its joins without re-calibrating against a known slip. Every lot of every
+shipped item is mirrored (not only kits); the attach uses kit members only. An SO leaves the queue only after its
+read succeeded; a failure stands the step down for 15 min and keeps the queue, and the SO tail is never affected.
+The queue is in memory; the first shipments step after start-up queues the sweep window, so a restart or deploy loses nothing. `SHIPMENTS_DRY_RUN=true` reads and
+logs (with five sample rows) and asks SkyNet for the attach's self-rolling-back dry run — nothing is written.
+`npm run mirror:shipments` runs one sweep + read + attach and exits (first load; set `SHIPMENTS_SWEEP_DAYS` for a
+longer window). `SHIPMENTS_ENABLED=false` switches off the queue, the start-up and nightly sweeps and the attach in the running bridge; `npm run mirror:shipments` is an explicit one-shot and runs regardless, like `mirror:valuation`.
+`npm test` runs the unit tests (the four `node --test` files plus the inventory arithmetic test).
 
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`

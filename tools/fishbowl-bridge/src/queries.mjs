@@ -44,6 +44,58 @@ export const q = {
   // Kit definitions for the kit products on a batch of SOs (D-FB-29). kitItemTypeId 10 = product component.
   kitItems: (productIds) => `SELECT kitProductId, productId, kitItemTypeId FROM kititem WHERE kitProductId IN (${idList(productIds)})`,
 
+  // --- Bridge v1.9 shipments poller (D-FB-54 / D-KSTC-37). Read-only. -------------------------------
+  // The Fishbowl rev 5 query of 2026-10-09 (Docs/migrations/2026-10-09_FISHBOWL_kit_component_lots_READONLY.sql),
+  // scoped by SO id instead of a typed SO list; aliases = mapper fields. A shipped item's lot is in its
+  // tracking history (trackinginfo.tableId 1555030112 — shipitem.tagId is cleared once a shipment ships;
+  // -1515431424 is the pick history). kitMember = 1 only when kititem lists the part for the nearest kit
+  // header above it AND every line in between is a member too — the packing slip's indentation. Calibrated on
+  // SO 16373 against the August backfill line for line; do not change the join without re-calibrating.
+  shipmentLots: (soIds) => `SELECT so.num AS soNum, so.statusId AS soStatus, si.id AS soItemId, si.soLineItem AS soLine,
+      si.typeId AS lineType, si.productNum AS productNum, hdr.soLineItem AS kitLine, hdr.productNum AS kitProductNum,
+      hdr.qtyFulfilled AS kitQtyFulfilled,
+      CASE
+        WHEN hdr.id IS NULL THEN NULL
+        WHEN EXISTS (SELECT 1 FROM kititem ki
+                     WHERE ki.kitProductId = hdr.productId AND ki.productId = si.productId)
+         AND NOT EXISTS (SELECT 1 FROM soitem x
+                         WHERE x.soId = si.soId
+                           AND x.soLineItem > hdr.soLineItem
+                           AND x.soLineItem < si.soLineItem
+                           AND NOT EXISTS (SELECT 1 FROM kititem k2
+                                           WHERE k2.kitProductId = hdr.productId
+                                             AND k2.productId = x.productId))
+        THEN 1 ELSE 0
+      END AS kitMember,
+      ship.num AS shipNum, ss.name AS shipStatus, DATE(ship.dateShipped) AS dateShipped,
+      shi.id AS shipItemId, shi.qtyShipped AS qtyShipped,
+      pt.name AS trackingName, ti.info AS lotNumber, ti.qty AS lotQty
+    FROM so
+    JOIN soitem si          ON si.soId = so.id
+    JOIN shipitem shi       ON shi.soItemId = si.id
+    JOIN ship               ON ship.id = shi.shipId
+    LEFT JOIN shipstatus ss ON ss.id = ship.statusId
+    LEFT JOIN soitem hdr    ON hdr.id = (
+           SELECT h.id FROM soitem h
+           WHERE h.soId = si.soId AND h.typeId = 80 AND h.soLineItem < si.soLineItem
+           ORDER BY h.soLineItem DESC
+           LIMIT 1)
+    LEFT JOIN trackinginfo ti ON ti.recordId = shi.id AND ti.tableId = 1555030112
+    LEFT JOIN parttracking pt ON pt.id = ti.partTrackingId
+    WHERE si.typeId <> 80 AND so.id IN (${idList(soIds)})
+    ORDER BY so.id, si.soLineItem, ship.num, shi.id, ti.id`,
+
+  // SO ids with a shipment shipped on or after a local date (the nightly sweep). The date is built by the
+  // bridge, never typed, but it is validated anyway so a malformed value can never reach the SQL.
+  recentShipmentSoIds: (since) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(since))) throw new Error(`recentShipmentSoIds: bad date ${JSON.stringify(since)}`)
+    return `SELECT DISTINCT si.soId AS soId
+    FROM ship
+    JOIN shipitem shi ON shi.shipId = ship.id
+    JOIN soitem si    ON si.id = shi.soItemId
+    WHERE ship.dateShipped >= '${since}'`
+  },
+
   // Users (daily): names only — never userPwd / mfaSecret (D-FB-34).
   users: 'SELECT id, userName, firstName, lastName, activeFlag FROM sysuser',
 

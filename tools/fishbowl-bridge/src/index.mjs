@@ -5,6 +5,7 @@
 //   node src/index.mjs --backfill  one full customers + products + part costs + SO history load (v1.4)
 //   node src/index.mjs --mirror-rules  one pricing-rules + product-tree mirror pass, then exit (v1.7)
 //   node src/index.mjs --mirror-valuation  one valuation mirror pass (fb_part_valuation), then exit (v1.8)
+//   node src/index.mjs --mirror-shipments  one shipments pass over the last SHIPMENTS_SWEEP_DAYS + attach, then exit (v1.9)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
@@ -17,6 +18,7 @@ import { syncPartValuation } from './valuation.mjs'
 import { aggregateInventory, countZeroRows } from './inventory.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { runPushCommands, canPushFor } from './push.mjs'
+import { syncShipmentLots, attachShipmentLots, sweepSince } from './shipments.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -33,6 +35,15 @@ let pricingPausedUntil = 0  // set after a pricing failure so a broken poller ca
 const PRICING_RETRY_MS = 900000
 let stopping = false
 let failures = 0
+// D-FB-54: SO ids whose shipment lots still need reading. Filled by the tail, the reconciler and the nightly
+// sweep; an id leaves the set only after its read succeeded, so a failed read is retried next cycle. In memory
+// on purpose: the first shipments step after start-up queues the SHIPMENTS_SWEEP_DAYS window, so a restart or a
+// deploy re-reads everything recent and loses nothing.
+const pendingShipmentSos = new Set()
+let lastAttachAt = 0
+let startupSweepDone = false
+let shipmentsPausedUntil = 0
+const SHIPMENTS_RETRY_MS = 900000
 
 // D-FB-34: Fishbowl user list (names only) so events can say who changed an order.
 async function syncUsers() {
@@ -161,6 +172,15 @@ async function pricingCycle({ force = false } = {}) {
         log.error(`valuation mirror failed (other mirrors unaffected): ${e.message}`)
       }
     }
+    // D-FB-54, same slot: re-queue every SO shipped in the last SHIPMENTS_SWEEP_DAYS, so a shipment the tail
+    // missed (bridge down, a failed read) is read tonight. Only queues; the shipments step reads them.
+    if (config.shipments.enabled) {
+      try {
+        await queueShipmentSweep()
+      } catch (e) {
+        log.error(`shipments sweep failed (other mirrors unaffected): ${e.message}`)
+      }
+    }
     // D-PRICE-49, last in the nightly slot: costs are in, so the book's kit sums are final for today.
     // A failure here is logged and swallowed — the mirrors are the bridge's job, and the kits site
     // going a night without an update must not stand the pricing pollers down for 15 minutes.
@@ -235,6 +255,50 @@ async function pushCycleGuarded() {
   }
 }
 
+// D-FB-54: read the queued SOs' shipment lots, then attach. Attach runs after any cycle that wrote rows and at
+// least every SHIPMENTS_ATTACH_MS, so a kit logged after its order shipped still picks up its lots. A failure is
+// logged, the queue is kept, and the step stands down for SHIPMENTS_RETRY_MS — the Order Queue tail never stops.
+async function shipmentsCycle() {
+  const sc = config.shipments
+  const ids = [...pendingShipmentSos].slice(0, Math.max(1, sc.maxSosPerCycle))
+  let upserted = 0
+  if (ids.length > 0) {
+    const r = await syncShipmentLots(fb, sky, ids, { log, batch: config.pricingBatch, dryRun: sc.dryRun })
+    upserted = r.upserted
+    for (const id of ids) pendingShipmentSos.delete(id)
+  }
+  if (upserted > 0 || Date.now() - lastAttachAt >= sc.attachMs) {
+    await attachShipmentLots(sky, { log, dryRun: sc.dryRun })
+    lastAttachAt = Date.now()
+  }
+}
+
+async function shipmentsCycleGuarded() {
+  if (!config.shipments.enabled || Date.now() < shipmentsPausedUntil) return
+  try {
+    if (!startupSweepDone) {
+      await queueShipmentSweep()
+      startupSweepDone = true
+    }
+    await shipmentsCycle()
+  } catch (e) {
+    shipmentsPausedUntil = Date.now() + SHIPMENTS_RETRY_MS
+    log.error(`shipments cycle failed, retrying in ${SHIPMENTS_RETRY_MS / 60000} min (${pendingShipmentSos.size} SO(s) kept queued): ${e.message}`)
+  }
+}
+
+// D-FB-54: queue every SO with a shipment shipped in the last SHIPMENTS_SWEEP_DAYS (nightly, and the one-shot).
+async function queueShipmentSweep() {
+  const since = sweepSince(new Date(), config.shipments.sweepDays)
+  const rows = await fb.query(q.recentShipmentSoIds(since))
+  for (const r of rows) {
+    const id = Number(r.soId)
+    if (Number.isFinite(id)) pendingShipmentSos.add(id)
+  }
+  log.info(`shipments sweep: ${rows.length} SO(s) shipped since ${since} queued (${pendingShipmentSos.size} pending)`)
+  return rows.length
+}
+
 async function tail() {
   const [{ maxRev }] = await fb.query(q.maxRev)
   const max = Number(maxRev) || 0
@@ -254,6 +318,8 @@ async function tail() {
   const totals = await ingestIds(fb, sky, ids, {
     source: 'tail', revFrom: from, revTo: max, revById, chunkSize: config.chunk, log,
   })
+  // D-FB-54: picking, packing and shipping all touch soitem, so the tail sees every shipment within a cycle.
+  if (config.shipments.enabled) for (const id of ids) pendingShipmentSos.add(Number(id))
   lastRev = max
   return { max, orders: totals.orders }
 }
@@ -279,6 +345,7 @@ async function reconcile() {
     return 0
   }
   log.info(`reconcile: ${ids.length} SO(s) differ → refetch`)
+  if (config.shipments.enabled) for (const id of ids) pendingShipmentSos.add(Number(id))
   const totals = await ingestIds(fb, sky, ids, { source: 'reconcile', chunkSize: config.chunk, log })
   return totals.orders
 }
@@ -300,6 +367,7 @@ async function cycle() {
       await syncInventory()
       lastInventoryAt = Date.now()
     }
+    await shipmentsCycleGuarded()
     await pricingCycleGuarded()
     await pushCycleGuarded()
     return { ...t, reconciled }
@@ -337,11 +405,27 @@ async function mirrorValuationOnce() {
   log.info('valuation mirror complete')
 }
 
+// `--mirror-shipments`: one sweep over the last SHIPMENTS_SWEEP_DAYS, every queued SO read, one attach, exit.
+// The first load after the D-FB-54 migration, or after fixing the query. Honours SHIPMENTS_DRY_RUN.
+async function mirrorShipmentsOnce() {
+  await fb.withSession(async () => {
+    await queueShipmentSweep()
+    while (pendingShipmentSos.size > 0) {
+      const ids = [...pendingShipmentSos].slice(0, Math.max(1, config.shipments.maxSosPerCycle))
+      await syncShipmentLots(fb, sky, ids, { log, batch: config.pricingBatch, dryRun: config.shipments.dryRun })
+      for (const id of ids) pendingShipmentSos.delete(id)
+    }
+  })
+  await attachShipmentLots(sky, { log, dryRun: config.shipments.dryRun })
+  log.info('shipments mirror complete')
+}
+
 async function main() {
   const once = process.argv.includes('--once')
   const backfill = process.argv.includes('--backfill')
   const mirrorRules = process.argv.includes('--mirror-rules')
   const mirrorValuation = process.argv.includes('--mirror-valuation')
+  const mirrorShipments = process.argv.includes('--mirror-shipments')
   log.info(`SkyNet Fishbowl Bridge v${config.version} starting on ${config.host} → ${config.fb.host}:${config.fb.port} (${config.fb.sessionMode}) → ${config.sb.url}`)
   await sky.signIn()
   pricing = await sky.pricingState()
@@ -364,6 +448,18 @@ async function main() {
       await mirrorRulesOnce()
     } catch (e) {
       log.error(`rules/tree mirror failed: ${e.stack || e.message}`)
+      process.exitCode = 1
+    } finally {
+      await fb.logout()
+    }
+    return
+  }
+  log.info(`shipments: ${config.shipments.enabled ? (config.shipments.dryRun ? 'DRY RUN (reads + logs, writes nothing)' : 'on') : 'off'} · sweep ${config.shipments.sweepDays} day(s) · max ${config.shipments.maxSosPerCycle} SO(s)/cycle · attach every ${config.shipments.attachMs / 60000} min`)
+  if (mirrorShipments) {
+    try {
+      await mirrorShipmentsOnce()
+    } catch (e) {
+      log.error(`shipments mirror failed: ${e.stack || e.message}`)
       process.exitCode = 1
     } finally {
       await fb.logout()

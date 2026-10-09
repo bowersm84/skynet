@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.8.0',
+  version: '1.9.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -101,6 +101,17 @@ export const config = {
     maxPerCycle: num('FB_PUSH_MAX_PER_CYCLE', 3),
   },
   rulesTreeEnabled: String(process.env.RULES_TREE_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  // D-FB-54 shipments poller (bridge 1.9): Fishbowl's shipped component lots -> fb_shipment_lots -> kit lots.
+  //   SHIPMENTS_ENABLED  only the literal `false` disables it (like VALUATION_ENABLED)
+  //   SHIPMENTS_DRY_RUN  only the literal `true` enables it (like INVENTORY_DRY_RUN): read and log, write
+  //                      nothing, and ask SkyNet for the attach's self-rolling-back dry run
+  shipments: {
+    enabled: String(process.env.SHIPMENTS_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    dryRun: String(process.env.SHIPMENTS_DRY_RUN ?? '').trim().toLowerCase() === 'true',
+    sweepDays: num('SHIPMENTS_SWEEP_DAYS', 14),
+    maxSosPerCycle: num('SHIPMENTS_MAX_SOS', 100),
+    attachMs: num('SHIPMENTS_ATTACH_MS', 900000),
+  },
   // Fishbowl import names (the import's name with dashes). Only change if Fishbowl renames an import.
   importNames: {
     // Product Pricing (columns Product, Price) is Fishbowl's list-price import. NOT "Product", which creates and

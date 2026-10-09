@@ -462,9 +462,11 @@ export async function savePackingSlipGroup({
  * kit_stc_documents row against the lot. uploadDocument stamps the
  * {timestamp}_{filename} leaf itself, so two slips for one lot never collide.
  *
- * Each affected lot gets its own copy and its own row: a slip covering two kits
- * is evidence for both, and a lot's drawer must never depend on another lot's
- * record to show its paperwork.
+ * Each affected lot gets its own row, so a lot's drawer never depends on another
+ * lot's record to show its paperwork. On the Packing Slip tab each lot also gets
+ * its own copy of the file; a block logged in one Kit Entry shares one copy via
+ * attachSlipDocumentToLots below (D-KSTC-35). Nothing in the app deletes slip
+ * files, so a shared path is safe.
  */
 export async function attachSlipDocument({ kitLotId, file, uploadedBy }) {
   const { filePath, fileSize, mimeType } = await uploadDocument(
@@ -481,4 +483,32 @@ export async function attachSlipDocument({ kitLotId, file, uploadedBy }) {
   })
   if (error) throw error
   return { filePath }
+}
+
+/**
+ * Attach one slip to a whole block of kit lots logged in one entry (D-KSTC-35).
+ * The file is uploaded ONCE, under the first lot's folder, and every lot gets
+ * its own kit_stc_documents row pointing at that path — so each drawer lists
+ * the slip without the bench pushing the same photo ten times. The table has
+ * no unique key on file_path, and the kiosk INSERT policy (packing_slip +
+ * kit_lot_id) is satisfied row by row.
+ */
+export async function attachSlipDocumentToLots({ kitLotIds, file, uploadedBy }) {
+  const ids = (kitLotIds || []).filter(Boolean)
+  if (!ids.length) throw new Error('no kit lot to attach the slip to')
+  const { filePath, fileSize, mimeType } = await uploadDocument(
+    file, `${SLIP_PREFIX}/${ids[0]}/packing-slips`)
+
+  const rows = ids.map(id => ({
+    kit_lot_id: id,
+    document_type: 'packing_slip',
+    file_name: file.name,
+    file_path: filePath,
+    file_size: fileSize,
+    mime_type: mimeType || file.type || null,
+    uploaded_by: uploadedBy || null,
+  }))
+  const { error } = await supabase.from('kit_stc_documents').insert(rows)
+  if (error) throw error
+  return { filePath, attached: ids.length }
 }

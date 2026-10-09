@@ -8,7 +8,7 @@ import PackingSlipTab from '../components/kitregistry/PackingSlipTab'
 // Pure helpers live in the query layer so the Search tab and the Entry tab
 // can't drift apart on formatting or filter escaping.
 import { BOOK_ORDER, todayLocal, sanitizeTerm } from '../lib/kitRegistry'
-import { slipPlan, savePackingSlipGroup, attachSlipDocument } from '../lib/packingSlip'
+import { slipPlan, savePackingSlipGroup, attachSlipDocumentToLots } from '../lib/packingSlip'
 import { createStcRequest, validateStcAtEntryFields, STC_AT_ENTRY_REQUIRED } from '../lib/stcIntake'
 import { useSlipExtraction } from '../components/kitregistry/hooks'
 import KitEntrySlipSection from '../components/kitregistry/KitEntrySlipSection'
@@ -26,6 +26,20 @@ const BOOKS_WITHOUT_STUD = ['RV']
 const TYPEAHEAD_DEBOUNCE = 250
 const SO_DEBOUNCE = 400
 
+// Most kits one entry may log. Mirrors the guard inside kit_assign_and_log_many —
+// the RPC refuses anything outside 1..MAX_KITS_PER_ENTRY (D-KSTC-35).
+const MAX_KITS_PER_ENTRY = 25
+
+// The Quantity field is text while it is being typed; this is the one parser
+// every reader uses. Blank IS the default of 1 — the field starts empty behind a
+// "1" placeholder, because a pre-filled digit is what turned 4 into 40
+// (D-KIOSK-ZERO01). Non-digit input is NaN so validation can name the problem.
+function parseQty(text) {
+  const s = String(text ?? '').trim()
+  if (s === '') return 1
+  return /^\d+$/.test(s) ? parseInt(s, 10) : NaN
+}
+
 // The only intake fields Kit Entry asks for (D-KSTC-33). Everything else on the
 // request — the date, the kit number, the kit part, the order — is derived from
 // the entry being saved, so asking for it again would invite a contradiction.
@@ -39,17 +53,19 @@ const BLANK_STC_AT_ENTRY = {
   notes: '',
 }
 
-// A kit_skus row whose description is missing, or just repeats the part number,
-// has no second line worth showing — never render the same string twice.
-// (Real kit names land via a kit_skus.description refresh from the Fishbowl
-// product export; this is display courtesy until then.)
+// The kit part number (SK203C172P-FW4) is what the bench searches by and what
+// identifies the kit, so it leads; the Fishbowl description is the second line
+// (D-KSTC-36, amends D-KSTC-11). The description cannot lead: it describes the
+// hardware, not the kit, and is shared — "SK40S5S Phillips - Complete Kit" is
+// seven different kits. A description that is missing or just repeats the part
+// number has no second line worth showing — never render the same string twice.
 function skuDisplay(sku) {
   const partNumber = (sku?.part_number || '').trim()
   const description = (sku?.description || '').trim()
   const hasName = !!description && description.toLowerCase() !== partNumber.toLowerCase()
   return {
-    primary: hasName ? description : partNumber,
-    secondary: hasName ? partNumber : null,
+    primary: partNumber,
+    secondary: hasName ? description : null,
   }
 }
 
@@ -128,6 +144,18 @@ export default function KitKiosk() {
   const [studNumber, setStudNumber] = useState('')
   const [platemount, setPlatemount] = useState('')
   const [notes, setNotes] = useState('')
+  // How many identical kits this entry logs (D-KSTC-35). Starts EMPTY and reads
+  // as 1 — no pre-filled digit for the caret to land in front of
+  // (D-KIOSK-ZERO01) — so a single kit needs nothing typed at all.
+  const [qtyText, setQtyText] = useState('')
+  // Chrome reports text a number field cannot parse ("3-", "e") as a BLANK
+  // value with validity.badInput set. Blank means 1 here, so without this flag
+  // garbage would quietly log one kit. Tracked beside the text, never inside it,
+  // so React never writes a sentinel into a controlled number input.
+  const [qtyBad, setQtyBad] = useState(false)
+  // SO-line echo for the quantity: what the line ordered and how many active
+  // kit lots already hang off it. Advisory only — never blocks (D-KSTC-07).
+  const [lineQtyInfo, setLineQtyInfo] = useState(null) // { ordered, logged }
 
   // --- Packing slip (optional, rides this entry) ---------------------------
   // Same hook the Packing Slip tab composes, so both surfaces mean the same
@@ -153,12 +181,19 @@ export default function KitKiosk() {
 
   // Focus targets for the first invalid field, in visual order.
   const kitPartRef = useRef(null)
+  const qtyRef = useRef(null)
   const logDateRef = useRef(null)
   const customerRef = useRef(null)
   const soRef = useRef(null)
 
 
   const showStudFields = !!book && !BOOKS_WITHOUT_STUD.includes(book.code)
+
+  // Derived every render from the text the operator typed, so the Kit # range,
+  // the validation, the PIN pad title and the save all read one number.
+  const qty = qtyBad ? NaN : parseQty(qtyText)
+  const qtyValid = Number.isInteger(qty) && qty >= 1 && qty <= MAX_KITS_PER_ENTRY
+  const multi = qtyValid && qty > 1
 
   // Derived every render, which is what makes the agreement chips live: editing
   // the Sales Order # moves the verdict with it. The same object drives what the
@@ -177,7 +212,10 @@ export default function KitKiosk() {
 
   // Read by both the save chain and the render, so what the operator ticked and
   // what the save does cannot disagree. Kiosk mode can never reach it.
-  const wantsStc = mode === 'office' && stcWanted
+  // A request carries ONE aircraft serial and registration, so it can only ride
+  // a single-kit entry; a block of kits gets its requests per kit from Log STC
+  // (D-KSTC-35). The same rule drives the checkbox, so UI and save agree.
+  const wantsStc = mode === 'office' && stcWanted && !multi
 
   const setStcField = useCallback((key, value) => {
     setStcForm(prev => ({ ...prev, [key]: value }))
@@ -479,6 +517,7 @@ export default function KitKiosk() {
   // the kit_sale_line_id onto the insert.
   useEffect(() => {
     setSaleLineId(null)
+    setLineQtyInfo(null)
     const saleId = soInfo?.saleId
     if (!saleId || !kitSkuId) return
     let cancelled = false
@@ -486,11 +525,30 @@ export default function KitKiosk() {
       try {
         const { data: lines } = await supabase
           .from('kit_sale_lines')
-          .select('id')
+          .select('id, qty_ordered')
           .eq('kit_sale_id', saleId)
           .eq('kit_sku_id', kitSkuId)
           .limit(1)
-        if (!cancelled && lines?.[0]) setSaleLineId(lines[0].id)
+        const line = lines?.[0]
+        if (cancelled || !line) return
+        setSaleLineId(line.id)
+        // How many active kit lots already hang off this line — what the
+        // Quantity field checks itself against (D-KSTC-35). A second small
+        // query, never a nested select.
+        const { count, error: countError } = await supabase
+          .from('kit_lots')
+          .select('id', { count: 'exact', head: true })
+          .eq('kit_sale_line_id', line.id)
+          .eq('record_status', 'active')
+        // A failed count is UNKNOWN, never 0: a 0 would read as "nothing logged
+        // yet" and silence the amber note (the `|| 0` class of bug).
+        if (countError) console.error('Logged-lot count failed:', countError)
+        if (!cancelled) {
+          setLineQtyInfo({
+            ordered: line.qty_ordered ?? null,
+            logged: countError ? null : (count ?? 0),
+          })
+        }
       } catch (err) {
         console.error('Sale-line staging failed:', err)
       }
@@ -515,6 +573,7 @@ export default function KitKiosk() {
     if (!logDate) errors.logDate = 'Required'
     if (!customerText.trim()) errors.customer = 'Required'
     if (!soText.trim()) errors.so = 'Required'
+    if (!qtyValid) errors.qty = `Enter a whole number from 1 to ${MAX_KITS_PER_ENTRY}`
     // Stud lot # is deliberately NOT required — it isn't always known at the
     // bench when the kit is logged (D-KSTC-17).
     return errors
@@ -522,7 +581,7 @@ export default function KitKiosk() {
 
   const focusFirstInvalid = (errors) => {
     const sequence = [
-      ['kitPart', kitPartRef], ['logDate', logDateRef], ['customer', customerRef],
+      ['kitPart', kitPartRef], ['qty', qtyRef], ['logDate', logDateRef], ['customer', customerRef],
       ['so', soRef],
     ]
     for (const [key, ref] of sequence) {
@@ -562,26 +621,36 @@ export default function KitKiosk() {
   // The slip half, run only after the kit itself is safely logged. Returns a
   // verdict rather than throwing: the kit is already saved by this point and the
   // operator must be told exactly which half succeeded (D-KSTC-29).
-  const recordSlip = async (lotId, operatorId) => {
+  const recordSlip = async (lotIds, operatorId) => {
+    // Every kit in the block ships with the same component lots — the rule the
+    // backfill already applies when one SKU is logged twice on one SO
+    // (D-KSTC-24). The RPC is idempotent, so a partial failure is repaired from
+    // the Packing Slip tab without double-recording what already landed.
+    let inserted = 0; let skipped = 0; let done = 0
     try {
-      const { inserted, skipped } = await savePackingSlipGroup({
-        kitLotId: lotId,
-        shipmentNumber: slipState.slip.order_number || null,
-        shipDate: slipState.slip.ship_date || null,
-        lines: plan.recordable,
-        operatorId,
-      })
+      for (const lotId of lotIds) {
+        const r = await savePackingSlipGroup({
+          kitLotId: lotId,
+          shipmentNumber: slipState.slip.order_number || null,
+          shipDate: slipState.slip.ship_date || null,
+          lines: plan.recordable,
+          operatorId,
+        })
+        inserted += r.inserted; skipped += r.skipped; done += 1
+      }
       let docError = null
       try {
-        await attachSlipDocument({ kitLotId: lotId, file: slipState.file, uploadedBy: operatorId })
+        // One upload, one document row per kit (D-KSTC-35).
+        await attachSlipDocumentToLots({ kitLotIds: lotIds, file: slipState.file, uploadedBy: operatorId })
       } catch (err) {
         console.error('Attaching the slip failed:', err)
         docError = err.message || 'the slip file did not attach'
       }
-      return { ok: true, inserted, skipped, docError }
+      return { ok: true, inserted, skipped, kits: lotIds.length, docError }
     } catch (err) {
       console.error('Recording component lots failed:', err)
-      return { ok: false, reason: err.message || 'the component lots could not be recorded' }
+      const where = lotIds.length > 1 ? ` (recorded on ${done} of ${lotIds.length} kits)` : ''
+      return { ok: false, reason: (err.message || 'the component lots could not be recorded') + where }
     }
   }
 
@@ -618,7 +687,12 @@ export default function KitKiosk() {
     setSaving(true)
     setSaveError(null)
     try {
-      const { data, error } = await supabase.rpc('kit_assign_and_log', {
+      // One RPC call for the whole block: kit_assign_and_log_many calls
+      // kit_assign_and_log p_qty times inside one transaction under the
+      // kit_books row lock, so the numbers are contiguous and the block is
+      // all-or-nothing — never half a PO logged (D-KSTC-35). Quantity 1 is the
+      // same call, so there is one save path.
+      const { data, error } = await supabase.rpc('kit_assign_and_log_many', {
         p_book_id: book.id,
         p_log_date: logDate || null,
         p_kit_part_as_written: kitPartText.trim(),
@@ -631,10 +705,15 @@ export default function KitKiosk() {
         p_rec_platemount_number: showStudFields ? platemount.trim() : '',
         p_notes: notes.trim(),
         p_created_by: createdById,
+        p_qty: qty,
       })
       if (error) throw error
 
-      const assigned = Array.isArray(data) ? data[0] : data
+      // One row per kit; the lowest number leads everywhere below.
+      const rows = (Array.isArray(data) ? data : (data ? [data] : []))
+        .filter(r => r?.lot_number)
+        .sort((a, b) => a.lot_number - b.lot_number)
+      const assigned = rows[0]
       if (!assigned?.lot_number) throw new Error('The registry did not return a kit number.')
 
       // The kit is logged. From here nothing may throw — a slip or STC problem
@@ -644,15 +723,19 @@ export default function KitKiosk() {
       //
       // Both optional halves hang off the new lot's id, so it is resolved once.
       const needsLot = slipState.hasFile || wantsStc
-      let lotId = null
-      if (needsLot) {
+      // The ids come back with the numbers; the lookup fallback only matters
+      // for a deployment still on the older single-row signature.
+      let lotIds = rows.map(r => r.lot_id).filter(Boolean)
+      if (needsLot && !lotIds.length) {
         try {
-          lotId = await resolveLotId(assigned)
+          const id = await resolveLotId(assigned)
+          lotIds = id ? [id] : []
         } catch (err) {
           console.error('Resolving the new kit lot failed:', err)
-          lotId = null
+          lotIds = []
         }
       }
+      const lotId = lotIds[0] || null
 
       let slip = null
       if (slipState.hasFile) {
@@ -664,8 +747,8 @@ export default function KitKiosk() {
           } else if (!plan.recordable.length) {
             slip = { ok: false, reason: 'no component lines were left to record' }
           } else {
-            slip = lotId
-              ? await recordSlip(lotId, createdById)
+            slip = lotIds.length
+              ? await recordSlip(lotIds, createdById)
               : { ok: false, reason: 'the new kit lot could not be resolved' }
           }
         } catch (err) {
@@ -681,13 +764,17 @@ export default function KitKiosk() {
       // without comment.
       setSuccess({
         lotNumber: assigned.lot_number,
+        // The whole block, lowest first — one chip per kit label (D-KSTC-35).
+        lotNumbers: rows.map(r => r.lot_number),
+        lastLotNumber: rows[rows.length - 1].lot_number,
+        kits: rows.length,
         // The RPC returns the code; the friendly name is what the bench reads.
         // Both name the same book — the RPC assigned into the one we selected.
         bookName: book.name || assigned.book_code || book.code,
         bookCode: book.code || assigned.book_code || '',
-        // The kit's name as the registry knows it: the catalog description when
-        // there is a real one, otherwise whatever was typed / picked.
-        kitLabel: kitSkuDesc || kitPartText.trim(),
+        // The kit as the bench knows it: the part number typed / picked, with
+        // the catalog description in brackets when there is one (D-KSTC-36).
+        kitLabel: kitSkuDesc ? `${kitPartText.trim()} (${kitSkuDesc})` : kitPartText.trim(),
         who: createdByName || '',
         slip,
         stc,
@@ -781,6 +868,7 @@ export default function KitKiosk() {
     setCustomerText(''); setPartyId(null); setPartySuggestions([]); setPartyOpen(false)
     setSoText(''); setSoInfo(null); setSoChecking(false); setSaleLineId(null)
     setStudNumber(''); setPlatemount(''); setNotes('')
+    setQtyText(''); setQtyBad(false); setLineQtyInfo(null)
     slipState.reset()
     setStcWanted(false); setStcForm(BLANK_STC_AT_ENTRY); setStcFieldErrors({})
     stcRefs.current = {}
@@ -902,15 +990,28 @@ export default function KitKiosk() {
                     bare and huge so it can be copied straight onto the kit
                     label. */}
                 <p className="font-mono font-bold text-green-200 text-6xl leading-none tracking-tight">
-                  {success.lotNumber}
+                  {success.kits > 1 ? `${success.lotNumber} – ${success.lastLotNumber}` : success.lotNumber}
                 </p>
                 <p className="text-green-300/90 text-sm mt-3">
                   <span className="font-mono">
                     {success.bookCode ? `${success.bookCode} ` : ''}{success.lotNumber}
+                    {success.kits > 1 ? ` – ${success.lastLotNumber}` : ''}
                   </span>
+                  {success.kits > 1 ? ` · ${success.kits} kits` : ''}
                   {success.kitLabel ? ` — ${success.kitLabel}` : ''}
                   {success.who ? ` · logged by ${success.who}` : ''}
                 </p>
+                {/* One chip per kit, so the operator can tick each label off
+                    against the screen (D-KSTC-35). */}
+                {success.kits > 1 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {success.lotNumbers.map(n => (
+                      <span key={n} className="font-mono text-green-200 text-lg px-3 py-1 rounded-lg bg-green-900/50 border border-green-700">
+                        {n}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
                 {/* The kit number is the headline whatever happened to the
                     paperwork riding with it. Each optional half reports its own
@@ -919,6 +1020,7 @@ export default function KitKiosk() {
                 {success.slip?.ok && (
                   <p className="text-green-300/80 text-sm mt-1.5">
                     {success.slip.inserted} component lot{success.slip.inserted === 1 ? '' : 's'} recorded
+                    {success.slip.kits > 1 ? ` across ${success.slip.kits} kits` : ''}
                     {success.slip.skipped ? ` (${success.slip.skipped} already on file)` : ''}
                     {success.slip.docError
                       ? ` — but ${success.slip.docError}; re-attach it from the Packing Slip tab`
@@ -1007,8 +1109,9 @@ export default function KitKiosk() {
                   {skuOpen && skuSuggestions.length > 0 && (
                     <Suggestions onDismiss={() => setSkuOpen(false)}>
                       {skuSuggestions.map(s => {
-                        // Description leads — the warehouse thinks in names —
-                        // but a SKU with no real name renders on one line only.
+                        // Part number leads — it is what the bench types and
+                        // the only unique line (D-KSTC-36); the description
+                        // sits underneath, and is absent when it adds nothing.
                         const { primary, secondary } = skuDisplay(s)
                         return (
                           <button
@@ -1016,9 +1119,9 @@ export default function KitKiosk() {
                             onClick={() => pickSku(s)}
                             className="w-full text-left px-4 py-3 hover:bg-gray-700 border-b border-gray-700 last:border-0"
                           >
-                            <span className="block text-white">{primary}</span>
+                            <span className="block text-white font-mono font-semibold">{primary}</span>
                             {secondary && (
-                              <span className="block text-gray-400 text-xs font-mono truncate">{secondary}</span>
+                              <span className="block text-gray-400 text-xs truncate">{secondary}</span>
                             )}
                           </button>
                         )
@@ -1033,10 +1136,64 @@ export default function KitKiosk() {
                     : null}
               </Field>
 
-              {/* ---- Kit # — display only; SkyNet assigns it (D-KSTC-10) ---- */}
-              <Field label="Kit #">
+              {/* ---- Quantity — how many of THIS kit (D-KSTC-35) ----
+                  A PO for ten of the same kit is one entry: SkyNet assigns a
+                  contiguous block of numbers in one save. Everything else on
+                  the form applies to every kit in the block. */}
+              <Field label="Quantity" required error={fieldErrors.qty}>
+                <input
+                  ref={qtyRef}
+                  aria-required="true"
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={MAX_KITS_PER_ENTRY}
+                  step={1}
+                  value={qtyText}
+                  placeholder="1"
+                  onFocus={e => e.target.select()}
+                  // onInput as well as onChange: React skips onChange when the
+                  // sanitized value stays blank, so "e" on a fresh field never
+                  // reached the check. onInput fires on every keystroke.
+                  onInput={e => setQtyBad(!!e.target.validity?.badInput)}
+                  onChange={e => {
+                    setQtyText(e.target.value)
+                    setQtyBad(!!e.target.validity?.badInput)
+                    clearFieldError('qty')
+                  }}
+                  className={`w-32 px-4 py-3.5 bg-gray-800 border rounded-lg text-white text-base placeholder-gray-500 focus:border-skynet-accent focus:outline-none ${fieldErrors.qty ? INVALID_BORDER : VALID_BORDER}`}
+                />
+                {multi && (
+                  <p className="text-gray-400 text-sm mt-2">
+                    {qty} kits of the same part — one entry, {qty} consecutive kit numbers, one save.
+                  </p>
+                )}
+                {/* The SO line's own quantity, read back so a mis-key is caught
+                    at the bench. Informational only — the mirror lags new SOs
+                    and a stock build has no line, so this never blocks. */}
+                {lineQtyInfo && (
+                  qtyValid && lineQtyInfo.ordered != null && lineQtyInfo.logged != null
+                    && qty + lineQtyInfo.logged > lineQtyInfo.ordered
+                    ? (
+                      <p className="text-amber-300 text-sm mt-2">
+                        SO line ordered {lineQtyInfo.ordered} and {lineQtyInfo.logged} already logged —
+                        this entry would make {qty + lineQtyInfo.logged}. Check the quantity before saving.
+                      </p>
+                    ) : (
+                      <p className="text-gray-500 text-sm mt-2">
+                        SO line: {lineQtyInfo.ordered ?? '—'} ordered · {lineQtyInfo.logged ?? '—'} already logged
+                      </p>
+                    )
+                )}
+              </Field>
+
+              {/* ---- Kit # — display only; SkyNet assigns it (D-KSTC-10).
+                  A block shows its range; the RPC's answer still wins. ---- */}
+              <Field label={multi ? 'Kit #s' : 'Kit #'}>
                 <p className="font-mono font-bold text-white text-5xl leading-none tracking-tight">
-                  {advisoryNumber ?? '—'}
+                  {advisoryNumber == null
+                    ? '—'
+                    : multi ? `${advisoryNumber} – ${advisoryNumber + qty - 1}` : advisoryNumber}
                 </p>
               </Field>
 
@@ -1164,7 +1321,8 @@ export default function KitKiosk() {
                   <label className="flex items-start gap-3 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={stcWanted}
+                      checked={wantsStc}
+                      disabled={multi}
                       onChange={e => {
                         const on = e.target.checked
                         setStcWanted(on)
@@ -1186,13 +1344,14 @@ export default function KitKiosk() {
                         Customer requested STC with this kit
                       </span>
                       <span className="block text-gray-500 text-xs mt-0.5">
-                        Opens the STC request against this kit as it is logged — born matched,
-                        so it never joins the resolution backlog.
+                        {multi
+                          ? 'Single-kit entries only — a request names one aircraft. Log STC requests per kit from Log STC after saving.'
+                          : 'Opens the STC request against this kit as it is logged — born matched, so it never joins the resolution backlog.'}
                       </span>
                     </span>
                   </label>
 
-                  {stcWanted && (
+                  {wantsStc && (
                     <div className="mt-4 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
                       {/* The same derive-don't-ask rule the intake form applies to
                           a linked lot (D-KSTC-34) — stated up front so nobody
@@ -1304,7 +1463,7 @@ export default function KitKiosk() {
                   {saving || slipBusy ? <Loader2 size={20} className="animate-spin" /> : <CheckCircle size={20} />}
                   {slipBusy
                     ? 'Reading slip…'
-                    : mode === 'kiosk' ? 'Save — confirm with PIN' : 'Save entry'}
+                    : (mode === 'kiosk' ? 'Save — confirm with PIN' : 'Save entry') + (multi ? ` (${qty} kits)` : '')}
                 </button>
                 <button
                   onClick={resetAll}
@@ -1337,7 +1496,7 @@ export default function KitKiosk() {
           <div className="w-full max-w-sm">
             <PinPad
               icon={<ClipboardList size={40} className="mx-auto mb-3 text-skynet-accent" />}
-              title={`Log ${book?.code || ''} kit`}
+              title={multi ? `Log ${book?.code || ''} kits ×${qty}` : `Log ${book?.code || ''} kit`}
               subtitle="Enter your PIN to sign this entry"
               pin={savePin}
               error={savePinError}

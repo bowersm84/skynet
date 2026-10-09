@@ -920,9 +920,9 @@ export default function KitKiosk() {
 
   const NAV_ITEMS = [
     { key: 'entry', label: 'Kit Entry', icon: ClipboardList },
-    // Both modes: the slip is captured where the kit ships from, and the bench
-    // signs each save with a PIN exactly as Kit Entry does (D-KSTC-28).
-    { key: 'packing', label: 'Packing Slip', icon: PackageOpen },
+    // Both modes when on. Retired behind FEATURES.KIT_PACKING_SLIP (D-KSTC-38):
+    // component lots now come from Fishbowl's shipment records (D-KSTC-37).
+    ...(FEATURES.KIT_PACKING_SLIP ? [{ key: 'packing', label: 'Packing Slip', icon: PackageOpen }] : []),
     // Office-only: an issuance is an immutable compliance record and must
     // trace to a real authenticated user, not a shared bench device. It sits
     // between Entry and Search because logging is the office's daily work.
@@ -1302,15 +1302,17 @@ export default function KitKiosk() {
                 />
               </Field>
 
-              {/* ---- Packing slip (optional) ---- */}
-              <Field label="Packing Slip" optional>
-                <KitEntrySlipSection
-                  slipState={slipState}
-                  plan={plan}
-                  soText={soText}
-                  kitPartText={kitPartText}
-                />
-              </Field>
+              {/* ---- Packing slip (optional) -- retired, D-KSTC-38 ---- */}
+              {FEATURES.KIT_PACKING_SLIP && (
+                <Field label="Packing Slip" optional>
+                  <KitEntrySlipSection
+                    slipState={slipState}
+                    plan={plan}
+                    soText={soText}
+                    kitPartText={kitPartText}
+                  />
+                </Field>
+              )}
 
               {/* ---- Customer requested STC — OFFICE ONLY (D-KSTC-33) ----
                   Hidden entirely at the bench, not merely disabled: an intake is
@@ -1480,7 +1482,7 @@ export default function KitKiosk() {
       {/* Both modes. Writes go through kit_record_component_lots, which takes
           the operator id the same way kit_assign_and_log does — PIN at the
           bench, session user in the office. */}
-      {nav === 'packing' && <PackingSlipTab mode={mode} profile={profile} />}
+      {nav === 'packing' && FEATURES.KIT_PACKING_SLIP && <PackingSlipTab mode={mode} profile={profile} />}
 
       {/* Read-only in both modes — RLS already gates writes, and the Search tab
           issues none. Kiosk mode gets the same view as the office. */}

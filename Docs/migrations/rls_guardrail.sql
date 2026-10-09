@@ -29,7 +29,8 @@ WITH service_role_only_tables AS (
   SELECT unnest(ARRAY[
     'import_bom_staging',
     'import_parts_staging',
-    'pricing_counters'  -- D-PRICE-40: quote / price-list number counters, reached only via pricing_next_number (SECURITY DEFINER)
+    'pricing_counters',  -- D-PRICE-40: quote / price-list number counters, reached only via pricing_next_number (SECURITY DEFINER)
+    'fb_shipment_lots'  -- D-KSTC-37: Fishbowl shipment-lot mirror; read only by kit_attach_fb_shipment_lots (SECURITY DEFINER)
   ]) AS table_name
 ),
 

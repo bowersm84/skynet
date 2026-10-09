@@ -109,6 +109,21 @@ export const FEATURES = {
   KIT_EXCEPTIONS_SINCE: '2026-08-03',
 
   /**
+   * Kit Registry packing-slip capture (D-KSTC-28 / D-KSTC-29) -- the slip upload
+   * on Kit Entry and the Packing Slip tab.
+   *
+   * RETIRED 2026-10-09 (D-KSTC-38): component lots come from Fishbowl's own
+   * shipment records instead (D-KSTC-37, and the bridge's shipments poller).
+   * No slip was ever recorded on PROD.
+   *
+   * When false: no slip section on Kit Entry, no Packing Slip tab; the save
+   * path is untouched and saved slips still list in the kit drawer.
+   * When true: the D-KSTC-29 behavior exactly as before (needs the
+   * packing-slip-extract Edge Function, which is deployed on TEST only).
+   */
+  KIT_PACKING_SLIP: false,
+
+  /**
    * Pricing Portal — /pricing (S11, D-PRICE-25). Standalone office-session
    * route (no PIN, no kiosk JWT): price lookup, catalog, customer tiers and
    * purchase history, price books. Reads the price_books / price_items schema

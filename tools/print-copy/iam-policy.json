@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadDocuments",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::skynet-files-skybolt/*"
+    },
+    {
+      "Sid": "WritePrintCopiesOnly",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::skynet-files-skybolt/*.print.pdf"
+    },
+    {
+      "Sid": "WriteReviewPdf",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::skynet-files-skybolt/print-copy-review/*"
+    },
+    {
+      "Sid": "ListForSweepAndNotFound",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::skynet-files-skybolt"
+    }
+  ]
+}

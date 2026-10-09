@@ -1,4 +1,4 @@
-// src/pages/TravelerKiosk.jsx — Traveler Kiosk (S14, D-TKIOSK-01 … 07, 09, 12, 13; 04a, 06a, 13a).
+// src/pages/TravelerKiosk.jsx — Traveler Kiosk (S14, D-TKIOSK-01 … 07, 09, 12, 13; 04a, 06a, 13a; 06b, 13b).
 //
 // A dedicated PC near the machinists' office. PIN → tap your machine → the
 // lineup → Print Travel Pack (or Print Production Card) → done. Printing moves
@@ -17,7 +17,7 @@ import { getRunTarget, isPaperworkStale } from '../lib/jobMerge'
 import {
   fetchDocumentsForJobs, findProductionCard, isPrintableDoc,
   buildTravelPack, buildProductionCard, printHtmlJob,
-  recordTravelPackPrint, recordProductionCardPrint,
+  recordTravelPackPrint, recordProductionCardPrint, recordPrintFailed,
 } from '../lib/travelPack'
 import {
   Printer, LogOut, ArrowLeft, Loader2, CheckCircle, AlertTriangle,
@@ -295,9 +295,16 @@ export default function TravelerKiosk() {
       })
       // D-TKIOSK-06a: record once the pack is built, then print — nothing races print().
       setBusy(prev => prev ? { ...prev, progress: 'Sending to the printer' } : prev)
+      const previous = { at: job.traveler_printed_at || null, by: job.traveler_printed_by || null }
       const rec = await recordTravelPackPrint(supabase, { job: pack.job, machine: selectedMachine, operator, pack })
       const printed = await printHtmlJob(pack.html)
-      if (printed.how === 'error') throw printed.error || new Error('print failed')
+      if (printed.how === 'error') {
+        // D-TKIOSK-06b: no paper, so the stamp goes back to what it was.
+        const failure = printed.error || new Error('print failed')
+        await recordPrintFailed(supabase, { kind: 'pack', job: pack.job, machine: selectedMachine, operator, previous, stampedAt: rec.stampedAt, error: failure })
+        await loadJobs(selectedMachine)
+        throw failure
+      }
       setResult({
         job: pack.job, kind: 'pack', how: printed.how,
         printed: pack.docs, skipped: pack.skipped, pageCount: pack.pageCount,
@@ -326,7 +333,11 @@ export default function TravelerKiosk() {
       setBusy(prev => prev ? { ...prev, progress: 'Sending to the printer' } : prev)
       const rec = await recordProductionCardPrint(supabase, { job, machine: selectedMachine, operator, doc: card.doc, pageCount: card.pageCount })
       const printed = await printHtmlJob(card.html)
-      if (printed.how === 'error') throw printed.error || new Error('print failed')
+      if (printed.how === 'error') {
+        const failure = printed.error || new Error('print failed')
+        await recordPrintFailed(supabase, { kind: 'card', job, machine: selectedMachine, operator, error: failure })
+        throw failure
+      }
       setResult({
         job, kind: 'card', how: printed.how,
         printed: [{ doc: card.doc, pages: card.pageCount }], skipped: [], pageCount: card.pageCount,
@@ -498,7 +509,7 @@ export default function TravelerKiosk() {
                         {docs.map(d => (
                           isPrintableDoc(d)
                             ? <span key={d.id}>· {d.document_type?.name || d.file_name}</span>
-                            : <span key={d.id} className="text-amber-300 flex items-center gap-1">· <AlertTriangle size={12} /> {d.document_type?.name || d.file_name} (Excel — needs PDF)</span>
+                            : <span key={d.id} className="text-amber-300 flex items-center gap-1">· <AlertTriangle size={12} /> {d.document_type?.name || d.file_name} (can't print here)</span>
                         ))}
                       </p>
                       <p className="text-xs mt-1">
@@ -520,13 +531,13 @@ export default function TravelerKiosk() {
                       )}
                       {canPrint && card && (
                         <button onClick={() => handlePrintCard(job)} disabled={!!busy || !cardPrintable}
-                          title={cardPrintable ? undefined : 'This production card is an Excel file — Roger needs to upload it as a PDF'}
+                          title={cardPrintable ? undefined : "This production card's file type can't be printed here — see Roger"}
                           className={`flex items-center justify-center gap-2 px-5 py-3 rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${onMachine && cardPrintable ? 'bg-skynet-accent hover:bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-white'}`}>
                           <ClipboardList size={18} /> Print Production Card
                         </button>
                       )}
                       {canPrint && card && !cardPrintable && (
-                        <p className="text-amber-300 text-xs text-center">Card is Excel — needs PDF from Roger</p>
+                        <p className="text-amber-300 text-xs text-center">Card can't print here — see Roger</p>
                       )}
                       {waiting && <p className="text-gray-500 text-xs text-center">Prints once compliance releases it</p>}
                     </div>

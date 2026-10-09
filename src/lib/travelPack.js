@@ -1,4 +1,4 @@
-// src/lib/travelPack.js — the Traveler Kiosk's travel pack (D-TKIOSK-04 … 07, 13; 04a, 06a, 13a).
+// src/lib/travelPack.js — the Traveler Kiosk's travel pack (D-TKIOSK-04 … 07, 13; 04a, 06a, 13a; 06b, 11a, 13b).
 //
 // One pack = one HTML document = one print job:
 //   section.trav  the canonical traveler (buildTravelerBodyHTML), landscape
@@ -6,7 +6,12 @@
 //                 page rendered to a 300-DPI image by pdf.js (PDF) or embedded
 //                 as-is (jpg/png) — D-TKIOSK-04a: nothing else goes to the floor
 //   section.notice  "Not printed" page listing anything that could not be rendered
-//                 (spreadsheets, unknown types, unreadable files) — D-TKIOSK-05
+//                 (unknown types, unreadable files, a card whose print copy is not
+//                 there yet) — D-TKIOSK-05
+//
+// Production cards stay Excel (D-TKIOSK-11a). The skynet-print-copy Lambda writes
+// <key>.print.pdf beside every Excel file in the bucket; an Excel card is printed
+// from that copy, rendered like any other PDF (D-TKIOSK-13b).
 //
 // Printing is window.print() from a hidden srcdoc iframe — the PrintTraveler.jsx
 // pattern. With Chrome launched --kiosk-printing that is silent; without the flag
@@ -34,13 +39,26 @@ export function extOf(name) {
 }
 
 // 'pdf' | 'image' | 'unprintable' — mime first, extension as the fallback.
+// Every Excel file in the bucket gets a PDF print copy beside it (D-TKIOSK-11a).
+export const PRINT_COPY_SUFFIX = '.print.pdf'
+const EXCEL_EXTS = ['xls', 'xlsx', 'xlsm']
+const EXCEL_MIMES = [
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel.sheet.macroenabled.12',
+]
+
+// 'pdf' | 'image' | 'excel' (printed from its print copy) | 'unprintable'.
+// Mime first, extension as the fallback.
 export function docKind(doc) {
   const mime = (doc?.mime_type || '').toLowerCase()
   if (mime === 'application/pdf') return 'pdf'
   if (mime.startsWith('image/')) return 'image'
+  if (EXCEL_MIMES.includes(mime)) return 'excel'
   const ext = extOf(doc?.file_name || doc?.file_url)
   if (ext === 'pdf') return 'pdf'
   if (['jpg', 'jpeg', 'png'].includes(ext)) return 'image'
+  if (EXCEL_EXTS.includes(ext)) return 'excel'
   return 'unprintable'
 }
 
@@ -113,8 +131,8 @@ export async function fetchDocumentsForJobs(supabase, jobs) {
   return byJob
 }
 
-// The job's blank production card, printable or not (D-TKIOSK-13a: the button
-// shows either way; an Excel card renders it disabled with "needs PDF").
+// The job's blank production card, printable or not (D-TKIOSK-13a/13b: the button
+// shows whenever a card is on file; an Excel card prints from its print copy).
 export function findProductionCard(docs) {
   return (docs || []).find(d => d.document_type?.code === PRODUCTION_CARD_CODE) || null
 }
@@ -171,7 +189,7 @@ export function noticeSection(job, skipped) {
     <h2>Not printed &mdash; see Roger</h2>
     <p>Job ${esc(job?.job_number)}. These documents are on file but could not be printed from the kiosk:</p>
     <ul>${items}</ul>
-    <p>Spreadsheets and other non-PDF files cannot be printed here. Roger can print them from the Print Package.</p>
+    <p>Roger can print them from the Print Package.</p>
   </section>`
 }
 
@@ -185,8 +203,11 @@ async function renderDocument(doc, dpi, onProgress) {
   if (kind === 'unprintable') {
     throw Object.assign(new Error(`cannot print .${extOf(doc.file_name || doc.file_url) || 'unknown'} files`), { skipReason: true })
   }
-  const bytes = await fetchBytes(doc.file_url)
-  if (!bytes) throw Object.assign(new Error('file could not be read'), { skipReason: true })
+  // An Excel card prints from the PDF copy beside it (D-TKIOSK-13b).
+  const bytes = await fetchBytes(kind === 'excel' ? doc.file_url + PRINT_COPY_SUFFIX : doc.file_url)
+  if (!bytes) {
+    throw Object.assign(new Error(kind === 'excel' ? "print copy isn't ready yet" : 'file could not be read'), { skipReason: true })
+  }
   if (kind === 'image') {
     const mime = (doc.mime_type || '').startsWith('image/') ? doc.mime_type : (extOf(doc.file_name) === 'png' ? 'image/png' : 'image/jpeg')
     return { sections: [imageSection(bytesToDataUrl(bytes, mime), false)], pages: 1 }
@@ -245,9 +266,14 @@ export async function buildProductionCard(supabase, job, { dpi = TRAVEL_PACK_DPI
   const docs = await fetchJobDocuments(supabase, job)
   const card = findProductionCard(docs)
   if (!card) throw new Error('This job has no production card on file')
-  if (!isPrintableDoc(card)) throw new Error('This production card is an Excel file — Roger needs to upload it as a PDF')
   onProgress?.('Preparing the production card')
-  const r = await renderDocument(card, dpi, onProgress)
+  let r
+  try {
+    r = await renderDocument(card, dpi, onProgress)
+  } catch (err) {
+    if (err?.skipReason) throw new Error(`${err.message} — see Roger`)
+    throw err
+  }
   return { html: packDocument(`Production Card — ${job.job_number}`, r.sections), doc: card, pageCount: r.pages }
 }
 
@@ -303,7 +329,7 @@ export function printHtmlJob(html, { settleMs = 400, timeoutMs = 20000, loadTime
 // Both writes non-blocking: failures are logged and returned, never thrown.
 export async function recordTravelPackPrint(supabase, { job, machine, operator, pack }) {
   const now = new Date().toISOString()
-  const result = { stampError: null, auditError: null }
+  const result = { stampError: null, auditError: null, stampedAt: null }
   const { error: stampErr } = await supabase
     .from('jobs')
     .update({ traveler_printed_at: now, traveler_printed_by: operator?.id || null })
@@ -311,6 +337,8 @@ export async function recordTravelPackPrint(supabase, { job, machine, operator, 
   if (stampErr) {
     console.error('traveler_printed stamp failed (non-blocking):', stampErr)
     result.stampError = stampErr
+  } else {
+    result.stampedAt = now
   }
   const { error: auditErr } = await supabase.from('audit_logs').insert({
     event_type: 'travel_pack_printed',
@@ -321,7 +349,7 @@ export async function recordTravelPackPrint(supabase, { job, machine, operator, 
       job_number: job.job_number,
       machine_code: machine?.code || null,
       doc_count: pack?.docs?.length || 0,
-      docs: (pack?.docs || []).map(d => ({ name: d.doc.document_type?.name || null, file: d.doc.file_name, pages: d.pages })),
+      docs: (pack?.docs || []).map(d => ({ name: d.doc.document_type?.name || null, file: d.doc.file_name, pages: d.pages, print_copy: docKind(d.doc) === 'excel' })),
       skipped: (pack?.skipped || []).map(s => ({ name: s.type || null, file: s.file_name, reason: s.reason })),
       page_count: pack?.pageCount || null,
       path: 'html-raster-300dpi',
@@ -347,10 +375,53 @@ export async function recordProductionCardPrint(supabase, { job, machine, operat
       job_number: job.job_number,
       machine_code: machine?.code || null,
       file: doc?.file_name || null,
+      print_copy: docKind(doc) === 'excel',
       pages: pageCount || null,
       printed_at: new Date().toISOString(),
     },
   })
   if (error) console.error('production_card_printed audit failed (non-blocking):', error)
   return { auditError: error || null }
+}
+
+// D-TKIOSK-06b: the stamp and audit row land before print() (06a). If print()
+// then fails, a travel pack's stamp is put back to what it was — only while ours
+// is still the latest stamp, so a print made meanwhile from Compliance Review is
+// never undone — and the failure is logged, so "Printed … by" never claims paper
+// that did not come out. A card print has no stamp; it only logs the failure.
+export async function recordPrintFailed(supabase, { kind, job, machine, operator, previous, stampedAt, error }) {
+  const result = { restored: false, restoreError: null, auditError: null }
+  if (kind === 'pack' && stampedAt) {
+    const { data, error: restoreErr } = await supabase
+      .from('jobs')
+      .update({ traveler_printed_at: previous?.at ?? null, traveler_printed_by: previous?.by ?? null })
+      .eq('id', job.id)
+      .eq('traveler_printed_at', stampedAt)
+      .select('id')
+    if (restoreErr) {
+      console.error('traveler_printed restore failed:', restoreErr)
+      result.restoreError = restoreErr
+    } else {
+      result.restored = (data || []).length > 0
+    }
+  }
+  const { error: auditErr } = await supabase.from('audit_logs').insert({
+    event_type: kind === 'pack' ? 'travel_pack_print_failed' : 'production_card_print_failed',
+    job_id: job.id,
+    machine_id: machine?.id || null,
+    operator_id: operator?.id || null,
+    details: {
+      job_number: job.job_number,
+      machine_code: machine?.code || null,
+      error: String(error?.message || error || 'print failed'),
+      stamp_restored: result.restored,
+      restored_to: kind === 'pack' ? (previous?.at || null) : undefined,
+      failed_at: new Date().toISOString(),
+    },
+  })
+  if (auditErr) {
+    console.error('print-failed audit failed:', auditErr)
+    result.auditError = auditErr
+  }
+  return result
 }

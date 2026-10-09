@@ -1,0 +1,2 @@
+# Linux/Docker files: keep LF on every checkout - CodeBuild and the Lambda image use them as-is.
+* text eol=lf

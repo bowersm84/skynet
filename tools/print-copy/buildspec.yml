@@ -1,0 +1,29 @@
+# AWS CodeBuild: builds the skynet-print-copy image and pushes it to ECR.
+# Runs inside AWS - no Docker or command line on your PC. Needs the CodeBuild
+# project's "Privileged" flag (Docker builds) and ECR push permission on its role.
+# Each converter release bumps IMAGE_TAG here; a plain Start build then pushes the new tag.
+version: 0.2
+env:
+  variables:
+    IMAGE_TAG: "1.1"
+    REPO_NAME: "skynet-print-copy"
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+  build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - IMAGE=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+      - |
+        if docker buildx version >/dev/null 2>&1; then
+          docker buildx build --provenance=false --platform linux/amd64 --load -t "$IMAGE" .
+        else
+          docker build -t "$IMAGE" .
+        fi
+  post_build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - IMAGE=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+      - if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then docker push "$IMAGE" && echo "PUSHED $IMAGE"; else echo "Build failed - nothing pushed"; exit 1; fi

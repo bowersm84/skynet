@@ -39,7 +39,9 @@ import {
   Paperclip,
   Upload,
   Eye,
-  ExternalLink
+  ExternalLink,
+  Paintbrush,
+  Thermometer
 } from 'lucide-react'
 import PinPad from '../components/PinPad'
 
@@ -63,12 +65,22 @@ function getKioskDeviceId() {
   }
 }
 
-// Stage definitions
+// Stage definitions — standard flow (Wash → Treatment → Dry)
 const STAGES = [
   { key: 'wash', label: 'Wash', icon: Droplets },
   { key: 'treatment', label: 'Treatment', icon: Flame },
   { key: 'dry', label: 'Dry', icon: Wind }
 ]
+// Dry-film flow (D-GIZA-02): one batch = one oven load, Paint → Bake. The FLN is
+// assigned when Bake completes (D-GIZA-03), not at creation like the other types.
+const DRY_FILM_STAGES = [
+  { key: 'paint', label: 'Paint', icon: Paintbrush },
+  { key: 'bake', label: 'Bake', icon: Thermometer }
+]
+const BAKE_MINUTES = 120          // 2 h cure (D-GIZA-12)
+const DEFAULT_BAKE_TEMP_F = 350
+const isDryFilmBatch = (batch) => batch?.standalone_operation_type === 'dry_film'
+const stagesFor = (batch) => (isDryFilmBatch(batch) ? DRY_FILM_STAGES : STAGES)
 
 export default function Finishing() {
   // Per-device id — stable across reloads via localStorage. Binds the
@@ -101,6 +113,8 @@ export default function Finishing() {
 
   // Tank selection modal (shown when advancing Wash → Treatment)
   const [showTankModal, setShowTankModal] = useState(false)
+  const [showOvenModal, setShowOvenModal] = useState(false)        // Paint → Bake oven pick (D-GIZA-12)
+  const [ovenTempF, setOvenTempF] = useState(String(DEFAULT_BAKE_TEMP_F))
   const [pendingAdvanceBatch, setPendingAdvanceBatch] = useState(null)
 
   // Completion state
@@ -124,6 +138,9 @@ export default function Finishing() {
   const [newJobPartSearch, setNewJobPartSearch] = useState('')
   const [newJobForm, setNewJobForm] = useState({
     part_id: '',
+    program_id: '',              // D-GIZA: tracked program (Giza) the plated lot belongs to; '' = not tracked
+    plating_lot_number: '',      // lot receiving assigned when the nuts came back from Electrolab
+    dry_film_lot_number: '',     // 5-digit lot from the dry-film can (D-GIZA-10)
     source_type: 'machine',
     source_machine_id: '',
     source_description: '',
@@ -137,6 +154,8 @@ export default function Finishing() {
     notes: '',
   })
   const [newJobSubmitting, setNewJobSubmitting] = useState(false)
+  const [newJobPrograms, setNewJobPrograms] = useState([])         // active programs for the Dry Film picker
+  const [newJobPlatingLots, setNewJobPlatingLots] = useState([])   // program_plating_lots() rows for the chosen program
 
   // Collapsed state per batch
   const [collapsedBatches, setCollapsedBatches] = useState({})
@@ -234,7 +253,7 @@ export default function Finishing() {
     try {
       const { data, error } = await supabase
         .from('machines')
-        .select('id, name, code, status, status_reason, machine_type')
+        .select('id, name, code, status, status_reason, machine_type, finishing_role')
         .eq('machine_type', 'finishing')
         .eq('is_active', true)
         .eq('is_commissioned', true)
@@ -245,6 +264,11 @@ export default function Finishing() {
       console.error('Error loading finishing machines:', err)
     }
   }, [])
+
+  // D-GIZA-07: tanks and ovens share machine_type 'finishing'; finishing_role tells them apart.
+  // A null role is treated as a tank so pre-migration rows keep working.
+  const finishingTanks = finishingMachines.filter(m => m.finishing_role !== 'oven')
+  const finishingOvens = finishingMachines.filter(m => m.finishing_role === 'oven')
 
   // Generate finishing lot number — global 6-digit sequence starting at 100000.
   // New format: FLN-NNNNNN (e.g. FLN-100000). Existing FLN-YYMMDD-XXXX values
@@ -327,11 +351,52 @@ export default function Finishing() {
     }
   }
 
+  // Get most recent dry-film lot number — same persistence rule as the chemical drums (D-GIZA-10)
+  const getLastDryFilmLot = async () => {
+    try {
+      const { data } = await supabase
+        .from('finishing_sends')
+        .select('dry_film_lot_number')
+        .not('dry_film_lot_number', 'is', null)
+        .order('finishing_started_at', { ascending: false })
+        .limit(1)
+      if (data && data.length > 0 && data[0].dry_film_lot_number) {
+        return data[0].dry_film_lot_number
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  // Plating lots back from Electrolab with quantity still to paint — program_plating_lots() (D-GIZA-09).
+  const loadPlatingLotsForProgram = async (programId) => {
+    if (!programId) { setNewJobPlatingLots([]); return }
+    try {
+      const { data, error } = await supabase.rpc('program_plating_lots', { p_program_id: programId })
+      if (error) throw error
+      setNewJobPlatingLots(data || [])
+    } catch (err) {
+      console.error('Failed to load plating lots:', err)
+      setNewJobPlatingLots([])
+    }
+  }
+
+  // D-GIZA-09a: a tracked program's batches must be its own part, or the pipeline counts the wrong
+  // parts. Fill the part from the program when none is chosen yet; a mismatch is refused at submit.
+  const applyProgramPart = (program) => {
+    if (!program?.primary_part_id || newJobForm.part_id) return
+    const part = newJobParts.find(p => p.id === program.primary_part_id)
+    if (!part) return
+    setNewJobForm(f => ({ ...f, part_id: part.id, customer: part.customer || f.customer }))
+    setNewJobPartSearch(`${part.part_number} — ${part.description || ''}`)
+  }
+
   // Load parts and machines for the New Job modal — fired when modal opens.
   const loadNewJobReferences = async () => {
     setNewJobLoadingRefs(true)
     try {
-      const [partsRes, machinesRes, currentChem, currentChem2] = await Promise.all([
+      const [partsRes, machinesRes, currentChem, currentChem2, programsRes, lastDryFilm] = await Promise.all([
         supabase
           .from('parts')
           .select('id, part_number, description, customer, part_type, is_active')
@@ -344,17 +409,25 @@ export default function Finishing() {
           .order('name'),
         getCurrentChemicalLot(),
         getCurrentChemicalLot2(),
+        supabase
+          .from('programs')
+          .select('id, code, name, primary_part_id, oven_load_qty')
+          .eq('is_active', true)
+          .order('name'),
+        getLastDryFilmLot(),
       ])
       if (partsRes.error) throw partsRes.error
       if (machinesRes.error) throw machinesRes.error
       setNewJobParts(partsRes.data || [])
       setNewJobMachines(machinesRes.data || [])
+      setNewJobPrograms(programsRes.error ? [] : (programsRes.data || []))
       // Pre-fill chemical lots, but only if the user hasn't already typed something
       // (handles the race where the modal renders before this fetch returns).
       setNewJobForm(f => ({
         ...f,
         chemical_lot_number: f.chemical_lot_number || (currentChem || ''),
         chemical_lot_number_2: f.chemical_lot_number_2 || (currentChem2 || ''),
+        dry_film_lot_number: f.dry_film_lot_number || (lastDryFilm || ''),
       }))
     } catch (err) {
       console.error('Failed to load New Job references:', err)
@@ -365,8 +438,12 @@ export default function Finishing() {
   }
 
   const handleOpenNewJob = () => {
+    setNewJobPlatingLots([])
     setNewJobForm({
       part_id: '',
+      program_id: '',
+      plating_lot_number: '',
+      dry_film_lot_number: '',
       source_type: 'machine',
       source_machine_id: '',
       source_description: '',
@@ -394,11 +471,30 @@ export default function Finishing() {
       alert('Select a part number.')
       return
     }
-    if (newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) {
+    const isDryFilm = newJobForm.operation_type === 'dry_film'
+    const platingLot = newJobForm.plating_lot_number.trim()
+    const dryFilmLot = newJobForm.dry_film_lot_number.trim()
+    if (isDryFilm && !platingLot) {
+      alert('Pick or type the plating lot (the lot receiving assigned when the nuts came back from Electrolab).')
+      return
+    }
+    if (isDryFilm && !dryFilmLot) {
+      alert('Enter the dry-film lot number from the can.')
+      return
+    }
+    if (isDryFilm && newJobForm.program_id) {
+      const prog = newJobPrograms.find(p => p.id === newJobForm.program_id)
+      if (prog?.primary_part_id && prog.primary_part_id !== newJobForm.part_id) {
+        const progPart = newJobParts.find(p => p.id === prog.primary_part_id)
+        alert(`${prog.name} tracks ${progPart?.part_number || 'a different part'} — pick that part, or set Program to "Not a tracked program".`)
+        return
+      }
+    }
+    if (!isDryFilm && newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) {
       alert('Select a machine.')
       return
     }
-    if (newJobForm.source_type === 'received' && !newJobForm.source_description.trim()) {
+    if (!isDryFilm && newJobForm.source_type === 'received' && !newJobForm.source_description.trim()) {
       alert('Enter a source description for received parts.')
       return
     }
@@ -407,17 +503,23 @@ export default function Finishing() {
       alert('Enter a valid quantity (must be > 0).')
       return
     }
-    if (!['full_finishing', 'passivation_only'].includes(newJobForm.operation_type)) {
+    if (!['full_finishing', 'passivation_only', 'dry_film'].includes(newJobForm.operation_type)) {
       alert('Select an operation type.')
       return
     }
+    // Dry film: the parts always arrive plated from Electrolab — the source is implied (D-GIZA-04).
+    const selectedPartForSource = newJobParts.find(p => p.id === newJobForm.part_id)
+    const sourceDescription = isDryFilm
+      ? `Plated ${selectedPartForSource?.part_number || 'parts'} — plating lot ${platingLot}`
+      : (newJobForm.source_type === 'received' ? newJobForm.source_description.trim() : null)
 
     setNewJobSubmitting(true)
     try {
       const now = new Date().toISOString()
 
-      // Universal FLN — no exceptions
-      const fln = await generateFinishingLotNumber()
+      // Universal FLN at creation — except dry film, whose FLN is minted when Bake
+      // completes from (plating lot, dry-film lot) by assign_dry_film_fln (D-GIZA-03).
+      const fln = isDryFilm ? null : await generateFinishingLotNumber()
 
       // Generate the next J-FIN-XXXXXX number via DB function
       const { data: jobNumberRow, error: numberError } = await supabase
@@ -451,8 +553,8 @@ export default function Finishing() {
           is_standalone_finishing: true,
           notes: combinedNotes || null,
           production_lot_number: newJobForm.production_lot_number.trim() || null,
-          assigned_machine_id: newJobForm.source_type === 'machine' ? newJobForm.source_machine_id : null,
-          source_description: newJobForm.source_type === 'received' ? newJobForm.source_description.trim() : null,
+          assigned_machine_id: (!isDryFilm && newJobForm.source_type === 'machine') ? newJobForm.source_machine_id : null,
+          source_description: sourceDescription,
           created_at: now,
           updated_at: now,
         })
@@ -461,7 +563,9 @@ export default function Finishing() {
       if (jobError) throw jobError
 
       // Determine starting stage
-      const initialStage = newJobForm.operation_type === 'passivation_only' ? 'treatment' : 'wash'
+      const initialStage = isDryFilm
+        ? 'paint'
+        : (newJobForm.operation_type === 'passivation_only' ? 'treatment' : 'wash')
 
       // Step 2 — create the finishing_send linked to the new job
       // Chemical lots come from the form (pre-filled from persistence on modal open,
@@ -472,7 +576,10 @@ export default function Finishing() {
           is_standalone: true,
           standalone_operation_type: newJobForm.operation_type,
           job_id: createdJob.id,
-          machine_id: newJobForm.source_type === 'machine' ? newJobForm.source_machine_id : null,
+          machine_id: (!isDryFilm && newJobForm.source_type === 'machine') ? newJobForm.source_machine_id : null,
+          program_id: isDryFilm ? (newJobForm.program_id || null) : null,
+          plating_lot_number: isDryFilm ? platingLot : null,
+          dry_film_lot_number: isDryFilm ? dryFilmLot : null,
           sent_by: operator.id,
           quantity: qty,
           material_lot_number: newJobForm.material_lot_number.trim() || null,
@@ -483,8 +590,8 @@ export default function Finishing() {
           finishing_operator_id: operator.id,
           finishing_started_at: now,
           finishing_lot_number: fln,
-          chemical_lot_number: newJobForm.chemical_lot_number.trim() || null,
-          chemical_lot_number_2: newJobForm.chemical_lot_number_2.trim() || null,
+          chemical_lot_number: isDryFilm ? null : (newJobForm.chemical_lot_number.trim() || null),
+          chemical_lot_number_2: isDryFilm ? null : (newJobForm.chemical_lot_number_2.trim() || null),
           incoming_count: qty,
           sent_at: now,
           created_at: now,
@@ -784,12 +891,16 @@ export default function Finishing() {
     // Get the finishing machine used for this session
     const getSessionMachineId = async () => {
       try {
+        // D-GIZA-07a: ovens are finishing machines too; anchor on the first TANK by code so this
+        // watcher and the sign-in below always pick the same row (unordered, they could differ).
         const { data } = await supabase
           .from('machines')
           .select('id')
           .eq('machine_type', 'finishing')
+          .eq('finishing_role', 'tank')
           .eq('is_active', true)
           .eq('is_commissioned', true)
+          .order('code', { ascending: true })
           .limit(1)
           .single()
         return data?.id
@@ -939,13 +1050,16 @@ export default function Finishing() {
           }
         }
 
-        // Use first finishing machine as session anchor
+        // Use the first finishing TANK by code as session anchor (D-GIZA-07a) — must match the
+        // realtime watcher's query above, or a displaced session is never noticed.
         const { data: finMachine } = await supabase
           .from('machines')
           .select('id')
           .eq('machine_type', 'finishing')
+          .eq('finishing_role', 'tank')
           .eq('is_active', true)
           .eq('is_commissioned', true)
+          .order('code', { ascending: true })
           .limit(1)
           .single()
 
@@ -1244,6 +1358,40 @@ export default function Finishing() {
     }
   }
 
+  // D-GIZA-12: Paint → Bake. The oven becomes the batch's machine and stage_started_at
+  // is the cure start; finishing_completed_at will be the cure end.
+  const handleOvenSelect = async (machine) => {
+    if (!pendingAdvanceBatch) return
+    const temp = parseInt(ovenTempF, 10)
+    if (Number.isNaN(temp) || temp <= 0) {
+      alert('Enter the oven temperature in °F.')
+      return
+    }
+    setShowOvenModal(false)
+    setActionLoading(true)
+    try {
+      const now = new Date().toISOString()
+      const { error } = await supabase
+        .from('finishing_sends')
+        .update({
+          finishing_stage: 'bake',
+          stage_started_at: now,
+          machine_id: machine.id,
+          bake_temp_f: temp,
+          updated_at: now
+        })
+        .eq('id', pendingAdvanceBatch.id)
+      if (error) throw error
+      setPendingAdvanceBatch(null)
+      await loadData()
+    } catch (err) {
+      console.error('Error advancing to bake:', err)
+      alert('Failed to advance to bake: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleConfirmStartBatch = async (needsChemicals = true) => {
     if (!startModalSend) return
     const incomingCount = parseInt(startIncomingCount) || 0
@@ -1291,9 +1439,10 @@ export default function Finishing() {
   const handleAdvanceStage = async (batch) => {
     if (!batch) return
 
+    const stages = stagesFor(batch)
     const currentStage = batch.finishing_stage
-    const currentIndex = STAGES.findIndex(s => s.key === currentStage)
-    const isLastStage = currentIndex === STAGES.length - 1
+    const currentIndex = stages.findIndex(s => s.key === currentStage)
+    const isLastStage = currentIndex === stages.length - 1
 
     // On last stage, require verified count (must be explicitly entered)
     if (isLastStage) {
@@ -1314,6 +1463,17 @@ export default function Finishing() {
         const verifiedCount = parseInt(verifiedCounts[batch.id]) || 0
         const incomingCount = batch.incoming_count || 0
         const discrepancy = verifiedCount - incomingCount
+
+        // D-GIZA-03: a dry-film batch gets its FLN now, keyed on (plating lot, dry-film lot) —
+        // same pair, same FLN. Done BEFORE the completion write so a refused assignment
+        // (missing lot) leaves the batch in Bake instead of complete without a lot.
+        if (isDryFilmBatch(batch)) {
+          const { data: dryFilmFln, error: flnError } = await supabase
+            .rpc('assign_dry_film_fln', { p_send_id: batch.id, p_operator_id: operator.id })
+          if (flnError) throw flnError
+          // assign_dry_film_fln already wrote the FLN to the send and the job; dryFilmFln is for the log only.
+          console.info('[Finishing] Dry-film FLN assigned:', dryFilmFln)
+        }
 
         // Complete the batch with count verification
         const { error } = await supabase
@@ -1463,12 +1623,21 @@ export default function Finishing() {
         }
       } else {
         // Advance to next stage
-        const nextStage = STAGES[currentIndex + 1].key
+        const nextStage = stages[currentIndex + 1].key
 
         // Wash → Treatment requires tank selection
         if (currentStage === 'wash' && nextStage === 'treatment') {
           setPendingAdvanceBatch(batch)
           setShowTankModal(true)
+          setActionLoading(false)
+          return
+        }
+
+        // Paint → Bake requires an oven (D-GIZA-12)
+        if (currentStage === 'paint' && nextStage === 'bake') {
+          setPendingAdvanceBatch(batch)
+          setOvenTempF(String(DEFAULT_BAKE_TEMP_F))
+          setShowOvenModal(true)
           setActionLoading(false)
           return
         }
@@ -2039,9 +2208,10 @@ export default function Finishing() {
                 {activeView === 'job' && (
                 <div className="space-y-4 max-h-[700px] overflow-y-auto">
                   {activeBatches.map(batch => {
-                    const batchIsLastStage = batch.finishing_stage === STAGES[STAGES.length - 1].key
+                    const stages = stagesFor(batch)
+                    const batchIsLastStage = batch.finishing_stage === stages[stages.length - 1].key
                     const isCollapsed = !!collapsedBatches[batch.id]
-                    const currentStageDef = STAGES.find(s => s.key === batch.finishing_stage)
+                    const currentStageDef = stages.find(s => s.key === batch.finishing_stage)
 
                     return (
                       <div key={batch.id} className="rounded-lg border border-gray-700 overflow-hidden">
@@ -2075,7 +2245,7 @@ export default function Finishing() {
                               {currentStageDef && <currentStageDef.icon size={10} />}
                               {currentStageDef?.label}
                             </span>
-                            {batch.finishing_stage === 'treatment' && batch.machine?.name && (
+                            {['treatment', 'bake'].includes(batch.finishing_stage) && batch.machine?.name && (
                               <span className="text-xs text-gray-500">{batch.machine.name}</span>
                             )}
                             <span className="text-gray-400 text-sm font-mono flex items-center gap-1">
@@ -2110,7 +2280,9 @@ export default function Finishing() {
                                     <span>
                                       {batch.job?.work_order?.wo_number || (batch.is_standalone
                                         ? (() => {
-                                            const machine = batch.machine?.name || batch.job?.assigned_machine?.name
+                                            // D-GIZA-12a: the batch's machine becomes the tank (Treatment) or the oven
+                                            // (Bake) once it moves, so it is not the source; the job keeps the source machine.
+                                            const machine = batch.job?.assigned_machine?.name
                                             if (machine) return `Source: ${machine}`
                                             if (batch.job?.source_description) return `Source: Received (${batch.job.source_description})`
                                             return 'Source: Received'
@@ -2163,20 +2335,33 @@ export default function Finishing() {
                                 </div>
                                 <div>
                                   <p className="text-gray-500 text-xs">Finishing Lot #</p>
-                                  <p className="text-cyan-400 font-mono text-sm">{batch.finishing_lot_number || <span className="text-gray-600">Not assigned</span>}</p>
+                                  <p className="text-cyan-400 font-mono text-sm">{batch.finishing_lot_number || <span className="text-gray-600">{isDryFilmBatch(batch) ? 'Assigned at bake' : 'Not assigned'}</span>}</p>
                                 </div>
                               </div>
 
-                              <div className="grid grid-cols-2 gap-4 mt-4">
-                                <div>
-                                  <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
-                                  <p className="text-white font-mono text-sm">{batch.chemical_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
+                              {isDryFilmBatch(batch) ? (
+                                <div className="grid grid-cols-2 gap-4 mt-4">
+                                  <div>
+                                    <p className="text-gray-500 text-xs">Plating Lot #</p>
+                                    <p className="text-white font-mono text-sm">{batch.plating_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-500 text-xs">Dry Film Lot #</p>
+                                    <p className="text-white font-mono text-sm">{batch.dry_film_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
-                                  <p className="text-white font-mono text-sm">{batch.chemical_lot_number_2 || <span className="text-gray-600">&mdash;</span>}</p>
+                              ) : (
+                                <div className="grid grid-cols-2 gap-4 mt-4">
+                                  <div>
+                                    <p className="text-gray-500 text-xs">Citric Acid Lot #</p>
+                                    <p className="text-white font-mono text-sm">{batch.chemical_lot_number || <span className="text-gray-600">&mdash;</span>}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-500 text-xs">Alkaline Mix Lot #</p>
+                                    <p className="text-white font-mono text-sm">{batch.chemical_lot_number_2 || <span className="text-gray-600">&mdash;</span>}</p>
+                                  </div>
                                 </div>
-                              </div>
+                              )}
 
                               <div className="grid grid-cols-2 gap-4 mt-4">
                                 <div>
@@ -2235,8 +2420,8 @@ export default function Finishing() {
                             <div className="bg-gray-800 rounded-lg p-4">
                               <p className="text-gray-500 text-xs mb-3">Stage Progress</p>
                               <div className="flex items-center gap-2">
-                                {STAGES.map((stage, idx) => {
-                                  const currentIdx = STAGES.findIndex(s => s.key === batch.finishing_stage)
+                                {stages.map((stage, idx) => {
+                                  const currentIdx = stages.findIndex(s => s.key === batch.finishing_stage)
                                   const isComplete = idx < currentIdx
                                   const isCurrent = idx === currentIdx
                                   const StageIcon = stage.icon
@@ -2257,7 +2442,7 @@ export default function Finishing() {
                                         )}
                                         {stage.label}
                                       </div>
-                                      {idx < STAGES.length - 1 && (
+                                      {idx < stages.length - 1 && (
                                         <ChevronRight size={16} className="text-gray-600 mx-1 flex-shrink-0" />
                                       )}
                                     </div>
@@ -2282,6 +2467,30 @@ export default function Finishing() {
                                 </p>
                               </div>
                             </div>
+
+                            {/* Dry-film cure (D-GIZA-12): 2 h at the oven temperature from the move into Bake.
+                                Re-renders on the 30 s tick, so the countdown moves on its own. */}
+                            {isDryFilmBatch(batch) && batch.finishing_stage === 'bake' && (() => {
+                              const started = batch.stage_started_at ? new Date(batch.stage_started_at).getTime() : null
+                              const elapsedMin = started ? Math.floor((Date.now() - started) / 60000) : 0
+                              const remaining = BAKE_MINUTES - elapsedMin
+                              const done = !!started && remaining <= 0
+                              return (
+                                <div className={`rounded-lg p-4 border ${done ? 'bg-green-900/20 border-green-700' : 'bg-orange-900/20 border-orange-700'}`}>
+                                  <p className="text-gray-400 text-xs mb-1 flex items-center gap-1">
+                                    <Thermometer size={12} />
+                                    Cure — {batch.machine?.name || 'oven'} @ {batch.bake_temp_f || DEFAULT_BAKE_TEMP_F} °F
+                                  </p>
+                                  <p className={`text-lg font-mono ${done ? 'text-green-400' : 'text-orange-300'}`}>
+                                    {!started
+                                      ? 'Cure start not recorded'
+                                      : done
+                                        ? `Cure complete — ${Math.abs(remaining)} min over`
+                                        : `${remaining} min remaining of ${BAKE_MINUTES}`}
+                                  </p>
+                                </div>
+                              )
+                            })()}
 
                             {/* Job Traveler — live, generated on demand */}
                             <div className="bg-gray-800 rounded-lg p-4 mb-3">
@@ -2428,7 +2637,7 @@ export default function Finishing() {
                               ) : (
                                 <ArrowRight size={20} />
                               )}
-                              {batchIsLastStage ? 'Complete Batch' : `Advance to ${STAGES[STAGES.findIndex(s => s.key === batch.finishing_stage) + 1]?.label}`}
+                              {batchIsLastStage ? 'Complete Batch' : `Advance to ${stages[stages.findIndex(s => s.key === batch.finishing_stage) + 1]?.label}`}
                             </button>
                           </div>
                         )}
@@ -2444,7 +2653,7 @@ export default function Finishing() {
                   const treatmentBatches = activeBatches.filter(b => b.finishing_stage === 'treatment')
                   const dryBatches = activeBatches.filter(b => b.finishing_stage === 'dry')
                   const unassignedTreatment = treatmentBatches.filter(b => !b.machine_id)
-                  const treatmentColumns = finishingMachines.map(m => ({
+                  const treatmentColumns = finishingTanks.map(m => ({
                     key: m.id,
                     label: `Treatment — ${m.name.replace('Finishing ', '')}`,
                     batches: treatmentBatches.filter(b => b.machine_id === m.id)
@@ -2452,6 +2661,21 @@ export default function Finishing() {
                   if (unassignedTreatment.length > 0) {
                     treatmentColumns.push({ key: 'unassigned', label: 'Treatment — Unassigned', batches: unassignedTreatment })
                   }
+                  // Dry-film row (D-GIZA-02): Paint, then one column per commissioned oven.
+                  const paintBatches = activeBatches.filter(b => b.finishing_stage === 'paint')
+                  const bakeBatches = activeBatches.filter(b => b.finishing_stage === 'bake')
+                  const ovenColumns = finishingOvens.map(m => ({
+                    key: m.id,
+                    label: m.name,
+                    batches: bakeBatches.filter(b => b.machine_id === m.id)
+                  }))
+                  const unassignedBake = bakeBatches.filter(b => !finishingOvens.some(m => m.id === b.machine_id))
+                  if (unassignedBake.length > 0) {
+                    ovenColumns.push({ key: 'bake-unassigned', label: 'Unassigned', batches: unassignedBake })
+                  }
+                  const showDryFilmRow = paintBatches.length + bakeBatches.length > 0
+                  const dryFilmCols = 1 + ovenColumns.length
+                  const dryFilmGridClass = dryFilmCols <= 3 ? 'grid-cols-3' : dryFilmCols === 4 ? 'grid-cols-4' : `grid-cols-${dryFilmCols}`
                   const totalCols = 2 + treatmentColumns.length // Wash + treatment cols + Dry
                   const gridClass = totalCols <= 3 ? 'grid-cols-3' : totalCols === 4 ? 'grid-cols-4' : `grid-cols-${totalCols}`
 
@@ -2505,6 +2729,14 @@ export default function Finishing() {
                       )}
                       {renderColumn('dry', <Wind size={14} className="text-cyan-400" />, 'Dry', dryBatches, 'Dry')}
                     </div>
+                    {showDryFilmRow && (
+                      <div className={`grid ${dryFilmGridClass} gap-3 mt-3`}>
+                        {renderColumn('paint', <Paintbrush size={14} className="text-orange-400" />, 'Paint — Dry Film', paintBatches, 'Paint')}
+                        {ovenColumns.map(col =>
+                          renderColumn(col.key, <Thermometer size={14} className="text-orange-400" />, `Bake — ${col.label}`, col.batches, col.label)
+                        )}
+                      </div>
+                    )}
                     <p className="text-gray-600 text-xs text-center mt-3">Switch to Job view to advance stages</p>
                   </div>
                   )
@@ -3426,6 +3658,7 @@ export default function Finishing() {
                   )}
                 </div>
 
+                {newJobForm.operation_type !== 'dry_film' && (
                 <div>
                   <label className="block text-gray-400 text-sm mb-1">
                     Source <span className="text-red-400">*</span>
@@ -3467,6 +3700,7 @@ export default function Finishing() {
                     </div>
                   )}
                 </div>
+                )}
 
                 <div>
                   <label className="block text-gray-400 text-sm mb-1">
@@ -3509,6 +3743,7 @@ export default function Finishing() {
                   <p className="text-gray-600 text-xs mt-1">For batches arriving from non-Mazak-5 machines where the machinist wrote a PLN on the paper traveler.</p>
                 </div>
 
+                {newJobForm.operation_type !== 'dry_film' && (
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-gray-400 text-sm mb-1">
@@ -3537,6 +3772,7 @@ export default function Finishing() {
                     <p className="text-gray-600 text-xs mt-1">Auto-filled from the most recent batch — change if the alkaline drum has changed.</p>
                   </div>
                 </div>
+                )}
 
                 <div>
                   <label className="block text-gray-400 text-sm mb-1">
@@ -3555,10 +3791,10 @@ export default function Finishing() {
                   <label className="block text-gray-400 text-sm mb-2">
                     Operation Type <span className="text-red-400">*</span>
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
-                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'full_finishing' }))}
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'full_finishing', program_id: '', plating_lot_number: '' }))}
                       className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
                         newJobForm.operation_type === 'full_finishing'
                           ? 'bg-cyan-600 border-cyan-500 text-white'
@@ -3570,7 +3806,7 @@ export default function Finishing() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'passivation_only' }))}
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'passivation_only', program_id: '', plating_lot_number: '' }))}
                       className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
                         newJobForm.operation_type === 'passivation_only'
                           ? 'bg-cyan-600 border-cyan-500 text-white'
@@ -3580,8 +3816,120 @@ export default function Finishing() {
                       Passivation Only
                       <div className="text-xs font-normal opacity-75 mt-0.5">Treatment → Dry (skip Wash)</div>
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // D-GIZA-02: dry film is one oven load per batch; the parts arrive plated, so the
+                        // source is implied. If exactly one tracked program is active, pre-select it.
+                        const onlyProgram = newJobPrograms.length === 1 ? newJobPrograms[0] : null
+                        setNewJobForm(f => ({
+                          ...f,
+                          operation_type: 'dry_film',
+                          source_type: 'received',
+                          source_machine_id: '',
+                          program_id: f.program_id || (onlyProgram ? onlyProgram.id : ''),
+                          quantity: f.quantity || (onlyProgram?.oven_load_qty ? String(onlyProgram.oven_load_qty) : f.quantity),
+                        }))
+                        if (onlyProgram && !newJobForm.program_id) {
+                          loadPlatingLotsForProgram(onlyProgram.id)
+                          applyProgramPart(onlyProgram)
+                        }
+                      }}
+                      className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
+                        newJobForm.operation_type === 'dry_film'
+                          ? 'bg-orange-600 border-orange-500 text-white'
+                          : 'border-gray-700 text-gray-400 hover:border-orange-600 hover:text-orange-400'
+                      }`}
+                    >
+                      Dry Film
+                      <div className="text-xs font-normal opacity-75 mt-0.5">Paint → Bake (one oven load)</div>
+                    </button>
                   </div>
                 </div>
+
+                {newJobForm.operation_type === 'dry_film' && (
+                  <div className="space-y-3 rounded-lg border border-orange-800/60 bg-orange-950/20 p-3">
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-1">
+                        Program <span className="text-gray-600 text-xs">(Giza tracker)</span>
+                      </label>
+                      <select
+                        value={newJobForm.program_id}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          const prog = newJobPrograms.find(p => p.id === v)
+                          setNewJobForm(f => ({
+                            ...f,
+                            program_id: v,
+                            plating_lot_number: '',
+                            quantity: f.quantity || (prog?.oven_load_qty ? String(prog.oven_load_qty) : f.quantity),
+                          }))
+                          loadPlatingLotsForProgram(v)
+                          applyProgramPart(prog)
+                        }}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-orange-500 focus:outline-none"
+                      >
+                        <option value="">Not a tracked program (type the plating lot below)</option>
+                        {newJobPrograms.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                      {(() => {
+                        const prog = newJobPrograms.find(p => p.id === newJobForm.program_id)
+                        if (!prog?.primary_part_id || !newJobForm.part_id || prog.primary_part_id === newJobForm.part_id) return null
+                        const progPart = newJobParts.find(p => p.id === prog.primary_part_id)
+                        return (
+                          <p className="text-red-400 text-xs mt-1">
+                            This program tracks {progPart?.part_number || 'a different part'} — change the part above, or choose "Not a tracked program".
+                          </p>
+                        )
+                      })()}
+                    </div>
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-1">
+                        Plating Lot # <span className="text-red-400">*</span>
+                      </label>
+                      {newJobForm.program_id && newJobPlatingLots.length > 0 && (
+                        <select
+                          value={newJobPlatingLots.some(l => l.plating_lot_number === newJobForm.plating_lot_number) ? newJobForm.plating_lot_number : ''}
+                          onChange={(e) => setNewJobForm(f => ({ ...f, plating_lot_number: e.target.value }))}
+                          className="w-full px-3 py-2 mb-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
+                        >
+                          <option value="">— Pick a lot back from Electrolab —</option>
+                          {newJobPlatingLots.map(l => (
+                            <option key={l.plating_lot_number} value={l.plating_lot_number}>
+                              {l.plating_lot_number} — {l.remaining} left to paint (nut lot {l.nut_lots || '?'}, back {l.last_returned})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {newJobForm.program_id && newJobPlatingLots.length === 0 && (
+                        <p className="text-amber-400 text-xs mb-2">No lots are logged as back from Electrolab with quantity left to paint — ask Ashley to log the return, or type the lot below.</p>
+                      )}
+                      <input
+                        type="text"
+                        value={newJobForm.plating_lot_number}
+                        onChange={(e) => setNewJobForm(f => ({ ...f, plating_lot_number: e.target.value }))}
+                        placeholder="Lot receiving assigned when the nuts came back from Electrolab"
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-gray-400 text-sm mb-1">
+                        Dry Film Lot # <span className="text-red-400">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={newJobForm.dry_film_lot_number}
+                        onChange={(e) => setNewJobForm(f => ({ ...f, dry_film_lot_number: e.target.value }))}
+                        placeholder="5-digit lot from the can"
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
+                      />
+                      <p className="text-gray-600 text-xs mt-1">Auto-filled from the last dry-film batch — change it when the can changes. The finishing lot number is assigned when the bake completes: same plating lot + same dry-film lot = same FLN.</p>
+                    </div>
+                    <p className="text-gray-500 text-xs">Quantity above is one oven load (6 pans × 103 ≈ 618) — edit it to what is actually on the pans.</p>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-gray-400 text-sm mb-1">
@@ -3609,8 +3957,9 @@ export default function Finishing() {
                       newJobSubmitting ||
                       !newJobForm.part_id ||
                       !newJobForm.quantity ||
-                      (newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) ||
-                      (newJobForm.source_type === 'received' && !newJobForm.source_description.trim())
+                      (newJobForm.operation_type !== 'dry_film' && newJobForm.source_type === 'machine' && !newJobForm.source_machine_id) ||
+                      (newJobForm.operation_type !== 'dry_film' && newJobForm.source_type === 'received' && !newJobForm.source_description.trim()) ||
+                      (newJobForm.operation_type === 'dry_film' && (!newJobForm.plating_lot_number.trim() || !newJobForm.dry_film_lot_number.trim()))
                     }
                     className="flex items-center gap-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -3645,7 +3994,7 @@ export default function Finishing() {
               <p className="text-gray-400 text-sm mb-4">
                 Select the tank for treatment processing.
               </p>
-              {finishingMachines
+              {finishingTanks
                 .filter(m => !['offline', 'down'].includes(m.status))
                 .map(m => (
                   <button
@@ -3661,8 +4010,63 @@ export default function Finishing() {
                     </div>
                   </button>
                 ))}
-              {finishingMachines.filter(m => !['offline', 'down'].includes(m.status)).length === 0 && (
+              {finishingTanks.filter(m => !['offline', 'down'].includes(m.status)).length === 0 && (
                 <p className="text-gray-500 text-center py-4">No available finishing machines</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Oven Selection Modal (Paint → Bake, D-GIZA-12) */}
+      {showOvenModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-700">
+              <h3 className="text-white font-semibold flex items-center gap-2">
+                <Thermometer size={20} className="text-orange-400" />
+                Select Oven
+              </h3>
+              <button
+                onClick={() => { setShowOvenModal(false); setPendingAdvanceBatch(null) }}
+                className="text-gray-400 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3">
+              <p className="text-gray-400 text-sm">
+                Pick the oven this load is going into. The {BAKE_MINUTES}-minute cure clock starts now.
+              </p>
+              <div>
+                <label className="block text-gray-400 text-sm mb-1">Oven temperature (°F)</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={ovenTempF}
+                  onChange={(e) => setOvenTempF(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
+                />
+              </div>
+              {finishingOvens
+                .filter(m => !['offline', 'down'].includes(m.status))
+                .map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => handleOvenSelect(m)}
+                    disabled={actionLoading}
+                    className="w-full flex items-center gap-3 p-4 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors text-left disabled:opacity-50"
+                  >
+                    <div className={`w-3 h-3 rounded-full ${getMachineStatusDot(m.status)}`} />
+                    <div>
+                      <p className="text-white font-medium">{m.name}</p>
+                      <p className="text-gray-500 text-xs">{m.code} • {m.status}</p>
+                    </div>
+                  </button>
+                ))}
+              {finishingOvens.filter(m => !['offline', 'down'].includes(m.status)).length === 0 && (
+                <p className="text-gray-500 text-center py-4">No commissioned ovens are available</p>
               )}
             </div>
           </div>

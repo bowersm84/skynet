@@ -4586,3 +4586,87 @@ The Kit Entry slip upload and the Packing Slip tab (D-KSTC-28/29) go behind FEAT
 **What:** A new step in every cycle, after inventory: the SOs the revision tail touched (picking, packing and shipping all touch soitem) and the SOs the reconciler refetched are queued, and up to SHIPMENTS_MAX_SOS (100) are read per cycle with the 2026-10-09 calibrated rev 5 query (D-KSTC-37) scoped by SO id -- the lot from trackinginfo (recordId = shipitem.id, tableId 1555030112, tracking type 'Lot Number'), kit membership from kititem, contiguous under the nearest kit header. Rows go to fb_shipment_lots through fb_upsert_shipment_lots (SECURITY DEFINER, _fb_gate integration/admin, upsert on fb_shipitem_id + lot_number, in-batch DISTINCT ON, source 'bridge', stamps fb_sync_state.last_shipments_at); kit_attach_fb_shipment_lots(false) then runs after any cycle that wrote rows and at least every SHIPMENTS_ATTACH_MS (15 min), so a kit logged after its order shipped still picks up its lots. At start-up and nightly (products slot) every SO with a shipment shipped in the last SHIPMENTS_SWEEP_DAYS (14) is re-queued, so an outage, a deploy or a failed read loses nothing. An SO leaves the queue only after its read succeeded; a failure keeps the queue and stands the step down 15 min, never touching the SO tail. Flags: SHIPMENTS_ENABLED (only literal false disables), SHIPMENTS_DRY_RUN (only literal true enables -- reads, logs five sample rows, attach as SkyNet's self-rolling-back dry run). One-shot: npm run mirror:shipments. Every lot of every shipped item is mirrored, not only kits (useful traceability, ~25 rows per SO); the attach uses kit members only. Membership deliberately keeps the rev 5 rule (any kititem row) rather than D-FB-29's kitItemTypeId 10 filter, because that is the rule calibrated against the registry BOMs (0 of 714 kit/part pairs off-BOM).
 **Why:** Matt, 2026-10-09: no packing slip was ever uploaded; Fishbowl already holds the lots exactly, so the bench should not have to transcribe them (D-KSTC-38 retires the upload).
 **Files:** tools/fishbowl-bridge/src/shipments.mjs (new), src/shipments.test.mjs (new), src/queries.mjs, src/skynet.mjs, src/index.mjs, src/config.mjs (1.9.0), package.json, .env.example, README.md. SkyNet side: Docs/migrations/2026-10-09_D-FB-54_fb_upsert_shipment_lots.sql (TEST applied 2026-10-09 by Claude, smoke SMOKE_OK; PROD by Matt before the deploy). Review route per cheatsheet section 11: PC against TEST with SHIPMENTS_DRY_RUN=true, then a real TEST load (SHIPMENTS_SWEEP_DAYS=70 npm run mirror:shipments), then the PROD migration, then skyserver.
+
+## Giza Program Tracker — Sprint 15 (2026-10-12)
+
+Plan: S15_Implementation_Plan.md v1.1. Batch A of three (dry-film finishing). Batch B is the Giza Dashboard with the final-lot register; Batch C is manual cert creation in the Cert Repository, scoped after A and B are live.
+
+### D-GIZA-01 — Standalone program tracker, not the assembly round (2026-10-12)
+**What:** The SK21077-5 (Giza, sold as MS21077-5) nutplate program is tracked by its own tables — programs, program_parts, program_ledger, program_final_lots, dry_film_lot_map — with no work orders, work_order_assemblies, Fishbowl MO or Assembly-module coupling. Migration Docs/migrations/2026-10-13_giza_tracker.sql (TEST applied 2026-10-12 by Claude; PROD by Matt after the Batch A review).
+**Why:** Matt, Oct 12: the assembly re-enable round will not be far enough along and this is needed immediately — the program is far behind schedule and invisible in SkyNet because nothing on it is machined in-house. The ledger's stage keys map one-for-one onto the assembly round's rows later; nothing has to be undone.
+
+### D-GIZA-02 — Kiosk batch = one oven load (2026-10-12)
+**What:** A dry-film batch is one oven load: default quantity programs.oven_load_qty (618 = 6 pans × 103), editable; created at Paint; one oven at Bake. Station view gains a Dry Film row: Paint, then one column per commissioned oven.
+**Why:** Mirrors the tank model exactly, so James's clicks stay the same shape. Matt: go with the default and see how it goes; a paint-run batch with oven loads underneath is a Batch A2 if 618-piece batches cost too many clicks.
+
+### D-GIZA-03 — Dry-film FLN assigned at bake, keyed on (plating lot, dry-film lot) (2026-10-12)
+**What:** A dry_film batch carries no FLN at creation. When Bake completes, assign_dry_film_fln(send_id, operator_id) looks up dry_film_lot_map(plating_lot_number, dry_film_lot_number); if present it reuses that FLN, else it mints FLN-NNNNNN from finishing_lot_seq via next_finishing_lot_number() and records the pair (ON CONFLICT DO NOTHING, then re-select, so two ovens finishing the same pair cannot mint twice — one sequence value is skipped). Written to finishing_sends.finishing_lot_number and jobs.finishing_lot_number. The kiosk calls it BEFORE the completion write so a refused assignment leaves the batch in Bake. Rehearsed in scratch: FLN-100263 reused for a second load of the same pair, FLN-100264 for a new dry-film lot, idempotent re-call leaves the sequence alone.
+**Why:** Matt, Oct 12: the lot is generated after the bake, based on the lot assigned after Electrolab plus the dry-film lot — as long as those are the same it is the same finishing lot — and the existing FIN/FLN scheme is fine.
+
+### D-GIZA-04 — Plating leg tracked in the program ledger, not Outsourced Operations (2026-10-12)
+**What:** Ashley logs sent_plating (qty, nut lot, expected return) and returned_plating (qty, the plating lot receiving assigned, the nut lot it came from) in the Giza tracker. Outsourced Operations is untouched.
+**Why:** Matt: tracker-only for simplicity. Outsourced Operations is built around job batches and consolidation groups; wiring a program lot into it belongs in the assembly round. The ledger captures enough to migrate later.
+
+### D-GIZA-05 — Movement ledger, soft-void only (2026-10-12)
+**What:** program_ledger holds one row per move (received, washer_inserted, sent_plating, returned_plating, assembled, bagged) with lot, ref lot, vendor, PO, expected return, entry date, final lot, done-by initials. Written only through program_log_entry / program_void_entry (SECURITY DEFINER; admin or order_processor; NULL uid passes for the SQL Editor). Voids keep the row with reason and user. Bucket occupancy and daily throughput derive from it in v_program_pipeline / v_program_daily; a negative bucket is never blocked at entry, it renders as over-moved.
+**Why:** Matt: ledger. The AS9100-grade record is the movement with its lot, not a daily snapshot.
+
+### D-GIZA-06 — Receiving keeps assigning lots by hand; tracker records them as typed (2026-10-12)
+**What:** Nut lots (from Asia) and plating lots (back from Electrolab) are assigned in the receiving area as today and typed into the tracker. component_lots and the Cert Repository are untouched until Batch C.
+**Why:** Matt, Oct 12: the lot numbers are being assigned in receiving manually — don't mess with that at this stage.
+
+### D-GIZA-07 — Ovens are finishing machines with finishing_role (2026-10-12)
+**What:** machines.finishing_role text CHECK ('tank','oven'). FIN-1/FIN-2 backfilled 'tank'. OVEN-1..4 inserted beside FIN-1 (same location_id, display_order +10..+40, machine_type 'finishing', kiosk_enabled false, model 'Dry film cure oven'); OVEN-1/2 commissioned, OVEN-3/4 not until they arrive. Finishing.jsx splits finishingMachines into finishingTanks (role ≠ 'oven', so a NULL role still behaves as a tank) and finishingOvens; the tank picker and the oven picker never show each other. Mainframe's finishing-station heuristic (getSecondaryConfig) also matches 'oven'.
+**Why:** Scheduling, the Production Display and the Mainframe all already special-case machine_type = 'finishing', so ovens under that type cannot leak into the scheduler; a new brand value would have (D-MAY17-02). Knock-on: ovens appear on the Mainframe finishing strip and the kiosk header strip immediately.
+
+### D-GIZA-08 — Giza Dashboard access (2026-10-12)
+**What:** /dashboards/giza in the Dashboards menu for every role (SKY56 pattern); Log, Void and the final-lot actions for admin + the order_processor additional role (roles.js canLogProgramTracker), enforced server-side by _program_gate() in every write RPC. Batch B.
+**Why:** Everyone needs to see where the program stands; Ashley (order_processor) and Matt write.
+
+### D-GIZA-09 — Painted / Baked derive from finishing_sends (2026-10-12)
+**What:** v_program_pipeline reads dry-film batches linked by finishing_sends.program_id: painted = Σ incoming_count, in_paint / in_oven by finishing_stage while in_finishing, baked = Σ verified_count of finishing_complete sends, dry_film_loss = completed incoming − baked. Nothing from the kiosk is ever written into program_ledger. program_plating_lots() nets painted quantity off each returned plating lot for the kiosk picker.
+**Why:** One source of truth for the kiosk stages; no twin writes to drift.
+
+### D-GIZA-10 — Dry-film lot: 5-digit, persisted like the chemical drums (2026-10-12)
+**What:** finishing_sends.dry_film_lot_number, required to create a dry_film batch, pre-filled on the New Job modal from the most recent dry-film batch (getLastDryFilmLot, the getCurrentChemicalLot pattern), editable when the can changes.
+**Why:** Matt: the dry-film lot is a 5-digit number just like the other chemicals James tracks.
+
+### D-GIZA-11 — Shipped comes from the Fishbowl mirror (2026-10-12)
+**What:** v_program_demand = Sale lines (type_id 10) of programs.fb_product_num on non-removed SOs of status 10/20/25 whose customer_name ILIKE the program's customer_match; ordered / fulfilled / open / due / days late per line. Nobody types shipments.
+**Why:** The mirror already carries SO 15548 / MS21077-5: 145,020 ordered, 10,251 shipped, 134,769 open on TEST (Oct 6 mirror).
+
+### D-GIZA-12 — Cure record on the batch (2026-10-12)
+**What:** Paint → Bake opens an oven pick with the temperature (default 350 °F, editable); the move writes machine_id = the oven, bake_temp_f, stage_started_at = cure start; finishing_completed_at is the cure end. The Job view shows a 120-minute countdown from stage_started_at (green when elapsed) on the 30 s tick. The Bake header shows the oven name as Treatment shows the tank.
+**Why:** The cure time/temperature is the record Batch C's cert will cite; the countdown is what James actually needs at the oven.
+
+### D-GIZA-13 — Manual certs are Batch C (2026-10-12)
+**What:** Manual cert creation in the Cert Repository for outsourced/purchased products — scoped after Batches A and B are live on PROD. Discovery needs one cert Roger produces for Giza today, whether it is per shipment / per FLN / per SO line, and who signs. Everything the tracker captures in A and B (nut → plating → dry-film → FLN → final lot, oven, cure in/out, °F, torsion, inspector) is chosen so the cert needs no re-entry.
+**Why:** Matt, Oct 12: the Cert Repository runs off own-produced products; Giza requires full certs and Roger builds them by hand outside SkyNet. Build it after Finishing and the Dashboard.
+
+### D-GIZA-14 — Final lot register replaces the paper MS21077 Platenut Assembly sheet (2026-10-12)
+**What:** program_final_lots: one row per bag lot, number from a per-program integer counter programs.final_lot_next (seeded 3007; the sheet's last used row is 3006), reserved by program_open_final_lot (SELECT ... FOR UPDATE on the program row). Lots 3001–3006 seeded as status 'historical' for Ashley to complete from the paper. Assembled ledger entries land in an open lot (date / qty / done-by, no three-cell limit); bagged entries reference a closed lot and default to its number. Batch B renders the register and the bag label.
+**Why:** Matt, Oct 12: when a lot finishes final assembly a lot number following the sheet's sequence must be produced as the final lot that goes on the bags — built into the dashboard.
+
+### D-GIZA-15 — The number is reserved at open, becomes the bag lot at close (2026-10-12)
+**What:** Opening a lot takes the next number so the floor can label bins while the lot fills over several days (3003 took 1,570 on 6-23-26 and more on 6-27-26); program_close_final_lot freezes quantity = Σ assembled entries and makes it the bag lot. Mint-at-close instead would be a one-line change in program_open_final_lot / close.
+**Why:** Matches how the paper row is used; stated to Matt as the default with the alternative, Oct 12.
+
+### D-GIZA-16 — Lot close record (2026-10-12)
+**What:** program_close_final_lot(lot, cage_lot, retainer_lot, insert_lot, torsion jsonb {t1_qty,t1_inlbs,t2_qty,t2_inlbs}, inspected_by, notes): Cage / Retainer / Nylon Insert lots recorded as picked; finishing_lots = the FLNs on the assembled entries; plating_lots derived through dry_film_lot_map; nut_lots derived from the returned_plating entries' ref lots; quantity frozen. program_reopen_final_lot is admin-only and refused once anything is bagged; voiding an assembled entry on a closed lot is refused (reopen first). program_update_final_lot edits the recorded details, and quantity / the nut chain only on historical lots. Rehearsed in scratch: close → 800 with two FLNs / two plating lots / two nut lots; reopen, void one entry, re-close → 600 with the chain reduced to match.
+**Why:** The sheet's columns, with the nut columns derived instead of typed — the one place the register is stricter than the paper is where the data already exists in SkyNet.
+
+### D-GIZA-17 — Shipped baseline at tracker start (2026-10-12)
+**What:** programs.shipped_baseline numeric, set by the seed to the mirror's Σ qty_fulfilled on the program's Sale lines at that moment (10,251 on TEST). v_program_pipeline exposes shipped_since_start = fulfilled − baseline and waiting_ship = bagged − shipped_since_start; open_qty stays ordered − fulfilled (all-time).
+**Why:** Found in the migration rehearsal: without it the 10,251 pieces shipped before the tracker existed would be subtracted from tracker-era bagging and waiting_ship would start at −10,251.
+
+### D-GIZA-07a — Finishing PIN session anchored to the first tank by code (2026-10-12; amends D-GIZA-07)
+**What:** Finishing.jsx's two session-anchor queries (the realtime displaced-session watcher and the sign-in that records the kiosk_sessions row) both select machine_type 'finishing' AND finishing_role 'tank', active and commissioned, ORDER BY code, LIMIT 1 — FIN-1 on both projects. loadMachines stays unlimited.
+**Why:** CC's Batch A report: with ovens added as finishing machines the unordered "first finishing machine" could be an oven, and because the watcher and the sign-in queried separately they could pick different rows, in which case a displaced finishing session was never logged out. Ordering both on the same filter makes them agree.
+
+### D-GIZA-09a — A program's dry-film batches must be the program's part (2026-10-12; amends D-GIZA-09)
+**What:** On the New Job modal, choosing Dry Film with a single active program, or picking a program, fills the part from programs.primary_part_id when no part is chosen; a mismatch shows a red line under the Program select and handleSubmitNewJob refuses it with the program's part number. Program = "Not a tracked program" accepts any part. Client-side only for v1.
+**Why:** CC's Batch A report: primary_part_id was loaded but unused, so a wrong part linked to the Giza program would be counted in v_program_pipeline's painted / baked buckets.
+
+### D-GIZA-12a — Standalone "Source:" line reads the job, not the batch's machine (2026-10-12; amends D-GIZA-12)
+**What:** The Job view's standalone source line uses jobs.assigned_machine_id (the machine the parts came from) and then source_description; finishing_sends.machine_id is no longer consulted there.
+**Why:** CC's Batch A report: once a dry-film batch moves into Bake its machine_id is the oven (by design, D-GIZA-12), so the card read "Source: Oven 1"; a received full-finishing batch already read its tank the same way. The job keeps the true source.

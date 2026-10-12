@@ -511,7 +511,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
     const code = machine.code?.toLowerCase() || ''
     const name = machine.name?.toLowerCase() || ''
     
-    if (code.startsWith('pass') || name.includes('passivation') || code.startsWith('fin') || name.includes('finishing')) {
+    if (code.startsWith('pass') || name.includes('passivation') || code.startsWith('fin') || name.includes('finishing') || code.startsWith('oven') || name.includes('oven')) {
       return {
         type: 'finishing',
         statuses: ['pending_passivation', 'in_passivation']

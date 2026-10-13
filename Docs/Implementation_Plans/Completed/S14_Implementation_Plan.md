@@ -2,10 +2,10 @@
 
 **Sprint 14 — Traveler Kiosk**
 
-Implementation Plan v1.10 · October 9, 2026 (v1.10: Batch B passed (tablet check rides with B2); Batch B2 — traveler layout, pack margins as padding. v1.9: converter 1.2 live — 394 copies, 213 fit to one page, J-000203 confirmed; A4 passed; Batch B as built. v1.8: A3 passed; converter 1.2 — a print copy is always one page; Batch A4. v1.7: A2 passed; print copies live — image 1.1, 390 converted, trigger verified; Batch A3 as built. v1.6: converter 1.1 — the first real print copies hid the cards' controlled footer; fixed, and the sweep now redoes copies from older converter versions. v1.5: print-copy setup is console-only — CodeBuild builds the image, the function's Test tab runs the backfill and builds Roger's review PDF. v1.4: production cards stay Excel — automatic PDF print copies made by an AWS Lambda (D-TKIOSK-11a); the PDF swap and the Excel-refusing upload rule are dropped; Batch A3 added. v1.1: Print Production Card added; production-card PDF rule restated plainly. v1.2: spike result — print path fixed as one HTML job with documents rendered to images. v1.3: first-test fixes, Batch A2 — pack is traveler + drawing + card, one print per job, record before print, card button always shown)
+Implementation Plan v1.11 · October 9, 2026 — **CLOSED** (v1.11: sprint closed — live on PROD, spec v4.9. v1.10: Batch B passed (tablet check rides with B2); Batch B2 — traveler layout, pack margins as padding. v1.9: converter 1.2 live — 394 copies, 213 fit to one page, J-000203 confirmed; A4 passed; Batch B as built. v1.8: A3 passed; converter 1.2 — a print copy is always one page; Batch A4. v1.7: A2 passed; print copies live — image 1.1, 390 converted, trigger verified; Batch A3 as built. v1.6: converter 1.1 — the first real print copies hid the cards' controlled footer; fixed, and the sweep now redoes copies from older converter versions. v1.5: print-copy setup is console-only — CodeBuild builds the image, the function's Test tab runs the backfill and builds Roger's review PDF. v1.4: production cards stay Excel — automatic PDF print copies made by an AWS Lambda (D-TKIOSK-11a); the PDF swap and the Excel-refusing upload rule are dropped; Batch A3 added. v1.1: Print Production Card added; production-card PDF rule restated plainly. v1.2: spike result — print path fixed as one HTML job with documents rendered to images. v1.3: first-test fixes, Batch A2 — pack is traveler + drawing + card, one print per job, record before print, card button always shown)
 
 **Owner:** Matt Bowers
-**Status:** Draft for sign-off. S13 (Fishbowl Inventory) is paused with one batch left; S14 goes first.
+**Status:** **CLOSED October 9, 2026 — live on PROD.** Specified in SkyNet_Specification_v4_9 §5.38 (with §1.2, §2.2, §4.3, §5.4, §5.8, §5.29, §6, §10.13, §11, §12, §13.3, §13.5, §13.7). S13 (Fishbowl Inventory) resumes with its last batch.
 
 ---
 
@@ -318,3 +318,18 @@ Spike first (§6.1, Matt, 10 minutes). Then three batches, one in flight at a ti
 - Kiosk PC running the shortcut; Roger no longer printing; bins gone.
 - `feature/s14-traveler-kiosk` merged to test and main, main == test.
 - Spec v4.9 generated; Decisions updated; this plan marked CLOSED with actual outcomes.
+
+### Definition of Done — outcome (October 9, 2026)
+
+- **Tests:** T-01 – T-19 and T-21 – T-23 passed on TEST across Batches A – B2; T-20 passed on PROD — the first PROD packs (J-000311, J-000225, J-000269) printed traveler, drawing and production card from its print copy, nothing skipped, no print failures. Open: the machine tablet's Start Setup on the shared helper has not yet run on a tablet — read back the first PROD tablet start (spec §13.7).
+- **Spike:** recorded in D-TKIOSK-06 — HTML in a frame prints silently; a PDF frame cannot be scripted (Chrome 154).
+- **Print copies:** skynet-print-copy 1.2 live; 394 copies, 0 failed, 213 shrunk to one page; upload trigger verified (2.3 s); Roger reviewed the copies October 9.
+- **Kiosk PC:** set up and printing on PROD October 9; Roger no longer prints at compliance accept. Start it with Launch_TravelerKiosk_PROD.cmd so printing is silent (the first PROD prints showed the print dialog).
+- **Code:** commits on feature/s14-traveler-kiosk — A + A2 (Task 0 of A3), A3 64287dd, A4 e0039f9, B b9dc92c, B2 (the finish round); pushed to main by Matt, October 9.
+- **Docs:** SkyNet_Specification_v4_9.docx; Decisions D-TKIOSK-01 through D-TKIOSK-14 plus the sprint-close entry; this plan CLOSED; TEST-only SQL filed under Docs/migrations.
+
+### Lessons
+
+- A CC prompt pasted into the terminal is cut off at 50,000 characters — B2 lost its last two tasks. Keep prompts under the limit; send long files (the plan, the spec) as their own files, not inside the prompt.
+- TEST data drifts from PROD: J-000175's drawing pointed at a file PROD had replaced and S3 no longer held. When a TEST check fails on a document, compare the row with PROD before suspecting code.
+- Headless rendering found what paper did not show plainly: the old pack CSS shrank landscape drawings to ~81% and pushed portrait ones to the paper edge.

@@ -139,6 +139,7 @@ export default function Finishing() {
   const [newJobForm, setNewJobForm] = useState({
     part_id: '',
     program_id: '',              // D-GIZA: tracked program (Giza) the plated lot belongs to; '' = not tracked
+    program_lot_id: '',          // D-GIZA-24: the Giza lot (branch) these plated nuts belong to; '' = typed / untracked
     plating_lot_number: '',      // lot receiving assigned when the nuts came back from Electrolab
     dry_film_lot_number: '',     // 5-digit lot from the dry-film can (D-GIZA-10)
     source_type: 'machine',
@@ -382,12 +383,32 @@ export default function Finishing() {
     }
   }
 
+  // D-GIZA-02a / D-GIZA-24: picking a Giza lot from the list sets the plating lot and the batch
+  // quantity (what is left to paint on that lot). A typed plating lot attaches to a lot only when
+  // exactly one lot has it; otherwise the batch finds its lot at bake (assign_dry_film_fln).
+  const pickDryFilmLot = (lotId) => {
+    const row = newJobPlatingLots.find(l => l.lot_id === lotId)
+    setNewJobForm(f => (row
+      ? { ...f, program_lot_id: row.lot_id, plating_lot_number: row.plating_lot_number, quantity: String(row.remaining) }
+      : { ...f, program_lot_id: '' }))
+  }
+  const setDryFilmPlatingLot = (value) => {
+    const matches = newJobPlatingLots.filter(l => l.plating_lot_number === value.trim())
+    const only = matches.length === 1 ? matches[0] : null
+    setNewJobForm(f => ({
+      ...f,
+      plating_lot_number: value,
+      program_lot_id: only ? only.lot_id : '',
+      ...(only ? { quantity: String(only.remaining) } : {}),
+    }))
+  }
+
   // D-GIZA-09a: a tracked program's batches must be its own part, or the pipeline counts the wrong
   // parts. Fill the part from the program when none is chosen yet; a mismatch is refused at submit.
   const applyProgramPart = (program) => {
     if (!program?.primary_part_id || newJobForm.part_id) return
     const part = newJobParts.find(p => p.id === program.primary_part_id)
-    if (!part) return
+    if (!part || part.is_active === false) return   // the part picker refuses inactive parts too (D-GIZA-09b)
     setNewJobForm(f => ({ ...f, part_id: part.id, customer: part.customer || f.customer }))
     setNewJobPartSearch(`${part.part_number} — ${part.description || ''}`)
   }
@@ -442,6 +463,7 @@ export default function Finishing() {
     setNewJobForm({
       part_id: '',
       program_id: '',
+      program_lot_id: '',
       plating_lot_number: '',
       dry_film_lot_number: '',
       source_type: 'machine',
@@ -579,6 +601,7 @@ export default function Finishing() {
           machine_id: (!isDryFilm && newJobForm.source_type === 'machine') ? newJobForm.source_machine_id : null,
           program_id: isDryFilm ? (newJobForm.program_id || null) : null,
           plating_lot_number: isDryFilm ? platingLot : null,
+          program_lot_id: isDryFilm ? (newJobForm.program_lot_id || null) : null,
           dry_film_lot_number: isDryFilm ? dryFilmLot : null,
           sent_by: operator.id,
           quantity: qty,
@@ -3714,6 +3737,22 @@ export default function Finishing() {
                     placeholder="Count the parts in front of you"
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:border-cyan-500 focus:outline-none"
                   />
+                  {(() => {
+                    // D-GIZA-02a: warn (never block) when the quantity differs from what is left on the picked plating lot.
+                    if (newJobForm.operation_type !== 'dry_film') return null
+                    const lotRow = newJobPlatingLots.find(l => l.lot_id === newJobForm.program_lot_id)
+                    const q = parseInt(newJobForm.quantity, 10)
+                    const left = Number(lotRow?.remaining)
+                    if (!lotRow || Number.isNaN(q) || q === left) return null
+                    return (
+                      <p className="text-amber-400 text-xs mt-1 flex items-center gap-1">
+                        <AlertTriangle size={12} />
+                        {q < left
+                          ? `${(left - q).toLocaleString()} fewer than the ${left.toLocaleString()} left on lot ${lotRow.lot_number} (plating ${lotRow.plating_lot_number}) — the rest stays waiting for paint.`
+                          : `${(q - left).toLocaleString()} more than the ${left.toLocaleString()} lot ${lotRow.lot_number} has back from Electrolab — check the count.`}
+                      </p>
+                    )
+                  })()}
                 </div>
 
                 <div>
@@ -3794,7 +3833,7 @@ export default function Finishing() {
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
-                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'full_finishing', program_id: '', plating_lot_number: '' }))}
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'full_finishing', program_id: '', program_lot_id: '', plating_lot_number: '' }))}
                       className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
                         newJobForm.operation_type === 'full_finishing'
                           ? 'bg-cyan-600 border-cyan-500 text-white'
@@ -3806,7 +3845,7 @@ export default function Finishing() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'passivation_only', program_id: '', plating_lot_number: '' }))}
+                      onClick={() => setNewJobForm(f => ({ ...f, operation_type: 'passivation_only', program_id: '', program_lot_id: '', plating_lot_number: '' }))}
                       className={`px-4 py-3 rounded border-2 text-sm font-medium transition-colors ${
                         newJobForm.operation_type === 'passivation_only'
                           ? 'bg-cyan-600 border-cyan-500 text-white'
@@ -3828,7 +3867,6 @@ export default function Finishing() {
                           source_type: 'received',
                           source_machine_id: '',
                           program_id: f.program_id || (onlyProgram ? onlyProgram.id : ''),
-                          quantity: f.quantity || (onlyProgram?.oven_load_qty ? String(onlyProgram.oven_load_qty) : f.quantity),
                         }))
                         if (onlyProgram && !newJobForm.program_id) {
                           loadPlatingLotsForProgram(onlyProgram.id)
@@ -3861,8 +3899,8 @@ export default function Finishing() {
                           setNewJobForm(f => ({
                             ...f,
                             program_id: v,
+                            program_lot_id: '',
                             plating_lot_number: '',
-                            quantity: f.quantity || (prog?.oven_load_qty ? String(prog.oven_load_qty) : f.quantity),
                           }))
                           loadPlatingLotsForProgram(v)
                           applyProgramPart(prog)
@@ -3891,14 +3929,14 @@ export default function Finishing() {
                       </label>
                       {newJobForm.program_id && newJobPlatingLots.length > 0 && (
                         <select
-                          value={newJobPlatingLots.some(l => l.plating_lot_number === newJobForm.plating_lot_number) ? newJobForm.plating_lot_number : ''}
-                          onChange={(e) => setNewJobForm(f => ({ ...f, plating_lot_number: e.target.value }))}
+                          value={newJobPlatingLots.some(l => l.lot_id === newJobForm.program_lot_id) ? newJobForm.program_lot_id : ''}
+                          onChange={(e) => pickDryFilmLot(e.target.value)}
                           className="w-full px-3 py-2 mb-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
                         >
-                          <option value="">— Pick a lot back from Electrolab —</option>
+                          <option value="">— Pick a Giza lot back from Electrolab —</option>
                           {newJobPlatingLots.map(l => (
-                            <option key={l.plating_lot_number} value={l.plating_lot_number}>
-                              {l.plating_lot_number} — {l.remaining} left to paint (nut lot {l.nut_lots || '?'}, back {l.last_returned})
+                            <option key={l.lot_id} value={l.lot_id}>
+                              {`Lot ${l.lot_number} · ${l.plating_lot_number} — ${l.remaining} left to paint (nut ${l.nut_lots || '?'}, back ${l.last_returned})`}
                             </option>
                           ))}
                         </select>
@@ -3909,7 +3947,7 @@ export default function Finishing() {
                       <input
                         type="text"
                         value={newJobForm.plating_lot_number}
-                        onChange={(e) => setNewJobForm(f => ({ ...f, plating_lot_number: e.target.value }))}
+                        onChange={(e) => setDryFilmPlatingLot(e.target.value)}
                         placeholder="Lot receiving assigned when the nuts came back from Electrolab"
                         className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:border-orange-500 focus:outline-none"
                       />
@@ -3927,7 +3965,7 @@ export default function Finishing() {
                       />
                       <p className="text-gray-600 text-xs mt-1">Auto-filled from the last dry-film batch — change it when the can changes. The finishing lot number is assigned when the bake completes: same plating lot + same dry-film lot = same FLN.</p>
                     </div>
-                    <p className="text-gray-500 text-xs">Quantity above is one oven load (6 pans × 103 ≈ 618) — edit it to what is actually on the pans.</p>
+                    <p className="text-gray-500 text-xs">Picking a plating lot sets Quantity above to what is left to paint on that lot. Change it if the pans hold a different count — you'll see a warning, and the batch still starts.</p>
                   </div>
                 )}
 

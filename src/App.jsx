@@ -24,6 +24,7 @@ import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
 import SalesDashboard from './pages/dashboards/SalesDashboard'
+import GizaDashboard from './pages/dashboards/GizaDashboard'
 import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole, canAccessOrderQueue, canViewPricing } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
@@ -35,6 +36,7 @@ const DASHBOARDS = [
   { label: 'Production Dashboard', path: '/dashboards/production' },
   { label: 'Sales Dashboard', path: '/dashboards/sales' },
   { label: 'Assembly Dashboard', path: '/dashboards/assembly' },
+  { label: 'Giza Dashboard', path: '/dashboards/giza' },
   { label: "President's Bridge", path: '/bridge' },
   { label: 'Pricing Portal', path: '/pricing' },
 ]
@@ -440,6 +442,7 @@ function MainApp() {
                       if (db.path === '/bridge') return canSeeBridge(profile?.role)
                       if (db.path === '/dashboards/sales') return canViewSalesDashboard(profile)
                       if (db.path === '/pricing') return FEATURES.PRICING_PORTAL && canViewPricing(profile)
+                      if (db.path === '/dashboards/giza') return FEATURES.PROGRAM_TRACKER
                       return true
                     }).map(db => (
                       <a
@@ -619,6 +622,10 @@ function App() {
         <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
         <Route path="/dashboards/production" element={<ProductionDisplay />} />
         <Route path="/dashboards/sales" element={<SalesDashboard />} />
+
+        {/* Giza Dashboard - office session, every role views; writes gated in the page and by
+            the program RPCs (S15 Batch B, D-GIZA-08). Self-gated by FEATURES.PROGRAM_TRACKER. */}
+        <Route path="/dashboards/giza" element={<GizaDashboard />} />
 
         {/* President's Bridge - auth + role gated (president + admin) */}
         <Route path="/bridge" element={<PresidentsBridge />} />

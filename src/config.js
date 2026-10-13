@@ -152,4 +152,24 @@ export const FEATURES = {
    * 2026-09-11  off (Matt)
    */
   RM_DRAWING_EXTRACTION: false,
+
+  /**
+   * Giza program tracker — /dashboards/giza (S15 Batch B, D-GIZA). The SK21077-5 / MS21077-5
+   * pipeline, demand, component stock, throughput, forecast, the final-lot (bag lot) register
+   * and the movement ledger. Reads the program schema from 2026-10-13_giza_tracker.sql.
+   *
+   * When false: the route renders a "not enabled" card and the Dashboards dropdown entry is
+   * hidden. The Finishing station's Dry Film operation (Batch A) is unaffected either way.
+   *
+   * 2026-10-13  on (Matt)
+   */
+  PROGRAM_TRACKER: true,
+
+  /**
+   * Giza Dashboard capacity line: cure loads per oven per day. An ASSUMPTION used only for the
+   * "oven capacity" figure (ovens × load qty × this); the dashboard prints it as such. 2 h cure
+   * plus loading and cool-down → 4 per shift-day by default. Change when James's real cadence
+   * is known.
+   */
+  PROGRAM_OVEN_LOADS_PER_DAY: 4,
 }

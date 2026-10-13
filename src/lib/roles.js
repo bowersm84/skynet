@@ -114,3 +114,10 @@ export function canEditReorderPoints(profile) {
 export function canExportFbInventory(profile) {
   return hasRole(profile, ...FB_INVENTORY_EXPORT_ROLES)
 }
+
+// Giza program tracker (S15, D-GIZA-08) — every signed-in user views /dashboards/giza; logging
+// ledger moves and opening / closing final lots is admin + the order_processor additional role.
+// Mirrors _program_gate() in the program RPCs, which enforce it server-side.
+export function canLogProgramTracker(profile) {
+  return hasRole(profile, 'admin', 'order_processor') && !isReadOnlyRole(profile?.role)
+}

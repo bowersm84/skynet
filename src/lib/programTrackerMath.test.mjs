@@ -86,4 +86,67 @@ eq(escapeHtml('<b>&'), '&lt;b&gt;&amp;', 'escape')
 const html = lotLabelHtml({ lotNumber: '3007', partLabel: 'MS21077-5', qty: 1570, dateText: '10/12/26' })
 ok(html.includes('>3007<') && html.includes('1,570') && html.includes('#B8222E') && html.includes('Arial'), 'label')
 
+// --- Movements report (D-GIZA-29)
+{
+  const { lastWorkingDay, dayMovements, movementsReportHtml, MOVEMENT_STEPS } = await import('./programTrackerMath.js')
+  eq(lastWorkingDay('2026-10-14'), '2026-10-13', 'Wednesday -> Tuesday')
+  eq(lastWorkingDay('2026-10-12'), '2026-10-09', 'Monday -> Friday')
+  eq(lastWorkingDay('2026-10-11'), '2026-10-09', 'Sunday -> Friday')
+  const day = '2026-10-13'
+  const NUT = 'nut-id'
+  const ledger = [
+    { id: 'a', stage: 'received', part_id: NUT, qty: 11100, entry_date: '2026-10-13', created_at: '2026-10-13T15:19:00Z', to_lot: { lot_number: '3007' }, from_lot: { lot_number: '3007' } },
+    { id: 'b', stage: 'received', part_id: 'cage-id', qty: 5011, entry_date: '2026-10-13', created_at: '2026-10-13T18:00:00Z' },
+    { id: 'c', stage: 'washer_inserted', part_id: NUT, qty: 11126, entry_date: '2026-10-13', created_at: '2026-10-13T16:23:00Z' },
+    { id: 'd', stage: 'washer_inserted', part_id: NUT, qty: 10825, entry_date: '2026-10-13', created_at: '2026-10-13T15:19:00Z', voided_at: '2026-10-13T16:20:00Z', void_reason: 'WRONG COUNT' },
+    { id: 'e', stage: 'sent_plating', part_id: NUT, qty: 9829, entry_date: '2026-10-02', created_at: '2026-10-13T12:24:00Z' },
+    { id: 'f', stage: 'assembled', part_id: NUT, qty: 500, entry_date: '2026-10-12', created_at: '2026-10-12T20:00:00Z' },
+  ]
+  const sends = [
+    { id: 's1', status: 'complete', finishing_started_at: '2026-10-13T11:46:00Z', finishing_completed_at: '2026-10-13T16:10:00Z', incoming_count: 2016, verified_count: 2010 },
+    { id: 's2', status: 'in_finishing', finishing_started_at: '2026-10-13T19:00:00Z', incoming_count: 1200 },
+  ]
+  const shipments = [{ date_shipped: '2026-10-13', ship_status: 'Shipped', lot_qty: 300, lot_number: '3006', so_number: '15548', so_line: 3, ship_number: 'S15548-06' },
+                     { date_shipped: '2026-10-13', ship_status: 'Entered', lot_qty: 50 }]
+  const purchasing = [{ po_number: '260602-20', vendor_name: 'Maxtrust Industries', part_num: 'SK21077-5-3', role: 'nut',
+                        receipts: [{ date: '2026-10-13', qty: 10000, lot: '52029' }, { date: '2026-10-09', qty: 1, lot: 'x' }] }]
+  const m = dayMovements({ ledger, sends, shipments, purchasing }, day, NUT)
+  const s = Object.fromEntries(m.summary.map(x => [x.key, [x.count, x.qty]]))
+  eq(m.summary.map(x => x.key), MOVEMENT_STEPS.map(x => x[0]), 'summary has every step in order')
+  eq(s.received_nut, [1, 11100], 'nut receipt')
+  eq(s.received_component, [1, 5011], 'component receipt')
+  eq(s.washer_inserted, [1, 11126], 'voided entry not counted')
+  eq(s.sent_plating, [0, 0], 'move dated earlier is not that day')
+  eq(s.painted, [2, 3216], 'painted = batches started, pieces in')
+  eq(s.baked, [1, 2010], 'baked = completed batches, verified out')
+  eq(s.shipped, [1, 300], 'only Shipped shipments')
+  eq(s.po_received, [1, 10000], 'PO receipts that day')
+  eq(m.voids.map(v => v.id), ['d'], 'void listed on the day it was voided')
+  eq(m.late.map(v => v.id), ['e'], 'logged that day for an earlier date')
+  eq(m.empty, false, 'not empty')
+  eq(dayMovements({ ledger, sends, shipments, purchasing }, '2026-10-10', NUT).empty, true, 'empty day')
+  const html = movementsReportHtml({ programName: 'Giza - MS21077-5 nutplate', data: m, generatedAt: '10/14/2026 7:00 AM' })
+  ok(html.includes('Tuesday, October 13, 2026') && html.includes('#B8222E') && html.includes('Arial') && html.includes('WRONG COUNT')
+     && html.includes('S15548-06') && html.includes('52029') && html.includes('11,126'), 'report html')
+  ok(!html.includes('<script'), 'report has no script tags')
+  ok(movementsReportHtml({ data: dayMovements({}, '2026-10-10', NUT) }).includes('Nothing was logged'), 'empty report')
+}
+
+// --- Purchasing (D-GIZA-30)
+{
+  const { sortPurchasing, purchasingSummary } = await import('./programTrackerMath.js')
+  const lines = [
+    { po_number: '4207', line_number: 1, role: 'cage', is_open: false, last_received_date: '2026-10-01', qty_remaining: 0 },
+    { po_number: '260602-20', line_number: 3, role: 'nut', is_open: true, is_late: false, due_date: '2027-01-08', qty_remaining: 30000 },
+    { po_number: '4260', line_number: 1, role: 'assembly', is_open: true, is_late: true, due_date: '2026-10-10', qty_remaining: 11126 },
+    { po_number: '4300', line_number: 1, role: 'nut', is_open: true, is_late: false, due_date: '2026-11-01', qty_remaining: 5000 },
+  ]
+  eq(sortPurchasing(lines).map(l => l.po_number), ['4260', '4300', '260602-20'], 'open only: late first, then by due date')
+  eq(sortPurchasing(lines, true).map(l => l.po_number), ['4260', '4300', '260602-20', '4207'], 'all: closed last')
+  eq(purchasingSummary(lines), [
+    { role: 'assembly', remaining: 11126, lines: 1, late: 1, nextDue: '2026-10-10' },
+    { role: 'nut', remaining: 35000, lines: 2, late: 0, nextDue: '2026-11-01' },
+  ], 'summary by role, open lines only')
+}
+
 console.log(`programTrackerMath: ${n} assertions passed`)

@@ -265,3 +265,152 @@ body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #000; }
 </div>
 </body></html>`
 }
+
+// ---------------------------------------------------------------- Movements report (D-GIZA-29)
+
+const dayOf = (v) => (v ? (String(v).length > 10 ? isoDay(new Date(v)) : String(v).slice(0, 10)) : null)
+
+// The report's default day: the last working day before today (Monday -> Friday).
+export function lastWorkingDay(todayIso) {
+  let d = addDays(todayIso, -1)
+  while ([0, 6].includes(new Date(`${d}T12:00:00`).getDay())) d = addDays(d, -1)
+  return d
+}
+
+export const MOVEMENT_STEPS = [
+  ['received_nut', 'Steel nut receipts'],
+  ['received_component', 'Component receipts'],
+  ['washer_inserted', 'Nylon inserted'],
+  ['sent_plating', 'Sent to Electrolab'],
+  ['returned_plating', 'Back from Electrolab'],
+  ['painted', 'Painted (dry-film batches started)'],
+  ['baked', 'Baked (dry-film batches completed)'],
+  ['assembled', 'Assembled & bagged'],
+  ['shipped', 'Shipped to Giza'],
+  ['po_received', 'Received on Fishbowl POs'],
+]
+
+// Everything that happened on one day. Ledger moves count by their entry date; voids by the day they were voided;
+// "late" lists entries logged that day for an earlier date. Painted = batches started that day (pieces in),
+// baked = batches completed that day (verified out). Shipments and PO receipts come from the Fishbowl mirrors.
+export function dayMovements({ ledger, sends, shipments, purchasing }, day, nutPartId) {
+  const moves = (ledger || []).filter(e => !e.voided_at && dayOf(e.entry_date) === day)
+  const late = (ledger || []).filter(e => !e.voided_at && dayOf(e.created_at) === day && dayOf(e.entry_date) < day)
+  const voids = (ledger || []).filter(e => e.voided_at && dayOf(e.voided_at) === day)
+  const painted = (sends || []).filter(s => dayOf(s.finishing_started_at) === day)
+  const baked = (sends || []).filter(s => s.status !== 'in_finishing' && dayOf(s.finishing_completed_at) === day)
+  const shipped = (shipments || []).filter(s => dayOf(s.date_shipped) === day && (s.ship_status || 'Shipped') === 'Shipped')
+  const received = []
+  for (const l of purchasing || []) {
+    for (const r of l.receipts || []) {
+      if (dayOf(r.date) === day) received.push({ po: l.po_number, vendor: l.vendor_name, part: l.part_num, role: l.role, qty: num(r.qty), lot: r.lot || null })
+    }
+  }
+  const sum = (rows, f) => rows.reduce((s, r) => s + num(f(r)), 0)
+  const stageRows = (key) => {
+    if (key === 'received_nut') return moves.filter(e => e.stage === 'received' && e.part_id === nutPartId)
+    if (key === 'received_component') return moves.filter(e => e.stage === 'received' && e.part_id !== nutPartId)
+    return moves.filter(e => e.stage === key)
+  }
+  const summary = MOVEMENT_STEPS.map(([key, label]) => {
+    if (key === 'painted') return { key, label, qty: sum(painted, s => s.incoming_count), count: painted.length }
+    if (key === 'baked') return { key, label, qty: sum(baked, s => s.verified_count ?? s.incoming_count), count: baked.length }
+    if (key === 'shipped') return { key, label, qty: sum(shipped, s => s.lot_qty ?? s.qty_shipped), count: shipped.length }
+    if (key === 'po_received') return { key, label, qty: sum(received, r => r.qty), count: received.length }
+    const rows = stageRows(key)
+    return { key, label, qty: sum(rows, e => e.qty), count: rows.length }
+  })
+  const empty = summary.every(s => s.count === 0) && voids.length === 0 && late.length === 0
+  return { day, summary, moves, late, voids, painted, baked, shipped, received, empty }
+}
+
+const longDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+const fmtN = (v) => (v === null || v === undefined || v === '' ? '' : Number(v).toLocaleString('en-US'))
+
+// Self-contained, printable report (Letter portrait); prints itself on load. Brand: Arial, Skybolt red #B8222E,
+// grey #707172. labels: { stage: STAGE_LABELS-like map }.
+export function movementsReportHtml({ programName, data, generatedAt, stageLabels = STAGE_LABELS }) {
+  const e = escapeHtml
+  const NUMERIC = new Set(['Entries', 'Pieces', 'Qty', 'Pieces in', 'Verified out'])
+  const table = (head, rows) => rows.length === 0 ? '' : `<table><thead><tr>${head.map(h => `<th${NUMERIC.has(h) ? ' class="n"' : ''}>${e(h)}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(r => `<tr>${r.map((c, i) => `<td${NUMERIC.has(head[i]) ? ' class="n"' : ''}>${e(c ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+  const section = (title, html) => (html ? `<h2>${e(title)}</h2>${html}` : '')
+  const lotOf = (m) => (m.from_lot?.lot_number && m.to_lot?.lot_number && m.from_lot.lot_number !== m.to_lot.lot_number
+    ? `${m.from_lot.lot_number} → ${m.to_lot.lot_number}` : (m.to_lot?.lot_number || ''))
+  const by = (m) => m.done_by || m.entered?.full_name || ''
+  const d = data
+  const body = [
+    section('Summary', table(['Step', 'Entries', 'Pieces'], d.summary.map(s => [s.label, s.count ? fmtN(s.count) : '—', s.count ? fmtN(s.qty) : '—']))),
+    section('Tracker entries', table(['Step', 'Lot', 'Part', 'Qty', 'Lot #', 'Cage / retainer', 'Vendor / PO', 'By', 'Notes'],
+      d.moves.map(m => [stageLabels[m.stage] || m.stage, lotOf(m), m.part?.part_number || '', fmtN(m.qty), m.lot_number || '',
+        [m.cage_lot, m.retainer_lot].filter(Boolean).join(' / '), [m.vendor, m.po_number].filter(Boolean).join(' · '), by(m), m.notes || '']))),
+    section('Dry-film batches started (painted)', table(['Job', 'Plating lot', 'Dry film', 'FLN', 'Pieces in'],
+      d.painted.map(s => [s.job?.job_number || '', s.plating_lot_number || '', s.dry_film_lot_number || '', s.finishing_lot_number || '', fmtN(s.incoming_count)]))),
+    section('Dry-film batches completed (baked)', table(['Job', 'Oven', 'FLN', 'Pieces in', 'Verified out'],
+      d.baked.map(s => [s.job?.job_number || '', s.machine?.name || '', s.finishing_lot_number || '', fmtN(s.incoming_count), fmtN(s.verified_count)]))),
+    section('Shipped to Giza', table(['Shipment', 'SO / line', 'Bag lot', 'Pieces'],
+      d.shipped.map(s => [s.ship_number || '', `${s.so_number} / ${s.so_line ?? ''}`, s.lot_number || '', fmtN(s.lot_qty ?? s.qty_shipped)]))),
+    section('Received on Fishbowl POs', table(['PO', 'Vendor', 'Part', 'Pieces', 'Lot (SB#)'],
+      d.received.map(r => [r.po, r.vendor || '', r.part || '', fmtN(r.qty), r.lot || '']))),
+    section('Voided that day', table(['Entry date', 'Step', 'Lot', 'Qty', 'Voided by', 'Reason'],
+      d.voids.map(m => [m.entry_date, stageLabels[m.stage] || m.stage, lotOf(m), fmtN(m.qty), m.voider?.full_name || '', m.void_reason || '']))),
+    section('Logged that day for an earlier date', table(['Entry date', 'Step', 'Lot', 'Qty', 'By'],
+      d.late.map(m => [m.entry_date, stageLabels[m.stage] || m.stage, lotOf(m), fmtN(m.qty), by(m)]))),
+  ].join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Giza movements ${e(d.day)}</title>
+<style>
+@page { size: letter portrait; margin: 0.5in; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9.5pt; }
+.head { border-bottom: 3px solid #B8222E; padding-bottom: 6px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: flex-end; }
+.brand { color: #B8222E; font-weight: 700; font-size: 11pt; letter-spacing: 0.06em; }
+h1 { font-size: 15pt; margin: 2px 0 0; }
+.sub { color: #707172; font-size: 9pt; }
+h2 { font-size: 11pt; margin: 14px 0 4px; color: #B8222E; }
+table { width: 100%; border-collapse: collapse; page-break-inside: auto; }
+th { text-align: left; font-size: 8pt; text-transform: uppercase; color: #707172; border-bottom: 1px solid #707172; padding: 3px 4px; }
+td { border-bottom: 1px solid #ddd; padding: 3px 4px; vertical-align: top; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+tr { page-break-inside: avoid; }
+.empty { color: #707172; margin-top: 12px; }
+.foot { margin-top: 16px; color: #707172; font-size: 8pt; }
+</style></head><body onload="window.print()">
+<div class="head"><div><div class="brand">SKYBOLT AEROSPACE FASTENERS</div><h1>Giza daily movements — ${e(longDate(d.day))}</h1>
+<div class="sub">${e(programName || '')}</div></div><div class="sub">Generated ${e(generatedAt || '')}</div></div>
+${d.empty ? '<div class="empty">Nothing was logged for this day.</div>' : body}
+<div class="foot">From SkyNet: Giza tracker ledger, Finishing kiosk batches, and the Fishbowl shipment and purchasing mirrors. Internal.</div>
+</body></html>`
+}
+
+// ---------------------------------------------------------------- Purchasing (D-GIZA-30)
+
+export const PURCHASE_ROLE_LABELS = {
+  nut: 'Steel nut', cage: 'Cage', retainer: 'Retainer', insert: 'Nylon insert', assembly: 'Nut + nylon (MS21077-5)',
+}
+
+// Open lines first: late ones, then by due date; closed lines (when shown) newest-received first.
+export function sortPurchasing(lines, showAll = false) {
+  const rows = (lines || []).filter(l => showAll || l.is_open)
+  return [...rows].sort((a, b) =>
+    Number(!!b.is_open) - Number(!!a.is_open) ||
+    Number(!!b.is_late) - Number(!!a.is_late) ||
+    (a.is_open ? String(a.due_date || '9999').localeCompare(String(b.due_date || '9999'))
+               : String(b.last_received_date || '').localeCompare(String(a.last_received_date || ''))) ||
+    String(a.po_number).localeCompare(String(b.po_number), 'en', { numeric: true }) ||
+    num(a.line_number) - num(b.line_number))
+}
+
+// Per part role: what is still to come on open lines, how many lines, how many late, the next due date.
+export function purchasingSummary(lines) {
+  const out = {}
+  for (const l of lines || []) {
+    if (!l.is_open) continue
+    const k = l.role || 'other'
+    const s = out[k] || (out[k] = { role: k, remaining: 0, lines: 0, late: 0, nextDue: null })
+    s.remaining += num(l.qty_remaining)
+    s.lines += 1
+    if (l.is_late) s.late += 1
+    if (l.due_date && (!s.nextDue || l.due_date < s.nextDue)) s.nextDue = l.due_date
+  }
+  return Object.values(out).sort((a, b) => String(a.role).localeCompare(String(b.role)))
+}

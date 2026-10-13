@@ -6,6 +6,7 @@
 //   node src/index.mjs --mirror-rules  one pricing-rules + product-tree mirror pass, then exit (v1.7)
 //   node src/index.mjs --mirror-valuation  one valuation mirror pass (fb_part_valuation), then exit (v1.8)
 //   node src/index.mjs --mirror-shipments  one shipments pass over the last SHIPMENTS_SWEEP_DAYS + attach, then exit (v1.9)
+//   node src/index.mjs --mirror-purchasing  one purchasing pass over the PURCHASING_WINDOW_DAYS window, then exit (v1.10)
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
@@ -19,6 +20,7 @@ import { aggregateInventory, countZeroRows } from './inventory.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { runPushCommands, canPushFor } from './push.mjs'
 import { syncShipmentLots, attachShipmentLots, sweepSince } from './shipments.mjs'
+import { syncPurchasing, loadStatusNames, poWindowSince, changedSince } from './purchasing.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -44,6 +46,15 @@ let lastAttachAt = 0
 let startupSweepDone = false
 let shipmentsPausedUntil = 0
 const SHIPMENTS_RETRY_MS = 900000
+// D-FB-55: PO ids still to read, same queue design as the shipments poller. Filled by the window read (start-up,
+// nightly, one-shot) and the changed-PO poll; an id leaves only after its read succeeded. In memory on purpose: the
+// start-up window read re-queues everything recent, so a restart or a deploy loses nothing.
+const pendingPurchasingPos = new Set()
+let purchasingStartupDone = false
+let purchasingPausedUntil = 0
+let lastPurchasingPollAt = 0   // ms; start of the last successful changed-PO poll
+let purchasingNames = null     // { po, line } status-name maps, read once per process
+const PURCHASING_RETRY_MS = 900000
 
 // D-FB-34: Fishbowl user list (names only) so events can say who changed an order.
 async function syncUsers() {
@@ -181,6 +192,14 @@ async function pricingCycle({ force = false } = {}) {
         log.error(`shipments sweep failed (other mirrors unaffected): ${e.message}`)
       }
     }
+    // D-FB-55, same slot: re-queue the purchasing window, so a change the changed-PO poll missed is read tonight.
+    if (config.purchasing.enabled) {
+      try {
+        await queuePurchasingWindow()
+      } catch (e) {
+        log.error(`purchasing window failed (other mirrors unaffected): ${e.message}`)
+      }
+    }
     // D-PRICE-49, last in the nightly slot: costs are in, so the book's kit sums are final for today.
     // A failure here is logged and swallowed — the mirrors are the bridge's job, and the kits site
     // going a night without an update must not stand the pricing pollers down for 15 minutes.
@@ -299,6 +318,55 @@ async function queueShipmentSweep() {
   return rows.length
 }
 
+// D-FB-55: queue every PO created or issued in the last PURCHASING_WINDOW_DAYS, plus every PO not yet completed.
+async function queuePurchasingWindow() {
+  const since = poWindowSince(new Date(), config.purchasing.windowDays)
+  const rows = await fb.query(q.purchaseWindowIds(since))
+  for (const r of rows) {
+    const id = Number(r.poId)
+    if (Number.isFinite(id)) pendingPurchasingPos.add(id)
+  }
+  log.info(`purchasing window: ${rows.length} PO(s) since ${since} or still open queued (${pendingPurchasingPos.size} pending)`)
+  return rows.length
+}
+
+// D-FB-55: every PURCHASING_MS, queue the POs changed since the previous poll (minus PURCHASING_OVERLAP_MS); every
+// cycle, read up to PURCHASING_MAX_POS queued POs whole. The poll clock only moves after its query succeeded.
+async function purchasingCycle() {
+  const pc = config.purchasing
+  if (!purchasingNames) purchasingNames = await loadStatusNames(fb, log)
+  if (Date.now() - lastPurchasingPollAt >= pc.ms) {
+    const started = Date.now()
+    const since = changedSince(lastPurchasingPollAt, pc.overlapMs)
+    const rows = await fb.query(q.purchaseChangedIds(since))
+    for (const r of rows) {
+      const id = Number(r.poId)
+      if (Number.isFinite(id)) pendingPurchasingPos.add(id)
+    }
+    if (rows.length > 0) log.info(`purchasing: ${rows.length} PO(s) changed since ${since} queued (${pendingPurchasingPos.size} pending)`)
+    lastPurchasingPollAt = started
+  }
+  const ids = [...pendingPurchasingPos].slice(0, Math.max(1, pc.maxPosPerCycle))
+  if (ids.length === 0) return
+  await syncPurchasing(fb, sky, ids, { log, names: purchasingNames, batchPos: pc.batchPos, dryRun: pc.dryRun })
+  for (const id of ids) pendingPurchasingPos.delete(id)
+}
+
+async function purchasingCycleGuarded() {
+  if (!config.purchasing.enabled || Date.now() < purchasingPausedUntil) return
+  try {
+    if (!purchasingStartupDone) {
+      await queuePurchasingWindow()
+      purchasingStartupDone = true
+      lastPurchasingPollAt = Date.now()
+    }
+    await purchasingCycle()
+  } catch (e) {
+    purchasingPausedUntil = Date.now() + PURCHASING_RETRY_MS
+    log.error(`purchasing cycle failed, retrying in ${PURCHASING_RETRY_MS / 60000} min (${pendingPurchasingPos.size} PO(s) kept queued): ${e.message}`)
+  }
+}
+
 async function tail() {
   const [{ maxRev }] = await fb.query(q.maxRev)
   const max = Number(maxRev) || 0
@@ -368,6 +436,7 @@ async function cycle() {
       lastInventoryAt = Date.now()
     }
     await shipmentsCycleGuarded()
+    await purchasingCycleGuarded()
     await pricingCycleGuarded()
     await pushCycleGuarded()
     return { ...t, reconciled }
@@ -420,12 +489,28 @@ async function mirrorShipmentsOnce() {
   log.info('shipments mirror complete')
 }
 
+// `--mirror-purchasing`: one window read, every queued PO read whole, exit. The first load after the D-FB-55
+// migration, or after fixing a query. Honours PURCHASING_DRY_RUN.
+async function mirrorPurchasingOnce() {
+  await fb.withSession(async () => {
+    purchasingNames = await loadStatusNames(fb, log)
+    await queuePurchasingWindow()
+    while (pendingPurchasingPos.size > 0) {
+      const ids = [...pendingPurchasingPos].slice(0, Math.max(1, config.purchasing.maxPosPerCycle))
+      await syncPurchasing(fb, sky, ids, { log, names: purchasingNames, batchPos: config.purchasing.batchPos, dryRun: config.purchasing.dryRun })
+      for (const id of ids) pendingPurchasingPos.delete(id)
+    }
+  })
+  log.info('purchasing mirror complete')
+}
+
 async function main() {
   const once = process.argv.includes('--once')
   const backfill = process.argv.includes('--backfill')
   const mirrorRules = process.argv.includes('--mirror-rules')
   const mirrorValuation = process.argv.includes('--mirror-valuation')
   const mirrorShipments = process.argv.includes('--mirror-shipments')
+  const mirrorPurchasing = process.argv.includes('--mirror-purchasing')
   log.info(`SkyNet Fishbowl Bridge v${config.version} starting on ${config.host} → ${config.fb.host}:${config.fb.port} (${config.fb.sessionMode}) → ${config.sb.url}`)
   await sky.signIn()
   pricing = await sky.pricingState()
@@ -455,6 +540,18 @@ async function main() {
     return
   }
   log.info(`shipments: ${config.shipments.enabled ? (config.shipments.dryRun ? 'DRY RUN (reads + logs, writes nothing)' : 'on') : 'off'} · sweep ${config.shipments.sweepDays} day(s) · max ${config.shipments.maxSosPerCycle} SO(s)/cycle · attach every ${config.shipments.attachMs / 60000} min`)
+  log.info(`purchasing: ${config.purchasing.enabled ? (config.purchasing.dryRun ? 'DRY RUN (reads + logs, writes nothing)' : 'on') : 'off'} · window ${config.purchasing.windowDays} day(s) + open · poll every ${config.purchasing.ms / 60000} min · max ${config.purchasing.maxPosPerCycle} PO(s)/cycle`)
+  if (mirrorPurchasing) {
+    try {
+      await mirrorPurchasingOnce()
+    } catch (e) {
+      log.error(`purchasing mirror failed: ${e.stack || e.message}`)
+      process.exitCode = 1
+    } finally {
+      await fb.logout()
+    }
+    return
+  }
   if (mirrorShipments) {
     try {
       await mirrorShipmentsOnce()

@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.9.0',
+  version: '1.10.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -111,6 +111,18 @@ export const config = {
     sweepDays: num('SHIPMENTS_SWEEP_DAYS', 14),
     maxSosPerCycle: num('SHIPMENTS_MAX_SOS', 100),
     attachMs: num('SHIPMENTS_ATTACH_MS', 900000),
+  },
+  // D-FB-55 purchasing mirror (bridge 1.10): Fishbowl POs, lines and receipt lots -> fb_purchase_* -> SkyNet.
+  //   PURCHASING_ENABLED  only the literal `false` disables it (like SHIPMENTS_ENABLED)
+  //   PURCHASING_DRY_RUN  only the literal `true` enables it (like SHIPMENTS_DRY_RUN): read and log, write nothing
+  purchasing: {
+    enabled: String(process.env.PURCHASING_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+    dryRun: String(process.env.PURCHASING_DRY_RUN ?? '').trim().toLowerCase() === 'true',
+    ms: num('PURCHASING_MS', 600000),
+    overlapMs: num('PURCHASING_OVERLAP_MS', 1800000),
+    windowDays: num('PURCHASING_WINDOW_DAYS', 365),
+    maxPosPerCycle: num('PURCHASING_MAX_POS', 300),
+    batchPos: num('PURCHASING_BATCH_POS', 100),
   },
   // Fishbowl import names (the import's name with dashes). Only change if Fishbowl renames an import.
   importNames: {

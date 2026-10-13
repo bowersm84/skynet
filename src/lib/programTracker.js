@@ -21,7 +21,9 @@ export async function loadProgramBundle(code = GIZA_PROGRAM_CODE) {
   )
   if (!program) throw new Error(`Program ${code} not found — have the Giza migrations been applied?`)
 
-  const [parts, pipeline, demand, daily, lots, ledger, sends, sync] = await Promise.all([
+  // D-GIZA-29: the Movements report lists Giza shipments of the last 120 days.
+  const shipSince = new Date(Date.now() - 120 * 86400000).toISOString().slice(0, 10)
+  const [parts, pipeline, demand, daily, lots, ledger, sends, sync, purchasing, shipments] = await Promise.all([
     supabase
       .from('program_parts')
       .select('id, role, qty_per, consumed_at_stage, part_id, part:parts(id, part_number, description, is_active)')
@@ -57,7 +59,15 @@ export async function loadProgramBundle(code = GIZA_PROGRAM_CODE) {
       .eq('program_id', program.id)
       .eq('standalone_operation_type', 'dry_film')
       .order('finishing_started_at', { ascending: false }),
-    supabase.from('fb_sync_state').select('last_rev_at, bridge_version').limit(1).maybeSingle(),
+    supabase.from('fb_sync_state').select('last_rev_at, bridge_version, last_shipments_at, last_purchasing_at').limit(1).maybeSingle(),
+    // D-GIZA-30: every PO line for the program's parts (Fishbowl mirror, bridge 1.10).
+    supabase.from('v_program_purchasing').select('*').eq('program_id', program.id),
+    supabase
+      .from('fb_shipment_lots')
+      .select('so_number, so_line, ship_number, ship_status, date_shipped, qty_shipped, lot_number, lot_qty')
+      .eq('product_num', program.fb_product_num)
+      .gte('date_shipped', shipSince)
+      .order('date_shipped', { ascending: false }),
   ])
 
   return {
@@ -70,6 +80,9 @@ export async function loadProgramBundle(code = GIZA_PROGRAM_CODE) {
     ledger: must(ledger, 'ledger') || [],
     sends: must(sends, 'dry-film batches') || [],
     sync: sync.error ? null : sync.data,
+    // null = the purchasing mirror is not there yet (migration / bridge 1.10); [] = mirrored, nothing on order.
+    purchasing: purchasing.error ? null : (purchasing.data || []),
+    shipments: shipments.error ? [] : (shipments.data || []),
   }
 }
 

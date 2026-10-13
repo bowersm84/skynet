@@ -249,6 +249,61 @@ export const q = {
     LEFT JOIN customer c ON c.id = r.customerInclId AND cit.name = 'Customer'
     LEFT JOIN accountgroup ag ON ag.id = r.customerInclId AND cit.name = 'Customer Group'`,
 
+  // --- Bridge v1.10 purchasing mirror (D-FB-55). Read-only. ------------------------------------------
+  // Columns from the 2026-10-14 Fishbowl schema check (po, poitem, poitemtype, vendor, receiptitem, trackinginfo,
+  // parttracking); aliases = purchasing.mjs mapper fields. A receipt's lot is in trackinginfo with tableId
+  // 1259138490 ('ReceiptItem' in tablereference) and recordId = receiptitem.id — the join of the 2026-10-14 Giza
+  // receipts pull (35 of 35 lots found). The ids are numeric only (idList); the dates are built by the bridge and
+  // validated anyway, like recentShipmentSoIds.
+  purchaseOrders: (ids) => `SELECT po.id AS poId, po.num AS poNum, po.statusId, po.typeId, po.vendorId, v.name AS vendorName,
+      po.vendorSO AS vendorSo, po.buyer, po.locationGroupId, po.dateCreated, po.dateIssued, po.dateConfirmed,
+      po.dateCompleted, po.dateLastModified
+    FROM po LEFT JOIN vendor v ON v.id = po.vendorId
+    WHERE po.id IN (${idList(ids)})`,
+
+  purchaseOrderLines: (ids) => `SELECT poi.id AS poItemId, poi.poId, po.num AS poNum, poi.poLineItem AS lineNumber, poi.typeId,
+      pit.name AS typeName, poi.statusId, poi.partId, poi.partNum, poi.description,
+      poi.outsourcedPartNumber AS outsourcedPartNum, poi.outsourcedPartDescription AS outsourcedDescription,
+      poi.vendorPartNum, poi.revLevel, poi.qtyToFulfill, poi.qtyFulfilled, poi.qtyPicked, poi.unitCost, poi.totalCost,
+      poi.uomId, poi.dateScheduledFulfillment AS dateScheduled, poi.dateLastFulfillment
+    FROM poitem poi
+    JOIN po ON po.id = poi.poId
+    LEFT JOIN poitemtype pit ON pit.id = poi.typeId
+    WHERE poi.poId IN (${idList(ids)})
+    ORDER BY poi.poId, poi.poLineItem`,
+
+  purchaseReceipts: (ids) => `SELECT ri.id AS receiptItemId, ri.poItemId, poi.poId, po.num AS poNum, ri.partId, pt.num AS partNum,
+      ri.qty, ri.statusId, ri.dateReceived, ri.dateLastModified,
+      ptk.name AS trackingName, ti.info AS lotNumber, ti.qty AS lotQty
+    FROM receiptitem ri
+    JOIN poitem poi ON poi.id = ri.poItemId
+    JOIN po ON po.id = poi.poId
+    LEFT JOIN part pt ON pt.id = ri.partId
+    LEFT JOIN trackinginfo ti ON ti.recordId = ri.id AND ti.tableId = 1259138490
+    LEFT JOIN parttracking ptk ON ptk.id = ti.partTrackingId
+    WHERE poi.poId IN (${idList(ids)})
+    ORDER BY ri.id, ti.id`,
+
+  // The window: every PO created or issued on or after a local date, plus every PO not yet completed.
+  purchaseWindowIds: (since) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(since))) throw new Error(`purchaseWindowIds: bad date ${JSON.stringify(since)}`)
+    return `SELECT po.id AS poId FROM po
+    WHERE po.dateCreated >= '${since}' OR po.dateIssued >= '${since}' OR po.dateCompleted IS NULL`
+  },
+
+  // POs whose header changed, or that took or lost a receipt, since a Fishbowl local datetime.
+  purchaseChangedIds: (since) => {
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(since))) throw new Error(`purchaseChangedIds: bad datetime ${JSON.stringify(since)}`)
+    return `SELECT po.id AS poId FROM po WHERE po.dateLastModified >= '${since}'
+    UNION
+    SELECT poi.poId AS poId FROM receiptitem ri JOIN poitem poi ON poi.id = ri.poItemId WHERE ri.dateLastModified >= '${since}'`
+  },
+
+  // Status names. Not in the 2026-10-14 schema check: purchasing.mjs reads them once and carries on with ids
+  // only if either table is missing.
+  poStatuses: 'SELECT id, name FROM postatus',
+  poItemStatuses: 'SELECT id, name FROM poitemstatus',
+
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',
   statusOf: (ids) => `SELECT id, statusId, dateLastModified FROM so WHERE id IN (${idList(ids)})`,

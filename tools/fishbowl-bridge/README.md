@@ -117,7 +117,24 @@ The queue is in memory; the first shipments step after start-up queues the sweep
 logs (with five sample rows) and asks SkyNet for the attach's self-rolling-back dry run — nothing is written.
 `npm run mirror:shipments` runs one sweep + read + attach and exits (first load; set `SHIPMENTS_SWEEP_DAYS` for a
 longer window). `SHIPMENTS_ENABLED=false` switches off the queue, the start-up and nightly sweeps and the attach in the running bridge; `npm run mirror:shipments` is an explicit one-shot and runs regardless, like `mirror:valuation`.
-`npm test` runs the unit tests (the four `node --test` files plus the inventory arithmetic test).
+`npm test` runs the unit tests (the five `node --test` files plus the inventory arithmetic test).
+
+### Purchasing mirror (v1.10, D-FB-55)
+Fishbowl purchase orders, whole: header, every line, every received receipt with its lot. SkyNet uses it for the
+Giza Dashboard's purchasing section (`v_program_purchasing`) and the Movements report; any other screen can read the
+three tables.
+
+| Piece | When | Reads / writes |
+|---|---|---|
+| window | start-up, nightly (products slot) and the one-shot | every PO created or issued in the last `PURCHASING_WINDOW_DAYS` (365) plus every PO with no `dateCompleted` → queued |
+| changed poll | every `PURCHASING_MS` (10 min) | POs whose `po.dateLastModified` or any `receiptitem.dateLastModified` is newer than the previous poll minus `PURCHASING_OVERLAP_MS` (30 min) → queued |
+| read | every cycle, up to `PURCHASING_MAX_POS` (300) queued POs, `PURCHASING_BATCH_POS` (100) per read | `po` ⋈ `vendor`; `poitem` ⋈ `poitemtype`; `receiptitem` with its lot from `trackinginfo` (`recordId = receiptitem.id`, `tableId = 1259138490` 'ReceiptItem', tracking type `Lot Number`) → `fb_upsert_purchasing` → `fb_purchase_orders`, `fb_purchase_order_lines`, `fb_po_receipts` (stamps `last_purchasing_at`). Lines and receipts of a PO that are gone from Fishbowl are marked `removed_at` |
+| status names | once per process | `postatus` / `poitemstatus`; if either table cannot be read the mirror logs one warning and sends ids only |
+
+A PO always travels whole, so the RPC can see what disappeared. An id leaves the queue only after its read succeeded;
+a failure stands the step down for 15 min and keeps the queue; the SO tail is never affected. `PURCHASING_DRY_RUN=true`
+reads and logs (with five sample lines) and writes nothing. `npm run mirror:purchasing` runs one window read and exits
+(first load). `PURCHASING_ENABLED=false` switches the poller and the nightly window off.
 
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`
@@ -129,7 +146,9 @@ longer window). `SHIPMENTS_ENABLED=false` switches off the queue, the start-up a
    10,980 products and ≈ 35k history lines over ~20 pages. Idempotent, safe to re-run.
 5. First run only, after the S13 Batch A migration (v1.8): `npm run mirror:valuation` — one full read of every
    typeId-10 part into `fb_part_valuation`, so the next inventory cycle already covers every Product-class part.
-6. Smoke test: `npm run once` (one tail + one reconcile, then exits). Then `npm start`.
+6. First run only, after the D-FB-55 migration (v1.10): `npm run mirror:purchasing` — one read of every PO in the
+   window into `fb_purchase_orders` / `fb_purchase_order_lines` / `fb_po_receipts`.
+7. Smoke test: `npm run once` (one tail + one reconcile, then exits). Then `npm start`.
 
 ## Windows service (Fishbowl server)
 Install NSSM (https://nssm.cc) and Node.js >= 18, then as Administrator:

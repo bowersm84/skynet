@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { RefreshCw, Plus, Printer, Lock, RotateCcw, Pencil, Ban, Thermometer, Paintbrush, AlertTriangle, X, GitBranch } from 'lucide-react'
+import { RefreshCw, Plus, Printer, Lock, RotateCcw, Pencil, Ban, Thermometer, Paintbrush, AlertTriangle, X, GitBranch, CalendarDays, LayoutGrid } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { FEATURES } from '../../config'
 import { canLogProgramTracker, hasRole } from '../../lib/roles'
@@ -20,6 +20,7 @@ import {
   STAGE_LABELS, SPLIT_REASON_LABELS, FLOW_STAGES, THROUGHPUT_STAGES, isoDay, lastNDays, dailyMatrix, sevenDayRates,
   constrainingStage, forecast, ovenCapacity, inProcess, lotsReadyFor, previewRoute, selectableLots, sortLots, canReopen,
   bucketValues, componentLots, recentInitials, lotLabelHtml,
+  lastWorkingDay, dayMovements, movementsReportHtml, PURCHASE_ROLE_LABELS, sortPurchasing, purchasingSummary,
 } from '../../lib/programTrackerMath'
 
 const POLL_MS = 60000
@@ -428,6 +429,7 @@ export function GizaBoard({ bundle, today, now, canWrite, isAdmin, selectedLotId
   const { program, parts, pipeline: p, demand, daily, lots, ledger, sends } = bundle
   const [stageFilter, setStageFilter] = useState('')
   const [search, setSearch] = useState('')
+  const [poShowAll, setPoShowAll] = useState(false)
   const partByRole = Object.fromEntries(parts.map(x => [x.role, x]))
 
   const selectable = selectableLots(lots)
@@ -594,6 +596,77 @@ export function GizaBoard({ bundle, today, now, canWrite, isAdmin, selectedLotId
         </div>
       </Panel>
 
+      <Panel
+        title="Purchase orders"
+        right={
+          <div className="flex items-center gap-3 text-xs text-gray-500">
+            {bundle.sync?.last_purchasing_at && <span>Fishbowl POs synced {new Date(bundle.sync.last_purchasing_at).toLocaleString()}</span>}
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={poShowAll} onChange={(e) => setPoShowAll(e.target.checked)} />
+              show received / closed (12 months)
+            </label>
+          </div>
+        }
+      >
+        {bundle.purchasing === null && (
+          <div className="text-gray-500 text-sm">The Fishbowl purchasing mirror is not available yet (needs the D-FB-55 migration and bridge 1.10).</div>
+        )}
+        {bundle.purchasing !== null && (() => {
+          const rows = sortPurchasing(bundle.purchasing, poShowAll)
+          const summary = purchasingSummary(bundle.purchasing)
+          return (
+            <>
+              {summary.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {summary.map(s => (
+                    <div key={s.role} className={`rounded border px-3 py-1.5 text-xs ${s.late ? 'border-red-800 bg-red-950/30' : 'border-gray-800 bg-gray-950/40'}`}>
+                      <span className="text-gray-300">{PURCHASE_ROLE_LABELS[s.role] || s.role}</span>
+                      <span className="text-white font-mono ml-2">{fmt(s.remaining)}</span>
+                      <span className="text-gray-500"> to come · {s.lines} line{s.lines === 1 ? '' : 's'} · next due {fmtDate(s.nextDue)}</span>
+                      {s.late > 0 && <span className="text-red-400"> · {s.late} late</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-gray-500 uppercase">
+                    <tr>
+                      <th className="text-left py-1">PO</th><th className="text-left">Vendor</th><th className="text-left">Part</th>
+                      <th className="text-right">Ordered</th><th className="text-right">Received</th><th className="text-right">Remaining</th>
+                      <th className="text-right">Due</th><th className="text-right">Last received</th><th className="text-left pl-3">Lots received (SB#)</th>
+                      <th className="text-left">SkyNet lots sent</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(l => (
+                      <tr key={l.fb_poitem_id} className={`border-t border-gray-800 align-top ${l.is_open ? 'text-gray-200' : 'text-gray-500'}`}>
+                        <td className="py-1 font-mono text-white">{l.po_number}<span className="text-gray-500"> / {l.line_number}</span></td>
+                        <td>{l.vendor_name}{l.type_name && l.type_name !== 'Purchase' ? <span className="text-gray-500"> · {l.type_name}</span> : null}</td>
+                        <td>
+                          <span className="font-mono">{l.part_num}</span>
+                          <span className="text-gray-500"> · {PURCHASE_ROLE_LABELS[l.role] || l.role}{l.is_plating ? ' · plating' : ''}</span>
+                        </td>
+                        <td className="text-right font-mono">{fmt(l.qty_ordered)}</td>
+                        <td className="text-right font-mono">{fmt(l.qty_received)}</td>
+                        <td className={`text-right font-mono ${l.is_open ? 'text-white' : ''}`}>{l.is_open ? fmt(l.qty_remaining) : '—'}</td>
+                        <td className={`text-right ${l.is_late ? 'text-red-400' : ''}`}>{fmtDate(l.due_date)}{l.is_late ? ' · late' : ''}</td>
+                        <td className="text-right">{fmtDate(l.last_received_date)}</td>
+                        <td className="pl-3 font-mono">{(l.receipts || []).map(r => `${r.lot || '—'} (${fmt(r.qty)}, ${fmtDate(r.date)})`).join('; ') || '—'}</td>
+                        <td className="font-mono">{(l.tracker_sent || []).map(t => `${t.lot} · ${fmt(t.qty)}`).join('; ') || (l.is_plating ? '—' : '')}</td>
+                      </tr>
+                    ))}
+                    {rows.length === 0 && (
+                      <tr><td colSpan={10} className="py-3 text-gray-500">{poShowAll ? 'No purchase orders for these parts in the last 12 months.' : 'Nothing on order for these parts.'}</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )
+        })()}
+      </Panel>
+
       <Panel title={`Demand — ${program.fb_product_num}`} right={<span className="text-gray-500 text-xs">from the Fishbowl mirror</span>}>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -754,6 +827,87 @@ export function GizaBoard({ bundle, today, now, canWrite, isAdmin, selectedLotId
   )
 }
 
+// ---------------------------------------------------------------- Movements (D-GIZA-29)
+function MovementRows({ title, head, rows }) {
+  if (rows.length === 0) return null
+  return (
+    <Panel title={title}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-gray-500 uppercase"><tr>{head.map(h => <th key={h} className="text-left py-1 pr-3">{h}</th>)}</tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-t border-gray-800 text-gray-200 align-top">{r.map((c, j) => <td key={j} className="py-1 pr-3 font-mono">{c}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  )
+}
+
+// Everything that happened on one day, defaulting to the last working day, with a printable report.
+export function MovementsView({ bundle, today }) {
+  const [day, setDay] = useState(() => lastWorkingDay(today))
+  const nutPartId = bundle.parts.find(p => p.role === 'nut')?.part_id
+  const data = dayMovements(bundle, day, nutPartId)
+  const lotOf = (m) => (m.from_lot?.lot_number && m.to_lot?.lot_number && m.from_lot.lot_number !== m.to_lot.lot_number
+    ? `${m.from_lot.lot_number} → ${m.to_lot.lot_number}` : (m.to_lot?.lot_number || '—'))
+
+  const print = () => {
+    const win = window.open('', '_blank')
+    if (!win) { alert('Allow pop-ups for SkyNet to print the report.'); return }
+    win.document.write(movementsReportHtml({ programName: bundle.program.name, data, generatedAt: new Date().toLocaleString() }))
+    win.document.close()
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <CalendarDays size={16} className="text-gray-400" />
+        <input type="date" value={day} max={today} onChange={(e) => e.target.value && setDay(e.target.value)} className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-sm" />
+        <Btn onClick={() => setDay(lastWorkingDay(today))}>Last working day</Btn>
+        <Btn onClick={() => setDay(today)}>Today so far</Btn>
+        <div className="flex-1" />
+        <Btn tone="cyan" onClick={print}><Printer size={12} />Print report</Btn>
+      </div>
+
+      <Panel title={`Movements — ${new Date(`${day}T12:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}`}>
+        {data.empty ? (
+          <div className="text-gray-500 text-sm">Nothing was logged for this day.</div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+            {data.summary.map(s => (
+              <div key={s.key} className={`rounded-lg border p-3 ${s.count ? 'border-gray-700 bg-gray-950/40' : 'border-gray-900 bg-gray-950/20'}`}>
+                <div className="text-gray-400 text-xs">{s.label}</div>
+                <div className={`text-xl font-semibold mt-1 ${s.count ? 'text-white' : 'text-gray-700'}`}>{s.count ? fmt(s.qty) : '—'}</div>
+                {s.count > 0 && <div className="text-gray-500 text-xs">{s.count} entr{s.count === 1 ? 'y' : 'ies'}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <MovementRows title="Tracker entries" head={['Step', 'Lot', 'Part', 'Qty', 'Lot #', 'Cage / retainer', 'Vendor / PO', 'By', 'Notes']}
+        rows={data.moves.map(m => [STAGE_LABELS[m.stage] || m.stage, lotOf(m), m.part?.part_number, fmt(m.qty), m.lot_number || '—',
+          [m.cage_lot, m.retainer_lot].filter(Boolean).join(' / ') || '—', [m.vendor, m.po_number].filter(Boolean).join(' · ') || '—',
+          m.done_by || m.entered?.full_name || '—', m.notes || ''])} />
+      <MovementRows title="Dry-film batches started (painted)" head={['Job', 'Plating lot', 'Dry film', 'FLN', 'Pieces in']}
+        rows={data.painted.map(s => [s.job?.job_number, s.plating_lot_number || '—', s.dry_film_lot_number || '—', s.finishing_lot_number || '—', fmt(s.incoming_count)])} />
+      <MovementRows title="Dry-film batches completed (baked)" head={['Job', 'Oven', 'FLN', 'Pieces in', 'Verified out']}
+        rows={data.baked.map(s => [s.job?.job_number, s.machine?.name || '—', s.finishing_lot_number || '—', fmt(s.incoming_count), s.verified_count == null ? '—' : fmt(s.verified_count)])} />
+      <MovementRows title="Shipped to Giza" head={['Shipment', 'SO / line', 'Bag lot', 'Pieces']}
+        rows={data.shipped.map(s => [s.ship_number || '—', `${s.so_number} / ${s.so_line ?? ''}`, s.lot_number || '—', fmt(s.lot_qty ?? s.qty_shipped)])} />
+      <MovementRows title="Received on Fishbowl POs" head={['PO', 'Vendor', 'Part', 'Pieces', 'Lot (SB#)']}
+        rows={data.received.map(r => [r.po, r.vendor || '—', r.part || '—', fmt(r.qty), r.lot || '—'])} />
+      <MovementRows title="Voided that day" head={['Entry date', 'Step', 'Lot', 'Qty', 'Voided by', 'Reason']}
+        rows={data.voids.map(m => [fmtDate(m.entry_date), STAGE_LABELS[m.stage] || m.stage, lotOf(m), fmt(m.qty), m.voider?.full_name || '—', m.void_reason || ''])} />
+      <MovementRows title="Logged that day for an earlier date" head={['Entry date', 'Step', 'Lot', 'Qty', 'By']}
+        rows={data.late.map(m => [fmtDate(m.entry_date), STAGE_LABELS[m.stage] || m.stage, lotOf(m), fmt(m.qty), m.done_by || m.entered?.full_name || '—'])} />
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- Page shell (auth, data, actions)
 export default function GizaDashboard() {
   const navigate = useNavigate()
@@ -767,6 +921,7 @@ export default function GizaDashboard() {
   const [entryPreset, setEntryPreset] = useState(null)
   const [lotModal, setLotModal] = useState(null) // { lot, mode: 'close' | 'edit' }
   const [notice, setNotice] = useState(null)
+  const [view, setView] = useState('board') // 'board' | 'movements' (D-GIZA-29)
 
   useEffect(() => {
     let mounted = true
@@ -893,6 +1048,11 @@ export default function GizaDashboard() {
           </div>
         </div>
 
+        <div className="flex gap-2">
+          <Btn tone={view === 'board' ? 'cyan' : 'gray'} onClick={() => setView('board')}><LayoutGrid size={12} />Dashboard</Btn>
+          <Btn tone={view === 'movements' ? 'cyan' : 'gray'} onClick={() => setView('movements')}><CalendarDays size={12} />Movements</Btn>
+        </div>
+
         {notice && <div className="bg-green-900/30 border border-green-800 text-green-300 text-sm rounded px-3 py-2">{notice}</div>}
         {loadError && (
           <div className="bg-red-900/30 border border-red-800 text-red-300 text-sm rounded px-3 py-2 flex items-center gap-2">
@@ -900,7 +1060,8 @@ export default function GizaDashboard() {
           </div>
         )}
 
-        {bundle && bundle.pipeline && (
+        {bundle && bundle.pipeline && view === 'movements' && <MovementsView bundle={bundle} today={today} />}
+        {bundle && bundle.pipeline && view === 'board' && (
           <GizaBoard
             bundle={bundle}
             today={today}

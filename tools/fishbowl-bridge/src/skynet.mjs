@@ -104,6 +104,12 @@ export class SkyNet {
   upsertShipmentLots(rows) { return this.rpc('fb_upsert_shipment_lots', { p_rows: rows }) }
 
   attachShipmentLots(dryRun = false) { return this.rpc('kit_attach_fb_shipment_lots', { p_dry_run: dryRun }) }
+  // D-FB-55 (bridge 1.10) purchasing mirror. One call carries whole POs (header, every line, every received receipt
+  // with its lot) so the RPC can mark lines and receipts that left Fishbowl; it stamps fb_sync_state.last_purchasing_at
+  // and returns { orders, lines, receipts, removed_lines, removed_receipts }.
+  upsertPurchasing(orders, lines, receipts) {
+    return this.rpc('fb_upsert_purchasing', { p_orders: orders, p_lines: lines, p_receipts: receipts })
+  }
 
   // D-FB-53. Month-end valuation snapshot (S13 Batch C). The RPC decides whether one is due and returns either
   // { skipped: true, reason } or { id, kind, period_end, product_value, raw_value }. Until Batch C is applied

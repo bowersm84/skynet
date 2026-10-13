@@ -384,8 +384,8 @@ export default function Finishing() {
   }
 
   // D-GIZA-02a / D-GIZA-24: picking a Giza lot from the list sets the plating lot and the batch
-  // quantity (what is left to paint on that lot). A typed plating lot attaches to a lot only when
-  // exactly one lot has it; otherwise the batch finds its lot at bake (assign_dry_film_fln).
+  // quantity (what is left to paint on that lot). A typed plating lot attaches the batch to its Giza
+  // lot at start, or on a later call once that lot exists (D-GIZA-03a).
   const pickDryFilmLot = (lotId) => {
     const row = newJobPlatingLots.find(l => l.lot_id === lotId)
     setNewJobForm(f => (row
@@ -539,8 +539,7 @@ export default function Finishing() {
     try {
       const now = new Date().toISOString()
 
-      // Universal FLN at creation — except dry film, whose FLN is minted when Bake
-      // completes from (plating lot, dry-film lot) by assign_dry_film_fln (D-GIZA-03).
+      // Dry film: no FLN at insert; assign_dry_film_fln assigns it right after the insert (D-GIZA-03a).
       const fln = isDryFilm ? null : await generateFinishingLotNumber()
 
       // Generate the next J-FIN-XXXXXX number via DB function
@@ -592,7 +591,7 @@ export default function Finishing() {
       // Step 2 — create the finishing_send linked to the new job
       // Chemical lots come from the form (pre-filled from persistence on modal open,
       // editable by James if either drum has changed).
-      const { error: sendError } = await supabase
+      const { data: createdSend, error: sendError } = await supabase
         .from('finishing_sends')
         .insert({
           is_standalone: true,
@@ -620,10 +619,24 @@ export default function Finishing() {
           created_at: now,
           updated_at: now,
         })
+        .select('id')
+        .single()
       if (sendError) {
         // Roll back the job we just created if the send insert fails
         await supabase.from('jobs').delete().eq('id', createdJob.id)
         throw sendError
+      }
+
+      // D-GIZA-03a: a dry-film batch gets its FLN the moment it starts — same plating lot + same
+      // dry-film lot = same FLN — and is attached to its Giza lot. If this fails the batch still
+      // stands; completion calls the same function again and assigns it then.
+      if (isDryFilm && createdSend?.id) {
+        const { error: flnError } = await supabase
+          .rpc('assign_dry_film_fln', { p_send_id: createdSend.id, p_operator_id: operator.id })
+        if (flnError) {
+          console.error('[Finishing] FLN not assigned at start:', flnError)
+          alert('Batch started, but the finishing lot number could not be assigned yet: ' + flnError.message)
+        }
       }
 
       setShowNewJobModal(false)
@@ -1487,9 +1500,9 @@ export default function Finishing() {
         const incomingCount = batch.incoming_count || 0
         const discrepancy = verifiedCount - incomingCount
 
-        // D-GIZA-03: a dry-film batch gets its FLN now, keyed on (plating lot, dry-film lot) —
-        // same pair, same FLN. Done BEFORE the completion write so a refused assignment
-        // (missing lot) leaves the batch in Bake instead of complete without a lot.
+        // D-GIZA-03a: the FLN is normally assigned when the batch starts, so this call returns it
+        // unchanged; it assigns it (and attaches the batch to its Giza lot) if that didn't happen.
+        // Done BEFORE the completion write so a refused assignment leaves the batch in Bake.
         if (isDryFilmBatch(batch)) {
           const { data: dryFilmFln, error: flnError } = await supabase
             .rpc('assign_dry_film_fln', { p_send_id: batch.id, p_operator_id: operator.id })
@@ -2358,7 +2371,7 @@ export default function Finishing() {
                                 </div>
                                 <div>
                                   <p className="text-gray-500 text-xs">Finishing Lot #</p>
-                                  <p className="text-cyan-400 font-mono text-sm">{batch.finishing_lot_number || <span className="text-gray-600">{isDryFilmBatch(batch) ? 'Assigned at bake' : 'Not assigned'}</span>}</p>
+                                  <p className="text-cyan-400 font-mono text-sm">{batch.finishing_lot_number || <span className="text-gray-600">Not assigned</span>}</p>
                                 </div>
                               </div>
 

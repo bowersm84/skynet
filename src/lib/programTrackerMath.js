@@ -173,10 +173,14 @@ export function selectableLots(lots) {
     .sort((a, b) => lotNo(a) - lotNo(b))
 }
 
-// Register order: active first (oldest number first), then closed and historical newest first.
+// Register order (D-GIZA-27a): one sequence, newest lot number first, every status together
+// (3007, 3006, 3005-2, 3005 ...). A suffixed lot sits just above its base number; void lots go last.
 export function sortLots(lots) {
-  const rank = (l) => (l.status === 'active' ? 0 : l.status === 'closed' ? 1 : l.status === 'historical' ? 2 : 3)
-  return [...(lots || [])].sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? lotNo(a) - lotNo(b) : lotNo(b) - lotNo(a)))
+  const isVoid = (l) => (l.status === 'void' ? 1 : 0)
+  return [...(lots || [])].sort((a, b) =>
+    isVoid(a) - isVoid(b) ||
+    lotNo(b) - lotNo(a) ||
+    String(b.lot_number).localeCompare(String(a.lot_number), 'en', { numeric: true }))
 }
 
 // A closed lot can be reopened (admin) until its leftovers have continued as another lot.

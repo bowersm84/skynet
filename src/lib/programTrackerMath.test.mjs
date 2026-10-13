@@ -50,7 +50,10 @@ eq(lotsReadyFor(lots, 'sent_plating').map(x => [x.lot, x.qty]), [['3008', 400]],
 eq(lotsReadyFor(lots, 'assembled').map(x => [x.lot, x.qty]), [['3007', 12]], 'closed lot with leftovers is ready (continues as a new lot)')
 eq(lotsReadyFor(lots, 'painted'), [], 'kiosk stages are not logged here')
 eq(selectableLots(lots).map(l => l.lot_number), ['3007', '3008', '3009', '3012'], 'selector: active + closed with pieces in process')
-eq(sortLots(lots).map(l => l.lot_number), ['3008', '3009', '3012', '3010', '3007', '3001', '3011'], 'register order')
+eq(sortLots(lots).map(l => l.lot_number), ['3012', '3010', '3009', '3008', '3007', '3001', '3011'], 'register order: newest first, void last')
+eq(sortLots([{ lot_number: '3005', status: 'historical' }, { lot_number: '3007', status: 'active' }, { lot_number: '3005-2', status: 'historical' },
+              { lot_number: '3007-VOID', status: 'void' }, { lot_number: '3006', status: 'active' }, { lot_number: '3001', status: 'historical' }]).map(l => l.lot_number),
+   ['3007', '3006', '3005-2', '3005', '3001', '3007-VOID'], 'register order: PROD today')
 eq(canReopen(lots[0], lots), true, '3007 reopenable')
 eq(canReopen(lots[3], lots), false, '3010 not reopenable once its leftovers continued as 3012')
 eq(canReopen(lots[1], lots), false, 'active lot is not reopened')

@@ -4732,3 +4732,11 @@ Plan: S15_Implementation_Plan.md v1.1. Batch A of three (dry-film finishing). Ba
 ### D-GIZA-27a — Lot register in one newest-first order (2026-10-15; amends D-GIZA-27)
 **What:** sortLots orders the register by lot number, newest first, every status together; equal base numbers sort by the full number with numeric collation, so 3005-2 sits above 3005; void lots last. The selector over the pipeline keeps oldest-first.
 **Why:** Matt, 10/15: the register read 3006, 3007, 3005, 3005-2 … (active lots ascending, then the rest descending). PROD now also has suffixed numbers from the 10/15 catch-up (3005-2 for the 10/12 shipment, 3007-VOID for the voided typo receipt).
+
+### D-GIZA-07b — Finishing Station card without machine dots (2026-10-15; amends D-GIZA-07)
+**What:** The Mainframe's Finishing Station card no longer lists each finishing machine (tanks FIN-1/FIN-2, ovens OVEN-1..4) as a status dot in its header. The red border when any finishing machine is down, offline or in maintenance is unchanged.
+**Why:** Matt, 10/15: with the ovens added in S15 the header became a row of tank and oven names; the card is the station, and the machines are managed inside the Finishing kiosk.
+
+### D-PROC-01a — CC ships on Matt's go-ahead (2026-10-15; amends D-PROC-01)
+**What:** CC still builds in the working tree and stops after VERIFY for Matt's review. When Matt replies in the same chat with an explicit go-ahead ("OK to push" or equivalent), CC commits the files the prompt lists, fast-forwards test and main from the work branch, and pushes both (`git push origin test main`). Pushing main deploys PROD through Amplify; Matt's go-ahead is the approval for that deploy. Building or passing VERIFY never implies the go-ahead. If a merge is not a fast-forward or any step fails, CC stops and reports; it never forces, rebases or resolves on its own, and never pushes with --force. Database changes for PROD stay file-based and applied by a person.
+**Why:** Matt, 10/15: CC's pushes were blocked inconsistently because prompts ended "no commit, no merge, no push" and the permission check read that as standing; Matt wants CC to push, but only after he says it is okay.

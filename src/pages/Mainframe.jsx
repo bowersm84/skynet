@@ -1972,20 +1972,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                 <Beaker size={16} className="text-cyan-400" />
                                 <span className="text-white font-semibold text-sm">Finishing Station</span>
                               </div>
-                              <div className="flex items-center gap-2">
-                                {/* Tank status dots */}
-                                {locationMachines.filter(m => m.machine_type === 'finishing').map(m => {
-                                  const isDown = ['down', 'offline', 'maintenance'].includes(m.status)
-                                  return (
-                                    <div key={m.id} className="flex items-center gap-1" title={m.name}>
-                                      <div className={`w-2 h-2 rounded-full ${isDown ? 'bg-red-500' : 'bg-green-500'}`} />
-                                      <span className={`text-xs ${isDown ? 'text-red-400' : 'text-gray-500'}`}>
-                                        {m.name.replace('Finishing ', '')}
-                                      </span>
-                                    </div>
-                                  )
-                                })}
-                              </div>
+                              {/* D-GIZA-07b: no per-tank / per-oven dots; the card stands for the whole station */}
                             </div>
 
                             <div className="p-3 space-y-2">

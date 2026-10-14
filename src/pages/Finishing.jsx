@@ -383,13 +383,14 @@ export default function Finishing() {
     }
   }
 
-  // D-GIZA-02a / D-GIZA-24: picking a Giza lot from the list sets the plating lot and the batch
-  // quantity (what is left to paint on that lot). A typed plating lot attaches the batch to its Giza
-  // lot at start, or on a later call once that lot exists (D-GIZA-03a).
+  // D-GIZA-24: picking a Giza lot from the list sets the plating lot. A typed plating lot attaches the
+  // batch to its Giza lot at start, or on a later call once that lot exists (D-GIZA-03a).
+  // D-GIZA-02b: neither fills Quantity — the operator always types the count in front of him; the list
+  // shows what is left on each lot and the warning below compares his count with it.
   const pickDryFilmLot = (lotId) => {
     const row = newJobPlatingLots.find(l => l.lot_id === lotId)
     setNewJobForm(f => (row
-      ? { ...f, program_lot_id: row.lot_id, plating_lot_number: row.plating_lot_number, quantity: String(row.remaining) }
+      ? { ...f, program_lot_id: row.lot_id, plating_lot_number: row.plating_lot_number }
       : { ...f, program_lot_id: '' }))
   }
   const setDryFilmPlatingLot = (value) => {
@@ -399,7 +400,6 @@ export default function Finishing() {
       ...f,
       plating_lot_number: value,
       program_lot_id: only ? only.lot_id : '',
-      ...(only ? { quantity: String(only.remaining) } : {}),
     }))
   }
 

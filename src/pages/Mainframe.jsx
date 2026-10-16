@@ -17,6 +17,7 @@ import MergeAllocationModal from '../components/MergeAllocationModal'
 import CreatePinPromptModal from '../components/CreatePinPromptModal'
 import ChangePinModal from '../components/ChangePinModal'
 import { FEATURES } from '../config'
+import { isLocationHidden } from '../lib/locations'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { getWOFulfillmentSummary } from '../lib/woFulfillment'
@@ -158,7 +159,11 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
         console.error('❌ Error fetching machines:', machinesError)
       } else {
         console.log('✅ Machines fetched:', machinesData?.length || 0, 'machines')
-        setMachines(machinesData || [])
+        // D-LOC-01: a location switched off in config.js (Tavares) drops out of
+        // the lineup here, so the tile count, the DOWN count and the location
+        // groups all agree. Jobs are untouched: work on a hidden machine still
+        // counts in the job tiles and WO Lookup.
+        setMachines((machinesData || []).filter(m => !isLocationHidden(m.location)))
       }
 
       const { data: jobsData, error: jobsError } = await supabase

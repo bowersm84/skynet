@@ -172,4 +172,21 @@ export const FEATURES = {
    * is known.
    */
   PROGRAM_OVEN_LOADS_PER_DAY: 4,
+
+  /**
+   * Tavares location in the main views (D-LOC-01). When false: machines at the
+   * Tavares facility (locations.code 'SB-TAV' — see src/lib/locations.js) are
+   * left out of the Mainframe lineup (tile count, DOWN count, location groups)
+   * and the Command page (grid, list view, machine picker, maintenance modal,
+   * advisor). Jobs are untouched: work assigned to a Tavares machine keeps its
+   * assignment and still counts in the job tiles, WO Lookup and the compliance
+   * queues — it only loses its machine tile and row. The kiosks (/kiosk/:code,
+   * Traveler, Material), the Finishing station, the Production Display, the
+   * Sales dashboard, the Bridge and the routing pickers do not read this flag,
+   * so Tavares still reaches its kiosks and the TV counts are unchanged.
+   * When true: as before this flag.
+   *
+   * 2026-10-16  off (Matt)
+   */
+  TAVARES_LOCATION: false,
 }

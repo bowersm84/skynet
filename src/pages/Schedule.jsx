@@ -42,6 +42,7 @@ import ScheduleJobModal from '../components/ScheduleJobModal'
 import { getMachineQueue, computeRemovalCascade, applyUnschedule, computeEndChangeCascade, applyEndDateChange, isJobRunning, formatDurationDH, fetchPartThroughputRuns, computePartsPerDaySuggestion, partsPerDayToMinutes, fetchPartFamily, fetchLengthFamilyHistory, fetchPartMachineHistory, buildRateLadder, resolveJobMaterial, fetchRunningMaterials, fetchObservedMaterialsForParts, fetchFamilyMaterials, fetchJobFirstRuns } from '../lib/scheduling'
 import AIAdvisorPanel from '../components/schedule/AIAdvisorPanel'
 import { FEATURES } from '../config'
+import { isLocationHidden } from '../lib/locations'
 
 const ONGOING_STATUSES = [
   'in_setup',
@@ -586,7 +587,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       if (machinesError) {
         console.error('Error fetching machines:', machinesError)
       } else {
-        setMachines(machinesData || [])
+        // D-LOC-01: a location switched off in config.js (Tavares) drops out
+        // here, so the grid, the list view, the machine picker, maintenance and
+        // the advisor all stop offering its machines. Jobs already on a hidden
+        // machine keep their assignment; they just have no row to draw on.
+        setMachines((machinesData || []).filter(m => !isLocationHidden(m.location)))
       }
 
       const { data: durationsData, error: durationsError } = await supabase

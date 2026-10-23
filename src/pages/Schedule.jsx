@@ -60,18 +60,22 @@ const isJobOverrun = (job) =>
 
 // D-SCHED-03: scheduled but never started, and the whole slot has elapsed.
 const MISSABLE_STATUSES = ['ready', 'assigned', 'pending_compliance']
-const isJobMissedSlot = (job) =>
+// D-SCHED-03a: `waiting` (from buildWaitingSet) exempts queued jobs that sit behind a
+// job still running on the same machine — their window elapsed, but the machine was
+// never free for them, so they were not missed.
+const isJobMissedSlot = (job, waiting) =>
   MISSABLE_STATUSES.includes(job?.status) &&
   !!job?.scheduled_end &&
-  new Date(job.scheduled_end).getTime() < Date.now()
+  new Date(job.scheduled_end).getTime() < Date.now() &&
+  !(waiting && waiting.has(job.id))
 
 // D-SCHED-03: for a missed-slot job whose slot fully predates today, the
 // synthetic display span pinned at today's start (2h wide). Null when the job
 // isn't pin-eligible — a slot missed earlier TODAY renders at its real
 // position (amber via getJobBlockColor) with no pin. Display-only; the real
 // scheduled_start/end are never modified.
-const getMissedPinSpan = (job) => {
-  if (!isJobMissedSlot(job)) return null
+const getMissedPinSpan = (job, waiting) => {
+  if (!isJobMissedSlot(job, waiting)) return null
   const todayStart = new Date()
   todayStart.setHours(0, 0, 0, 0)
   if (new Date(job.scheduled_end) >= todayStart) return null
@@ -79,6 +83,30 @@ const getMissedPinSpan = (job) => {
     start: todayStart,
     end: new Date(todayStart.getTime() + 2 * 60 * 60 * 1000),
   }
+}
+
+// D-SCHED-03a: queued production jobs (MISSABLE_STATUSES, not maintenance) that come
+// after a job still running on the same machine, in scheduled_start order. Their
+// planned window can pass while the earlier job overruns; they are waiting, not
+// missed, so they stay in the D-SCHED-04 projection behind the running job instead of
+// being dropped and pinned as missed slots. A queued job whose window passed while
+// nothing earlier was running is still a missed slot.
+const buildWaitingSet = (jobs) => {
+  const byMachine = {}
+  for (const j of jobs || []) {
+    if (!j.assigned_machine_id || !j.scheduled_start) continue
+    ;(byMachine[j.assigned_machine_id] ||= []).push(j)
+  }
+  const waiting = new Set()
+  for (const arr of Object.values(byMachine)) {
+    arr.sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
+    let running = false
+    for (const j of arr) {
+      if (!j.actual_end && ONGOING_STATUSES.includes(j.status)) running = true
+      else if (running && MISSABLE_STATUSES.includes(j.status) && !j.is_maintenance) waiting.add(j.id)
+    }
+  }
+  return waiting
 }
 
 // D-SCHED-04: display-only projection of each machine's live timeline.
@@ -90,10 +118,11 @@ const getMissedPinSpan = (job) => {
 // Missed-slot jobs are excluded (D-SCHED-03 pins them; they occupy nothing).
 // scheduled_start/end are never modified anywhere.
 const buildProjection = (jobs) => {
+  const waiting = buildWaitingSet(jobs) // D-SCHED-03a: waiting jobs stay in the chain
   const byMachine = {}
   for (const j of jobs || []) {
     if (!j.assigned_machine_id || !j.scheduled_start) continue
-    if (isJobMissedSlot(j)) continue
+    if (isJobMissedSlot(j, waiting)) continue
     ;(byMachine[j.assigned_machine_id] ||= []).push(j)
   }
   const map = {}
@@ -766,6 +795,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     return grouped
   }, [scheduledJobs])
 
+  // D-SCHED-03a: queued jobs waiting behind a running job — exempt from missed-slot.
+  const waitingQueueIds = useMemo(() => buildWaitingSet(scheduledJobs), [scheduledJobs])
+
   // D-SCHED-04: display-only projection of every machine's live timeline.
   const projectedSpans = useMemo(() => buildProjection(scheduledJobs), [scheduledJobs])
 
@@ -892,7 +924,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
     // D-SCHED-03/04: missed slot — pin to today only when today is on
     // screen; on past windows the job renders at its real slot so history
     // stays browsable.
-    const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+    const missedPin = windowContainsToday() ? getMissedPinSpan(job, waitingQueueIds) : null
     if (missedPin) {
       if (dayStart.getTime() !== missedPin.start.getTime()) return null
       jobStart = missedPin.start
@@ -970,7 +1002,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
     // D-SCHED-03/04: missed-slot pin — today's zoomed day only, and only
     // while today is the viewed day; past days show the real slot.
-    const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+    const missedPin = windowContainsToday() ? getMissedPinSpan(job, waitingQueueIds) : null
     if (missedPin) {
       if (dayStart.getTime() !== missedPin.start.getTime()) return null
       jobStart = missedPin.start
@@ -1858,7 +1890,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
 
     // D-SCHED-03: missed slot — amber + dashed overrides every normal color
     // (including maintenance) so forgotten work reads instantly on the board.
-    if (isJobMissedSlot(job)) {
+    if (isJobMissedSlot(job, waitingQueueIds)) {
       return 'bg-amber-900/70 border-2 border-dashed border-amber-500'
     }
     
@@ -2182,7 +2214,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       // only, and only while today is on screen; on past windows there is no
       // pin and the job falls through to its real slot. getJobBlockStyle
       // renders the pinned span.
-      const missedPin = windowContainsToday() ? getMissedPinSpan(job) : null
+      const missedPin = windowContainsToday() ? getMissedPinSpan(job, waitingQueueIds) : null
       if (missedPin) {
         return dayStart.getTime() === missedPin.start.getTime()
       }
@@ -2516,7 +2548,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
               title="Running past scheduled end"
             />
           )}
-          {isJobMissedSlot(job) && (
+          {isJobMissedSlot(job, waitingQueueIds) && (
             <AlertTriangle
               size={10}
               className="text-amber-400 flex-shrink-0"

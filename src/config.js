@@ -188,5 +188,5 @@ export const FEATURES = {
    *
    * 2026-10-16  off (Matt)
    */
-  TAVARES_LOCATION: false,
+  TAVARES_LOCATION: true,
 }

@@ -4799,3 +4799,15 @@ Refresh or retire it — see the D-PRICE-70 follow-up once Matt's reprint test s
 **Files:** Docs/migrations/2026-10-26_D-PRICE-70_whole_cent_list_prices.sql; src/lib/pricing.js, src/lib/fishbowlSync.js,
 src/components/pricing/PriceBooks.jsx, src/components/pricing/PriceCatalog.jsx,
 src/components/kitregistry/KitPricePanel.jsx, Docs/Decisions.md.
+
+### D-PRICE-70 addendum — prices push only; rules and groups held (2026-10-26)
+The Knock-on line above said prices then rules. Changed the same day after the PROD apply: only the PRICES
+push follows D-PRICE-70. The Fishbowl Sync status showed the rules and groups areas already out of step
+before this round (last pushes Oct 1: 384 rules missing / 1,284 mismatched including the 358 kit_column
+rules from D-PRICE-66, and a pending SkyNet Tier 1/2/3 → "(2)" group replacement), so those pushes wait for
+their own deliberate round. The 38 `SN .. EA` rules are inert against a whole-cent list (100 % of $14.71,
+rounded, is $14.71) and are switched off whenever that rules push happens. The prices push also carries
+what was never pushed after Oct 1: ten catalog edits from Oct 7–8 (D-PRICE-69 grommets, SK25S51-xBLK,
+SK244C16ENC, SK221-2S) and 328 kit list prices, 110 of them by more than $0.50 (the D-PRICE-67 Σ kits —
+RV1014-C1P $555 → $1,873.49, RV679-C1P $623.81 → $1,597.69). CS told before the push.
+The migration header's "After PROD" paragraph is left as written; this addendum supersedes it.

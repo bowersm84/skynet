@@ -4768,3 +4768,34 @@ Plan: S15_Implementation_Plan.md v1.1. Batch A of three (dry-film finishing). Ba
 **Why:** D-SCHED-03 treated any queued job whose whole planned window had passed as missed, dropping it from the lineup and pinning a 2-hour amber block at today's start. When the job ahead overruns, the queued job's window passes while it is simply waiting: RQ-89732236 (SK4C9 ×1,514) was scheduled 2026-10-22 behind J-000359, whose planned end (10-20) was already past; its window ended overnight and it vanished from Nexturn 7's grid, its pin hidden under J-000359's running bar, while the list view still showed it second in line. A job whose window passed while nothing earlier was running is still a missed slot.
 **Not changed:** placement at scheduling time still starts a new job at the predecessor's planned end, even when that end is past; using Adjust End Date on an overrunning job remains the way to re-time the lineup behind it.
 **Files:** src/pages/Schedule.jsx, Docs/Decisions.md.
+
+### D-PRICE-70 — Whole-cent list prices; the each-band rules are retired (supersedes D-PRICE-54) (2026-10-26)
+**What:** Every list price in a live book (status other than superseded; catalog and kit-hardware sections; priced and
+component_sum items) is a whole cent: 2,951 Rev 82 prices rounded on TEST and PROD by
+Docs/migrations/2026-10-26_D-PRICE-70_whole_cent_list_prices.sql, before-images kept in price_items_cents_backup_dprice70.
+Every function that writes a list price rounds to 2 dp (pricing_clone_book, pricing_uplift_book,
+pricing_set_section_vs_base, pricing_upsert_item, pricing_refresh_hardware_costs). pricing_fb_expected_products sends
+round(list_price, 2) for rule-priced items; the eaches CTE of pricing_fb_expected_rules is switched off, so the next
+rules push deactivates the 38 `SN <rule> <ladder> EA` rules in Fishbowl. Portal: the Each column, the Diff table and the
+Catalog search show cents; the section-vs-base confirm and the kit gap note say "to the cent". Engine, RPCs and the
+bridge are unchanged — they multiply whatever list_price holds. Resale rows (Fishbowl-owned) and Rev 81 (superseded,
+prices its own dates per D-PRICE-56) are not touched.
+**Why:** Fishbowl's Pricing Rule module compares every valid tier-3 rule with the list price and keeps the lower one
+(SO 19785, Product Pricing window: `SN A std EA → $14.71 Valid` listed, line left on `Use List Price $14.705`). A
+100 % rule that rounds up can therefore never win, so D-PRICE-54's three-decimal list prices leaked onto orders —
+30 lines on 11 PROD SOs, Oct 7–26 (S19490, 19526, 19538, 19540, 19584, 19618, 19662, 19681, 19692, 19782, 19783) — and
+only in the round-up direction, which is why S19782's SK2600-12SW (14.974) printed 14.97 while SK26S51-13 (7.075)
+printed 7.075. Acknowledgements and invoices then disagreed with Nexternal (which carries the 2-dp price) and with
+SkyNet's quotes (round2 of the list, D-PRICE-02) by a few cents per line; the AHF web order 125151 totalled $1,638.15
+in Fishbowl against $1,638.50 on Nexternal. Flipping the module option to "Highest" is not a fix: the same comparison
+would then let the list beat the quantity breaks and the tier rules. With a whole-cent list there is nothing to compare.
+**Knock-on (told to CS):** tier and column prices are now the percentage of a rounded Each, so about 3,000 of them move
+by one cent against the price lists and quotes already sent under Rev 82 (saved price_list_lines and quotes are frozen
+snapshots and do not change). Kit sums move by the cents of their components. The prices push (~2,950 rows) and the
+rules push (kit fixed prices; EA rules off) must follow the PROD migration from Pricing › Fishbowl Sync, prices first.
+**Also found, separate fix:** Fishbowl's acknowledgement "List Price" column prints product custom field 16
+"Original Price", a text field still holding the Rev 81 each ($6.15 for SK26S51-13); the push never writes it.
+Refresh or retire it — see the D-PRICE-70 follow-up once Matt's reprint test settles which report reads it.
+**Files:** Docs/migrations/2026-10-26_D-PRICE-70_whole_cent_list_prices.sql; src/lib/pricing.js, src/lib/fishbowlSync.js,
+src/components/pricing/PriceBooks.jsx, src/components/pricing/PriceCatalog.jsx,
+src/components/kitregistry/KitPricePanel.jsx, Docs/Decisions.md.

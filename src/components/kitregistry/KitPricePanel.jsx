@@ -138,7 +138,7 @@ export default function KitPricePanel({ sku, bom }) {
 
       {gap !== null && Math.abs(gap) > 0.01 && (
         <div className="text-xs text-amber-300">
-          Σ components is {money(Math.abs(gap))} {gap > 0 ? 'below' : 'above'} the book price — the book rounds each Each to 3 dp before summing, so a small difference is expected.
+          Σ components is {money(Math.abs(gap))} {gap > 0 ? 'below' : 'above'} the book price — the book rounds each Each to the cent before summing, so a small difference is expected.
         </div>
       )}
       <div className="text-[11px] text-gray-500">Read-only — prices come from the price book via pricing_get_price; the Kit Registry stores no price of its own.</div>

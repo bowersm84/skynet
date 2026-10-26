@@ -127,7 +127,7 @@ function ItemRow({ it, meta, editable, sum, onSave, onDelete }) {
         sum && sum.each !== null
           ? <span title={`Sum of ${sum.total} components`}>Σ {money(sum.each)}</span>
           : <span className="text-rose-300" title={!sum || !sum.total ? 'No components on file' : `${sum.missing.length} of ${sum.total} components unpriced: ${sum.missing.join(', ')}`}>Σ —</span>
-      ) : it.list_price === null ? <span className="text-gray-500 italic text-xs">no price</span> : money(it.list_price, 3)}</td>
+      ) : it.list_price === null ? <span className="text-gray-500 italic text-xs">no price</span> : money(it.list_price)}</td>
       <td className="px-2 py-1 text-center">{editable && it.status !== 'component_sum' ? <select value={v.rule_code || ''} onChange={e => set('rule_code', e.target.value || null)} className="bg-gray-800 border border-gray-700 rounded px-1 text-xs"><option value="">—</option>{Object.keys(meta.rules).sort().map(c => <option key={c} value={c}>{c}</option>)}</select> : <span className="text-xs text-gray-400">{it.rule_code || ''}</span>}</td>
       <td className="px-2 py-1 text-center">{editable ? <select value={v.ladder_code} onChange={e => set('ladder_code', e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-1 text-xs">{Object.keys(meta.ladders).sort().map(c => <option key={c} value={c}>{c}</option>)}</select> : <span className="text-xs text-gray-400">{it.ladder_code}</span>}</td>
       <td className="px-2 py-1 text-center"><input type="checkbox" checked={!!v.has_premier} disabled={!editable} onChange={e => set('has_premier', e.target.checked)} /></td>
@@ -433,7 +433,7 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                           const t = Number(sectionTarget)
                           if (!Number.isFinite(t) || t <= -100) return
                           const skipped = sectionStats.unmatched ? ` ${num(sectionStats.unmatched)} part${sectionStats.unmatched === 1 ? ' has' : 's have'} no ${sectionStats.baseLabel} price and will be left unchanged.` : ''
-                          if (confirm(`Set the ${num(sectionStats.matched)} priced Each in "${section.name}" to ${fmtPct(t / 100)} over ${sectionStats.baseLabel} (currently ${fmtPct(sectionStats.avgPct)})? Each becomes the ${sectionStats.baseLabel} Each × ${(1 + t / 100).toFixed(3)}, rounded to 3 dp.${skipped}`)) run(async () => { const r = await setSectionVsBase(book.id, section.id, sectionStats.baseId, t / 100); await loadBook(); setSectionTarget(''); note(`${section.name}: ${num(r.updated)} Each set to ${fmtPct(t / 100)} vs ${sectionStats.baseLabel}${r.unmatched ? ` (${num(r.unmatched)} without a base price left unchanged)` : ''}`) })
+                          if (confirm(`Set the ${num(sectionStats.matched)} priced Each in "${section.name}" to ${fmtPct(t / 100)} over ${sectionStats.baseLabel} (currently ${fmtPct(sectionStats.avgPct)})? Each becomes the ${sectionStats.baseLabel} Each × ${(1 + t / 100).toFixed(3)}, rounded to the cent.${skipped}`)) run(async () => { const r = await setSectionVsBase(book.id, section.id, sectionStats.baseId, t / 100); await loadBook(); setSectionTarget(''); note(`${section.name}: ${num(r.updated)} Each set to ${fmtPct(t / 100)} vs ${sectionStats.baseLabel}${r.unmatched ? ` (${num(r.unmatched)} without a base price left unchanged)` : ''}`) })
                         }} className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:text-white disabled:opacity-40 disabled:hover:text-gray-200" title="Reprice every part in this section as a percentage over the in-effect book — absolute, so running it again with the same number changes nothing">Set section</button></div>
                     )}
                   </div>
@@ -497,8 +497,8 @@ export default function PriceBooks({ canEdit, onBooksChanged }) {
                           <tr key={i} className="border-t border-gray-800">
                             <td className="px-2 py-1 font-mono text-white">{d.part_number}</td>
                             <td className={`px-2 py-1 text-xs ${d.kind === 'added' ? 'text-emerald-300' : d.kind === 'removed' ? 'text-rose-300' : 'text-amber-300'}`}>{d.kind}</td>
-                            <td className="px-2 py-1 text-right font-mono text-gray-400">{d.fromEach != null ? money(d.fromEach, 3) : d.from?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
-                            <td className="px-2 py-1 text-right font-mono text-white">{d.toEach != null ? money(d.toEach, 3) : d.to?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
+                            <td className="px-2 py-1 text-right font-mono text-gray-400">{d.fromEach != null ? money(d.fromEach) : d.from?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
+                            <td className="px-2 py-1 text-right font-mono text-white">{d.toEach != null ? money(d.toEach) : d.to?.status === 'component_sum' ? <span className="text-rose-300">Σ —</span> : ''}</td>
                             <td className="px-2 py-1 text-right font-mono text-xs text-gray-300">{d.pct != null ? `${d.pct > 0 ? '+' : ''}${(d.pct * 100).toFixed(1)}%` : ''}</td>
                             <td className="px-2 py-1 text-xs text-gray-400">{d.from && d.to && (d.from.rule_code !== d.to.rule_code || d.from.ladder_code !== d.to.ladder_code) ? `${d.from.rule_code || '—'}/${d.from.ladder_code} → ${d.to.rule_code || '—'}/${d.to.ladder_code}` : ''}</td>
                           </tr>

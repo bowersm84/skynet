@@ -508,7 +508,7 @@ export default function PriceCatalog({ book, meta, nextBook, canEdit }) {
                             <td className="px-3 py-1.5 font-mono text-white">{h.part_number}</td>
                             <td className="px-3 py-1.5 text-gray-300 truncate max-w-md">{h.description || ''}</td>
                             <td className="px-3 py-1.5 text-gray-500 truncate max-w-xs">{sectionIndex[h.section_id]?.name || ''}</td>
-                            <td className="px-3 py-1.5 text-right font-mono text-gray-200">{h.status === 'no_price' ? <span className="italic text-gray-500">no price</span> : h.status === 'component_sum' ? <span className="text-sky-300">Σ set</span> : money(h.list_price, 3)}</td>
+                            <td className="px-3 py-1.5 text-right font-mono text-gray-200">{h.status === 'no_price' ? <span className="italic text-gray-500">no price</span> : h.status === 'component_sum' ? <span className="text-sky-300">Σ set</span> : money(h.list_price)}</td>
                           </tr>
                         ))}
                       </tbody>

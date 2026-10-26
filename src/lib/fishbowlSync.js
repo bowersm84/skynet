@@ -112,7 +112,7 @@ export function effectiveDryRun(c) { return !!(c?.dry_run || c?.result?.dry_run)
 // The manual fallback for the prices push (Price Books › Fishbowl Product Pricing CSV): every row a full prices
 // push would send for the book — pricing_fb_expected_products(book, false) — so Fishbowl's own product numbers
 // (the book can spell a product differently: Cloc2000Kit / "CLoc 2000 Kit") and the same prices, including the
-// book's three decimals for rule-priced items (D-PRICE-54). Import through Fishbowl Data › Import › Product Pricing.
+// whole-cent list prices (D-PRICE-70; three decimals under D-PRICE-54 until 2026-10-26). Import through Fishbowl Data › Import › Product Pricing.
 // PostgREST returns at most 1,000 rows per request, so this pages, ordered, so no row is read twice or missed.
 export async function fishbowlPricingCsv(bookId) {
   const rows = []

@@ -2,7 +2,7 @@
 
 **Workstream:** Manufacturing cost model (input costs → margins) for SkyNet MES / Skybolt Aeromotive
 **Phase:** 0 — external Excel model (proof + data collection) before building costing into SkyNet. Phase 1 (cost fields in SkyNet) not started; the Pricing Portal (D-PRICE series, Docs/Decisions.md) now carries the sell side.
-**Companion deliverable:** `SkyNet_Costing_Model_v0_9_11.xlsx` (18 tabs — 10 reference tabs + 8 Product tabs)
+**Companion deliverable:** `SkyNet_Costing_Model_v0_9_12.xlsx` (20 tabs — 13 reference tabs incl. Equipment Loans + 7 Product tabs)
 **Spec:** `SkyNet_Costing_Specification_v0_4.docx` (v0.5 referenced in Decisions.md; v0.4 is the latest copy in the project)
 **Status as of 2026-10-01:** eight products costed end-to-end on the template (QL8C62 · SK21077-5 · Exum Sleeve+Insert · SK203C22 · SK2003-10C1 · SK4002-SFW · SK220-15S + nut, in the workbook; FA6-1/2-45-ACP and SK35C38B1 on fork workbooks — see Open items). Machine cycle for four parts is MEASURED from SkyNet jobs; the rest are hand estimates or comparables, flagged. Bar prices and sell prices are pulled live from PROD (material_receiving, price_items).
 **Log convention:** append-only. Entries are never rewritten; a superseded entry gets a "→ superseded by" note. From D-COST-34 on, every costing decision is also logged in `Docs/Decisions.md` (one file carries every decision); this file remains the costing-only view and is the one that will seed SkyNet's decision table.
@@ -75,6 +75,10 @@
 
 - **D-COST-43 (PROPOSED) — Standalone catalog parts: Each from the family comparable where one exists, cost-plus at 55% on Tier 3 otherwise; one Each across a length series.** When a new standalone part has a same-family comparable in the active book, its proposed Each is the comparable's Each (not cost-plus) so the family stays coherent; a part with no comparable is priced cost ÷ 0.45 ÷ (rule Tier 3 multiplier), rounded. A length-dash series whose factory cost spreads by less than ~$0.25 carries one Each. The two open approvals on this part pair — lights-out vs attended basis, and the nut Each ($2.50 cost-plus vs ~$3.75 family-margin) — are the first test of the rule. First use: SK220-15S $7.534 (= SK220-2S w/o Nut) + SK220-15S-(x)SN $2.500 (= $0.674 ÷ 0.45 ÷ 0.60). Migration `2026-10-01_D-PRICE-63_SK220-15S_into_Rev82.sql` (TEST applied, PROD pending).
 
+### New machine and its financing (NT-8, Oct 2026)
+
+- **D-COST-44 — A newly financed machine enters Machine Master at the amount financed, the whole package capitalized; its loan terms live on the Equipment Loans tab (2026-10-27).** NT-8 (Nexturn SA-20B, Fanuc 0iT-F Plus, Leesburg, 2026; SkyNet D-MACH-02) is costed like the other financed machines (D-COST-09): acquisition cost = amount financed, $174,600 (Highland Capital Corporation EFA, App # 2026090206, signed 9/30/26), which is the Absolute Machine Tools package (proposal MS08013026-1-SIP, $198,500 list) net of its $23,900 discount. The bar feeder, chip conveyor, coolant tank, oscillation option, install and freight are capitalized into the one machine, not split out. 15-yr life → $11,640/yr depreciation ($7.76 per attended hr, $2.59 per lights-out hr). Interest ($36,480 over 60 × $3,518; ~8.0% implied, payments in advance) stays out of burden and the overhead pool (D-COST-16); the $42,216/yr of payments is called out, not put in piece cost. NT-8's operator and op-labor are left for Matt — the op-labor formulas carry individual pay, which the org's AI data rule keeps out of Claude's work — so its burden is a depreciation-only floor until they are set; adding NT-8 to an operator raises that operator's machine-count divisor on every row he tends, which moves the products costed on those machines. Workbook v0.9.12.
+
 ---
 
 ## Cost build-up (the model)
@@ -89,7 +93,7 @@ Standard inputs today: 144" bar, 141" usable, 95% yield, kerf .05 (3/8") · .06 
 
 ## Reference data (current — superseding the June snapshot below where they differ)
 
-**Machine burden (Machine Master, v0.9.11), attended $/hr → lights-out $/hr:** Mazak 1/2 35.15 → 11.72 (Carlos over 2 machines) · Mazak 3/4/6 11.59 → 3.86 · Mazak 5 14.75 → 4.92 · Mazak 7 23.73 → 7.91 · Nexturn 7 22.03 → 7.34 · Nexturn 5/6 9.86–10.72 → 3.29–3.57 · Nexturn 1 11.59 · Nexturn 2/3/4, Ganesh 1, BM 1/2/6 4.88 → 1.63 · BM 3/4/5 10.01–12.59. Pools = op-labor + depreciation only; floor / coolant / tooling / maintenance still $0 everywhere (floors).
+**Machine burden (Machine Master, v0.9.11), attended $/hr → lights-out $/hr:** Mazak 1/2 35.15 → 11.72 (Carlos over 2 machines) · Mazak 3/4/6 11.59 → 3.86 · Mazak 5 14.75 → 4.92 · Mazak 7 23.73 → 7.91 · Nexturn 7 22.03 → 7.34 · Nexturn 5/6 9.86–10.72 → 3.29–3.57 · Nexturn 1 11.59 · Nexturn 2/3/4, Ganesh 1, BM 1/2/6 4.88 → 1.63 · BM 3/4/5 10.01–12.59 · Nexturn 8 (v0.9.12) 7.76 → 2.59 depreciation only until its op-labor is set (D-COST-44). Pools = op-labor + depreciation only; floor / coolant / tooling / maintenance still $0 everywhere (floors).
 
 **Labor (loaded ×1.30):** James Yates (finishing) $27.95 · Dept-200 assembly crew weighted average $22.69 (10 heads, ex-Jody) · Jody $34.65 · Patrick $58.50 · Jeff $42.25 · Carlos $50.70.
 
@@ -101,7 +105,7 @@ Standard inputs today: 144" bar, 141" usable, 95% yield, kerf .05 (3/8") · .06 
 
 **Costed products (workbook tab · headline · cycle status):** QL8C62 Product · $10.75/unit (3-min assembly; $17.00 at 12 min) · cycles ESTIMATE · SK21077-5 Product · $4.33 landed make vs $3.88 buy · ESTIMATE · Exum Sleeve+Insert · $2.19 + $1.35 = $3.54, quoted $4.87/$3.00 at 55% (now book rows AC58/AC45) · ESTIMATE · SK203C22 Product · $5.22, 57.5% at Pinair $12.29 · MEASURED (barrel NT3/NT7, insert send-derived 4.26 min) · SK2003-10C1 Product · $0.518 internal component, 42.6k/yr · ESTIMATE 750/day · SK4002-SFW Product · $4.97 DFARS wing / $3.25 China wing, avg list $25.53 · stud COMPARABLE 5.22 min, cup MEASURED 2.44 min · SK220-15S Product · $1.03 recp + $0.67 nut = $1.70, Beta Tier 2 $6.22 · ESTIMATE 3:15 / 2:00.
 
-**Fork workbooks not merged into the main line:** FA6-1/2-45-ACP (15 Jul 2026, "v0.9.9 → v0.9.10" of its day; $1.38/pc internal at 1,000 on NT7, 7-min estimate; 8620 bar $38.06) and SK35C38B1 (7 Aug 2026, "v0.9.9 → v1.0.3"; $1.300/unit at 0:45 assembly, black-oxide rate card) each advanced the version number on a copy of the workbook; the main line later reused v0.9.9/v0.9.10 for SK2003-10C1 and SK4002-SFW. Their Product tabs (and the Outsourcing Rates rows for Silverman-Gorf and Alro 8620) need porting into v0.9.12 so one workbook carries all ten products.
+**Fork workbooks not merged into the main line:** FA6-1/2-45-ACP (15 Jul 2026, "v0.9.9 → v0.9.10" of its day; $1.38/pc internal at 1,000 on NT7, 7-min estimate; 8620 bar $38.06) and SK35C38B1 (7 Aug 2026, "v0.9.9 → v1.0.3"; $1.300/unit at 0:45 assembly, black-oxide rate card) each advanced the version number on a copy of the workbook; the main line later reused v0.9.9/v0.9.10 for SK2003-10C1 and SK4002-SFW. Their Product tabs (and the Outsourcing Rates rows for Silverman-Gorf and Alro 8620) need porting into v0.9.13 (v0.9.12 went to NT-8, D-COST-44) so one workbook carries all ten products.
 
 ---
 
@@ -150,9 +154,10 @@ BM3 $115,325; BM4 $122,974; BM5 $173,350; NT5 $111,895; NT6 $131,400; NT7 $234,9
 1. **Burden pools are floors** — floor space, coolant, tooling, maintenance still $0 on every machine; acquisition cost on 13 of 21 machines; Tavares electric; full insurance + WC rate. The single largest understatement in every headline.
 2. **Assembly time studies** — QL8C62 (12 vs 3 min), SK203C22 (6 min), SK35C38B1 (0:45), SK4002-SFW (2 min). Jody not yet active; the crew-average rate is standing in.
 3. **Cycle harvests** owed: SK4SFW(x) (when J-000169 completes), SK2003-10C1, SK220-15S / -(x)SN (first kiosk runs), QL8-CS / QL8C62-1, FA6.
-4. **Merge the fork workbooks** (FA6, SK35C38B1) into v0.9.12; carry their Outsourcing Rates and Cycle Times rows.
+4. **Merge the fork workbooks** (FA6, SK35C38B1) into v0.9.13; carry their Outsourcing Rates and Cycle Times rows.
 5. **Spec v0.5 → v0.6**: fold D-COST-32 … 43 and the collision renumbering into §9; the project copy is v0.4.
 6. **Phase 1 (costing into SkyNet):** cost on `outbound_sends`; `parts.unit_cost` load from `fb_part_costs`; per-part standard cost record (material / machine / finishing / overhead) keyed to this log's decisions; margin view = `pricing_get_price` vs standard cost.
+7. **NT-8 operator and op-labor** — Machine Master E27 / O27 (yellow), plus the matching machine-count divisor on that operator's other rows; NT-8's progress-payment interest and the $500 fee to confirm on HCC's first invoice (Equipment Loans B33/B34).
 
 **Per part (newest first):** SK220-15S — basis call (lights-out vs attended), nut Each, order qty, Ø.625 flange on 5/8" bar, Fishbowl products + SkyNet parts rows to create before the push · SK4002-SFW — wing post-processing placed (in-house), ring price corrected to $0.075, die amortization horizon · SK2003-10C1 — 6061 bar $/lb from a PO · SK203C22 — second clip price, cage p/n mapping, §122 appeal · SK21077-5 — Xiamen qualification, inbound freight · QL8C62 — KEE qty in assembly_bom, purchased unit_cost load.
 

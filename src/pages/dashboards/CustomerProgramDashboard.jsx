@@ -10,7 +10,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   RefreshCw, Plus, AlertTriangle, X, LayoutGrid, Package, DollarSign, Boxes, CalendarDays, FileText,
-  ChevronDown, ChevronRight, Ban, Pencil, Ruler, CheckCircle, Clock, Square, XCircle,
+  ChevronDown, ChevronRight, Ban, Pencil, Ruler, CheckCircle, Clock, Square, XCircle, Mail,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { FEATURES } from '../../config'
@@ -21,6 +21,8 @@ import {
   LOT_STAGES, LOT_STAGE_LABELS, MONEY_KIND_LABELS, FLOW_LABELS, TERMS_LABELS,
   moneyPosition, depositForPo, lotTable, stageTotalsByPart, lineView, creditPlan, isoDay, money, round2,
 } from '../../lib/customerProgramMath'
+import EmailTrail from '../../components/customerprogram/EmailTrail'
+import { emailsForLine } from '../../lib/customerProgramEmail'
 
 const POLL_MS = 60000
 const fmt = (v) => Number(v || 0).toLocaleString('en-US')
@@ -197,7 +199,7 @@ function CreditBar({ plan }) {
   )
 }
 
-function Overview({ bundle, model, onOpenLine }) {
+function Overview({ bundle, model, onOpenLine, onOpenEmails }) {
   const { position, plan, views } = model
   const attention = bundle.lines
     .map(l => ({ l, v: views[l.fb_soitem_id], c: plan.byLine[l.fb_soitem_id] }))
@@ -241,6 +243,19 @@ function Overview({ bundle, model, onOpenLine }) {
         )}
       </Panel>
 
+      {(bundle.emails || []).some(e => e.direction === 'in' && !e.hidden_at) && (
+        <Panel title="Latest from the customer" right={<Btn onClick={onOpenEmails}><Mail size={12} />Email trail</Btn>}>
+          <ul className="divide-y divide-gray-800 text-sm">
+            {bundle.emails.filter(e => e.direction === 'in' && !e.hidden_at).slice(0, 5).map(e => (
+              <li key={e.id} className="py-2">
+                <div className="text-gray-300"><span className="text-gray-500">{fmtDate(e.sent_at)}</span> · {e.from_name || e.from_addr} · <span className="text-white">{e.subject}</span></div>
+                <div className="text-gray-500 text-xs truncate">{e.snippet || e.body_new}</div>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       {bundle.quotes.filter(q => q.status === 'open').length > 0 && (
         <Panel title="Open quotes">
           <ul className="text-sm text-gray-300 space-y-1">
@@ -255,7 +270,8 @@ function Overview({ bundle, model, onOpenLine }) {
 }
 
 // ------------------------------------------------------------------ Orders
-function LineDetail({ bundle, line, view, ctx }) {
+function LineDetail({ bundle, line, view, ctx, onOpenEmail }) {
+  const lineEmails = emailsForLine(bundle.emails || [], line)
   const poMoney = bundle.money.filter(m => String(m.po_number || '') === String(line.customer_po || ''))
   const part = line.part_num || line.product_num
   const partMoves = bundle.moves.filter(m => m.part_num === part).slice(0, 15)
@@ -317,6 +333,15 @@ function LineDetail({ bundle, line, view, ctx }) {
             </div>
           ))}
         </div>
+        <div>
+          <div className="text-gray-500 text-xs uppercase mb-1 flex items-center gap-2">
+            Emails about PO {line.customer_po} ({lineEmails.length})
+            {lineEmails.length > 0 && <button type="button" onClick={() => onOpenEmail([`PO:${line.customer_po}`, `SO:${line.so_number}`])} className="normal-case text-cyan-400 hover:underline">Open in Email</button>}
+          </div>
+          {lineEmails.length === 0 ? <div className="text-gray-500 text-xs">None tagged</div> : lineEmails.slice(0, 5).map(e => (
+            <div key={e.id} className="text-xs text-gray-300 truncate">{fmtDate(e.sent_at)} · {e.from_name || e.from_addr} · {e.subject}</div>
+          ))}
+        </div>
         {partMoves.length > 0 && (
           <div>
             <div className="text-gray-500 text-xs uppercase mb-1">Recent lot moves · {part}</div>
@@ -332,7 +357,7 @@ function LineDetail({ bundle, line, view, ctx }) {
   )
 }
 
-function Orders({ bundle, model, openLine, setOpenLine, canMoney, onEditLine }) {
+function Orders({ bundle, model, openLine, setOpenLine, canMoney, onEditLine, onOpenEmail }) {
   return (
     <div className="space-y-3">
       {bundle.lines.length === 0 && <div className="text-gray-500 text-sm">No open orders in Fishbowl for this customer.</div>}
@@ -364,7 +389,7 @@ function Orders({ bundle, model, openLine, setOpenLine, canMoney, onEditLine }) 
             {(v.blocker || c?.status === 'hold') && (
               <div className="mt-2 text-sm text-amber-300">{c?.status === 'hold' ? c.reason : v.blocker}</div>
             )}
-            {isOpen && <LineDetail bundle={bundle} line={l} view={v} ctx={model.ctxByLine[l.fb_soitem_id]} />}
+            {isOpen && <LineDetail bundle={bundle} line={l} view={v} ctx={model.ctxByLine[l.fb_soitem_id]} onOpenEmail={onOpenEmail} />}
           </div>
         )
       })}
@@ -764,6 +789,7 @@ const TABS = [
   { key: 'money', label: 'Money', Icon: DollarSign },
   { key: 'movements', label: 'Movements', Icon: CalendarDays },
   { key: 'quotes', label: 'Quotes', Icon: FileText },
+  { key: 'email', label: 'Email', Icon: Mail },
 ]
 
 export default function CustomerProgramDashboard() {
@@ -777,6 +803,7 @@ export default function CustomerProgramDashboard() {
   const [lastUpdated, setLastUpdated] = useState(null)
   const [tab, setTab] = useState('overview')
   const [openLine, setOpenLine] = useState(null)
+  const [emailRef, setEmailRef] = useState('') // preset filter when the Email tab is opened from an order (a tag, or the order's tags)
   const [modal, setModal] = useState(null) // { kind, data }
   const [notice, setNotice] = useState(null)
   const today = isoDay(new Date())
@@ -902,10 +929,14 @@ export default function CustomerProgramDashboard() {
 
         {bundle?.program && model && (
           <>
-            {tab === 'overview' && <Overview bundle={bundle} model={model} onOpenLine={(id) => { setOpenLine(id); setTab('orders') }} />}
+            {tab === 'overview' && (
+              <Overview bundle={bundle} model={model} onOpenLine={(id) => { setOpenLine(id); setTab('orders') }}
+                onOpenEmails={() => { setEmailRef(''); setTab('email') }} />
+            )}
             {tab === 'orders' && (
               <Orders bundle={bundle} model={model} openLine={openLine} setOpenLine={setOpenLine} canMoney={canMoney}
-                onEditLine={(line) => setModal({ kind: 'line', data: line })} />
+                onEditLine={(line) => setModal({ kind: 'line', data: line })}
+                onOpenEmail={(ref) => { setEmailRef(ref); setTab('email') }} />
             )}
             {tab === 'lots' && (
               <Lots bundle={bundle} model={model} canMoves={canMoves}
@@ -914,6 +945,10 @@ export default function CustomerProgramDashboard() {
             {tab === 'money' && <Money bundle={bundle} model={model} canMoney={canMoney} onAdd={() => setModal({ kind: 'money' })} onVoid={handleVoid} />}
             {tab === 'movements' && <Movements bundle={bundle} canMoves={canMoves} onVoid={handleVoid} />}
             {tab === 'quotes' && <Quotes bundle={bundle} canMoney={canMoney} onEdit={(q) => setModal({ kind: 'quote', data: q })} />}
+            {tab === 'email' && (
+              <EmailTrail key={(Array.isArray(emailRef) ? emailRef.join('|') : emailRef) || 'all'} program={bundle.program} emails={bundle.emails || []} syncState={bundle.emailSync || []}
+                canWrite={canMoves || canMoney} presetRef={emailRef} onChanged={(msg) => { setNotice(msg); load() }} />
+            )}
           </>
         )}
       </div>

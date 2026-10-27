@@ -32,7 +32,7 @@ export async function loadCustomerProgramBundle(code, profileId) {
   )
   if (!program) return { program: null }
 
-  const [access, lines, money, moves, balances, checks, quotes, sync] = await Promise.all([
+  const [access, lines, money, moves, balances, checks, quotes, sync, emails, emailSync] = await Promise.all([
     supabase
       .from('customer_program_access')
       .select('profile_id, can_log_moves, can_enter_money, profile:profiles!customer_program_access_profile_id_fkey(full_name, email)')
@@ -68,6 +68,14 @@ export async function loadCustomerProgramBundle(code, profileId) {
       .order('checked_on', { ascending: false }),
     supabase.from('cp_quotes').select('*').eq('program_id', program.id).order('quoted_on', { ascending: false }),
     supabase.from('fb_sync_state').select('last_rev_at, bridge_version').limit(1).maybeSingle(),
+    // S16 Batch B (D-CPROG-07..12): the email trail. body_full stays on the server until asked for.
+    supabase
+      .from('cp_emails')
+      .select('id, rfc822_id, thread_key, sent_at, from_addr, from_name, to_addrs, cc_addrs, subject, snippet, body_new, attachments, direction, refs, mailboxes, hidden_at, hidden_reason')
+      .eq('program_id', program.id)
+      .order('sent_at', { ascending: false })
+      .limit(3000),
+    supabase.from('cp_email_sync_state').select('*').eq('program_id', program.id),
   ])
 
   const lineRows = must(lines, 'order lines') || []
@@ -135,6 +143,8 @@ export async function loadCustomerProgramBundle(code, profileId) {
     balances: must(balances, 'lot balances') || [],
     checks: must(checks, 'lot checks') || [],
     quotes: must(quotes, 'quotes') || [],
+    emails: must(emails, 'emails') || [],
+    emailSync: must(emailSync, 'email sync state') || [],
     sync: sync?.data || null,
     allocations,
     bomByPart,
@@ -184,4 +194,23 @@ export async function saveLineTracking(programId, profileId, fbSoitemId, fields)
 export async function saveQuote(programId, profileId, quote) {
   const row = { ...quote, program_id: programId, updated_by: profileId, updated_at: new Date().toISOString() }
   must(await supabase.from('cp_quotes').upsert(row, { onConflict: 'program_id,rfq_number,part_num' }), 'quote')
+}
+
+// ------------------------------------------------------------------ email trail (S16 Batch B)
+export async function loadEmailBody(id) {
+  const row = must(await supabase.from('cp_emails').select('body_full').eq('id', id).single(), 'email body')
+  return row?.body_full || ''
+}
+
+// "Sync now": runs cp-gmail-ingest for this program with the signed-in user's token.
+export async function syncEmails(programCode) {
+  const { data, error } = await supabase.functions.invoke('cp-gmail-ingest', { body: { program_code: programCode } })
+  if (error) throw new Error(`email sync: ${error.message}`)
+  if (data?.error) throw new Error(`email sync: ${data.error}`)
+  return data
+}
+
+// Hide / show a message (reason required to hide) or replace its tags. Server checks the roster.
+export async function updateEmail(id, { hidden = null, reason = null, refs = null }) {
+  must(await supabase.rpc('cp_email_update', { p_id: id, p_hidden: hidden, p_reason: reason, p_refs: refs }), 'email update')
 }

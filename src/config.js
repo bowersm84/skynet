@@ -166,6 +166,20 @@ export const FEATURES = {
   PROGRAM_TRACKER: true,
 
   /**
+   * Customer program dashboards — /dashboards/program/:code (S16, D-CPROG). Kaytech first:
+   * open orders with a stage pipeline and blocker per line, money (deposits, invoices,
+   * payments) against the credit line, lot-level piece tracking, the movement ledger and open
+   * quotes. Only the program's roster (customer_program_access) gets any data back; the
+   * Dashboards menu lists only the programs the user is on. Reads the schema from
+   * Docs/migrations/2026-10-27_customer_program.sql.
+   *
+   * When false: the route renders a "not enabled" card and no menu entries appear.
+   *
+   * 2026-10-27  on (Matt)
+   */
+  CUSTOMER_PROGRAMS: true,
+
+  /**
    * Giza Dashboard capacity line: cure loads per oven per day. An ASSUMPTION used only for the
    * "oven capacity" figure (ovens × load qty × this); the dashboard prints it as such. 2 h cure
    * plus loading and cool-down → 4 per shift-day by default. Change when James's real cadence

@@ -25,6 +25,8 @@ import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
 import SalesDashboard from './pages/dashboards/SalesDashboard'
 import GizaDashboard from './pages/dashboards/GizaDashboard'
+import CustomerProgramDashboard from './pages/dashboards/CustomerProgramDashboard'
+import { listMyCustomerPrograms } from './lib/customerProgram'
 import { isReadOnlyRole, canSeeBridge, canViewSalesDashboard, hasRole, canAccessOrderQueue, canViewPricing } from './lib/roles'
 import PrintTraveler from './components/PrintTraveler'
 import LoadingScreen from './components/LoadingScreen'
@@ -66,6 +68,8 @@ function MainApp() {
     setNavPayload(payload)
   }, [])
   const [showDashboardsMenu, setShowDashboardsMenu] = useState(false)
+  // D-CPROG-02: customer program dashboards this user is rostered on (RLS returns only those).
+  const [customerPrograms, setCustomerPrograms] = useState([])
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showChangePinModal, setShowChangePinModal] = useState(false)
   const dashboardsMenuRef = useRef(null)
@@ -232,6 +236,15 @@ function MainApp() {
   // Reports module (D-RPT-01) — visible to ALL authenticated roles; CSV
   // export gated to admin/president/scheduler inside the page.
   const canAccessReports = !!profile?.role
+
+  // D-CPROG-02: one Dashboards entry per customer program the user is rostered on. RLS on
+  // customer_programs returns only those, so nobody else ever sees the entry.
+  useEffect(() => {
+    if (!profile?.id || !FEATURES.CUSTOMER_PROGRAMS) return
+    let alive = true
+    listMyCustomerPrograms().then(rows => { if (alive) setCustomerPrograms(rows) })
+    return () => { alive = false }
+  }, [profile?.id])
 
   // D-NAV-02: persist the current page so a refresh restores it.
   useEffect(() => {
@@ -457,6 +470,19 @@ function MainApp() {
                         {db.label}
                       </a>
                     ))}
+                    {customerPrograms.map(cp => (
+                      <a
+                        key={`cp-${cp.code}`}
+                        href={`/dashboards/program/${String(cp.code).toLowerCase()}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => setShowDashboardsMenu(false)}
+                        className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
+                      >
+                        <Monitor size={14} />
+                        {cp.name} Dashboard
+                      </a>
+                    ))}
                   </div>
                 )}
               </div>
@@ -626,6 +652,10 @@ function App() {
         {/* Giza Dashboard - office session, every role views; writes gated in the page and by
             the program RPCs (S15 Batch B, D-GIZA-08). Self-gated by FEATURES.PROGRAM_TRACKER. */}
         <Route path="/dashboards/giza" element={<GizaDashboard />} />
+
+        {/* Customer program dashboards (S16, D-CPROG) — Kaytech first. Office session; only the
+            program's roster gets data back (RLS). Self-gated by FEATURES.CUSTOMER_PROGRAMS. */}
+        <Route path="/dashboards/program/:code" element={<CustomerProgramDashboard />} />
 
         {/* President's Bridge - auth + role gated (president + admin) */}
         <Route path="/bridge" element={<PresidentsBridge />} />

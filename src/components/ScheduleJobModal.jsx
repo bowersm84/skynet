@@ -745,6 +745,10 @@ function MachinePickCard({ m, selected, onSelect, showPlacement, commitDate }) {
       {m.partHistory && (
         <div className="text-xs text-cyan-300/90 mt-1">
           Ran this part: {m.partHistory.runs} run{m.partHistory.runs === 1 ? '' : 's'}
+          {/* D-HIST-02: runs read from the traveler archive (no rate on paper) */}
+          {m.partHistory.archiveRuns > 0 && (m.partHistory.archiveRuns === m.partHistory.runs
+            ? ' (on travelers)'
+            : ` (${m.partHistory.archiveRuns} on travelers)`)}
           {m.partHistory.rate != null && ` · ${m.partHistory.rate.toLocaleString()}/day`}
           {m.partHistory.lastRun && ` · last ${m.partHistory.lastRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
         </div>
@@ -757,8 +761,11 @@ function MachinePickCard({ m, selected, onSelect, showPlacement, commitDate }) {
           {fmtDashList(m.familyHistory.dashes) && ` · ${fmtDashList(m.familyHistory.dashes)}`}
           {m.familyHistory.calendar_rate != null && ` · ${m.familyHistory.calendar_rate.toLocaleString()}/day`}
           {m.familyHistory.steady_median != null && ` · steady ${fmtSteadyRange(m.familyHistory)}`}
-          {m.familyHistory.last_run_at && ` · last ${new Date(m.familyHistory.last_run_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
-          {m.familyHistory.paper_runs > 0 && ` · ${m.familyHistory.paper_runs} unrated`}
+          {m.familyHistory.last_run_at && ` · last ${new Date(m.familyHistory.last_run_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
+          {/* D-HIST-02: archive_runs are counted inside paper_runs; show them apart */}
+          {(m.familyHistory.archive_runs || 0) > 0 && ` · ${m.familyHistory.archive_runs} on travelers`}
+          {(m.familyHistory.paper_runs || 0) - (m.familyHistory.archive_runs || 0) > 0 &&
+            ` · ${(m.familyHistory.paper_runs || 0) - (m.familyHistory.archive_runs || 0)} unrated`}
         </div>
       )}
       {m.sameModelFamily && m.sameModelPeer && (
@@ -959,8 +966,8 @@ function Step1Machines({
 
       {proven.length === 0 && familyOnly.length === 0 && (
         <p className="text-gray-500 text-xs mb-4">
-          No machine has produced this part since SkyNet went live in April 2026. Earlier runs
-          exist only on paper, so an absent history is not evidence a machine cannot make it —
+          No machine has produced this part in SkyNet (April 2026 on) or in the traveler archive
+          (October 2021 to May 2026). An absent history is not evidence a machine cannot make it —
           the Preferred star reflects master-data capability.
         </p>
       )}

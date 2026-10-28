@@ -37,6 +37,42 @@ export async function buildScheduleSnapshot({
     stats = data || []
   }
 
+  // D-HIST-02: traveler-archive runs (Oct 2021 - May 2026) are part history too. Each archive
+  // part x machine adds its runs to completed_runs (archive_runs says how many came from paper) and
+  // can move last_run_at; actual_pcs_per_hour stays SkyNet-only because a traveler has no hours.
+  // A machine with archive runs only becomes a history-sourced capable machine with no rate.
+  // v_historical_part_machine already leaves out runs SkyNet also holds and runs with no quantity.
+  if (poolPartIds.length) {
+    const { data: arch, error: archErr } = await supabase
+      .from('v_historical_part_machine')
+      .select('part_id, machine_id, runs, last_run')
+      .in('part_id', poolPartIds)
+      .not('machine_id', 'is', null)
+    if (archErr) throw new Error(`v_historical_part_machine: ${archErr.message}`)
+    for (const a of arch || []) {
+      const archRuns = Number(a.runs) || 0
+      if (archRuns <= 0) continue
+      const archLast = a.last_run ? new Date(`${a.last_run}T12:00:00`) : null
+      const s = stats.find(x => x.part_id === a.part_id && x.machine_id === a.machine_id)
+      if (s) {
+        s.completed_runs = (Number(s.completed_runs) || 0) + archRuns
+        s.archive_runs = archRuns
+        if (archLast && (!s.last_run_at || archLast > new Date(s.last_run_at))) s.last_run_at = archLast.toISOString()
+      } else {
+        stats.push({
+          part_id: a.part_id,
+          machine_id: a.machine_id,
+          completed_runs: archRuns,
+          archive_runs: archRuns,
+          actual_pcs_per_hour: null,
+          avg_setup_minutes: null,
+          est_vs_actual_drift: null,
+          last_run_at: archLast ? archLast.toISOString() : null,
+        })
+      }
+    }
+  }
+
   // Family history. D-SCHED-27: the family is now the LENGTH family
   // (parts.length_family_key, e.g. SK4C#S — the part number with the length dash masked),
   // which is the machining grain: same geometry, same setup, different length. This is not
@@ -68,6 +104,7 @@ export async function buildScheduleSnapshot({
         total_qty: r.pieces,
         actual_pcs_per_hour: r.calendar_rate ? Math.round(r.calendar_rate / 24 * 100) / 100 : null,
         last_run_at: r.last_run_at,
+        archive_runs: r.archive_runs || 0, // D-HIST-02: traveler runs inside completed_runs
       }))
     }
   }
@@ -161,6 +198,7 @@ export async function buildScheduleSnapshot({
             ? Math.max(15, Math.round((j.quantity / pph) * 60)) : null,
           history: h ? {
             runs: Number(h.completed_runs),
+            archive_runs: Number(h.archive_runs) || 0, // D-HIST-02: of runs, how many are traveler runs
             actual_pcs_per_hour: h.actual_pcs_per_hour == null ? null : Number(h.actual_pcs_per_hour),
             avg_setup_minutes: h.avg_setup_minutes == null ? null : Number(h.avg_setup_minutes),
             est_vs_actual_drift: h.est_vs_actual_drift == null ? null : Number(h.est_vs_actual_drift),
@@ -170,6 +208,7 @@ export async function buildScheduleSnapshot({
             family_key: f.family_key,
             parts_in_family: Number(f.parts_in_family),
             runs: Number(f.completed_runs),
+            archive_runs: Number(f.archive_runs) || 0, // D-HIST-02
             actual_pcs_per_hour: f.actual_pcs_per_hour == null ? null : Number(f.actual_pcs_per_hour),
             last_run_at: f.last_run_at,
           } : null,

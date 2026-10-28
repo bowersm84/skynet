@@ -25,6 +25,25 @@ const STATUS_BADGES = {
 }
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : '—')
+// D-HIST-02: archive dates are plain YYYY-MM-DD; new Date('2023-01-05') is UTC midnight and would
+// show the day before in Florida, so build the date in local time.
+const fmtDay = (s) => {
+  if (!s) return '—'
+  const [y, m, d] = String(s).slice(0, 10).split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString()
+}
+// "Mazak ?" = the traveler named the machine type but not its number.
+const archMachine = (a) => {
+  const s = a.machine_on_traveler || a.machine_raw || ''
+  if (!s) return '—'
+  return s.endsWith(' ?') ? `${s.slice(0, -2)} (no. not recorded)` : s
+}
+const archNote = (a) => {
+  if (a.skynet_job_id) return `Also in SkyNet${a.skynet_job?.job_number ? ` as ${a.skynet_job.job_number}` : ''} — SkyNet is the record`
+  if (a.review_status === 'excluded') return 'No quantity recorded — not counted'
+  if (a.review_status === 'needs_review') return 'Needs review'
+  return ''
+}
 const humanStatus = (s) => (s || '').replace(/_/g, ' ')
 const _esc = (v) => String(v ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -50,6 +69,8 @@ export default function PartHistoryModal({ part, onClose }) {
   const [jobs, setJobs] = useState([])
   const [totalCount, setTotalCount] = useState(0)
   const [loadError, setLoadError] = useState(null)
+  const [archive, setArchive] = useState([]) // D-HIST-02: traveler-archive runs for this part
+  const [archiveError, setArchiveError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -77,6 +98,26 @@ export default function PartHistoryModal({ part, onClose }) {
       } else {
         setJobs(data || [])
         setTotalCount(count ?? (data || []).length)
+      }
+      // D-HIST-02: runs read from the Form 10-100 traveler archive (Oct 2021 - May 2026).
+      const { data: arch, error: archErr } = await supabase
+        .from('historical_runs')
+        .select(`
+          id, run_date, lot_date, order_number, customer_name, order_kind,
+          machine_on_traveler, machine_raw, qty_produced, lot_number, operator_initials,
+          review_status, skynet_job_id, source_file,
+          skynet_job:jobs!skynet_job_id(job_number)
+        `)
+        .eq('part_id', part.id)
+        .order('run_date', { ascending: false, nullsFirst: false })
+        .limit(500)
+      if (cancelled) return
+      if (archErr) {
+        setArchiveError(archErr.message)
+        setArchive([])
+      } else {
+        setArchiveError(null)
+        setArchive(arch || [])
       }
       setLoading(false)
     }
@@ -158,6 +199,30 @@ export default function PartHistoryModal({ part, onClose }) {
     }
   }, [jobs])
 
+  // D-HIST-02: counted archive runs (quantity recorded, not also in SkyNet) by machine on the traveler.
+  const archiveSummary = useMemo(() => {
+    const counted = archive.filter(a => a.review_status === 'ok' && !a.skynet_job_id && (a.qty_produced || 0) > 0)
+    const byMachine = new Map()
+    for (const a of counted) {
+      const key = archMachine(a)
+      if (!byMachine.has(key)) byMachine.set(key, { machine: key, runs: 0, pieces: 0, first: null, last: null })
+      const m = byMachine.get(key)
+      m.runs += 1
+      m.pieces += a.qty_produced || 0
+      const d = a.run_date || a.lot_date
+      if (d && (!m.first || d < m.first)) m.first = d
+      if (d && (!m.last || d > m.last)) m.last = d
+    }
+    const machineRows = [...byMachine.values()].sort((x, y) =>
+      y.runs - x.runs || x.machine.localeCompare(y.machine, undefined, { numeric: true, sensitivity: 'base' }))
+    return {
+      counted,
+      machineRows,
+      pieces: counted.reduce((s, a) => s + (a.qty_produced || 0), 0),
+      notCounted: archive.length - counted.length
+    }
+  }, [archive])
+
   const truncated = totalCount > jobs.length
   const basisNote = summary.overall
     ? `weighted over ${summary.rateRunCount} run${summary.rateRunCount === 1 ? '' : 's'}${summary.derivedCount > 0 ? `, ${summary.derivedCount} derived` : ''}`
@@ -234,6 +299,50 @@ export default function PartHistoryModal({ part, onClose }) {
         ${summary.noRateCount === 1 ? '1 completed run carries no rate at all (no production start recorded).' : summary.noRateCount > 1 ? `${summary.noRateCount} completed runs carry no rate at all (no production start recorded).` : ''}
       </p>`
 
+    // D-HIST-02: traveler archive
+    const archiveTables = archive.length === 0 ? '' : `
+      <h3 style="font-size:14px; margin:16px 0 6px;">Traveler Archive (Oct 2021 &ndash; May 2026) &mdash; ${archiveSummary.counted.length} run${archiveSummary.counted.length === 1 ? '' : 's'}, ${archiveSummary.pieces.toLocaleString()} pieces</h3>
+      ${archiveSummary.machineRows.length === 0 ? '' : `
+      <table style="border-collapse:collapse; width:100%; margin-bottom:10px;">
+        <thead><tr>
+          <th style="${thCSS}">Machine (traveler)</th><th style="${thCSS}">Runs</th>
+          <th style="${thCSS}">Pieces</th><th style="${thCSS}">First</th><th style="${thCSS}">Last</th>
+        </tr></thead>
+        <tbody>${archiveSummary.machineRows.map(m => `
+          <tr>
+            <td style="${tdCSS}">${_esc(m.machine)}</td>
+            <td style="${tdCSS}">${m.runs}</td>
+            <td style="${tdCSS}">${m.pieces.toLocaleString()}</td>
+            <td style="${tdCSS}">${fmtDay(m.first)}</td>
+            <td style="${tdCSS}">${fmtDay(m.last)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+      <table style="border-collapse:collapse; width:100%;">
+        <thead><tr>
+          <th style="${thCSS}">Date</th><th style="${thCSS}">Order #</th>
+          <th style="${thCSS}">Customer</th><th style="${thCSS}">Machine (traveler)</th>
+          <th style="${thCSS}">Qty</th><th style="${thCSS}">Lot</th>
+          <th style="${thCSS}">Opr</th><th style="${thCSS}">Note</th>
+        </tr></thead>
+        <tbody>${archive.map(a => `
+          <tr>
+            <td style="${tdCSS}">${fmtDay(a.run_date || a.lot_date)}</td>
+            <td style="${tdCSS}">${_esc(a.order_number || '—')}</td>
+            <td style="${tdCSS}">${_esc(a.customer_name || '—')}</td>
+            <td style="${tdCSS}">${_esc(archMachine(a))}</td>
+            <td style="${tdCSS}">${a.qty_produced != null ? a.qty_produced.toLocaleString() : '—'}</td>
+            <td style="${tdCSS}">${_esc(a.lot_number || '—')}</td>
+            <td style="${tdCSS}">${_esc(a.operator_initials || '—')}</td>
+            <td style="${tdCSS}">${_esc(archNote(a))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+      <p style="font-size:11px; color:#64748b; margin-top:6px;">
+        From the Form 10-100 travelers on Google Drive. A traveler records quantity and date, not hours, so these runs carry no rate.
+        The machine is the one written on the traveler; where the same run is also in SkyNet, SkyNet is the record.
+      </p>`
+
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -258,6 +367,7 @@ export default function PartHistoryModal({ part, onClose }) {
   ${summaryTiles}
   ${machineTable}
   ${historyTable}
+  ${archiveTables}
   <div style="border-top:1px solid #999; margin-top:16px; padding-top:8px; display:flex; justify-content:space-between; font-size:12px; color:#666;">
     <span>Generated from SkyNet MES &mdash; ${_esc(now)}</span><span>Skybolt Aeromotive Corp</span>
   </div>
@@ -287,7 +397,7 @@ export default function PartHistoryModal({ part, onClose }) {
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={handlePrint}
-              disabled={loading || jobs.length === 0}
+              disabled={loading || (jobs.length === 0 && archive.length === 0)}
               className="flex items-center gap-2 px-3 py-1.5 bg-skynet-accent hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
             >
               <Printer size={16} />
@@ -325,7 +435,7 @@ export default function PartHistoryModal({ part, onClose }) {
           ) : jobs.length === 0 ? (
             <div className="text-center py-16">
               <History size={40} className="mx-auto text-gray-600 mb-3" />
-              <p className="text-gray-400">No jobs have been created for this part yet</p>
+              <p className="text-gray-400">No SkyNet jobs for this part yet</p>
             </div>
           ) : (
             <>
@@ -491,6 +601,89 @@ export default function PartHistoryModal({ part, onClose }) {
                 </p>
               </div>
             </>
+          )}
+
+          {/* D-HIST-02: runs read from the Form 10-100 traveler archive */}
+          {!loading && archiveError && (
+            <div className="bg-red-900/20 border border-red-700/40 rounded-lg p-3 text-red-300 text-sm">
+              Failed to load the traveler archive: {archiveError}
+            </div>
+          )}
+          {!loading && !archiveError && archive.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-gray-300 text-sm font-medium">
+                Traveler Archive <span className="text-gray-500 font-normal">· Oct 2021 – May 2026</span>
+                <span className="text-gray-500 text-xs font-normal ml-2">
+                  {archiveSummary.counted.length} run{archiveSummary.counted.length === 1 ? '' : 's'}
+                  {' · '}{archiveSummary.pieces.toLocaleString()} pieces
+                  {archiveSummary.notCounted > 0 && ` · ${archiveSummary.notCounted} not counted`}
+                </span>
+              </h3>
+              {archiveSummary.machineRows.length > 0 && (
+                <div className="overflow-x-auto border border-gray-700 rounded-lg">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-900/60">
+                      <tr className="text-gray-400 text-xs">
+                        <th className="text-left px-3 py-2">Machine (traveler)</th>
+                        <th className="text-right px-3 py-2">Runs</th>
+                        <th className="text-right px-3 py-2">Pieces</th>
+                        <th className="text-right px-3 py-2">First</th>
+                        <th className="text-right px-3 py-2">Last</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {archiveSummary.machineRows.map(m => (
+                        <tr key={m.machine} className="border-t border-gray-700/60">
+                          <td className="px-3 py-2 text-gray-200">{m.machine}</td>
+                          <td className="px-3 py-2 text-right text-gray-300">{m.runs}</td>
+                          <td className="px-3 py-2 text-right text-gray-300">{m.pieces.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-gray-400">{fmtDay(m.first)}</td>
+                          <td className="px-3 py-2 text-right text-gray-400">{fmtDay(m.last)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="overflow-x-auto border border-gray-700 rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-900/60">
+                    <tr className="text-gray-400 text-xs">
+                      <th className="text-left px-3 py-2">Date</th>
+                      <th className="text-left px-3 py-2">Order #</th>
+                      <th className="text-left px-3 py-2">Customer</th>
+                      <th className="text-left px-3 py-2">Machine (traveler)</th>
+                      <th className="text-right px-3 py-2">Qty</th>
+                      <th className="text-left px-3 py-2">Lot</th>
+                      <th className="text-left px-3 py-2">Opr</th>
+                      <th className="text-left px-3 py-2">Note</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {archive.map(a => {
+                      const counted = a.review_status === 'ok' && !a.skynet_job_id && (a.qty_produced || 0) > 0
+                      return (
+                        <tr key={a.id} className={`border-t border-gray-700/60 ${counted ? '' : 'opacity-60'}`} title={a.source_file || ''}>
+                          <td className="px-3 py-2 text-gray-300">{fmtDay(a.run_date || a.lot_date)}</td>
+                          <td className="px-3 py-2 font-mono text-gray-300">{a.order_number || '—'}</td>
+                          <td className="px-3 py-2 text-gray-400">{a.customer_name || '—'}</td>
+                          <td className="px-3 py-2 text-gray-300">{archMachine(a)}</td>
+                          <td className="px-3 py-2 text-right text-gray-300">{a.qty_produced != null ? a.qty_produced.toLocaleString() : '—'}</td>
+                          <td className="px-3 py-2 font-mono text-gray-400">{a.lot_number || '—'}</td>
+                          <td className="px-3 py-2 text-gray-400">{a.operator_initials || '—'}</td>
+                          <td className="px-3 py-2 text-gray-500 text-xs">{archNote(a)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-gray-600 text-xs">
+                From the Form 10-100 travelers on Google Drive (hover a row for its file). A traveler records quantity
+                and date, not hours, so these runs carry no rate. The machine is the one written on the traveler; where
+                the same run is also in SkyNet, SkyNet is the record.
+              </p>
+            </div>
           )}
         </div>
       </div>

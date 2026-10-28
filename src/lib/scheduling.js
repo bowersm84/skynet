@@ -355,6 +355,9 @@ export function effectiveTimePerUnit(job) {
 // D-SCHED-27: single history source. One row per production-done run on a machine
 // (view v_part_run_rates); calendar_rate/tpu_minutes carry the effectiveTimePerUnit basis,
 // steady_* carry the D-COST-31 waypoint basis, is_paper_era marks pre-kiosk rows.
+// D-HIST-02: the view also carries the traveler archive (Oct 2021 - May 2026) as rows with
+// source = 'archive' and job_id null. They are paper-era and never rated, so they prove a machine
+// has run the part without ever touching a rate or a duration suggestion.
 export async function fetchPartRunRates(supabase, componentId, excludeJobId) {
   if (!componentId) return []
   const { data, error } = await supabase
@@ -390,12 +393,13 @@ export async function fetchPartMachineHistory(supabase, componentId, excludeJobI
     if (!r.machine_id) continue
     const m = byMachine[r.machine_id] || (byMachine[r.machine_id] = {
       runs: 0, pieces: 0, ratedPieces: 0, ratedMinutes: 0, ratedRuns: 0, derived: 0,
-      paperRuns: 0, lastRun: null, _steady: []
+      paperRuns: 0, archiveRuns: 0, lastRun: null, _steady: []
     })
     m.runs += 1
     const pieces = Number(r.pieces) || 0
     m.pieces += pieces
     if (r.is_paper_era) m.paperRuns += 1
+    if (r.source === 'archive') m.archiveRuns += 1 // D-HIST-02: subset of paperRuns
     const tpu = Number(r.tpu_minutes)
     if (r.is_rated && tpu > 0 && pieces > 0) {
       m.ratedRuns += 1
@@ -656,11 +660,16 @@ export function buildRateLadder({ partHistory, partRuns, familyHistory, machines
     : null
 
   // 5 — the family, everywhere. Piece-weighted across every rated family row.
-  const ratedFam = famRows.filter(f => f.calendar_rate != null && Number(f.pieces) > 0)
+  // D-HIST-02: the row's pieces now include traveler-archive runs, which carry no rate; weight by
+  // the SkyNet pieces only so the archive cannot move this rate (runs_detail entries carry source).
+  const skynetPieces = (f) => Number(f.pieces || 0) - (f.runs_detail || [])
+    .filter(d => d?.source === 'archive')
+    .reduce((s, d) => s + (Number(d.pieces) || 0), 0)
+  const ratedFam = famRows.filter(f => f.calendar_rate != null && skynetPieces(f) > 0)
   let t5 = null
   if (familyKey && ratedFam.length) {
-    const pieces = ratedFam.reduce((s, f) => s + Number(f.pieces || 0), 0)
-    const days = ratedFam.reduce((s, f) => s + Number(f.pieces || 0) / Number(f.calendar_rate), 0)
+    const pieces = ratedFam.reduce((s, f) => s + skynetPieces(f), 0)
+    const days = ratedFam.reduce((s, f) => s + skynetPieces(f) / Number(f.calendar_rate), 0)
     const steadies = ratedFam.map(f => f.steady_median).filter(v => v != null).map(Number)
     const lastRuns = ratedFam.map(f => f.last_run_at).filter(Boolean).map(d => new Date(d))
     t5 = line('family_anywhere', `${familyKey} family, all machines`, {

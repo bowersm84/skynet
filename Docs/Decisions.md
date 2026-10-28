@@ -4950,3 +4950,29 @@ Plan: S16_Implementation_Plan.md v1.1. Batch A of three (orders, money, lots on 
 ### D-CPROG-18 — Export-marked email text is not stored (2026-10-28; Matt)
 **What:** For any message that cp_email_markings() flags (ITAR, EAR, EAR99, export-controlled, CUI, Distribution Statement A–F, ECCN, USML), the trigger cp_emails_bob_markings now drops the text: body_full and snippet become NULL, and body_new becomes "Text not stored in SkyNet: this message carries an export-control or CUI marking (…). Open it in Gmail." The header, the attachment names, the tags and the Gmail link stay. The message stays excluded from Uncle Bob, and the exclusion can no longer be cleared once the text is gone. Because this lives in the trigger, new marked messages lose their text on the way in, with no ingest redeploy. Migration Docs/migrations/2026-10-28_customer_program_itar_text.sql, run on PROD by Matt and on TEST by Claude, 2026-10-28: 2 messages cleared in each.
 **Why:** CC's Batch C review: D-CPROG-16 ruled on what Uncle Bob reads, not on what SkyNet stores. Gmail already holds the original, and keeping ITAR-marked text in a cloud database that the whole roster can read is an export-compliance exposure.
+
+## Session close — 2026-10-27/28 (S16 Customer Program Dashboard, D-CPROG-01 → D-CPROG-18)
+
+*Appended at conversation close. Records what the round entries above do not: deployment state, open findings, queued work and operating notes. Nothing here rewrites an entry.*
+
+### Deployment record — S16 (2026-10-28)
+PROD, run by Matt: `2026-10-27_customer_program.sql` (7 / 14 / 2 / 3), `2026-10-27_customer_program_kaytech_seed.sql` (roster 5, lines 6, quotes 1, money 5 live / 1 void, invoices 3276.00, deposits 59454.02, lots ready 1100 / rework 1650), `2026-10-28_customer_program_email.sql` (3 / 3 / 6 / {kaytech.com} / 1 / 1), `2026-10-28_customer_program_email_cron_PROD.sql` (cp-gmail-ingest */10 active), `2026-10-28_customer_program_bob.sql` (1 / 1 / 1 / 2 "Marking: ITAR" / true), `2026-10-28_customer_program_itar_text.sql` (2 / 0 / 2). TEST: the same, applied by Claude (TEST holds only two Kaytech lines; its roster is the TEST admin plus a machinist profile that owns mbowers@skybolt.com). Edge Functions on both projects, deployed by Matt from the repo with `npx supabase functions deploy`: cp-gmail-ingest (JWT off; first PROD run 2026-10-27 23:40 UTC, backfill complete by 2026-10-28, 416 messages, 97 runs / 0 failed in the first 24 h) and uncle-bob-program (JWT on; claude-opus-5-5, structured outputs). Secrets GMAIL_SA_KEY and ANTHROPIC_API_KEY on both. Google Cloud project skynet-gmail-reader: service account key created after Matt lifted iam.disableServiceAccountKeyCreation for that project only (an accidental override on gen-lang-client-0574404030 was deleted); domain-wide delegation gmail.readonly only. First TEST question answered in 20 s with 11 citations, ≈128k input tokens. main pushed with Batch C (8565675 on test, then main).
+
+### Open findings
+- PROD's daily `auto_close_stale_tco` cron job last ran 2026-09-13 and is no longer scheduled on PROD; TEST still runs it at 06:00. Restore or retire deliberately.
+- `2026-10-27_customer_program_kaytech_name.sql` (written by CC on Oct 27 when Matt asked for "Kaytech Dashboard"; run on TEST; PROD still reads "Kaytech Industries" until Matt runs it) and a scheduling-context doc (not from S16) are untracked in the repo; review before running or committing.
+- Confirm `iam.disableServiceAccountKeyCreation` on skynet-gmail-reader is back to "inherit".
+- Matt's Kaytech Gmail label brings internal side messages in labelled threads to the roster and to Uncle Bob (D-CPROG-08, -16); what is labelled is shared.
+- QuickBooks (read-only check through Matt's connector, 2026-10-28): Kaytech = QuickBooks customer 14255, realm 9341457805196692; invoices are numbered S+SO with the PO in the "P.O. Number" custom field and one lump-sum "Sales" line; open A/R S15933 $2,704.00 and S16497 $572.00 match the seeded cp_money rows; no deposit invoice or estimate exists in QuickBooks (the $41,670 request came from outside QuickBooks).
+
+### Queued work
+- **S17 — company-wide reporting in SkyNet** (Matt, 2026-10-28): the weekly scorecard built and released from SkyNet on Saturday mornings, the month-end pack triggered by Matt after the QuickBooks close, and customer programs for the larger customers (Giza, Air Tractor, Pinair, SRI) with live QuickBooks figures. Starts from Docs/S17_Handoff_2026-10-28.md. The S16 Batch D plan (Docs/Implementation_Plans/S16_BatchD_QuickBooks_Plan.md) is superseded by a company-wide QuickBooks mirror; its OAuth, Vault, read-only and CDC design carries over. Open with Crystalyn: how a received deposit is recorded in QuickBooks.
+- Release approval for the Saturday scorecard: the org rule says work product is a draft until a person approves it; S17 must either keep a one-click approval by Matt or record Matt's deliberate change to that rule.
+- Roster screen for customer programs (roster changes are SQL today).
+- QL8C78 stud-length lot checks (JP4146R, JP4147R, 4149) so the Lots tab and Uncle Bob can answer "which lots are long-stud".
+
+### Operating notes
+- The Supabase CLI is not installed on Matt's PC; `npx supabase …` from the repo root works without Docker. Unzip a batch's files into the repo before deploying its functions.
+- Edge Functions that authenticate themselves (cron + Vault token) deploy with `--no-verify-jwt`; user-facing ones keep JWT verification on.
+- Uncle Bob: thinking counts against max_tokens; structured outputs (output_config.format) are what guarantee parseable answers on claude-opus-5-5.
+- Spec v5.0 (2026-10-28) specifies S16 (§5.39, §10.14, §13.8). Sprint 15 (Giza, D-GIZA) and D-HIST-01/02, D-LOT-04, D-SCHED-31/32, D-MACH-03 remain queued for the consolidation revision.

@@ -1,6 +1,8 @@
 # SkyNet Sprint 16 — Implementation Plan
 ## Customer Program Dashboard: Kaytech (orders, piece tracking, email trail, Uncle Bob)
-### v1.1 — GO October 27, 2026 · Decision family D-CPROG (collision check clean)
+### v1.2 — CLOSED October 28, 2026 · Decision family D-CPROG (D-CPROG-01 → D-CPROG-18)
+
+> **Status at close (v1.2):** Batches A, B and C are live on PROD (Oct 28). Batch C took Matt's ruling on what Uncle Bob may read (D-CPROG-16), moved to claude-opus-5-5 with structured outputs, and added D-CPROG-18 (export-marked email text not stored). **Batch D (QuickBooks, §7a) is superseded** by a company-wide QuickBooks mirror in S17; its draft plan is kept as `S16_BatchD_QuickBooks_Plan.md` for the design. Handoff: `Docs/S17_Handoff_2026-10-28.md`. Spec v5.0 §5.39.
 
 > **v1.1 changes (Batch A build):** customer programs got their own tables instead of Giza's `programs` / `program_ledger` (D-CPROG-01a, D-CPROG-06); order lines filter on Fishbowl part type, not the Order Queue disposition (D-CPROG-15); the open invoices are confirmed; Matt is the Workspace admin; a QuickBooks link is added as Batch D (§7a).
 

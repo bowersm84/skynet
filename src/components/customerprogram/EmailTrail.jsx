@@ -7,6 +7,7 @@
 import { useState, useMemo } from 'react'
 import { Mail, RefreshCw, Paperclip, ExternalLink, EyeOff, Eye, Tag, ChevronDown, ChevronRight, Search } from 'lucide-react'
 import { loadEmailBody, syncEmails, updateEmail } from '../../lib/customerProgram'
+import BobSwitch from './BobSwitch'
 import { groupThreads } from '../../lib/customerProgramEmail'
 
 const DIR_STYLE = {
@@ -71,6 +72,8 @@ function Message({ m, canWrite, onChanged }) {
         <button type="button" onClick={showFull} disabled={busy} className="text-gray-500 hover:text-white">{full !== null ? 'Show new text only' : busy ? 'Loading…' : 'Show whole message'}</button>
         {canWrite && <button type="button" onClick={retag} className="text-gray-500 hover:text-white inline-flex items-center gap-1"><Tag size={11} />Tags</button>}
         {canWrite && <button type="button" onClick={hide} className="text-gray-500 hover:text-white inline-flex items-center gap-1">{m.hidden_at ? <><Eye size={11} />Show</> : <><EyeOff size={11} />Hide</>}</button>}
+        {canWrite && <BobSwitch m={m} onChanged={onChanged} />}
+        {m.bob_excluded_reason && <span className="text-amber-400/80">Kept from Uncle Bob: {m.bob_excluded_reason}</span>}
         {m.hidden_at && <span className="text-gray-500">Hidden: {m.hidden_reason}</span>}
         <span className="text-gray-600">seen in {(m.mailboxes || []).map(x => x.split('@')[0]).join(', ')}</span>
       </div>

@@ -197,7 +197,10 @@ export function findRefs(text: string, known: { parts: string[]; pos: string[]; 
   for (const p of known.parts) if (p && token(p.toUpperCase()).test(up)) out.add(`PART:${p.toUpperCase()}`)
   for (const po of known.pos) if (po && token(po).test(up)) out.add(`PO:${po}`)
   for (const m of up.matchAll(/\bP\.?\s?O\.?\s*(?:NUMBER|NO\.?|#)?\s*[:#-]?\s*(\d{5,7})\b/g)) out.add(`PO:${m[1]}`)
-  for (const m of up.matchAll(/\b(?:SO|S|SALES ORDER)\s?#?\s?-?\s?(\d{4,5})(?:AB)?(?:-\d{2})?\b/g)) out.add(`SO:${m[1]}`)
+  // Case-sensitive on the original text: "SO 15392" and "S15392" tag, "so 2027" and "Kaytech's 2026" don't.
+  for (const m of s.matchAll(/\b(?:SO|S\.O\.)\s?#?\s?-?\s?(\d{4,5})(?:AB)?(?:-\d{2})?\b/g)) out.add(`SO:${m[1]}`)
+  for (const m of s.matchAll(/\bsales order\s?#?\s?(\d{4,5})\b/gi)) out.add(`SO:${m[1]}`)
+  for (const m of s.matchAll(/\bS(\d{4,5})(?:AB)?(?:-\d{2})?\b/g)) out.add(`SO:${m[1]}`)
   for (const so of known.sos) if (so && token(`S${so}`).test(up)) out.add(`SO:${so}`)
   for (const m of up.matchAll(/\b(\d{4,5})(?:AB)?-\d{2}\b/g)) if (known.sos.includes(m[1])) out.add(`SO:${m[1]}`)
   for (const m of up.matchAll(/\bR\.?F\.?Q\.?\s*[-#:]?\s*(\d{5,7})\b/g)) out.add(`RFQ:${m[1]}`)

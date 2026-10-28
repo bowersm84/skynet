@@ -138,9 +138,15 @@ async function syncMailbox(admin: any, program: any, mailbox: string, sources: a
     for (const s of sources) for (const id of await listIds(token, gmailQuery(s, program.email_domains, since))) ids.add(id)
 
     // What this mailbox has already given us (gmail_ids is { "<mailbox>:<gmailId>": true }).
-    const { data: rows } = await admin.from('cp_emails').select('gmail_ids').eq('program_id', program.id)
+    // Paged: the API returns at most 1,000 rows per read (S16 Batch C).
     const seen = new Set<string>()
-    for (const r of rows || []) for (const k of Object.keys(r.gmail_ids || {})) seen.add(k)
+    for (let from = 0; ; from += 1000) {
+      const { data: rows, error } = await admin.from('cp_emails').select('gmail_ids')
+        .eq('program_id', program.id).order('id').range(from, from + 999)
+      if (error) throw new Error(`seen check: ${error.message}`)
+      for (const r of rows || []) for (const k of Object.keys(r.gmail_ids || {})) seen.add(k)
+      if (!rows || rows.length < 1000) break
+    }
     const fresh = [...ids].filter(id => !seen.has(`${mailbox}:${id}`))
     const batch = fresh.slice(0, MAX_NEW_PER_MAILBOX)
 

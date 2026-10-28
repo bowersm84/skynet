@@ -25,6 +25,22 @@ export async function listMyCustomerPrograms() {
   return data || []
 }
 
+// S16 Batch C: the email trail can pass 1,000 messages, the API's per-read ceiling, so read it
+// in pages. Returns { data, error } like a single query, so must() handles it the same way.
+async function fetchAllEmails(programId) {
+  const cols = 'id, rfc822_id, thread_key, sent_at, from_addr, from_name, to_addrs, cc_addrs, subject, snippet, body_new, attachments, direction, refs, mailboxes, hidden_at, hidden_reason, bob_excluded_reason, bob_excluded_auto'
+  const all = []
+  for (let from = 0; from < 20000; from += 1000) {
+    const { data, error } = await supabase
+      .from('cp_emails').select(cols).eq('program_id', programId)
+      .order('sent_at', { ascending: false }).order('id').range(from, from + 999)
+    if (error) return { data: null, error }
+    all.push(...(data || []))
+    if (!data || data.length < 1000) break
+  }
+  return { data: all, error: null }
+}
+
 export async function loadCustomerProgramBundle(code, profileId) {
   const program = must(
     await supabase.from('customer_programs').select('*').eq('code', code).maybeSingle(),
@@ -69,12 +85,7 @@ export async function loadCustomerProgramBundle(code, profileId) {
     supabase.from('cp_quotes').select('*').eq('program_id', program.id).order('quoted_on', { ascending: false }),
     supabase.from('fb_sync_state').select('last_rev_at, bridge_version').limit(1).maybeSingle(),
     // S16 Batch B (D-CPROG-07..12): the email trail. body_full stays on the server until asked for.
-    supabase
-      .from('cp_emails')
-      .select('id, rfc822_id, thread_key, sent_at, from_addr, from_name, to_addrs, cc_addrs, subject, snippet, body_new, attachments, direction, refs, mailboxes, hidden_at, hidden_reason')
-      .eq('program_id', program.id)
-      .order('sent_at', { ascending: false })
-      .limit(3000),
+    fetchAllEmails(program.id),
     supabase.from('cp_email_sync_state').select('*').eq('program_id', program.id),
   ])
 

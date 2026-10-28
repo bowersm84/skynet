@@ -10,7 +10,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   RefreshCw, Plus, AlertTriangle, X, LayoutGrid, Package, DollarSign, Boxes, CalendarDays, FileText,
-  ChevronDown, ChevronRight, Ban, Pencil, Ruler, CheckCircle, Clock, Square, XCircle, Mail,
+  ChevronDown, ChevronRight, Ban, Pencil, Ruler, CheckCircle, Clock, Square, XCircle, Mail, Brain,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { FEATURES } from '../../config'
@@ -21,6 +21,7 @@ import {
   LOT_STAGES, LOT_STAGE_LABELS, MONEY_KIND_LABELS, FLOW_LABELS, TERMS_LABELS,
   moneyPosition, depositForPo, lotTable, stageTotalsByPart, lineView, creditPlan, isoDay, money, round2,
 } from '../../lib/customerProgramMath'
+import UncleBobPanel from '../../components/customerprogram/UncleBobPanel'
 import EmailTrail from '../../components/customerprogram/EmailTrail'
 import { emailsForLine } from '../../lib/customerProgramEmail'
 
@@ -790,6 +791,7 @@ const TABS = [
   { key: 'movements', label: 'Movements', Icon: CalendarDays },
   { key: 'quotes', label: 'Quotes', Icon: FileText },
   { key: 'email', label: 'Email', Icon: Mail },
+  { key: 'bob', label: 'Uncle Bob', Icon: Brain },
 ]
 
 export default function CustomerProgramDashboard() {
@@ -945,6 +947,13 @@ export default function CustomerProgramDashboard() {
             {tab === 'money' && <Money bundle={bundle} model={model} canMoney={canMoney} onAdd={() => setModal({ kind: 'money' })} onVoid={handleVoid} />}
             {tab === 'movements' && <Movements bundle={bundle} canMoves={canMoves} onVoid={handleVoid} />}
             {tab === 'quotes' && <Quotes bundle={bundle} canMoney={canMoney} onEdit={(q) => setModal({ kind: 'quote', data: q })} />}
+            {tab === 'bob' && (
+              <UncleBobPanel bundle={bundle} model={model} today={today}
+                onOpenEmail={(id) => {
+                  const e = (bundle.emails || []).find(x => x.id === id)
+                  if (e) window.open(`https://mail.google.com/mail/u/0/#search/rfc822msgid%3A${encodeURIComponent(e.rfc822_id)}`, '_blank', 'noopener')
+                }} />
+            )}
             {tab === 'email' && (
               <EmailTrail key={(Array.isArray(emailRef) ? emailRef.join('|') : emailRef) || 'all'} program={bundle.program} emails={bundle.emails || []} syncState={bundle.emailSync || []}
                 canWrite={canMoves || canMoney} presetRef={emailRef} onChanged={(msg) => { setNotice(msg); load() }} />

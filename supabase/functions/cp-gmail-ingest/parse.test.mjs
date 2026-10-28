@@ -77,4 +77,6 @@ ok(isAutoReply({ subject: 'Out of the office RE: P.O. - 165251' }), 'OOO subject
 ok(!isAutoReply({ 'auto-submitted': 'no', subject: 'RE: P.O. - 165251' }), 'normal message')
 const fwd = { ...msg, payload: { ...msg.payload, headers: msg.payload.headers.map(x => x.name === 'Message-ID' ? { name: 'Message-ID', value: '<fwd@k>' } : x), body: { data: b64('<p>Dear Matt, please give dates.</p><p>From: Sandy</p><p>Sent: today</p><p>Po 165058</p>') } } }
 eq(parseGmailMessage(fwd, 'mbowers@skybolt.com', K, known).refs, ['PO:165058'], 'forward with no refs in the new text falls back to the whole body')
+eq(findRefs("Kaytech's 2026 plan, so 2027 too", known), [], 'a bare S or "so" before a year is not an SO')
+eq(findRefs('Invoice S15968 and S8291-04, SO# 15392, Sales Order 15516', known), ['SO:15392', 'SO:15516', 'SO:15968', 'SO:8291'], 'S-prefixed, SO-prefixed and spelled-out numbers')
 console.log(`cp-gmail-ingest parse: ${n} assertions passed`)

@@ -266,7 +266,21 @@ export async function getWorkOrderTraceability(workOrderId) {
     }
   }
 
-  const allJobs = [...(jobs || []), ...linkedJobs]
+  // D-LOT-04: a cancelled job with no compliance-approved batch made nothing that ships
+  // (e.g. J-000380, the voided wrong-lot placeholder) — keep it out of the cert trail.
+  // A cancelled job with an approved batch stays: those parts are real.
+  const rawJobs = [...(jobs || []), ...linkedJobs]
+  const cancelledIds = rawJobs.filter((j) => j.status === 'cancelled').map((j) => j.id)
+  let cancelledWithApproved = new Set()
+  if (cancelledIds.length) {
+    const { data: appr } = await supabase
+      .from('finishing_sends')
+      .select('job_id')
+      .in('job_id', cancelledIds)
+      .eq('compliance_status', 'approved')
+    cancelledWithApproved = new Set((appr || []).map((r) => r.job_id))
+  }
+  const allJobs = rawJobs.filter((j) => j.status !== 'cancelled' || cancelledWithApproved.has(j.id))
   const allJobIds = allJobs.map((j) => j.id)
   const jobComponentIds = uniq(allJobs.map((j) => j.component_id || j.part_id).filter(Boolean))
   const machineIds = uniq(allJobs.map((j) => j.assigned_machine_id))

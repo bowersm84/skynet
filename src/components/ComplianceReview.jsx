@@ -191,7 +191,9 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
       .order('finishing_completed_at', { ascending: true })
 
     if (!error) {
-      setPendingBatches(data || [])
+      // D-LOT-04: a batch on a cancelled job that finishing verified at 0 pieces holds nothing
+      // to approve (FLN-100340). Batches with parts stay in the queue whatever the job's status.
+      setPendingBatches((data || []).filter(s => !(s.job?.status === 'cancelled' && (s.verified_count ?? 0) === 0)))
 
       // Fetch all sends for jobs with pending batches (for accurate batch labeling)
       const jobIds = [...new Set((data || []).map(s => s.job_id))]

@@ -262,6 +262,7 @@ export default function Kiosk() {
   const [selectedBlankLot, setSelectedBlankLot] = useState('')
   const [selectedBlankDash, setSelectedBlankDash] = useState('')
   const [selectedBlankId, setSelectedBlankId] = useState(null)
+  const [blankLotMode, setBlankLotMode] = useState('start') // D-LOT-04: 'start' (begin production) | 'correct' (wrong lot entered)
 
   // Finishing send state
   const [showFinishingSendModal, setShowFinishingSendModal] = useState(false)
@@ -275,6 +276,7 @@ export default function Kiosk() {
   const [lotChangeNewLot, setLotChangeNewLot] = useState('')
   const autoMaterialsJobIdRef = useRef(null)
   const lotChangePrefillRef = useRef(null)        // carries Job A's material + new lot to Job B's Add Material form
+  const blankLotPrefillRef = useRef(null)         // D-LOT-04: carries the new lot + Job A's dash to Job B's blank-lot picker (Bolt Master)
   const suppressLotAutofillRef = useRef(false)    // keep the carried lot through the inventory-match effect
 
   // Admin state
@@ -334,7 +336,9 @@ export default function Kiosk() {
   useEffect(() => {
     if (autoMaterialsJobIdRef.current && activeJob?.id === autoMaterialsJobIdRef.current) {
       autoMaterialsJobIdRef.current = null
-      handleOpenMaterials()
+      // D-LOT-04: a Bolt Master continuation opens the blank-lot picker, never bar-style Add Material.
+      if (isBoltMaster) handleOpenBlankLot()
+      else handleOpenMaterials()
     }
   }, [activeJob?.id])
 
@@ -2471,8 +2475,8 @@ export default function Kiosk() {
       if (error) throw error
       setShowToolingModal(false)
       
-      // Open materials modal for next step
-      await handleOpenMaterials()
+      // Open materials for next step (D-LOT-04: the blank-lot picker on a Bolt Master)
+      await (isBoltMaster ? handleOpenBlankLot() : handleOpenMaterials())
       await loadJobs()
     } catch (err) {
       console.error('Error confirming tooling:', err)
@@ -2613,19 +2617,28 @@ export default function Kiosk() {
       const newJobId = data?.new_job_id
       const nowIso = new Date().toISOString()
       if (newJobId) {
-        // Carry Job A's material identity + the entered new lot to Job B's Add Material
-        // form, so the machinist only logs bars and starts (which mints Job B's PLN).
-        const { data: aMat } = await supabase
-          .from('job_materials')
-          .select('material_type, bar_size, bar_length')
-          .eq('job_id', activeJob.id)
-          .limit(1)
-        const a0 = aMat?.[0] || {}
-        lotChangePrefillRef.current = {
-          material_type: a0.material_type || '',
-          bar_size: a0.bar_size || '',
-          bar_length: a0.bar_length != null ? String(a0.bar_length) : '',
-          lot_number: lotChangeNewLot.trim()
+        if (isBoltMaster) {
+          // D-LOT-04: a Bolt Master continuation goes to the blank-lot picker with the new
+          // lot and Job A's dash carried, so starting it mints Job B's PLN and blank identity.
+          blankLotPrefillRef.current = {
+            lot_number: lotChangeNewLot.trim(),
+            blank_dash: activeJob.blank_dash || null
+          }
+        } else {
+          // Carry Job A's material identity + the entered new lot to Job B's Add Material
+          // form, so the machinist only logs bars and starts (which mints Job B's PLN).
+          const { data: aMat } = await supabase
+            .from('job_materials')
+            .select('material_type, bar_size, bar_length')
+            .eq('job_id', activeJob.id)
+            .limit(1)
+          const a0 = aMat?.[0] || {}
+          lotChangePrefillRef.current = {
+            material_type: a0.material_type || '',
+            bar_size: a0.bar_size || '',
+            bar_length: a0.bar_length != null ? String(a0.bar_length) : '',
+            lot_number: lotChangeNewLot.trim()
+          }
         }
         await supabase.from('jobs').update({
           status: 'in_setup', setup_start: nowIso, assigned_user_id: operator.id, updated_at: nowIso
@@ -2637,7 +2650,7 @@ export default function Kiosk() {
       setLotChangeNewLot('')
       setSelectedJob(null)
       await loadJobs()
-      setToastMessage(`Lot change saved — log bars for ${data?.new_job_number || 'the new job'} (${data?.remainder ?? ''} pcs) and start.`)
+      setToastMessage(`Lot change saved — ${isBoltMaster ? 'confirm the blank lot' : 'log bars'} for ${data?.new_job_number || 'the new job'} (${data?.remainder ?? ''} pcs) and start.`)
     } catch (err) {
       console.error('Lot change split error:', err)
       alert('Failed to switch lot: ' + err.message)
@@ -2712,18 +2725,24 @@ export default function Kiosk() {
           .in('id', ids)
         for (const c of (cats || [])) if (c.category === 'blank') blankIds.add(c.id)
       }
-      setBlankLots(rows
+      const mapped = (rows
         .filter(r => blankIds.has(r.material_receiving_id) && (r.available_bars || 0) > 0)
         .map(r => ({ id: r.material_receiving_id, lot_number: r.lot_number, material_type: r.material_type, bar_size: r.bar_size, available: r.available_bars || 0 }))
         .sort((a, b) => (a.material_type || '').localeCompare(b.material_type || '') || (a.lot_number || '').localeCompare(b.lot_number || '') || (a.bar_size || '').localeCompare(b.bar_size || '')))
+      setBlankLots(mapped)
+      return mapped // D-LOT-04: the picker pre-selects a carried lot from these rows
     } catch (err) {
       console.error('Error loading blank lots:', err)
       setBlankLots([])
+      return []
     }
   }
 
-  const handleOpenBlankLot = async () => {
+  // D-LOT-04: mode 'correct' re-opens the picker on a running Bolt Master job to fix a
+  // wrongly entered lot (correct_job_blank_lot) instead of starting production.
+  const handleOpenBlankLot = async (mode = 'start') => {
     if (!activeJob) return
+    setBlankLotMode(mode === 'correct' ? 'correct' : 'start')
     setSelectedBlankLot('')
     setSelectedBlankDash('')
     setSelectedBlankId(null)
@@ -2732,8 +2751,92 @@ export default function Kiosk() {
     setBlankTypeId('')
     const { data: btRows } = await supabase.from('blank_types').select('*').eq('is_active', true)
     setBlankTypes(btRows || [])
-    await loadBlankLots()
+    const rows = await loadBlankLots()
+    // D-LOT-04: a lot-change continuation carries the new lot and Job A's dash in.
+    const pf = blankLotPrefillRef.current
+    blankLotPrefillRef.current = null
+    if (pf?.lot_number) {
+      setSelectedBlankLot(pf.lot_number)
+      const hit = (rows || []).find(b => b.lot_number === pf.lot_number && (!pf.blank_dash || b.bar_size === pf.blank_dash))
+      if (hit) { setSelectedBlankId(hit.id); setSelectedBlankDash(hit.bar_size || '') }
+    }
     setShowBlankLotModal(true)
+  }
+
+  // D-LOT-04: an unreceived blank lot is tracked as a qty-0 stub receipt — the rule
+  // handleStartBlankJob applies at start — so a corrected lot still reconciles on receipt.
+  const ensureBlankStubReceipt = async (blankLot) => {
+    if (blankLots.some(b => b.lot_number === blankLot)) return
+    const { data: existingRcv } = await supabase
+      .from('material_receiving')
+      .select('id')
+      .eq('category', 'blank')
+      .eq('lot_number', blankLot)
+      .limit(1)
+    if (existingRcv && existingRcv.length > 0) return
+    const { error: stubErr } = await supabase
+      .from('material_receiving')
+      .insert({
+        category: 'blank',
+        material_id: null,
+        material_type: blankType,
+        bar_size: blankDash,
+        blank_type_id: blankTypeId || null,
+        bar_length_inches: null,
+        lot_number: blankLot,
+        quantity: 0,
+        vendor: 'AJ Fasteners',
+        rack: 'Blank Rack',
+        notes: 'Entered at kiosk — not yet received',
+        received_by: operator.id
+      })
+    if (stubErr) console.error('Blank stub receipt failed (non-blocking):', stubErr)
+  }
+
+  // D-LOT-04: the blank-lot twin of Correct Lot (D-LOT-01). The lot was entered wrong and
+  // nothing physical changed, so the job keeps running — no split, no placeholder piece.
+  const handleCorrectBlankLot = async () => {
+    const blankLot = selectedBlankLot.trim()
+    if (!blankLot || !activeJob) return
+    const blankDashVal = (selectedBlankDash || blankDash || '').trim() || null
+    setActionLoading(true)
+    try {
+      await ensureBlankStubReceipt(blankLot)
+      const { data, error } = await supabase.rpc('correct_job_blank_lot', {
+        p_job_id: activeJob.id,
+        p_new_lot: blankLot,
+        p_new_dash: blankDashVal,
+        p_operator_id: operator.id,
+        p_reason: 'Wrong blank lot entered at the kiosk',
+        p_force: false
+      })
+      if (error) throw error
+      setActiveJob(prev => ({
+        ...prev,
+        blank_lot_number: blankLot,
+        blank_dash: blankDashVal || prev.blank_dash,
+        production_lot_number: data?.new_pln || prev.production_lot_number
+      }))
+      setShowBlankLotModal(false)
+      setBlankLotMode('start')
+      setSelectedBlankLot('')
+      setSelectedBlankDash('')
+      setSelectedBlankId(null)
+      setBlankType('')
+      setBlankDash('')
+      setBlankTypeId('')
+      await loadJobs()
+      setToastMessage(data?.changed === false
+        ? `Blank lot is already ${blankLot}`
+        : data?.new_pln
+          ? `Blank lot corrected to ${blankLot} — production lot is now ${data.new_pln}`
+          : `Blank lot corrected to ${blankLot}`)
+    } catch (err) {
+      console.error('Error correcting blank lot:', err)
+      alert('Could not correct the blank lot: ' + err.message)
+    } finally {
+      setActionLoading(false)
+    }
   }
 
   const handleStartBlankJob = async () => {
@@ -3357,8 +3460,8 @@ export default function Kiosk() {
       setShowToolingOverrideModal(false)
       setShowToolingModal(false)
 
-      // Open materials modal for next step
-      await handleOpenMaterials()
+      // Open materials for next step (D-LOT-04: the blank-lot picker on a Bolt Master)
+      await (isBoltMaster ? handleOpenBlankLot() : handleOpenMaterials())
       await loadJobs()
     } catch (err) {
       console.error('Error overriding tooling:', err)
@@ -6034,13 +6137,18 @@ export default function Kiosk() {
             <div className="px-6 py-4 border-b border-gray-800">
               <h2 className="text-xl font-semibold text-white flex items-center gap-2">
                 <Package className="text-blue-400" size={24} />
-                Select Blank Lot
+                {blankLotMode === 'correct' ? 'Correct Blank Lot' : 'Select Blank Lot'}
               </h2>
               <p className="text-gray-500 text-sm mt-1">{activeJob.job_number} - {activeJob.component?.part_number}</p>
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               <p className="text-sm text-gray-400">Enter the blank lot loaded in this machine. Inventory is deducted from this lot by the verified finishing count when James completes finishing. If the lot isn't received yet, enter it anyway — it reconciles once the receipt is logged.</p>
+              {blankLotMode === 'correct' && (
+                <p className="text-sm text-amber-300 bg-amber-900/20 border border-amber-700/50 rounded-lg px-3 py-2">
+                  Correcting lot <span className="font-mono">{activeJob.blank_lot_number}</span>{activeJob.blank_dash ? <> (dash {activeJob.blank_dash})</> : null}. Use this only when the wrong lot was entered — the production lot number, this job's finishing batches and any blanks already deducted move to the lot you pick. If the blanks ran out, cancel and use Switch Lot.
+                </p>
+              )}
 
               <div>
                 <label className="text-xs text-gray-400 uppercase tracking-wide">Blank Lot #</label>
@@ -6127,11 +6235,11 @@ export default function Kiosk() {
             </div>
 
             <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-3">
-              <button onClick={() => { setShowBlankLotModal(false); setSelectedBlankLot('') }} className="px-4 py-2 text-gray-400 hover:text-white">
+              <button onClick={() => { setShowBlankLotModal(false); setSelectedBlankLot(''); setBlankLotMode('start') }} className="px-4 py-2 text-gray-400 hover:text-white">
                 Cancel
               </button>
               <button
-                onClick={handleStartBlankJob}
+                onClick={blankLotMode === 'correct' ? handleCorrectBlankLot : handleStartBlankJob}
                 disabled={
                   actionLoading ||
                   !selectedBlankLot.trim() ||
@@ -6142,7 +6250,7 @@ export default function Kiosk() {
                 className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-semibold rounded-lg transition-colors flex items-center gap-2"
               >
                 {actionLoading && <Loader2 size={16} className="animate-spin" />}
-                Confirm & Start Production
+                {blankLotMode === 'correct' ? 'Correct Blank Lot' : 'Confirm & Start Production'}
               </button>
             </div>
           </div>
@@ -6950,6 +7058,22 @@ export default function Kiosk() {
                 <p className="text-gray-300 text-sm">
                   Finalize this job at what was made on{lot1 ? <> lot <span className="font-mono text-amber-300">{lot1}</span></> : ' the current lot'}. The remainder moves to a new job on the same machine, due by <span className="text-white">{due}</span>. Enter the new lot below — the continuation job opens ready for you to log bars and start.
                 </p>
+
+                {/* D-LOT-04: on a Bolt Master a wrongly entered lot is corrected in place — no split, no placeholder piece */}
+                {isBoltMaster && activeJob.blank_lot_number && (
+                  <button
+                    onClick={() => {
+                      setShowLotChangeModal(false)
+                      setLotChangeForm({ send_choice: null, final_batch_qty: '' })
+                      setLotChangeNewLot('')
+                      handleOpenBlankLot('correct')
+                    }}
+                    disabled={actionLoading}
+                    className="tap w-full py-3 px-3 rounded-lg border border-blue-600/50 bg-blue-600/10 hover:bg-blue-600/20 text-blue-300 text-sm font-medium transition-colors"
+                  >
+                    Lot {activeJob.blank_lot_number} was entered by mistake? Correct the lot instead
+                  </button>
+                )}
 
                 {/* Required pieces */}
                 <div className="bg-skynet-accent/10 border border-skynet-accent/30 rounded-lg p-4 text-center">

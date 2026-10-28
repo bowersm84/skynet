@@ -14,14 +14,18 @@ export function isJobRunning(job) {
 }
 
 /**
- * Jobs currently assigned to a machine, ordered by scheduled_start.
+ * Jobs currently assigned to a machine, in queue order: by scheduled_start, except
+ * that the job on the machine goes ahead of every not-started job whose slot had not
+ * ended when it went on the machine (D-SCHED-32). That work waited behind it — a
+ * lot-change split or an out-of-order start leaves those slots dated earlier — so
+ * cascades (end-date change, unschedule, insert) must treat it as downstream.
  * Excludes complete/cancelled and jobs without scheduled_start.
  * Pass excludeJobId to omit a specific job (used in edit mode to
  * remove the job-being-rescheduled from its old slot).
  */
 export function getMachineQueue(allJobs, machineId, { excludeJobId } = {}) {
   if (!machineId) return []
-  return (allJobs || [])
+  const queue = (allJobs || [])
     .filter(j =>
       j.assigned_machine_id === machineId &&
       j.status !== 'complete' &&
@@ -31,6 +35,25 @@ export function getMachineQueue(allJobs, machineId, { excludeJobId } = {}) {
       j.id !== excludeJobId
     )
     .sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
+  // D-SCHED-32: move the running job ahead of the first not-started job still waiting on it.
+  const runIdx = queue.findIndex(j => isJobRunning(j))
+  if (runIdx > 0) {
+    const run = queue[runIdx]
+    const liveStart = new Date(run.setup_start || run.production_start || run.actual_start || run.scheduled_start).getTime()
+    const waitIdx = queue.findIndex((j, i) =>
+      i < runIdx &&
+      !isJobRunning(j) &&
+      !j.actual_end &&
+      !PRODUCTION_DONE_STATUSES.includes(j.status) &&
+      j.scheduled_end &&
+      new Date(j.scheduled_end).getTime() > liveStart
+    )
+    if (waitIdx >= 0) {
+      queue.splice(runIdx, 1)
+      queue.splice(waitIdx, 0, run)
+    }
+  }
+  return queue
 }
 
 /**

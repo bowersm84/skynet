@@ -105,8 +105,32 @@ const buildWaitingSet = (jobs) => {
       if (!j.actual_end && ONGOING_STATUSES.includes(j.status)) running = true
       else if (running && MISSABLE_STATUSES.includes(j.status) && !j.is_maintenance) waiting.add(j.id)
     }
+    // D-SCHED-32: work whose slot had not ended when the running job went on the machine
+    // waited behind it too, even when that slot is dated earlier (lot-change split,
+    // out-of-order start). Slots that ended before it started stay missed (D-SCHED-03).
+    const run = arr.find(j => !j.actual_end && ONGOING_STATUSES.includes(j.status))
+    if (run) {
+      const liveStart = new Date(run.setup_start || run.production_start || run.actual_start || run.scheduled_start).getTime()
+      for (const j of arr) {
+        if (MISSABLE_STATUSES.includes(j.status) && !j.is_maintenance && j.scheduled_end &&
+            new Date(j.scheduled_end).getTime() > liveStart) waiting.add(j.id)
+      }
+    }
   }
   return waiting
+}
+
+// D-SCHED-32: in a machine's chain, the job on the machine goes ahead of the work waiting
+// behind it, even when a waiting job's stored slot is dated earlier — otherwise the
+// projection draws that work over the running bar.
+const putRunningAheadOfWaiting = (arr, waiting) => {
+  const runIdx = arr.findIndex(j => !j.actual_end && ONGOING_STATUSES.includes(j.status))
+  if (runIdx <= 0) return arr
+  const waitIdx = arr.findIndex((j, i) => i < runIdx && waiting.has(j.id))
+  if (waitIdx < 0) return arr
+  const [run] = arr.splice(runIdx, 1)
+  arr.splice(waitIdx, 0, run)
+  return arr
 }
 
 // D-SCHED-04: display-only projection of each machine's live timeline.
@@ -129,6 +153,7 @@ const buildProjection = (jobs) => {
   const now = Date.now()
   for (const arr of Object.values(byMachine)) {
     arr.sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))
+    putRunningAheadOfWaiting(arr, waiting) // D-SCHED-32
     let cursor = null
     for (const j of arr) {
       const schedStart = new Date(j.scheduled_start).getTime()

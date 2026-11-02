@@ -212,6 +212,10 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
   const [showBlankModal, setShowBlankModal] = useState(false)
   const [blankForm, setBlankForm] = useState(BLANK_EMPTY)
   const [blankError, setBlankError] = useState('')
+  // D-BLANK-CERT-01: cert files staged in the Receive Blanks modal, uploaded after the receipt
+  // insert; savedBlankReceiptId guards against a duplicate receipt when a cert upload fails.
+  const [blankCertFiles, setBlankCertFiles] = useState([])
+  const [savedBlankReceiptId, setSavedBlankReceiptId] = useState(null)
   const [inventoryRows, setInventoryRows] = useState([])
   const [invFilterMaterial, setInvFilterMaterial] = useState('')
   const [invFilterRack, setInvFilterRack] = useState('')
@@ -2058,6 +2062,14 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
     }
   }
 
+  // D-BLANK-CERT-01: full reset + close for the Receive Blanks modal (X / Cancel / Close).
+  const closeBlankModal = () => {
+    setShowBlankModal(false)
+    setBlankError('')
+    setBlankCertFiles([])
+    setSavedBlankReceiptId(null)
+  }
+
   const handleSaveBlank = async () => {
     const qty = parseInt(blankForm.quantity, 10)
     const total = parseFloat(blankForm.total_cost)
@@ -2123,10 +2135,38 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
         console.error('Blank auto-reconcile failed (non-blocking):', linkErr)
       }
 
+      // D-BLANK-CERT-01: upload attached material certs against the new receipt (the bars
+      // pattern). A failed cert must NOT lose the receipt: catch per file, keep the modal
+      // open with Close only, and point to the after-the-fact upload on Inventory → Blanks.
+      let certFailed = false
+      for (const file of blankCertFiles) {
+        try {
+          const up = await uploadDocument(file, `material-certs/${newRow.id}`)
+          const { error: docErr } = await supabase.from('material_documents').insert({
+            material_receiving_id: newRow.id,
+            document_type: 'material_cert',
+            file_name: up.fileName,
+            file_path: up.filePath,
+            file_size: up.fileSize,
+            mime_type: up.mimeType,
+            uploaded_by: profile.id,
+          })
+          if (docErr) throw docErr
+        } catch (uploadErr) {
+          console.error('Blank cert upload failed (receipt already saved):', uploadErr)
+          certFailed = true
+        }
+      }
+
       await fetchData()
-      setShowBlankModal(false)
-      setBlankForm(BLANK_EMPTY)
-      setBlankError('')
+      if (certFailed) {
+        setSavedBlankReceiptId(newRow.id)
+        setBlankCertFiles([])
+        setBlankError('Receipt saved, but cert upload failed — retry from Inventory → Blanks (Docs column)')
+      } else {
+        closeBlankModal()
+        setBlankForm(BLANK_EMPTY)
+      }
     } catch (err) {
       setBlankError('Error saving blanks receipt: ' + (err.message || 'unknown error'))
     } finally {
@@ -3685,6 +3725,7 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                             <th className="px-4 py-3 text-right">Used</th>
                             <th className="px-4 py-3 text-right"><button onClick={() => toggleInvSort('available_bars')} className="inline-flex items-center gap-1 uppercase hover:text-white">Available {sortIcon('available_bars')}</button></th>
                             <th className="px-4 py-3 text-right">Cost/Blank</th>
+                            <th className="px-4 py-3 text-center">Docs</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-700">
@@ -3719,6 +3760,17 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-right font-mono text-gray-300">{row.price_per_bar != null ? `$${Number(row.price_per_bar).toFixed(4)}` : '—'}</td>
+                                <td className="px-4 py-3 text-center">
+                                  {/* D-BLANK-CERT-01: after-the-fact cert upload/view for this blank receipt */}
+                                  <button
+                                    onClick={() => openLotDocs(row)}
+                                    className={`inline-flex items-center gap-1 hover:text-skynet-accent ${materialDocCounts[row.id] > 0 ? 'text-skynet-accent' : 'text-gray-600'}`}
+                                    title="Lot documents (material certs)"
+                                  >
+                                    <Paperclip size={14} />
+                                    <span className="text-xs">{materialDocCounts[row.id] || 0}</span>
+                                  </button>
+                                </td>
                               </tr>
                             )
                           })}
@@ -3730,6 +3782,7 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                             <td className="px-4 py-3 text-right font-mono font-semibold">{totalUsed.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right font-mono font-semibold">{totalAvail.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right font-mono font-semibold">{totalValue > 0 ? `$${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}</td>
+                            <td className="px-4 py-3"></td>
                           </tr>
                         </tfoot>
                       </table>
@@ -3939,7 +3992,7 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                     <Plus size={18} /> Receive Bars
                   </button>
                   <button
-                    onClick={() => { setBlankForm(BLANK_EMPTY); setBlankError(''); setShowBlankModal(true) }}
+                    onClick={() => { setBlankForm(BLANK_EMPTY); setBlankError(''); setBlankCertFiles([]); setSavedBlankReceiptId(null); setShowBlankModal(true) }}
                     className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
                   >
                     <Plus size={18} /> Receive Blanks
@@ -6146,7 +6199,7 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
             <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-bold text-white">Receive Blanks</h2>
-                <button onClick={() => { setShowBlankModal(false); setBlankError('') }} className="text-gray-400 hover:text-white">
+                <button onClick={closeBlankModal} className="text-gray-400 hover:text-white">
                   <X size={20} />
                 </button>
               </div>
@@ -6259,6 +6312,41 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                     className="w-full mt-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-skynet-accent resize-none"
                   />
                 </div>
+
+                {/* D-BLANK-CERT-01: Material Cert upload (full width) — the Receive Bars pattern */}
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-gray-400 uppercase tracking-wide">Material Cert</label>
+                  <input
+                    type="file"
+                    accept=".pdf,image/*"
+                    multiple
+                    disabled={!!savedBlankReceiptId}
+                    onChange={e => {
+                      const files = Array.from(e.target.files || [])
+                      if (files.length) setBlankCertFiles(prev => [...prev, ...files])
+                      e.target.value = ''
+                    }}
+                    className="block w-full mt-1 text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600 disabled:opacity-50"
+                  />
+                  {blankCertFiles.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {blankCertFiles.map((f, i) => (
+                        <li key={i} className="flex items-center justify-between text-xs bg-gray-800 rounded px-2 py-1">
+                          <span className="text-gray-300 truncate">{f.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => setBlankCertFiles(prev => prev.filter((_, idx) => idx !== i))}
+                            className="text-gray-500 hover:text-red-400 flex-shrink-0 ml-2"
+                            title="Remove"
+                          >
+                            <X size={14} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-xs text-gray-600 mt-1">Filed against this lot — it goes into the cert package of every job run from it.</p>
+                </div>
               </div>
 
               {blankError && (
@@ -6268,17 +6356,25 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
               )}
 
               <div className="flex justify-end gap-3 pt-2">
-                <button onClick={() => { setShowBlankModal(false); setBlankError('') }} className="px-4 py-2 text-gray-400 hover:text-white">
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveBlank}
-                  disabled={saving || !blankForm.vendor.trim() || !blankForm.blank_type_id || !blankForm.lot_number.trim() || !blankForm.quantity || blankForm.total_cost === ''}
-                  className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
-                >
-                  {saving && <Loader2 size={16} className="animate-spin" />}
-                  Receive Blanks
-                </button>
+                {savedBlankReceiptId ? (
+                  <button onClick={closeBlankModal} className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 text-white font-medium rounded-lg transition-colors">
+                    Close
+                  </button>
+                ) : (
+                  <>
+                    <button onClick={closeBlankModal} className="px-4 py-2 text-gray-400 hover:text-white">
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSaveBlank}
+                      disabled={saving || !blankForm.vendor.trim() || !blankForm.blank_type_id || !blankForm.lot_number.trim() || !blankForm.quantity || blankForm.total_cost === ''}
+                      className="px-6 py-2 bg-skynet-accent hover:bg-skynet-accent/80 disabled:opacity-50 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      {saving && <Loader2 size={16} className="animate-spin" />}
+                      Receive Blanks
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>

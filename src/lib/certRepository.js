@@ -356,14 +356,43 @@ export async function getWorkOrderTraceability(workOrderId) {
   const jdByJob = groupBy(jd.data, 'job_id')
 
   // material cert docs: material_usage.material_receiving_id → material_documents
+  // D-BLANK-CERT-02: a blank lot's cert covers every receipt of that lot + dash (a kiosk
+  // qty-0 stub, a split delivery). consume_blank_lot pins usage to the NEWEST receipt of the
+  // lot, so a cert filed on another receipt of the same lot must still reach the job. Bars
+  // keep per-receipt resolution (unchanged).
   const receivingIds = uniq((mu.data || []).map((u) => u.material_receiving_id))
   let matDocsByReceiving = {}
   if (receivingIds.length) {
+    const { data: usedRcv } = await supabase
+      .from('material_receiving')
+      .select('id, category, lot_number, bar_size')
+      .in('id', receivingIds)
+    const blankUsed = (usedRcv || []).filter((r) => r.category === 'blank' && r.lot_number)
+    const lotDashKey = (r) => `${String(r.lot_number || '').trim().toUpperCase()}|${r.bar_size ?? ''}`
+    const sourcesByReceiving = {} // used receipt id → every blank receipt id sharing its lot + dash
+    if (blankUsed.length) {
+      const { data: blankSibs } = await supabase
+        .from('material_receiving')
+        .select('id, lot_number, bar_size')
+        .eq('category', 'blank')
+        .in('lot_number', uniq(blankUsed.map((r) => r.lot_number)))
+      const sibsByKey = {}
+      for (const s of blankSibs || []) {
+        const k = lotDashKey(s)
+        if (!sibsByKey[k]) sibsByKey[k] = []
+        sibsByKey[k].push(s.id)
+      }
+      for (const r of blankUsed) sourcesByReceiving[r.id] = uniq([r.id, ...(sibsByKey[lotDashKey(r)] || [])])
+    }
+    const docReceivingIds = uniq([...receivingIds, ...Object.values(sourcesByReceiving).flat()])
     const { data: matDocs } = await supabase
       .from('material_documents')
       .select('id, material_receiving_id, document_type, file_name, file_path, uploaded_at')
-      .in('material_receiving_id', receivingIds)
-    matDocsByReceiving = groupBy(matDocs, 'material_receiving_id')
+      .in('material_receiving_id', docReceivingIds)
+    const docsByOwnReceiving = groupBy(matDocs, 'material_receiving_id')
+    for (const rid of receivingIds) {
+      matDocsByReceiving[rid] = (sourcesByReceiving[rid] || [rid]).flatMap((sid) => docsByOwnReceiving[sid] || [])
+    }
   }
 
   // --- profile names (assembly completed_by, lot received_by) ---

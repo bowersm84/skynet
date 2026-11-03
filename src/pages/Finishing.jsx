@@ -78,7 +78,7 @@ const DRY_FILM_STAGES = [
   { key: 'bake', label: 'Bake', icon: Thermometer }
 ]
 const BAKE_MINUTES = 120          // 2 h cure (D-GIZA-12)
-const DEFAULT_BAKE_TEMP_F = 350
+const DEFAULT_BAKE_TEMP_F = 300   // D-GIZA-31: Giza dry-film cure 300 °F for 2 h (was 350)
 const isDryFilmBatch = (batch) => batch?.standalone_operation_type === 'dry_film'
 const stagesFor = (batch) => (isDryFilmBatch(batch) ? DRY_FILM_STAGES : STAGES)
 

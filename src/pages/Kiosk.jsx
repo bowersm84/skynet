@@ -1576,6 +1576,7 @@ export default function Kiosk() {
           finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
         `)
         .eq('job_id', targetId)
+        .is('cancelled_at', null)
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 

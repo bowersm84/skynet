@@ -343,7 +343,7 @@ export async function getWorkOrderTraceability(workOrderId) {
         supabase.from('material_loads').select('job_id, lot_number, material_type, bar_size').in('job_id', allJobIds),
         supabase.from('material_usage').select('id, job_id, material_receiving_id, lot_number').in('job_id', allJobIds),
         supabase.from('finishing_sends').select('job_id, production_lot_number, finishing_lot_number, material_lot_number, chemical_lot_number, chemical_lot_number_2').in('job_id', allJobIds),
-        supabase.from('outbound_sends').select('job_id, operation_type, vendor_name, vendor_lot_number, cert_document_path, quantity_returned, returned_at').in('job_id', allJobIds),
+        supabase.from('outbound_sends').select('job_id, operation_type, vendor_name, vendor_lot_number, cert_document_path, quantity_returned, returned_at').in('job_id', allJobIds).is('cancelled_at', null),
         supabase.from('job_documents').select('id, job_id, document_type_id, file_name, file_url, uploaded_at:created_at, status').in('job_id', allJobIds),
       ])
     : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }]

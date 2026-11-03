@@ -90,8 +90,12 @@ export default function OutsourcedJobs({ profile }) {
   const [groupReturnForm, setGroupReturnForm] = useState({})
   const [editingExpectedId, setEditingExpectedId] = useState(null)
   const [editingExpectedValue, setEditingExpectedValue] = useState('')
+  // D-OUTCANCEL-01: Admin cancel on a Ready to Send card (reason required)
+  const [cancelFormOpen, setCancelFormOpen] = useState(null)
+  const [cancelForm, setCancelForm] = useState({})
 
   const canEdit = profile?.can_approve_compliance === true || profile?.role === 'admin'
+  const isAdmin = profile?.role === 'admin' || (profile?.roles || []).includes('admin')
 
   // Map: consolidation_group_id → count of rows in that group (across at-vendor + returned).
   // Used to render the "Consolidated (N)" pill on group members.
@@ -357,6 +361,7 @@ export default function OutsourcedJobs({ profile }) {
       .select('id, source_id, source_type, routing_step_id, operation_type, quantity, created_at')
       .eq('source_type', 'work_order_assembly')
       .is('sent_at', null)
+      .is('cancelled_at', null)
       .order('created_at', { ascending: true })
 
     if (asmErr) {
@@ -596,6 +601,42 @@ export default function OutsourcedJobs({ profile }) {
     }
   }
 
+  // D-OUTCANCEL-01: an Admin cancels a Ready to Send card that will never go out
+  // (order cancelled, sent outside SkyNet, scrapped). cancel_outsourced_send records
+  // the cancellation, closes the step once nothing on it is still out or to come,
+  // and moves the job on (to TCO when nothing was processed at a vendor).
+  const handleCancelReady = async (row) => {
+    const form = cancelForm[row.rowKey] || {}
+    const reason = (form.reason || '').trim()
+    if (!reason) {
+      alert('A reason is required to cancel')
+      return
+    }
+    setSaving(true)
+    try {
+      const partType = row.job?.part?.part_type
+      const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
+        ? 'pending_tco'
+        : 'ready_for_assembly'
+      const { error } = await supabase.rpc('cancel_outsourced_send', {
+        p_finishing_send_id: row.batch.id,
+        p_job_routing_step_id: row.step.id,
+        p_reason: reason,
+        p_cascade_later_steps: form.cascade === true,
+        p_next_status: nextStatus,
+      })
+      if (error) throw error
+      setCancelFormOpen(null)
+      setCancelForm({})
+      await fetchAll()
+    } catch (err) {
+      console.error('Error cancelling outsourced operation:', err)
+      alert('Failed to cancel: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleLogReturn = async (send) => {
     const form = returnForm[send.id] || {}
     if (!form.vendor_lot_number?.trim()) {
@@ -637,7 +678,7 @@ export default function OutsourcedJobs({ profile }) {
           if (stepSendsErr) throw stepSendsErr
 
           const allStepReturned = stepSends && stepSends.length > 0
-            && stepSends.every(s => s.returned_at != null)
+            && stepSends.every(s => s.returned_at != null || s.cancelled_at != null)
 
           if (allStepReturned) {
             // 2. Look up the Assemble step's status — only mark this external step
@@ -732,12 +773,12 @@ export default function OutsourcedJobs({ profile }) {
         if (send.job_routing_step_id) {
           const { data: stepSends, error: stepSendsErr } = await supabase
             .from('outbound_sends')
-            .select('id, returned_at, finishing_send_id')
+            .select('id, returned_at, cancelled_at, finishing_send_id')
             .eq('job_routing_step_id', send.job_routing_step_id)
           if (stepSendsErr) throw stepSendsErr
 
           const allStepReturned = stepSends && stepSends.length > 0
-            && stepSends.every(s => s.returned_at != null)
+            && stepSends.every(s => s.returned_at != null || s.cancelled_at != null)
 
           // D-LATEBATCH-02: a finishing batch still upstream of this step (in
           // finishing, awaiting compliance, or approved but not yet sent out)
@@ -788,7 +829,7 @@ export default function OutsourcedJobs({ profile }) {
               if (allStepsErr) throw allStepsErr
 
               const allExternalComplete = allSteps && allSteps.length > 0
-                && allSteps.every(s => s.status === 'complete')
+                && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
 
               if (allExternalComplete) {
                 const partType = send.job?.part?.part_type
@@ -888,10 +929,10 @@ export default function OutsourcedJobs({ profile }) {
 
         const { data: stepSends } = await supabase
           .from('outbound_sends')
-          .select('id, returned_at, finishing_send_id')
+          .select('id, returned_at, cancelled_at, finishing_send_id')
           .eq('job_routing_step_id', r.job_routing_step_id)
         const allStepReturned = stepSends && stepSends.length > 0
-          && stepSends.every(s => s.returned_at != null)
+          && stepSends.every(s => s.returned_at != null || s.cancelled_at != null)
         if (!allStepReturned) continue
 
         const jobId = r.job?.id || r.job_id
@@ -933,7 +974,7 @@ export default function OutsourcedJobs({ profile }) {
           .eq('job_id', jobId)
           .eq('step_type', 'external')
         const allExternalComplete = allSteps && allSteps.length > 0
-          && allSteps.every(s => s.status === 'complete')
+          && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
         if (!allExternalComplete) continue
 
         const partType = r.job?.part?.part_type
@@ -1271,6 +1312,14 @@ export default function OutsourcedJobs({ profile }) {
               const batchQty = displayQty
               const job = row.job
               const step = row.step
+              const laterExternalSteps = row.sourceKind === 'finishing'
+                ? (job?.job_routing_steps || []).filter(s =>
+                    s.step_type === 'external'
+                    && s.step_order > (step?.step_order ?? 0)
+                    && ['pending', 'in_progress'].includes(s.status)).length
+                : 0
+              const cancelOpen = cancelFormOpen === rowKey
+              const cancelData = cancelForm[rowKey] || {}
 
               return (
                 <div key={rowKey} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
@@ -1320,8 +1369,8 @@ export default function OutsourcedJobs({ profile }) {
                     {meta.customer && <><span>·</span><span>{meta.customer}</span></>}
                   </div>
 
-                  {canEdit && !isOpen && (
-                    <div className="pt-2 border-t border-gray-800">
+                  {canEdit && !isOpen && !cancelOpen && (
+                    <div className="pt-2 border-t border-gray-800 flex items-center gap-2">
                       <button
                         onClick={() => {
                           setSendFormOpen(rowKey)
@@ -1341,6 +1390,65 @@ export default function OutsourcedJobs({ profile }) {
                         <Truck size={13} />
                         Log Send-Out
                       </button>
+                      {isAdmin && row.sourceKind === 'finishing' && (
+                        <button
+                          onClick={() => {
+                            setSendFormOpen(null)
+                            setCancelFormOpen(rowKey)
+                            setCancelForm(prev => ({ ...prev, [rowKey]: { reason: '', cascade: false } }))
+                          }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-red-900/40 border border-gray-700 hover:border-red-700 text-gray-300 hover:text-red-300 text-xs font-medium rounded-lg transition-colors"
+                        >
+                          <X size={13} />
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* D-OUTCANCEL-01: Admin cancel - reason required, later steps opt-in */}
+                  {isAdmin && row.sourceKind === 'finishing' && cancelOpen && (
+                    <div className="pt-2 border-t border-gray-800 space-y-2">
+                      <div>
+                        <label className="block text-gray-500 text-[10px] mb-1">Reason for cancelling *</label>
+                        <textarea
+                          value={cancelData.reason || ''}
+                          onChange={e => setCancelForm(prev => ({ ...prev, [rowKey]: { ...cancelData, reason: e.target.value } }))}
+                          placeholder="e.g. order cancelled, sent outside SkyNet, scrapped"
+                          rows={2}
+                          className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-white text-xs focus:border-red-600 focus:outline-none resize-none"
+                        />
+                      </div>
+                      {laterExternalSteps > 0 && (
+                        <label className="flex items-center gap-2 text-xs text-gray-400">
+                          <input
+                            type="checkbox"
+                            checked={cancelData.cascade === true}
+                            onChange={e => setCancelForm(prev => ({ ...prev, [rowKey]: { ...cancelData, cascade: e.target.checked } }))}
+                          />
+                          Also cancel the later outsourced steps for this batch
+                        </label>
+                      )}
+                      <p className="text-[10px] text-gray-500">
+                        Removes this card. Once nothing else on this step is out or still to come, the step closes and the job moves on (to TCO when nothing was processed at a vendor).
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleCancelReady(row)}
+                          disabled={saving || !cancelData.reason?.trim()}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                        >
+                          {saving ? <Clock size={13} className="animate-spin" /> : <X size={13} />}
+                          Confirm Cancel
+                        </button>
+                        <button
+                          onClick={() => setCancelFormOpen(null)}
+                          disabled={saving}
+                          className="px-3 py-1.5 text-gray-400 hover:text-white text-xs"
+                        >
+                          Keep
+                        </button>
+                      </div>
                     </div>
                   )}
 

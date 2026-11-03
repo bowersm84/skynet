@@ -174,6 +174,7 @@ export async function fetchTravelerData(supabase, jobId) {
       finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
     `)
     .eq('job_id', jobId)
+    .is('cancelled_at', null)
     .order('sent_at', { ascending: true })
 
   const woId = job.work_order?.id || job.work_order_id

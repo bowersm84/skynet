@@ -410,6 +410,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
           .select('*', { count: 'exact', head: true })
           .eq('source_type', 'work_order_assembly')
           .is('sent_at', null)
+          .is('cancelled_at', null)
       ])
 
       // Build a set of (batch, step) combos that already have an outbound_send
@@ -635,7 +636,8 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
             outbound_sends (
               id, operation_type, vendor_name, quantity, sent_at,
               expected_return_at, returned_at, vendor_lot_number,
-              quantity_returned, cert_document_path, finishing_send_id
+              quantity_returned, cert_document_path, finishing_send_id,
+              cancelled_at, cancel_reason
             ),
             job_materials (
               lot_number,
@@ -1547,6 +1549,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
           finishing_send:finishing_sends!finishing_send_id(id, compliance_approved_at)
         `)
         .eq('job_id', jobId)
+        .is('cancelled_at', null)
         .order('sent_at', { ascending: true })
       if (osError) throw osError
 
@@ -3416,6 +3419,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
 
                                                             const linkedOutbound = job.outbound_sends?.find(os => os.finishing_send_id === send.id)
                                                             if (linkedOutbound) {
+                                                              if (linkedOutbound.cancelled_at) return <span className="text-gray-500">Outsourcing cancelled</span>
                                                               if (linkedOutbound.returned_at) return <span className="text-emerald-400">Returned · {linkedOutbound.vendor_name}</span>
                                                               return <span className="text-blue-400">At Vendor · {linkedOutbound.vendor_name}</span>
                                                             }
@@ -3528,7 +3532,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                         <span className="text-gray-600">&middot;</span>
                                                         <span className="text-gray-400">{send.quantity} pcs</span>
                                                         <span className="text-gray-600">&middot;</span>
-                                                        {send.returned_at ? (
+                                                        {send.cancelled_at ? (
+                                                          <span className="text-gray-500">Cancelled{send.cancel_reason ? ` · ${send.cancel_reason}` : ''}</span>
+                                                        ) : send.returned_at ? (
                                                           <span className="text-green-400">
                                                             Returned {new Date(send.returned_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                                                             {send.vendor_lot_number ? ` | Lot: ${send.vendor_lot_number}` : ''}
@@ -3783,6 +3789,7 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
 
                                                     const linkedOutbound = job.outbound_sends?.find(os => os.finishing_send_id === send.id)
                                                     if (linkedOutbound) {
+                                                      if (linkedOutbound.cancelled_at) return <span className="text-gray-500">Outsourcing cancelled</span>
                                                       if (linkedOutbound.returned_at) return <span className="text-emerald-400">Returned · {linkedOutbound.vendor_name}</span>
                                                       return <span className="text-blue-400">At Vendor · {linkedOutbound.vendor_name}</span>
                                                     }
@@ -3895,7 +3902,9 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
                                                 <span className="text-gray-600">&middot;</span>
                                                 <span className="text-gray-400">{send.quantity} pcs</span>
                                                 <span className="text-gray-600">&middot;</span>
-                                                {send.returned_at ? (
+                                                {send.cancelled_at ? (
+                                                  <span className="text-gray-500">Cancelled{send.cancel_reason ? ` · ${send.cancel_reason}` : ''}</span>
+                                                ) : send.returned_at ? (
                                                   <span className="text-green-400">
                                                     Returned {new Date(send.returned_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                                                     {send.vendor_lot_number ? ` | Lot: ${send.vendor_lot_number}` : ''}

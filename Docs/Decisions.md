@@ -4750,6 +4750,9 @@ Plan: S15_Implementation_Plan.md v1.1. Batch A of three (dry-film finishing). Ba
 **What:** src/purchasing.mjs reads POs in batches: headers (po ⋈ vendor), lines (poitem ⋈ poitemtype) and received receipts with their lot (receiptitem ⋈ trackinginfo, tableId 1259138490 'ReceiptItem', recordId = receiptitem.id, tracking type 'Lot Number'), and sends each PO whole to fb_upsert_purchasing, which upserts fb_purchase_orders / fb_purchase_order_lines / fb_po_receipts, marks lines and receipts that left Fishbowl removed_at, and stamps fb_sync_state.last_purchasing_at. Queue design as D-FB-54: the window (POs created or issued in the last PURCHASING_WINDOW_DAYS = 365, plus every PO with no dateCompleted) is queued at start-up, nightly in the products slot and by `npm run mirror:purchasing`; every PURCHASING_MS (10 min) the POs whose header or receipts changed since the previous poll minus PURCHASING_OVERLAP_MS (30 min) are queued; each cycle reads up to PURCHASING_MAX_POS (300). Status names come from postatus / poitemstatus when readable (not in the 10/14 schema check); otherwise ids only. PURCHASING_ENABLED / PURCHASING_DRY_RUN follow the shipments flags. Migration: Docs/migrations/2026-10-15_fb_purchasing_mirror.sql.
 **Why:** Matt, 10/15: a full PO link for the Giza Dashboard and "other things in the future". The receipt-lot join is the one the 10/14 Giza receipts pull proved (35 of 35 lots).
 
+### D-FB-57 — S17 read-side facts (probe, 2026-11-03)
+pickitem.destTagId → tag.locationId → location is the pick flag (Hold = pickitemstatus 6, Committed 30, Finished 40; SO lines are orderTypeId 20 — WO picks also land in location 3315 Production). On-hand lot = trackingtext (tagId, partTrackingId 1) / tagtrackingview. WO consumed lots = trackinginfo tableId -1515431424 keyed on the WO's pickitem ids. Shipped lots = tableId 1555030112 (already fb_shipment_lots). Invoiced = postso.postDate (written at ship time); journalPosted/extRefNumber unused so far. BOM sign-off lines = bominstructionitem; woinstruction is auto-fulfilled by Quick Fulfill. Nested assembly = one MO, one moitem typeId-50 configuration per level. Envers audits pick/pickitem/ship/shipcarton/shipitem/mo/moitem/wo/woitem/trackinginfo/bom/bomitem/bominstructionitem/woinstruction; not tag or postso. Signal locations: 3315 Production, 3316 Assembly, 3320 Purchasing. (MB, 2026-11-03)
+
 ### D-GIZA-29 — Movements tab and printed daily report (2026-10-15)
 **What:** The Giza Dashboard has two views, Dashboard and Movements. Movements opens on the last working day (Monday → Friday) with a date picker, and shows totals by step (steel nut receipts, component receipts, nylon inserted, sent to Electrolab, back from Electrolab, painted = dry-film batches started with pieces in, baked = batches completed with verified out, assembled & bagged, shipped to Giza from the Fishbowl shipment mirror, received on Fishbowl POs), then the detail: tracker entries by entry date, batches, shipments, PO receipts, entries voided that day, and entries logged that day for an earlier date. Print opens a self-contained Letter report (Arial, Skybolt red #B8222E, grey #707172) that prints itself. dayMovements / movementsReportHtml / lastWorkingDay are pure helpers in programTrackerMath.js with tests.
 **Why:** Matt, 10/15: a yesterday's-movements tab that can be produced as a printed report.
@@ -5011,3 +5014,97 @@ PROD, run by Matt: `2026-10-27_customer_program.sql` (7 / 14 / 2 / 3), `2026-10-
 **What:** The Paint → Bake oven pick now opens at 300 °F (was 350 °F). The 120-minute cure clock is unchanged. The temperature stays editable per load and is still recorded on the batch (`finishing_sends.bake_temp_f`), which is what the cert cites; the 12 dry-film batches baked before this change keep their recorded 350 °F.
 **Why:** Matt, 2026-11-03: Giza parts going through Finishing cure at 300 °F for 2 hours instead of 350 °F.
 **Files:** src/pages/Finishing.jsx; Docs/Decisions.md.
+
+## Sprint 17 — Assembly re-enabled with Fishbowl end to end (S17)
+
+Plan: S17_Implementation_Plan.md v1.1 (2026-11-03). Discovery Oct 8 – Nov 3, 2026.
+
+### D-ASM-01 — Fishbowl keeps the MO as the posting record
+Fishbowl keeps the MO as the posting record; the bridge creates and issues it at build creation; Ashley finishes it with one Quick Fulfill from a SkyNet card; the bridge reads the posted WO back and raises an exception on any mismatch.
+**Source:** Matt, Oct 8 / Nov 3
+
+### D-ASM-02 — One global assembly-lot sequence from 80000
+One global SkyNet assembly-lot sequence starting at **80000** (Nov 3), so new ALNs never collide with the book's four-digit numbers. Same set of component lots → same ALN; any different lot → next number. Rework output = source lot + `R`. Giza builds carry the program's final lot (D-GIZA-14) instead. **Default:** the lot string written to Fishbowl is the bare number (`80000`), the `ALN-` prefix is a display label — say so if the prefix should be in the lot itself (it would print on the C of C).
+**Source:** Matt, Oct 8 / Nov 3
+
+### D-ASM-03 — Stock, special and rework builds are work orders without jobs
+A stock/special/rework build is a `work_order` of origin `stock_assembly` with one `work_order_assembly` and no jobs; the existing floor, routing, outsourcing, TCO, traveler and genealogy apply unchanged.
+**Source:** Matt, Oct 8
+**Superseded by D-ASM-20** (2026-11-03): builds are `assembly_builds` rows; no job-less work order is created.
+
+### D-ASM-04 — Jody creates and assigns builds
+Jody creates and assigns builds (from grouped requests, from scratch, stock, special projects, rework). Nobody works without a task. Ashley may also create builds from the Order Queue.
+**Source:** Matt, Nov 3
+
+### D-ASM-05 — Ashley owns plating and heat treat
+Ashley owns plating/HT: completion of a build with an external routing step auto-creates the outbound batch; she sends it from Outsourced Operations. Jody has no send control.
+**Source:** Matt, Oct 8
+
+### D-ASM-06 — Pick-line signals set the Order Queue disposition
+Pick-line signals: destination Assembly / Production / Purchasing on an SO pick item (orderTypeId 20) sets the Order Queue disposition; Hold with destination Shipping = `pending` (manual disposition still allowed); Committed (30) = stock reserved; Finished (40) = picked. Flags only move a line forward or raise an exception; they never delete SkyNet work.
+**Source:** Matt, Oct 8; probe
+
+### D-ASM-07 — Checklists are configuration per part family
+Checklists are configuration per part family (step type, label, PINs required, distinct-from rule, readings, threshold, sample size), seeded from `bominstructionitem` and normalized to nine step types; Roger approves each family's checklist before the flag flips. Two-person checks are two PINs.
+**Source:** Matt, Oct 8 / Nov 3
+
+### D-ASM-08 — Kiosk entry is limited
+Kiosk entry is limited to: PIN, build, one lot tap per component (lot must exist in Fishbowl for that part with enough on hand), checkpoints only where the checklist says, pause with count, closeout. Jody's release is a status move, not an inspection record (her visual QC stays off-system, Feb 13).
+**Source:** Matt, Oct 8; Jody, Feb 13
+
+### D-ASM-09 — SkyNet-made components reach Fishbowl by Add Inventory at clearance
+SkyNet-made components reach Fishbowl by a bridge Add Inventory at clearance (location Receiving, lot = SkyNet lot number, unit cost per D-ASM-13), so every build can be posted through a Fishbowl MO.
+**Source:** Matt, Nov 3
+
+### D-ASM-10 — Fishbowl writes go through fb_push_commands
+Fishbowl writes go through `fb_push_commands` with new command types; every write is journaled, idempotent on a SkyNet key, flag-gated (`FB_MO_ENABLED`, `FB_INVADD_ENABLED`), dry-run first. The bridge-created MO is standalone (no SO link), matching today's practice.
+**Source:** design default
+
+### D-ASM-11 — Write tests on PROD only through disposable objects
+Write tests on PROD only through disposable objects: MO numbers prefixed `SKYTEST-` against a dedicated test BOM, created → issued → inspected → deleted the same day; Add Inventory against a $0 test part in a quarantine location, scrapped afterward.
+**Source:** Matt, Nov 3
+
+### D-ASM-12 — Cutover is all families at once
+Cutover is all families at once after the test script passes and a shadow day with Jody's team; the one-bench pilot stays in reserve. The flag stays reversible: off = Fishbowl exactly as today.
+**Source:** Matt, Nov 3
+
+### D-ASM-13 — Add Inventory posts at TCO close; unit cost basis
+Add Inventory posts at TCO close (the last gate) to Receiving. Unit cost basis, in order: SkyNet `parts.unit_cost` (Armory — the costing model's landing place for a standard cost until the complete costing system exists) when > 0; else Fishbowl `part.stdCost` when > 0; else the write is held as an exception for Roger to cost, as he does today. Each add records which basis it used.
+**Source:** Matt, Nov 3 (costing model v0.9.12 / spec v0.4)
+
+### D-ASM-14 — Invoiced = postso.postDate
+Invoiced = `postso.postDate` now (same instant as shipped). A later "QuickBooks posted" flag from `postso.journalPosted` / `extTxnId` is a separate phase, once that export is writing back.
+**Source:** Matt, Nov 3
+
+### D-ASM-15 — Every build records a cost snapshot at closeout
+Every build records a cost snapshot at closeout in the costing model's shape (spec v0.4, D-COST-21/25): component cost per unit from the posted WO's read-back, assembly labor = actual session minutes ÷ good qty × the loaded assembly rate (config value, $22.69/hr today), manufacturing-support overhead = 20 % of conversion. Stored on the build and exportable to the workbook; **not** pushed into Fishbowl, whose MO keeps rolling components only. The measured minutes per family replace the 6–12-minute estimates in the spec's open items.
+**Source:** Matt, Nov 3
+
+### D-ASM-16 — Rework posting is scrap plus add
+Rework posting in Fishbowl = scrap the old lot's tag and add a new tag with the `R` lot (never edit tracking). Both are REST inventory calls, so the bridge automates them in Batch D (`inventory_scrap` + `inventory_add`, flag-gated) — no Ready-to-post step for rework.
+**Source:** Matt, Nov 3
+
+### D-ASM-17 — Giza nut plates move into the kiosk as two-wave builds
+Giza nut plates move into the kiosk as two-wave builds: wave 1 "Insert nylon" (instruction: nylon washer flat side up; checked by 1 / 2), wave 2 "Final assembly" after dry film and bake (crimp 10 pieces checked 1st / 2nd; 25 pieces per bag checked with bolt 1 / 2; checked by). Each wave's closeout posts the program ledger move (`washer_inserted` with the nylon-insert lot; `assembled` with cage and retainer lots), so the tracker's final lots, splits and buckets stay the record. Fishbowl posting for Giza builds is unchanged this sprint (open item).
+**Source:** Matt, Nov 3
+
+### D-ASM-18 — D-NEST-13 deferred fix landed
+D-NEST-13 itself is on `main` (`12a6768`, 2026-09-28, via merge `912d9ed`). The deferred item recorded under it — `Assembly.jsx:189` skipping finished-good sub-assemblies, and the finishing / compliance / outsourcing routing that sends every component job to `pending_tco` while `ASSEMBLY_MODULE` is off — is not on `main` (audit §1.9). The earlier note that it was promoted to PROD on 2026-11-03 was mistaken: Matt's only recent promotions were the Giza finishing instruction, certs on blank receipts and the outsourced-module cancel (D-OUTCANCEL-01, D-GIZA-31); nothing touched D-NEST. The fix is carried by S17 Batch B and precedes the flag flip. (MB, 2026-11-03; corrected after the Batch 0 audit)
+
+### D-ASM-19 — Batch 0 is read-only
+Batch 0 produced Docs/Fishbowl_Bridge_Audit_2026-11.md and Docs/S17_Assembly_Side_Audit_2026-11.md with no source changes; Batches A–E cite them instead of the code for names. (MB, 2026-11-03)
+
+### D-ASM-20 — assembly_builds is the floor object (supersedes D-ASM-03)
+The Batch 0 audit (§8.1) found that a work order with no jobs breaks or disappears in twenty places (Assembly board, WO Lookup, TCO Review, nightly auto-close, CO fulfilment, stock requests, cert package, traveler, sales report, TV board, President's Bridge), and that `work_orders.origin` does not exist. D-ASM-03 is superseded: every piece of assembly work — order-driven, stock, special, rework, Giza — is one `assembly_builds` row. A build made from SkyNet-machined components links to its existing `work_order_assembly` and mirrors its status into the WOA's current CHECK enum (start → in_progress; complete → ready_for_outsource / pending_tco; TCO approve → complete). A stock, special, rework or program build has no work order, so no job-less work order ever exists. Sessions, component lots, step sign-offs, the ALN, the cost snapshot and the Fishbowl post status hang off the build. `outbound_sends.source_type` gains `assembly_build`. The build record is its own one-page Build Record where no job traveler exists. (MB, 2026-11-03)
+
+### D-ASM-21 — kiosk access for the assembly team
+`kiosk-authenticate` admits the `assembly` role, checking the primary role or `roles[]`; `assembly` joins `PIN_REQUIRED_ROLES` so PINs are set at first sign-in; the assembly kiosk anchors on the first commissioned machine (Traveler Kiosk pattern) with the bench as `device_id`, needs no `kiosk_sessions` row, and signs out after 2 minutes of inactivity. Role-gated RLS policies are re-checked when the role is admitted. (MB, 2026-11-03)
+
+### D-ASM-22 — Giza moves through a gated wrapper
+Two-wave Giza builds post their ledger moves through `assembly_log_program_move(...)`, gated admin / order_processor / assembly and limited to stages `washer_inserted` and `assembled`, which calls `program_log_entry` unchanged — the program gate, validation and split rules (D-GIZA-22) stay as they are. `p_done_by` is initials derived from the signer's `full_name` (profiles has no initials column). (MB, 2026-11-03)
+
+### D-ASM-23 — bridge 1.11 refactors first
+Before any new family is mirrored: an audit-tail registry with one cursor per family (`fb_sync_state.last_<family>_rev`, advanced by that family's upsert RPC; the sales-order family keeps `last_rev`); push dispatch resolved inside the handler's `try` from a table keyed by kind, so an unknown kind is finished `failed` with a clear error instead of stalling the executor; every new poller guarded with its own stamp, read by the banner. New `fb_*` mirrors follow the existing convention — RLS on, one SELECT policy for `authenticated`, writes only through `fb_upsert_*` — not "no policies". Changes to `fb_ingest_delta` or `fb_set_disposition` start from `pg_get_functiondef` on the target database. (MB, 2026-11-03)
+
+### D-ASM-24 — tco_close RPC and a general push queue
+Manual TCO close moves into one RPC, `tco_close`, atomic over jobs, work order and WOAs, which also moves linked builds to `ready_to_post` and enqueues `inventory_add` (D-ASM-09 / D-ASM-13). The push queue is generalised for non-pricing commands: `kind` CHECK widened, `import_name` nullable, an `idempotency_key` unique column, and `fb_push_enqueue_cmd(p_kind, p_payload, p_key, p_note)`; `fb_push_enqueue` stays pricing-only. Ordering rule: the bridge that knows a kind is installed before the SQL that can enqueue it. (MB, 2026-11-03)

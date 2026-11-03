@@ -100,8 +100,24 @@ export function mapLine(r) {
     note: r.note ?? null,
     customFields: jsonObj(r.customFields),
     dateLastModified: ts(r.dateLastModified),
-    parentId: null, // set by tagKitChildren() in sync.mjs (D-FB-29)
+    parentId: null, // set by tagKitChildren() then applyKitLinks() in sync.mjs (D-FB-29 / D-FB-59)
   }
+}
+
+// D-FB-59: Fishbowl's own kit link (objecttoobject typeId 30, component soitem -> kit header soitem) wins
+// over the positional rule wherever it exists. A link is only taken when the header is a kit line (typeId 80)
+// of the same order, so a stray link can never hang a line under something that is not its kit.
+// links: Map(childSoItemId -> headerSoItemId). Mutates line.parentId; returns the number of lines linked.
+export function applyKitLinks(lines, links) {
+  const kitHeaders = new Set(lines.filter((l) => l.typeId === 80).map((l) => l.id))
+  let linked = 0
+  for (const l of lines) {
+    const header = links.get(l.id)
+    if (header === undefined || header === null || !kitHeaders.has(header) || header === l.id) continue
+    l.parentId = header
+    linked++
+  }
+  return linked
 }
 
 // D-FB-29: Fishbowl explodes a kit into its header line (typeId 80) followed by component lines with

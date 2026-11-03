@@ -16,7 +16,7 @@ if (-not (Test-Path (Join-Path $root 'node_modules'))) { throw "node_modules not
 & $Nssm install $ServiceName $node $entry
 & $Nssm set $ServiceName AppDirectory $root
 & $Nssm set $ServiceName DisplayName 'SkyNet Fishbowl Bridge'
-& $Nssm set $ServiceName Description 'Mirrors Fishbowl sales orders into SkyNet MES (read-only against Fishbowl).'
+& $Nssm set $ServiceName Description 'Mirrors Fishbowl into SkyNet MES (reads Fishbowl; writes only through the push queue).'
 & $Nssm set $ServiceName Start SERVICE_AUTO_START
 & $Nssm set $ServiceName AppStdout (Join-Path $logs 'service-stdout.log')
 & $Nssm set $ServiceName AppStderr (Join-Path $logs 'service-stderr.log')

@@ -1,7 +1,7 @@
 // shipments.test.mjs — the shipments mapper, no I/O. Run: npm test (or node --test src/shipments.test.mjs)
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mapShipmentLot, isLotRow, toPayload, sweepSince, summarizeAttach, LOT_TRACKING_NAME } from './shipments.mjs'
+import { mapShipmentLot, isLotRow, toPayload, sweepSince, summarizeAttach, LOT_TRACKING_NAME, mapShip, mapShipCarton, mapShipItem, upsertShips } from './shipments.mjs'
 import { q } from './queries.mjs'
 
 // A real row of the rev 5 pull (SO 18716 line 17), as Fishbowl's data-query returns it.
@@ -62,6 +62,47 @@ test('the shipments query is the proven rev 5 join, scoped by numeric SO ids onl
   const since = q.recentShipmentSoIds('2026-09-25')
   assert.match(since, /ship\.dateShipped >= '2026-09-25'/)
   assert.throws(() => q.recentShipmentSoIds("2026-09-25' OR 1=1 --"))
+})
+
+// v1.11 ship mirror: SO 18934's shipment S18934 as data-query returned it on 2026-11-04.
+const SHIP = { soId: 11689, carrier: 'UPS', carrierService: 'Ground', dateCreated: '2026-10-08T07:47:44.157-04', cartonCount: 1, statusId: 30, dateShipped: '2026-10-08T08:45:34.477-04', shipNum: 'S18934', soNumber: '18934', shipId: 12301, status: 'Shipped' }
+const CARTON = { trackingNum: '1Z3723890395897341', freightAmount: 0, cartonNum: 1, cartonId: 12661, freightWeight: 11.75, shipId: 12301 }
+const SHIP_ITEMS = [
+  { soItemId: 108410, qtyShipped: 300, cartonId: 12661, productNum: 'SK2600-7S', shipItemId: 76375, shipId: 12301 },
+  { soItemId: 108411, qtyShipped: 1350, cartonId: 12661, productNum: 'SK2600-SW', shipItemId: 76378, shipId: 12301 },
+  { soItemId: '108409', qtyShipped: '422.000000000', cartonId: '12661', productNum: 'SK2600-6S', shipItemId: '76381', shipId: '12301' },
+]
+
+test('a ship maps to the fb_upsert_shipments keys: header with carrier and service, carton with tracking, items', () => {
+  assert.deepEqual(mapShip(SHIP), {
+    shipId: 12301, shipNum: 'S18934', soId: 11689, soNumber: '18934', statusId: 30, status: 'Shipped',
+    dateCreated: '2026-10-08T07:47:44.157-04:00', dateShipped: '2026-10-08T08:45:34.477-04:00',
+    carrier: 'UPS', carrierService: 'Ground', cartonCount: 1,
+  })
+  assert.deepEqual(mapShipCarton(CARTON), { cartonId: 12661, shipId: 12301, cartonNum: 1, trackingNum: '1Z3723890395897341', freightWeight: 11.75, freightAmount: 0 })
+  assert.deepEqual(SHIP_ITEMS.map(mapShipItem).map((i) => [i.shipItemId, i.soItemId, i.cartonId, i.qtyShipped]),
+    [[76375, 108410, 12661, 300], [76378, 108411, 12661, 1350], [76381, 108409, 12661, 422]])
+  assert.equal(mapShip({ ...SHIP, carrierService: '', dateShipped: null }).carrierService, null)
+  assert.equal(mapShipCarton({ ...CARTON, trackingNum: '' }).trackingNum, null)
+})
+
+test('ships travel whole per call; rev_to rides the last call; nothing to send still stamps once', async () => {
+  const calls = []
+  const sky = { upsertShipments: async (...a) => { calls.push(a); return a[0].length + a[2].length } }
+  const two = { ships: [mapShip(SHIP), mapShip({ ...SHIP, shipId: 1, shipNum: 'S1' })], cartons: [mapShipCarton(CARTON)], items: SHIP_ITEMS.map(mapShipItem) }
+  const n = await upsertShips(sky, two, 777, { perCall: 1 })
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls.map((c) => [c[0][0].shipId, c[1].length, c[2].length, c[3]]), [[12301, 1, 3, null], [1, 0, 0, 777]])
+  assert.equal(n, 5)
+  calls.length = 0
+  await upsertShips(sky, { ships: [], cartons: [], items: [] }, 778)
+  assert.deepEqual(calls, [[[], [], [], 778]])
+})
+
+test('the ship-mirror queries are scoped by numeric ids only', () => {
+  assert.match(q.ships([12301, 'x']), /ship\.id IN \(12301\)/)
+  assert.match(q.ships([12301]), /LEFT JOIN carrierservice ON carrierservice\.id = ship\.carrierServiceId/)
+  assert.match(q.shipIdsForSos([]), /soId IN \(NULL\)/)
 })
 
 test('the attach report becomes one log line', () => {

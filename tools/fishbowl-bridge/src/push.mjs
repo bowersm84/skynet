@@ -11,15 +11,36 @@
 import { syncProducts, syncCustomers } from './pricing.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 
-// kind -> the Fishbowl import name(s) to post, in order. Configurable because the names are Fishbowl's.
+// D-ASM-23 dispatch table: kind -> the Fishbowl import name(s) to post, in order (configurable because the names
+// are Fishbowl's), and the mirror to re-read after a real push. It is resolved inside the handler's try, so a kind
+// this bridge does not know is finished `failed` with a clear error and the executor moves on to the next command.
+export const PUSH_KINDS = {
+  prices: {
+    imports: (cfg) => [{ name: cfg.importNames.product, key: null }],
+    remirror: (fb, sky, cfg, log) => syncProducts(fb, sky, { log, batch: cfg.pricingBatch }),
+  },
+  rules: {
+    imports: (cfg) => [{ name: cfg.importNames.rules, key: null }],
+    remirror: (fb, sky, cfg, log) => syncPricingRules(fb, sky, { log }),
+  },
+  tree: {
+    imports: (cfg) => [{ name: cfg.importNames.treeCategories, key: 'categories' }, { name: cfg.importNames.tree, key: 'members' }],
+    remirror: (fb, sky, cfg, log) => syncProductTree(fb, sky, { log }),
+  },
+  groups: {
+    imports: (cfg) => [{ name: cfg.importNames.groups, key: null }],
+    remirror: (fb, sky, cfg, log) => syncCustomers(fb, sky, { since: null, log, batch: cfg.pricingBatch }),
+  },
+}
+
+export function pushHandler(kind) {
+  return Object.hasOwn(PUSH_KINDS, kind) ? PUSH_KINDS[kind] : null
+}
+
 export function importsFor(kind, cfg) {
-  switch (kind) {
-    case 'prices': return [{ name: cfg.importNames.product, key: null }]
-    case 'rules': return [{ name: cfg.importNames.rules, key: null }]
-    case 'tree': return [{ name: cfg.importNames.treeCategories, key: 'categories' }, { name: cfg.importNames.tree, key: 'members' }]
-    case 'groups': return [{ name: cfg.importNames.groups, key: null }]
-    default: throw new Error(`push: unknown command kind ${kind}`)
-  }
+  const handler = pushHandler(kind)
+  if (!handler) throw new Error(`unknown push kind: ${kind}`)
+  return handler.imports(cfg)
 }
 
 export function canPushFor(cfg) {
@@ -45,10 +66,12 @@ export async function runPushCommands(fb, sky, { cfg, log, max = 3 } = {}) {
     const gate = canPushFor(cfg)
     const dryRun = Boolean(cmd.dry_run) || !gate.ok
     const forced = !cmd.dry_run && !gate.ok
-    const imports = importsFor(cmd.kind, cfg)
     const result = { dry_run: dryRun, forced, reason: forced ? gate.why : null, imports: [], rows: 0, host: cfg.host, version: cfg.version }
+    let handler = null
     try {
-      for (const imp of imports) {
+      handler = pushHandler(cmd.kind)
+      if (!handler) throw Object.assign(new Error(`unknown push kind: ${cmd.kind}`), { plain: true })
+      for (const imp of handler.imports(cfg)) {
         const table = rowsOf(cmd.payload, imp.key)
         const n = table.length - 1
         result.rows += n
@@ -64,7 +87,7 @@ export async function runPushCommands(fb, sky, { cfg, log, max = 3 } = {}) {
       }
       await sky.pushFinish(cmd.id, true, result, null)
     } catch (e) {
-      const msg = `${e.name || 'Error'}: ${e.message}`
+      const msg = e.plain ? e.message : `${e.name || 'Error'}: ${e.message}`
       log.error(`push #${cmd.id} ${cmd.kind} failed: ${msg}`)
       try { await sky.pushFinish(cmd.id, false, result, msg.slice(0, 2000)) } catch (e2) { log.error(`push #${cmd.id}: could not record failure: ${e2.message}`) }
       continue
@@ -72,10 +95,7 @@ export async function runPushCommands(fb, sky, { cfg, log, max = 3 } = {}) {
     // Re-mirror what the push touched so the confirmation is true within the cycle (real pushes only).
     if (!dryRun) {
       try {
-        if (cmd.kind === 'prices') await syncProducts(fb, sky, { log, batch: cfg.pricingBatch })
-        else if (cmd.kind === 'rules') await syncPricingRules(fb, sky, { log })
-        else if (cmd.kind === 'tree') await syncProductTree(fb, sky, { log })
-        else if (cmd.kind === 'groups') await syncCustomers(fb, sky, { since: null, log, batch: cfg.pricingBatch })
+        await handler.remirror(fb, sky, cfg, log)
       } catch (e) {
         log.error(`push #${cmd.id}: re-mirror after push failed (the nightly poll will catch up): ${e.message}`)
       }

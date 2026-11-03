@@ -7,11 +7,15 @@
 //   node src/index.mjs --mirror-valuation  one valuation mirror pass (fb_part_valuation), then exit (v1.8)
 //   node src/index.mjs --mirror-shipments  one shipments pass over the last SHIPMENTS_SWEEP_DAYS + attach, then exit (v1.9)
 //   node src/index.mjs --mirror-purchasing  one purchasing pass over the PURCHASING_WINDOW_DAYS window, then exit (v1.10)
+//
+// v1.11 (D-ASM-23 / D-FB-58): every step runs through guarded() (guard.mjs) — one family's failure never stops
+// another; the picks / ships / mos / boms families are audit-tailed on their own cursors (audit.mjs); tags and
+// postso are polled (tags.mjs, postings.mjs); BOMs and tags are swept nightly at FB_SWEEP_HOUR.
 import { config } from './config.mjs'
 import { Fishbowl } from './fishbowl.mjs'
 import { SkyNet, makeLogger } from './skynet.mjs'
 import { q } from './queries.mjs'
-import { ts, chunk } from './mapper.mjs'
+import { ts, chunk, fbDateTime } from './mapper.mjs'
 import { ingestIds, revisionMap } from './sync.mjs'
 import { syncCustomers, syncProducts, syncHistory, nightlyDue } from './pricing.mjs'
 import { syncPartCosts } from './partCosts.mjs'
@@ -19,8 +23,12 @@ import { syncPartValuation } from './valuation.mjs'
 import { aggregateInventory, countZeroRows } from './inventory.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { runPushCommands, canPushFor } from './push.mjs'
-import { syncShipmentLots, attachShipmentLots, sweepSince } from './shipments.mjs'
+import { syncShipmentLots, attachShipmentLots, sweepSince, syncShipsForSos } from './shipments.mjs'
 import { syncPurchasing, loadStatusNames, poWindowSince, changedSince } from './purchasing.mjs'
+import { FAMILIES, runFamily, sweepBoms } from './audit.mjs'
+import { makeGuard } from './guard.mjs'
+import { loadTagScope, syncTags, tagSweepDue } from './tags.mjs'
+import { syncPostings } from './postings.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -33,7 +41,6 @@ let lastInventoryAt = 0
 let lastUsersAt = 0
 let lastCustomersRunAt = 0  // in-process interval clock for the customers poller
 let pricing = null          // in-memory copy of fb_sync_state.last_*_at / history_cursor (D-PRICE-26)
-let pricingPausedUntil = 0  // set after a pricing failure so a broken poller cannot hot-loop
 const PRICING_RETRY_MS = 900000
 let stopping = false
 let failures = 0
@@ -44,17 +51,40 @@ let failures = 0
 const pendingShipmentSos = new Set()
 let lastAttachAt = 0
 let startupSweepDone = false
-let shipmentsPausedUntil = 0
 const SHIPMENTS_RETRY_MS = 900000
 // D-FB-55: PO ids still to read, same queue design as the shipments poller. Filled by the window read (start-up,
 // nightly, one-shot) and the changed-PO poll; an id leaves only after its read succeeded. In memory on purpose: the
 // start-up window read re-queues everything recent, so a restart or a deploy loses nothing.
 const pendingPurchasingPos = new Set()
 let purchasingStartupDone = false
-let purchasingPausedUntil = 0
 let lastPurchasingPollAt = 0   // ms; start of the last successful changed-PO poll
 let purchasingNames = null     // { po, line } status-name maps, read once per process
 const PURCHASING_RETRY_MS = 900000
+
+// D-ASM-23 (bridge 1.11): every poller runs through guarded(family, fn, { retryMs }) — it catches, logs, records
+// the failure in fb_sync_state.family_errors and stands that family alone down for retryMs (SHIPMENTS_RETRY_MS by
+// default). The Order Queue's own feed (SO tail, reconciler, the four audit families) retries after a minute.
+// D-FB-61: the steps with no upsert RPC of their own have their family_errors entry cleared by fb_family_ok.
+const guard = makeGuard({
+  sky, log, defaultRetryMs: SHIPMENTS_RETRY_MS,
+  clearFamilies: ['so', 'reconcile', 'users', 'inventory', 'shipments', 'purchasing', 'pricing', 'valuation'],
+})
+const guarded = guard.guarded
+const FEED_RETRY_MS = 60000
+const HEARTBEAT_FAMILIES = ['picks', 'ships', 'mos', 'boms', 'tags', 'postings']
+// The steps that used to fail the whole cycle: while one of them is failing it still reaches
+// fb_sync_state.last_error through the heartbeat, so the banner turns red exactly as before 1.11.
+const LAST_ERROR_FAMILIES = ['so', 'reconcile', 'users', 'inventory']
+let clocks = null              // the last fb_get_family_cursors() reply: four cursors + tag / posting / sweep clocks
+let tagScope = null            // part ids on active BOMs (Labor excluded), refreshed hourly
+let tagScopeAt = 0
+let lastTagsRunAt = 0          // ms; end of the last successful tag poll (interval clock)
+let lastTagsPollAt = null      // ms; start of the last successful tag poll (the next delta's lower bound)
+let lastPostingsRunAt = 0
+let lastPostingsPollAt = null
+const TAG_SCOPE_MS = 3600000
+const POLL_OVERLAP_MS = 600000 // tags and postings re-read 10 minutes behind the previous poll
+const sweepAt = () => `${String(config.sweepHour).padStart(2, '0')}:00`
 
 // D-FB-34: Fishbowl user list (names only) so events can say who changed an order.
 async function syncUsers() {
@@ -168,8 +198,10 @@ async function pricingCycle({ force = false } = {}) {
     // tag quantity and partcost average). Logged and swallowed like the kits sync - a Fishbowl schema surprise
     // must not stand the pricing pollers down. D-FB-53: then the month-end snapshot RPC, which decides for itself
     // whether one is due (the 1st of the month, or a month-end that was missed while the bridge was down).
+    // v1.11: guarded as its own family, so a failure is recorded in family_errors (and cleared by the next good
+    // night, D-FB-61) instead of only logged; like before, it never stands the other pricing pollers down.
     if (config.valuationEnabled) {
-      try {
+      await guarded('valuation', async () => {
         await syncPartValuation(fb, sky, { log, batch: config.pricingBatch })
         pricing.last_valuation_at = new Date().toISOString()
         try {
@@ -179,9 +211,7 @@ async function pricingCycle({ force = false } = {}) {
         } catch (e) {
           log.warn(`month-end snapshot skipped: ${e.message}`)
         }
-      } catch (e) {
-        log.error(`valuation mirror failed (other mirrors unaffected): ${e.message}`)
-      }
+      }, { retryMs: PRICING_RETRY_MS })
     }
     // D-FB-54, same slot: re-queue every SO shipped in the last SHIPMENTS_SWEEP_DAYS, so a shipment the tail
     // missed (bridge down, a failed read) is read tonight. Only queues; the shipments step reads them.
@@ -250,13 +280,7 @@ async function pricingCycle({ force = false } = {}) {
 // job whose clock was not stamped is due again on the very next cycle, so an unguarded failure would
 // hot-loop a broken query every 20 s. Staleness surfaces as the three ages on /pricing.
 async function pricingCycleGuarded() {
-  if (Date.now() < pricingPausedUntil) return
-  try {
-    await pricingCycle()
-  } catch (e) {
-    pricingPausedUntil = Date.now() + PRICING_RETRY_MS
-    log.error(`pricing cycle failed, retrying in ${PRICING_RETRY_MS / 60000} min: ${e.message}`)
-  }
+  await guarded('pricing', () => pricingCycle(), { retryMs: PRICING_RETRY_MS })
 }
 
 // D-PRICE-53: claim and run queued import commands. Same stand-down pattern as the pricing pollers:
@@ -284,6 +308,8 @@ async function shipmentsCycle() {
   if (ids.length > 0) {
     const r = await syncShipmentLots(fb, sky, ids, { log, batch: config.pricingBatch, dryRun: sc.dryRun })
     upserted = r.upserted
+    // v1.11: the same SOs' ships (header, cartons, items) ride along into the ship mirror.
+    await syncShipsForSos(fb, sky, ids, { log, dryRun: sc.dryRun })
     for (const id of ids) pendingShipmentSos.delete(id)
   }
   if (upserted > 0 || Date.now() - lastAttachAt >= sc.attachMs) {
@@ -293,17 +319,14 @@ async function shipmentsCycle() {
 }
 
 async function shipmentsCycleGuarded() {
-  if (!config.shipments.enabled || Date.now() < shipmentsPausedUntil) return
-  try {
+  if (!config.shipments.enabled) return
+  await guarded('shipments', async () => {
     if (!startupSweepDone) {
       await queueShipmentSweep()
       startupSweepDone = true
     }
     await shipmentsCycle()
-  } catch (e) {
-    shipmentsPausedUntil = Date.now() + SHIPMENTS_RETRY_MS
-    log.error(`shipments cycle failed, retrying in ${SHIPMENTS_RETRY_MS / 60000} min (${pendingShipmentSos.size} SO(s) kept queued): ${e.message}`)
-  }
+  }, { retryMs: SHIPMENTS_RETRY_MS, detail: () => `(${pendingShipmentSos.size} SO(s) kept queued)` })
 }
 
 // D-FB-54: queue every SO with a shipment shipped in the last SHIPMENTS_SWEEP_DAYS (nightly, and the one-shot).
@@ -353,23 +376,80 @@ async function purchasingCycle() {
 }
 
 async function purchasingCycleGuarded() {
-  if (!config.purchasing.enabled || Date.now() < purchasingPausedUntil) return
-  try {
+  if (!config.purchasing.enabled) return
+  await guarded('purchasing', async () => {
     if (!purchasingStartupDone) {
       await queuePurchasingWindow()
       purchasingStartupDone = true
       lastPurchasingPollAt = Date.now()
     }
     await purchasingCycle()
-  } catch (e) {
-    purchasingPausedUntil = Date.now() + PURCHASING_RETRY_MS
-    log.error(`purchasing cycle failed, retrying in ${PURCHASING_RETRY_MS / 60000} min (${pendingPurchasingPos.size} PO(s) kept queued): ${e.message}`)
-  }
+  }, { retryMs: PURCHASING_RETRY_MS, detail: () => `(${pendingPurchasingPos.size} PO(s) kept queued)` })
 }
 
-async function tail() {
-  const [{ maxRev }] = await fb.query(q.maxRev)
-  const max = Number(maxRev) || 0
+// D-ASM-23: the four audit-tailed families, each on its own cursor and behind its own guard. The cursors are read
+// once per cycle; if that read fails, every family is marked failed for the cycle (each clears its own
+// family_errors key on its next success) and no cursor moves.
+async function auditCycle(maxRev) {
+  let cursorErr = null
+  try { clocks = await sky.familyCursors() } catch (e) { cursorErr = e }
+  const out = {}
+  for (const entry of FAMILIES) {
+    out[entry.family] = await guarded(entry.family, async () => {
+      if (cursorErr) throw new Error(`family cursors unavailable: ${cursorErr.message}`)
+      const r = await runFamily(entry, { fb, sky, cursor: clocks[entry.cursorKey], maxRev, overlap: config.overlapRevs })
+      if (r.mode === 'backfill') log.info(`${entry.family}: first run on this database — ${r.ids} id(s) backfilled, ${r.fetched} read, cursor -> ${maxRev}`)
+      if (entry.family === 'boms' && r.mode !== 'backfill' && nightlyDue(clocks.bomsSweepAt, sweepAt())) {
+        const s = await sweepBoms(fb, sky)
+        log.info(`boms: nightly sweep — ${s.ids} active BOM(s), ${s.fetched} read`)
+      }
+      return r
+    }, { retryMs: FEED_RETRY_MS })
+  }
+  return out
+}
+
+// D-FB-58 tags poller. Due every FB_TAGS_INTERVAL_MS, or when the sweep is (every FB_TAGS_SWEEP_INTERVAL_MS from
+// last_tags_sweep_at, D-FB-62 — independent of the 02:00 BOM sweep); the first run on a database (no last_tags_at)
+// is a sweep too. The delta reads 10 minutes behind the previous poll's start.
+const tagsSweepDue = () => tagSweepDue(clocks?.tagsSweepAt, Date.now(), config.tagsSweepMs)
+
+function tagsDue() {
+  return clocks !== null && (Date.now() - lastTagsRunAt >= config.tagsMs || tagsSweepDue())
+}
+
+async function tagsStep() {
+  if (!clocks) throw new Error('family clocks unavailable (fb_get_family_cursors has not answered yet)')
+  if (!tagScope || Date.now() - tagScopeAt >= TAG_SCOPE_MS) {
+    tagScope = await loadTagScope(fb)
+    tagScopeAt = Date.now()
+  }
+  const started = Date.now()
+  const lastPoll = lastTagsPollAt ?? (clocks.tagsAt ? Date.parse(clocks.tagsAt) : null)
+  const sweep = lastPoll === null || tagsSweepDue()
+  const r = await syncTags(fb, sky, { scope: tagScope, since: sweep ? null : fbDateTime(new Date(lastPoll - POLL_OVERLAP_MS)), log })
+  lastTagsPollAt = started
+  lastTagsRunAt = Date.now()
+  if (sweep) clocks.tagsSweepAt = new Date().toISOString()
+  return r
+}
+
+// D-FB-58 postings poller (D-ASM-14 Invoiced). The first run on a database loads the last 180 days.
+function postingsDue() {
+  return clocks !== null && Date.now() - lastPostingsRunAt >= config.postingsMs
+}
+
+async function postingsStep() {
+  if (!clocks) throw new Error('family clocks unavailable (fb_get_family_cursors has not answered yet)')
+  const started = Date.now()
+  const lastPoll = lastPostingsPollAt ?? (clocks.postingsAt ? Date.parse(clocks.postingsAt) : null)
+  const r = await syncPostings(fb, sky, { since: lastPoll === null ? null : fbDateTime(new Date(lastPoll - POLL_OVERLAP_MS)), log })
+  lastPostingsPollAt = started
+  lastPostingsRunAt = Date.now()
+  return r
+}
+
+async function tail(max) {
   if (lastRev === null) {
     lastRev = Number(await sky.getCursor()) || 0
     log.info(`cursor loaded from SkyNet: last_rev=${lastRev}`)
@@ -418,36 +498,59 @@ async function reconcile() {
   return totals.orders
 }
 
+// One cycle-log field per family: ids handled ("backfill" on a first run), "-" when it did not run, "failed" /
+// "paused" when its guard stood it down.
+function familyField(name, r) {
+  if (r && typeof r === 'object' && 'ids' in r) return `${name}=${r.ids}${r.mode === 'backfill' ? '(backfill)' : ''}`
+  if (r && typeof r === 'object' && 'rows' in r) return `${name}=${r.rows}${r.sweep ? '(sweep)' : ''}`
+  if (r && typeof r === 'object' && 'postings' in r) return `${name}=${r.postings}`
+  if (guard.isPaused(name)) return `${name}=paused`
+  return `${name}=-`
+}
+
 async function cycle() {
   const once = process.argv.includes('--once')
+  const started = Date.now()
   const result = await fb.withSession(async () => {
-    const t = await tail()
+    // The cycle's one MAX(revinfo.id) read, shared by the SO tail and every audit family. If Fishbowl cannot
+    // answer it, the cycle fails as it always has: last_error, the banner turns red, the loop backs off.
+    const [{ maxRev }] = await fb.query(q.maxRev)
+    const max = Number(maxRev) || 0
+    const t = await guarded('so', () => tail(max), { retryMs: FEED_RETRY_MS })
+    const fam = await auditCycle(max)
     let reconciled = null
     if (once || Date.now() - lastReconcileAt >= config.reconcileMs) {
-      reconciled = await reconcile()
-      lastReconcileAt = Date.now()
+      reconciled = await guarded('reconcile', async () => {
+        const n = await reconcile()
+        lastReconcileAt = Date.now()
+        return n
+      }, { retryMs: FEED_RETRY_MS }) ?? null
     }
     if (once || Date.now() - lastUsersAt >= config.usersMs) {
-      await syncUsers()
-      lastUsersAt = Date.now()
+      await guarded('users', async () => { await syncUsers(); lastUsersAt = Date.now() })
     }
     if (once || Date.now() - lastInventoryAt >= config.inventoryMs) {
-      await syncInventory()
-      lastInventoryAt = Date.now()
+      await guarded('inventory', async () => { await syncInventory(); lastInventoryAt = Date.now() })
     }
+    if (once || tagsDue()) fam.tags = await guarded('tags', tagsStep)
+    if (once || postingsDue()) fam.postings = await guarded('postings', postingsStep)
     await shipmentsCycleGuarded()
     await purchasingCycleGuarded()
     await pricingCycleGuarded()
     await pushCycleGuarded()
-    return { ...t, reconciled }
+    return { max, orders: t?.orders ?? 0, reconciled, fam }
   })
+  const cycleMs = Date.now() - started
+  const lastError = guard.failing(LAST_ERROR_FAMILIES).join(' | ') || null
   await sky.heartbeat({
-    last_rev: lastRev, version: config.version, host: config.host, last_error: null,
-    reconciled: result.reconciled !== null,
+    last_rev: lastRev, version: config.version, host: config.host, last_error: lastError ? lastError.slice(0, 500) : null,
+    reconciled: result.reconciled !== null, cycleMs, families: guard.snapshot(HEARTBEAT_FAMILIES),
   })
   if (result.orders > 0 || result.reconciled) {
     log.info(`tail ok: max_rev=${result.max} orders=${result.orders}${result.reconciled !== null ? ` reconciled=${result.reconciled}` : ''}`)
   }
+  const fields = ['picks', 'ships', 'mos', 'boms', 'tags', 'postings'].map((f) => familyField(f, result.fam[f]))
+  log.info(`bridge ${config.version} cycle: cycleMs=${cycleMs} max_rev=${result.max} so=${result.orders} ${fields.join(' ')}`)
 }
 
 // `--backfill`: one full pass of the v1.4 mirrors from scratch — customers with no `since`,
@@ -541,6 +644,7 @@ async function main() {
   }
   log.info(`shipments: ${config.shipments.enabled ? (config.shipments.dryRun ? 'DRY RUN (reads + logs, writes nothing)' : 'on') : 'off'} · sweep ${config.shipments.sweepDays} day(s) · max ${config.shipments.maxSosPerCycle} SO(s)/cycle · attach every ${config.shipments.attachMs / 60000} min`)
   log.info(`purchasing: ${config.purchasing.enabled ? (config.purchasing.dryRun ? 'DRY RUN (reads + logs, writes nothing)' : 'on') : 'off'} · window ${config.purchasing.windowDays} day(s) + open · poll every ${config.purchasing.ms / 60000} min · max ${config.purchasing.maxPosPerCycle} PO(s)/cycle`)
+  log.info(`families (1.11): ${FAMILIES.map((f) => f.family).join(', ')} audit-tailed every cycle (own cursors, overlap ${config.overlapRevs} revs) · tags every ${config.tagsMs / 60000} min (sweep every ${config.tagsSweepMs / 60000} min) · postings every ${config.postingsMs / 60000} min · BOM sweep nightly at ${sweepAt()}`)
   if (mirrorPurchasing) {
     try {
       await mirrorPurchasingOnce()

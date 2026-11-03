@@ -1,6 +1,6 @@
 // sync.mjs — shared "fetch full current state of these SOs" step used by the tail, the reconciler and the backfill.
 import { q } from './queries.mjs'
-import { buildOrders, chunk, int, ts, tagKitChildren } from './mapper.mjs'
+import { buildOrders, chunk, int, ts, tagKitChildren, applyKitLinks } from './mapper.mjs'
 
 // Kit definitions for the kit headers present in a set of mapped orders (D-FB-29).
 async function loadKitDefs(fb, orders) {
@@ -20,6 +20,20 @@ async function loadKitDefs(fb, orders) {
   return defs
 }
 
+// D-FB-59: Map(component soitem id -> kit header soitem id) from objecttoobject, for every line of the batch.
+async function loadKitLinks(fb, orders) {
+  const lineIds = orders.flatMap((o) => o.lines.map((l) => l.id)).filter((id) => id !== null)
+  const links = new Map()
+  for (const part of chunk(lineIds, 500)) {
+    for (const r of await fb.query(q.kitLinks(part))) {
+      const child = int(r.childSoItemId)
+      const header = int(r.headerSoItemId)
+      if (child !== null && header !== null) links.set(child, header)
+    }
+  }
+  return links
+}
+
 // Returns { orders, missingIds }. missingIds = ids that no longer exist in Fishbowl (hard-deleted SO).
 export async function fetchOrders(fb, ids, revById = new Map()) {
   if (ids.length === 0) return { orders: [], missingIds: [] }
@@ -27,7 +41,13 @@ export async function fetchOrders(fb, ids, revById = new Map()) {
   const lines = headers.length ? await fb.query(q.lines(headers.map((h) => h.id))) : []
   const orders = buildOrders(headers, lines, revById)
   const kitDefs = await loadKitDefs(fb, orders)
-  for (const o of orders) tagKitChildren(o.lines, kitDefs)
+  const kitLinks = await loadKitLinks(fb, orders)
+  // The positional rule runs first, exactly as before, so a line Fishbowl has no link for keeps its D-FB-29
+  // result; the objecttoobject link then overrides every line it covers (a non-contiguous component included).
+  for (const o of orders) {
+    tagKitChildren(o.lines, kitDefs)
+    applyKitLinks(o.lines, kitLinks)
+  }
   const found = new Set(orders.map((o) => o.header.id))
   const missingIds = ids.map(Number).filter((id) => !found.has(id))
   return { orders, missingIds }

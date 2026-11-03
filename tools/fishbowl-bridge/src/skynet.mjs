@@ -142,6 +142,67 @@ export class SkyNet {
 
   pushAuto() { return this.rpc('fb_push_auto', { p_as_of: new Date().toISOString().slice(0, 10) }) }
 
+  // Bridge 1.11 (D-ASM-23 / D-FB-58). Every family's upsert RPC stamps its own fb_sync_state clock and clears its
+  // own family_errors key; the audit-tailed ones advance their cursor to p_rev_to with GREATEST, so a NULL rev_to
+  // (every chunk but a window's last) never moves it.
+  familyCursors() { return this.rpc('fb_get_family_cursors', {}) }
+
+  familyError(family, message) { return this.rpc('fb_family_error', { p_family: family, p_message: message }) }
+
+  // D-FB-61 (A1b migration): removes the family's family_errors entry; a no-op when there is none.
+  familyOk(family) { return this.rpc('fb_family_ok', { p_family: family }) }
+
+  upsertPickItems(rows, removedIds = null, revTo = null) {
+    return this.rpc('fb_upsert_pick_items', { p_rows: rows, p_removed_ids: removedIds, p_rev_to: revTo })
+  }
+
+  upsertShipments(ships, cartons, items, revTo = null) {
+    return this.rpc('fb_upsert_shipments', { p_ships: ships, p_cartons: cartons, p_items: items, p_rev_to: revTo })
+  }
+
+  upsertManufactureOrders(mos, moItems, wos, woItems, consumed, revTo = null) {
+    return this.rpc('fb_upsert_manufacture_orders', {
+      p_mos: mos, p_mo_items: moItems, p_wos: wos, p_wo_items: woItems, p_consumed: consumed, p_rev_to: revTo,
+    })
+  }
+
+  upsertBoms(boms, items, instructions, revTo = null, sweep = false) {
+    return this.rpc('fb_upsert_boms', { p_boms: boms, p_items: items, p_instructions: instructions, p_rev_to: revTo, p_sweep: sweep })
+  }
+
+  upsertTags(rows, removedIds = null, sweep = false) {
+    return this.rpc('fb_upsert_tags', { p_rows: rows, p_removed_ids: removedIds, p_sweep: sweep })
+  }
+
+  upsertPostings(postings, items) { return this.rpc('fb_upsert_postings', { p_postings: postings, p_items: items }) }
+
+  // Paged read of one table, ordered on its primary key (PostgREST caps a request at 1000 rows; see openPartIds).
+  async pagedRows(table, columns, orderBy, filter = (b) => b) {
+    await this.ensureSignedIn()
+    const out = []
+    const page = 1000
+    for (let from = 0; ; from += page) {
+      const { data, error } = await filter(this.client.from(table).select(columns)).order(orderBy).range(from, from + page - 1)
+      if (error) throw new Error(`${table} read failed: ${error.message}`)
+      out.push(...(data || []))
+      if (!data || data.length < page) break
+    }
+    return out
+  }
+
+  // The mirror's live pick items of a set of picks: what the fetch did not return is sent as removed.
+  async openPickItemIds(pickIds) {
+    if (!pickIds || pickIds.length === 0) return []
+    const rows = await this.pagedRows('fb_pick_items', 'fb_pickitem_id', 'fb_pickitem_id',
+      (b) => b.in('fb_pick_id', pickIds).is('removed_at', null))
+    return rows.map((r) => Number(r.fb_pickitem_id))
+  }
+
+  // Every live mirrored tag with its part: the tag sweep marks the in-scope ones Fishbowl no longer has.
+  openTags() {
+    return this.pagedRows('fb_tags', 'fb_tag_id, fb_part_id', 'fb_tag_id', (b) => b.is('removed_at', null))
+  }
+
   // The pricing pollers' own clocks, read once at start-up. fb_sync_state is SELECT-able by authenticated.
   async pricingState() {
     await this.ensureSignedIn()

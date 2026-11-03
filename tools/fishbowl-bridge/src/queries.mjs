@@ -13,6 +13,22 @@ const strList = (vals) => (vals || [])
   .map((s) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`)
   .join(',') || 'NULL'
 
+// Bridge v1.11: an id list that can never become `IN ()` (empty -> NULL, which matches nothing).
+const inIds = (ids) => idList(ids || []) || 'NULL'
+
+// A revision number from the bridge's own arithmetic, checked anyway before it reaches the SQL.
+const rev = (n) => {
+  const v = Number(n)
+  if (!Number.isInteger(v) || v < 0) throw new Error(`audit window: bad revision ${JSON.stringify(n)}`)
+  return v
+}
+
+// A Fishbowl local datetime built by fbDateTime(), validated like purchaseChangedIds.
+const localDateTime = (s, label) => {
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(s))) throw new Error(`${label}: bad datetime ${JSON.stringify(s)}`)
+  return s
+}
+
 export const q = {
   maxRev: 'SELECT MAX(id) AS maxRev FROM revinfo',
 
@@ -43,6 +59,159 @@ export const q = {
 
   // Kit definitions for the kit products on a batch of SOs (D-FB-29). kitItemTypeId 10 = product component.
   kitItems: (productIds) => `SELECT kitProductId, productId, kitItemTypeId FROM kititem WHERE kitProductId IN (${idList(productIds)})`,
+
+  // D-FB-59: Fishbowl's own kit link. objecttoobject typeId 30 ties a component soitem (recordId1) to its kit
+  // header soitem (recordId2); the D-FB-29 positional rule is only the fallback for a line with no link.
+  kitLinks: (soItemIds) => `SELECT recordid1 AS childSoItemId, recordid2 AS headerSoItemId
+    FROM objecttoobject WHERE typeid = 30 AND recordid1 IN (${inIds(soItemIds)})`,
+
+  // --- Bridge v1.11 audit-tail families (D-ASM-23 / D-FB-58). Read-only. -----------------------------
+  // Columns confirmed against skybolt_newlive (information_schema, 2026-11-04), including the two marked
+  // "verify" in the A1 prompt: pickitem_aud.orderTypeId / pickId and carrierservice all exist.
+  // Each family's ids touched in a revision window (from, to]; the window is the family's own cursor.
+
+  // Pick ids touched in the window: SO picks only (WO picks belong to the mos family).
+  auditPickIds: (from, to) => `SELECT DISTINCT x.pickId FROM (
+      SELECT pickId FROM pickitem_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)} AND orderTypeId = 20
+      UNION ALL
+      SELECT id AS pickId FROM pick_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+    ) x WHERE x.pickId IS NOT NULL`,
+
+  auditShipIds: (from, to) => `SELECT DISTINCT x.shipId FROM (
+      SELECT id AS shipId FROM ship_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT shipId FROM shipcarton_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT shipId FROM shipitem_aud   WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+    ) x WHERE x.shipId IS NOT NULL`,
+
+  // The MO, its items, its WOs, their items, and WO pick consumption.
+  auditMoIds: (from, to) => `SELECT DISTINCT x.moId FROM (
+      SELECT id AS moId FROM mo_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT moId FROM moitem_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT mi.moId FROM wo_aud wa JOIN moitem mi ON mi.id = wa.moItemId WHERE wa.REV > ${rev(from)} AND wa.REV <= ${rev(to)}
+      UNION ALL SELECT mi.moId FROM woitem_aud wia JOIN moitem mi ON mi.id = wia.moItemId WHERE wia.REV > ${rev(from)} AND wia.REV <= ${rev(to)}
+      UNION ALL SELECT mi.moId FROM pickitem_aud pa JOIN woitem wi ON wi.id = pa.woItemId JOIN moitem mi ON mi.id = wi.moItemId
+                WHERE pa.orderTypeId = 30 AND pa.REV > ${rev(from)} AND pa.REV <= ${rev(to)}
+    ) x WHERE x.moId IS NOT NULL`,
+
+  auditBomIds: (from, to) => `SELECT DISTINCT x.bomId FROM (
+      SELECT id AS bomId FROM bom_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT bomId FROM bomitem_aud            WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+      UNION ALL SELECT bomId FROM bominstructionitem_aud WHERE REV > ${rev(from)} AND REV <= ${rev(to)}
+    ) x WHERE x.bomId IS NOT NULL`,
+
+  // First run on a database (the family's cursor is NULL): the ids to load instead of a window.
+  backfillPickIds: `SELECT DISTINCT pi.pickId FROM pickitem pi JOIN soitem ON soitem.id = pi.soItemId JOIN so ON so.id = soitem.soId
+    WHERE pi.orderTypeId = 20 AND so.statusId IN (20, 25)`,
+  backfillShipIds: 'SELECT id AS shipId FROM ship WHERE dateCreated >= DATE_SUB(NOW(), INTERVAL 180 DAY)',
+  backfillMoIds: 'SELECT id AS moId FROM mo WHERE statusId IN (10, 20, 50) OR dateCreated >= DATE_SUB(NOW(), INTERVAL 180 DAY)',
+  backfillBomIds: 'SELECT id AS bomId FROM bom WHERE activeFlag = 1',
+
+  // picks -> fb_upsert_pick_items. destTagId -> tag.locationId -> location is the D-ASM-06 flag.
+  pickItems: (pickIds) => `SELECT pi.id AS pickItemId, pi.pickId, pick.num AS pickNum, pick.statusId AS pickStatusId,
+      pick.dateLastModified AS pickLastModified,
+      soitem.soId AS soId, pi.soItemId, pi.partId, part.num AS partNum, pi.qty, pi.slotNum,
+      pi.statusId, pis.name AS status,
+      pi.srcLocationId, srcloc.name AS srcLocation, srctag.num AS srcTagNum,
+      desttag.locationId AS destLocationId, destloc.name AS destLocation, desttag.num AS destTagNum
+    FROM pickitem pi
+    JOIN pick                    ON pick.id = pi.pickId
+    LEFT JOIN pickitemstatus pis ON pis.id = pi.statusId
+    LEFT JOIN part               ON part.id = pi.partId
+    LEFT JOIN soitem             ON soitem.id = pi.soItemId
+    LEFT JOIN location srcloc    ON srcloc.id = pi.srcLocationId
+    LEFT JOIN tag srctag         ON srctag.id = COALESCE(pi.srcTagId, pi.tagId)
+    LEFT JOIN tag desttag        ON desttag.id = pi.destTagId
+    LEFT JOIN location destloc   ON destloc.id = desttag.locationId
+    WHERE pi.orderTypeId = 20 AND pi.pickId IN (${inIds(pickIds)})`,
+
+  // ships -> fb_upsert_shipments (headers, cartons, items). Lots stay with shipmentLots above.
+  ships: (shipIds) => `SELECT ship.id AS shipId, ship.num AS shipNum, ship.soId, so.num AS soNumber,
+      ship.statusId, shipstatus.name AS status, ship.dateCreated, ship.dateShipped,
+      carrier.name AS carrier, carrierservice.name AS carrierService, ship.cartonCount
+    FROM ship JOIN shipstatus ON shipstatus.id = ship.statusId
+    LEFT JOIN so ON so.id = ship.soId
+    LEFT JOIN carrier ON carrier.id = ship.carrierId
+    LEFT JOIN carrierservice ON carrierservice.id = ship.carrierServiceId
+    WHERE ship.id IN (${inIds(shipIds)})`,
+
+  shipCartons: (shipIds) => `SELECT id AS cartonId, shipId, cartonNum, trackingNum, freightWeight, freightAmount
+    FROM shipcarton WHERE shipId IN (${inIds(shipIds)})`,
+
+  shipItems: (shipIds) => `SELECT si.id AS shipItemId, si.shipId, si.shipCartonId AS cartonId, si.soItemId,
+      product.num AS productNum, si.qtyShipped
+    FROM shipitem si LEFT JOIN soitem ON soitem.id = si.soItemId LEFT JOIN product ON product.id = soitem.productId
+    WHERE si.shipId IN (${inIds(shipIds)})`,
+
+  // The ships of a set of SOs: how a SO queued for shipment lots (D-FB-54) also refreshes its ship headers.
+  shipIdsForSos: (soIds) => `SELECT id AS shipId FROM ship WHERE soId IN (${inIds(soIds)})`,
+
+  // mos -> fb_upsert_manufacture_orders. The RPC replaces every child of each MO it receives, so the four
+  // child reads always cover every MO id of the batch.
+  mos: (moIds) => `SELECT mo.id AS moId, mo.num AS moNum, mo.statusId, mostatus.name AS status, mo.soId, mo.locationGroupId,
+      mo.dateCreated, mo.dateIssued, mo.dateScheduled, mo.dateCompleted, mo.dateLastModified, mo.note, mo.userId
+    FROM mo LEFT JOIN mostatus ON mostatus.id = mo.statusId WHERE mo.id IN (${inIds(moIds)})`,
+
+  moItems: (moIds) => `SELECT mi.id AS moItemId, mi.moId, mi.typeId, mi.parentId, mi.bomId, bom.num AS bomNum, mi.partId, part.num AS partNum,
+      mi.description, mi.qtyToFulfill, mi.qtyFulfilled, mi.statusId, mi.stageLevel, mi.sortIdInstruct AS sortId
+    FROM moitem mi LEFT JOIN bom ON bom.id = mi.bomId LEFT JOIN part ON part.id = mi.partId WHERE mi.moId IN (${inIds(moIds)})`,
+
+  workOrders: (moIds) => `SELECT wo.id AS woId, wo.num AS woNum, mi.moId, wo.moItemId, wo.statusId, wostatus.name AS status,
+      wo.qtyOrdered, wo.qtyTarget, wo.qtyScrapped, wo.locationId, wo.dateCreated, wo.dateStarted, wo.dateFinished,
+      wo.note, wo.cost
+    FROM wo JOIN moitem mi ON mi.id = wo.moItemId LEFT JOIN wostatus ON wostatus.id = wo.statusId WHERE mi.moId IN (${inIds(moIds)})`,
+
+  woItems: (woIds) => `SELECT wi.id AS woItemId, wi.woId, wi.moItemId, wi.typeId, wi.partId, part.num AS partNum, wi.description,
+      wi.qtyTarget, wi.qtyUsed, wi.qtyScrapped, wi.cost, wi.standardCost, wi.sortId
+    FROM woitem wi LEFT JOIN part ON part.id = wi.partId WHERE wi.woId IN (${inIds(woIds)})`,
+
+  // Lots a WO consumed: its pick items (orderTypeId 30) with the lot from the pick history (tableId -1515431424).
+  woConsumedLots: (woIds) => `SELECT pi.id AS pickItemId, wi.woId, pi.woItemId, pi.partId, part.num AS partNum, pi.qty, pi.statusId,
+      loc.name AS srcLocation, tag.num AS srcTagNum, ti.info AS lotNumber
+    FROM pickitem pi
+    JOIN woitem wi ON wi.id = pi.woItemId
+    LEFT JOIN part ON part.id = pi.partId
+    LEFT JOIN location loc ON loc.id = pi.srcLocationId
+    LEFT JOIN tag ON tag.id = COALESCE(pi.srcTagId, pi.tagId)
+    LEFT JOIN trackinginfo ti ON ti.recordId = pi.id AND ti.tableId = -1515431424 AND ti.partTrackingId = 1
+    WHERE pi.orderTypeId = 30 AND wi.woId IN (${inIds(woIds)})`,
+
+  // boms -> fb_upsert_boms. Items and instructions are replaced whole per BOM by the RPC.
+  boms: (bomIds) => `SELECT bom.id AS bomId, bom.num AS bomNum, bom.description, bom.activeFlag AS active, bom.revision,
+      bom.autoCreateTypeId, bom.dateLastModified
+    FROM bom WHERE bom.id IN (${inIds(bomIds)})`,
+
+  bomItems: (bomIds) => `SELECT bi.id AS bomItemId, bi.bomId, bi.typeId, bi.partId, part.num AS partNum, part.description AS partDescription,
+      bi.quantity, bi.uomId, uom.code AS uom, bi.sortIdConfig AS sortId, bi.stage, bi.stageBomId
+    FROM bomitem bi LEFT JOIN part ON part.id = bi.partId LEFT JOIN uom ON uom.id = bi.uomId WHERE bi.bomId IN (${inIds(bomIds)})`,
+
+  bomInstructions: (bomIds) => `SELECT id AS instructionId, bomId, sortOrder, name, description, details
+    FROM bominstructionitem WHERE bomId IN (${inIds(bomIds)})`,
+
+  // --- Bridge v1.11 polled mirrors: tag and postso have no Envers table, so they are read by dateLastModified. ---
+
+  // The tags scope: every part on an active BOM, without the Labor line (uomId 4 = hr).
+  tagScopeParts: `SELECT DISTINCT bi.partId FROM bomitem bi JOIN bom ON bom.id = bi.bomId
+    WHERE bom.activeFlag = 1 AND bi.uomId <> 4`,
+
+  // On-hand lots for a batch of scope parts; `since` (Fishbowl local datetime) for the delta, null for a sweep.
+  tags: (partIds, since = null) => `SELECT tag.id AS tagId, tag.num AS tagNum, tag.partId, part.num AS partNum,
+      tag.locationId, location.name AS location, location.locationGroupId,
+      tag.qty, tag.qtyCommitted, tt.info AS lotNumber, 'Lot Number' AS trackingType, tag.woItemId,
+      tag.dateCreated AS tagCreated, tag.dateLastModified AS tagLastModified
+    FROM tag
+    JOIN part ON part.id = tag.partId
+    JOIN location ON location.id = tag.locationId
+    LEFT JOIN trackingtext tt ON tt.tagId = tag.id AND tt.partTrackingId = 1
+    WHERE tag.partId IN (${inIds(partIds)})${since === null ? '' : ` AND tag.dateLastModified >= '${localDateTime(since, 'tags')}'`}`,
+
+  // postso changed since a Fishbowl local datetime; null = the first load (posted in the last 180 days).
+  postings: (since = null) => `SELECT postso.id AS postSoId, postso.soId, so.num AS soNumber, postso.postDate, postso.datePosted, postso.statusId,
+      postso.extRefNumber, postso.extTxnId, postso.journalPosted, postso.totalTax
+    FROM postso JOIN so ON so.id = postso.soId
+    WHERE ${since === null ? 'postso.postDate >= DATE_SUB(NOW(), INTERVAL 180 DAY)' : `postso.dateLastModified >= '${localDateTime(since, 'postings')}'`}`,
+
+  postingItems: (postSoIds) => `SELECT id AS postSoItemId, postSOId AS postSoId, soItemId, shipItemId, qty, totalPrice
+    FROM postsoitem WHERE postSOId IN (${inIds(postSoIds)})`,
 
   // --- Bridge v1.9 shipments poller (D-FB-54 / D-KSTC-37). Read-only. -------------------------------
   // The Fishbowl rev 5 query of 2026-10-09 (Docs/migrations/2026-10-09_FISHBOWL_kit_component_lots_READONLY.sql),

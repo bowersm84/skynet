@@ -36,7 +36,7 @@ const num = (k, d) => {
 }
 
 export const config = {
-  version: '1.10.0',
+  version: '1.11.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -45,6 +45,9 @@ export const config = {
     pass: need('FB_PASS'),
     appId: num('FB_APP_ID', 4350),
     appName: 'SkyNet Bridge',
+    // Sent to Fishbowl at every login as the Integrated App's description. The bridge reads Fishbowl and writes
+    // only through the push queue (since 1.7), but this value is left as registered: changing it could make
+    // Fishbowl ask for the app to be accepted again in Setup > Settings > Integrated Apps (S17 A1, Matt to decide).
     appDescription: 'SkyNet MES sales order sync (read-only)',
     sessionMode: process.env.SESSION_MODE === 'per_cycle' ? 'per_cycle' : 'hold',
     timeoutMs: num('FB_TIMEOUT_MS', 30000),
@@ -124,6 +127,16 @@ export const config = {
     maxPosPerCycle: num('PURCHASING_MAX_POS', 300),
     batchPos: num('PURCHASING_BATCH_POS', 100),
   },
+  // Bridge 1.11 (D-ASM-23 / D-FB-58). The picks / ships / mos / boms families are audit-tailed every cycle on
+  // their own cursors (audit.mjs); tags and postso have no Envers table and are polled:
+  //   FB_TAGS_INTERVAL_MS        tag delta poll (dateLastModified), default 5 min
+  //   FB_TAGS_SWEEP_INTERVAL_MS  full tag sweep (catches tags Fishbowl deleted once emptied), default 1 h (D-FB-62)
+  //   FB_POSTINGS_INTERVAL_MS    postso delta poll, default 5 min
+  //   FB_SWEEP_HOUR              local hour (0-23) of the nightly BOM sweep, default 2
+  tagsMs: num('FB_TAGS_INTERVAL_MS', 300000),
+  tagsSweepMs: num('FB_TAGS_SWEEP_INTERVAL_MS', 3600000),
+  postingsMs: num('FB_POSTINGS_INTERVAL_MS', 300000),
+  sweepHour: (() => { const h = Math.trunc(num('FB_SWEEP_HOUR', 2)); return Number.isFinite(h) ? Math.min(23, Math.max(0, h)) : 2 })(),
   // Fishbowl import names (the import's name with dashes). Only change if Fishbowl renames an import.
   importNames: {
     // Product Pricing (columns Product, Price) is Fishbowl's list-price import. NOT "Product", which creates and

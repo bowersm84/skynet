@@ -1,4 +1,4 @@
-import { Fragment, useMemo } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { ChevronRight, ChevronDown, Loader2, ExternalLink, AlertTriangle } from 'lucide-react'
 import LineDetailPanel from './LineDetailPanel'
 import {
@@ -6,8 +6,12 @@ import {
   DISPOSITION_LABELS, DISPOSITION_COLORS, RESOLUTION_LABELS, RESOLUTION_COLORS, MANUAL_DISPOSITIONS,
   PRODUCT_LINE_TYPES, formatDate, formatDateShort, formatDateTime, isSuspectDate, isSelectableLine, convertBlocker,
   coQtyForLine, displayPartNumber, buildKitTree, formatTsDateShort, isClosedLine,
-  summarizeFbInventory, prodDueForLine,
+  summarizeFbInventory, prodDueForLine, PICK_SIGNAL_LABELS, FLAG_SIGNALS, orderShipPills,
 } from '../../lib/fishbowl'
+
+// Skybolt brand colours: red for Ashley's flags (Assembly / Production / Purchasing), grey for where a pick stands.
+const SKYBOLT_RED = '#B8222E'
+const SKYBOLT_GREY = '#707172'
 
 // D-FB-44: the Prod Due cell for a CO-linked line. Scheduled finish (last component off the
 // machine) when there is one — red past the target, "+" when part of the work is unscheduled;
@@ -34,11 +38,71 @@ function ProdDueCell({ line, detail }) {
   )
 }
 
-function Chip({ className = '', children, title }) {
+function Chip({ className = '', children, title, style, onClick }) {
   return (
-    <span title={title} className={`inline-flex items-center px-2 py-0.5 rounded text-xs border whitespace-nowrap ${className}`}>
+    <span title={title} style={style} onClick={onClick} className={`inline-flex items-center px-2 py-0.5 rounded text-xs border whitespace-nowrap ${className}`}>
       {children}
     </span>
+  )
+}
+
+// S17 A2 (D-ASM-06): the Fishbowl pick flag on a line — red when Ashley sent it to Assembly / Production /
+// Purchasing, grey for where the pick otherwise stands.
+function PickSignalChip({ line }) {
+  const s = line.fb_pick_signal
+  if (!s) return null
+  const flag = FLAG_SIGNALS.includes(s)
+  const title = [
+    `Pick ${line.fb_pick_num || '?'} · ${line.fb_pick_status || s}${line.fb_pick_dest ? ` → ${line.fb_pick_dest}` : ''}`,
+    line.fb_pick_signal_at ? formatDateTime(line.fb_pick_signal_at) : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <Chip className="text-white border-transparent" style={{ backgroundColor: flag ? SKYBOLT_RED : SKYBOLT_GREY }} title={title}>
+      {PICK_SIGNAL_LABELS[s] || s}
+    </Chip>
+  )
+}
+
+// S17 A2: shipped from the ship mirror. Partial shipments read shipped/ordered; the tracking numbers are in the
+// tooltip and a click copies the first one.
+function ShippedChip({ line }) {
+  const [copied, setCopied] = useState(false)
+  const ship = line.ship
+  const qtyShipped = Number(ship?.qty_shipped || 0)
+  if (!(qtyShipped > 0)) return null
+  const qtyOrdered = Number(line.qty_ordered || 0)
+  const qtyText = qtyShipped < qtyOrdered ? `${qtyShipped.toLocaleString()}/${qtyOrdered.toLocaleString()}` : qtyShipped.toLocaleString()
+  const tracking = String(ship.tracking_nums || '').split(',').map((t) => t.trim()).filter(Boolean)
+  const title = [
+    ship.ship_nums ? `Shipment ${ship.ship_nums}` : null,
+    tracking.length ? `Tracking ${tracking.join(', ')}` : 'No tracking number',
+    tracking.length ? (copied ? 'Copied' : 'Click to copy the tracking number') : null,
+  ].filter(Boolean).join(' · ')
+  const copy = async (e) => {
+    e.stopPropagation()
+    if (!tracking.length) return
+    try {
+      await navigator.clipboard.writeText(tracking[0])
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      console.warn('tracking number copy failed:', err?.message || err)
+    }
+  }
+  return (
+    <Chip className={`bg-green-900/40 text-green-300 border-green-800 ${tracking.length ? 'cursor-pointer hover:brightness-125' : ''}`} title={title} onClick={copy}>
+      {copied ? 'Copied' : [`Shipped ${qtyText}`, ship.carriers, formatTsDateShort(ship.last_shipped_at)].filter(Boolean).join(' · ')}
+    </Chip>
+  )
+}
+
+// S17 A2 (D-ASM-14): Invoiced = postso.postDate, written by Fishbowl at ship time.
+function InvoicedChip({ line }) {
+  if (!line.ship?.invoiced_at) return null
+  return (
+    <Chip className="bg-blue-900/40 text-blue-300 border-blue-800" title={`Posted in Fishbowl ${formatDateTime(line.ship.invoiced_at)}`}>
+      Invoiced {formatTsDateShort(line.ship.invoiced_at)}
+    </Chip>
   )
 }
 
@@ -73,7 +137,7 @@ export default function SOCard({
   order, lines, linesLoading, expanded, onToggle,
   selected, onToggleLine, onSelectAll, onClearSelection,
   canAct, busy, onBulkDisposition, onConvert, onOpenCO, inventory = {},
-  lineDetail = {}, purchaseComps = {}, expandedLines, onToggleLineDetail,
+  lineDetail = {}, purchaseComps = {}, expandedLines, onToggleLineDetail, highlight = null,
 }) {
   const openLines = expandedLines || new Set()
   const detailColSpan = canAct ? 12 : 11
@@ -86,6 +150,8 @@ export default function SOCard({
   // D-FB-29: kit components render indented under their kit header; D-FB-45: labelled with their Fishbowl line number
   const tree = useMemo(() => buildKitTree(lines || []), [lines])
   const allSelected = selectableLines.length > 0 && selectableLines.every((l) => selected.has(l.fb_soitem_id))
+  // S17 A2: Shipped / Invoiced pills once the lines (with their ship state) are loaded.
+  const pills = useMemo(() => orderShipPills(lines || []), [lines])
 
   const suspect = order.suspect_dates
 
@@ -121,6 +187,8 @@ export default function SOCard({
           <CountChip n={order.covered_lines} label="covered" className={DISPOSITION_COLORS.covered} />
           <CountChip n={order.assembly_lines} label="assy" className={DISPOSITION_COLORS.assembly} />
           <CountChip n={order.shipped_lines} label="shipped" className="bg-green-900/20 text-green-400 border-green-900" />
+          {pills.shipped && <Chip className="bg-green-900/40 text-green-300 border-green-800" title="Every Sale line has shipped what was ordered (Fishbowl shipments)">Shipped</Chip>}
+          {pills.invoiced && <Chip className="bg-blue-900/40 text-blue-300 border-blue-800" title="Every Sale line has a Fishbowl post date (D-ASM-14)">Invoiced</Chip>}
           {order.open_exceptions > 0 && (
             <Chip className="bg-red-900/40 text-red-300 border-red-800">{order.open_exceptions} exception{order.open_exceptions === 1 ? '' : 's'}</Chip>
           )}
@@ -185,9 +253,12 @@ export default function SOCard({
                     // purchased lines that carry a purchase component list (D-FB-42).
                     const hasDetail = !!l.customer_order_line_id || (l.disposition === 'purchased' && (purchaseComps[l.fb_soitem_id] || []).length > 0)
                     const detailOpen = hasDetail && openLines.has(l.fb_soitem_id)
+                    // D-ASM-27: a line matching the active Needs CO / flagged filter is marked
+                    const marked = !!highlight && highlight(l)
                     return (
                       <Fragment key={l.fb_soitem_id}>
-                      <tr className={`${muted ? 'text-gray-600' : ''} ${selected.has(l.fb_soitem_id) ? 'bg-purple-900/10' : ''}`}>
+                      <tr className={`${muted ? 'text-gray-600' : ''} ${selected.has(l.fb_soitem_id) ? 'bg-purple-900/10' : marked ? 'bg-red-900/20' : ''}`}
+                        style={marked ? { boxShadow: `inset 3px 0 0 ${SKYBOLT_RED}` } : undefined}>
                         {canAct && (
                           <td className="px-3 py-2">
                             {selectable && (
@@ -246,10 +317,17 @@ export default function SOCard({
                               </Chip>
                             ) : (
                               <Chip className={DISPOSITION_COLORS[l.disposition] || DISPOSITION_COLORS.ignore}
-                                title={[l.disposition_by_profile?.full_name, l.disposition_at ? formatDateTime(l.disposition_at) : null, l.disposition_note].filter(Boolean).join(' · ')}>
+                                title={[
+                                  // D-ASM-26: a disposition the pick signal set has no person behind it
+                                  l.disposition_source === 'fishbowl' ? 'by Fishbowl pick' : l.disposition_by_profile?.full_name ? `by ${l.disposition_by_profile.full_name}` : null,
+                                  l.disposition_at ? formatDateTime(l.disposition_at) : null, l.disposition_note,
+                                ].filter(Boolean).join(' · ')}>
                                 {DISPOSITION_LABELS[l.disposition] || l.disposition}
                               </Chip>
                             )}
+                            <PickSignalChip line={l} />
+                            <ShippedChip line={l} />
+                            <InvoicedChip line={l} />
                             {coNumber && (
                               <span
                                 role="link"

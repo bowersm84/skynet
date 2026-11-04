@@ -4768,6 +4768,9 @@ The `appDescription` the bridge sends to Fishbowl at every login (`config.mjs`, 
 ### D-FB-62 — Tag sweep hourly
 Fishbowl deletes a tag once it is emptied and the tag delta read (by `dateLastModified`) cannot see a deletion, so the full tag sweep — which marks every live in-scope mirror tag Fishbowl no longer has as removed — runs every `FB_TAGS_SWEEP_INTERVAL_MS` (default 3 600 000) measured from `last_tags_sweep_at`, not nightly: an emptied lot leaves `fb_tags` within the hour, which Batch C's kiosk lot check needs. This supersedes the nightly tag sweep in D-FB-58; the 02:00 slot (`FB_SWEEP_HOUR`) keeps the BOM sweep. A sweep costs about 3 s (2,832 tags on TEST's first run). (MB/CC, 2026-11-04)
 
+### D-FB-63 — Sync banner reads family stamps
+The Order Queue banner shows each bridge family's age from fb_sync_state and a family error only when its family_errors.at is newer than that family's last stamp; the heartbeat payload is not used for this. (CC, 2026-11-05)
+
 ### D-GIZA-29 — Movements tab and printed daily report (2026-10-15)
 **What:** The Giza Dashboard has two views, Dashboard and Movements. Movements opens on the last working day (Monday → Friday) with a date picker, and shows totals by step (steel nut receipts, component receipts, nylon inserted, sent to Electrolab, back from Electrolab, painted = dry-film batches started with pieces in, baked = batches completed with verified out, assembled & bagged, shipped to Giza from the Fishbowl shipment mirror, received on Fishbowl POs), then the detail: tracker entries by entry date, batches, shipments, PO receipts, entries voided that day, and entries logged that day for an earlier date. Print opens a self-contained Letter report (Arial, Skybolt red #B8222E, grey #707172) that prints itself. dayMovements / movementsReportHtml / lastWorkingDay are pure helpers in programTrackerMath.js with tests.
 **Why:** Matt, 10/15: a yesterday's-movements tab that can be produced as a printed report.
@@ -5126,3 +5129,9 @@ Manual TCO close moves into one RPC, `tco_close`, atomic over jobs, work order a
 
 ### D-ASM-25 — Batch A1 shipped
 Bridge 1.11 read side and the S17 A1 migration. Batch A2 (Order Queue signals) follows. (CC, 2026-11-04)
+
+### D-ASM-26 — Pick signals set dispositions
+Every bridge upsert of fb_pick_items re-evaluates the affected open SO lines (fb_apply_pick_signals, statement triggers): assembly → assembly, purchasing → purchased (components = whole part, noted), reserved/picked → stock; production and held only flag the line. A disposition moves only when the line is pending or was last set by Fishbowl (disposition_source = 'fishbowl'); a human or system disposition is never overridden, the production path (customer_order_line_id) is never touched, and a line reset to pending is re-evaluated at once. Migration 2026-11-05_S17_A2_pick_signals.sql. A line reset to pending by any path is re-evaluated at once by the `fb_sales_order_lines_pending_reeval` trigger (TEST, Nov 4). (MB/CC, 2026-11-05)
+
+### D-ASM-27 — Needs CO worklist
+Order Queue filter chips Needs CO / Assembly flagged / Purchasing flagged, driven by fb_pick_signal; Create CO is unchanged. Shipped and Invoiced chips per line from v_fb_line_ship_state (Invoiced = postso.postDate, D-ASM-14). Card pills load with the card's lines; a per-SO ship summary view is Batch E polish if Ashley wants them on the closed card. (CC, 2026-11-05)

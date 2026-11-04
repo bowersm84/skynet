@@ -10,7 +10,7 @@ import { canActOnOrderQueue } from '../lib/roles'
 import {
   getSyncState, getQueueOrders, getQueueLines, getQueuePartIndex, getInventoryFor, getOpenExceptions, getRecentEvents,
   setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS, getLineDetail, getPurchaseComponents,
-  resolveException,
+  resolveException, getLineShipStates, getFlaggedLines, SIGNAL_FILTERS,
 } from '../lib/fishbowl'
 
 // D-FB-42: a Purchase on one of these part types may need a component list — the modal loads the
@@ -51,6 +51,8 @@ export default function OrderQueue({ profile, onNavigate }) {
   const [eventsLoading, setEventsLoading] = useState(false)
   const [ackingId, setAckingId] = useState(null)
   const [resolvingId, setResolvingId] = useState(null) // D-FB-48
+  const [flagged, setFlagged] = useState([])              // lines with an Assembly / Production / Purchasing pick flag — D-ASM-27
+  const [signalFilter, setSignalFilter] = useState(null)  // null | 'needs_co' | 'assembly' | 'purchasing'
   const reresolvedRef = useRef(false)
 
   const loadOrders = useCallback(async () => {
@@ -66,6 +68,13 @@ export default function OrderQueue({ profile, onNavigate }) {
       } catch (e) {
         console.warn('queue part index read failed:', e?.message || e)
       }
+      // D-ASM-27: the flagged lines behind the Needs CO / Assembly / Purchasing filters. Same rule as the part
+      // index: a failed read is logged and the filters show no lines until the next refresh.
+      try {
+        setFlagged(await getFlaggedLines())
+      } catch (e) {
+        console.warn('flagged line read failed:', e?.message || e)
+      }
     } catch (e) {
       console.error('Order Queue load failed:', e)
       setLoadError(e?.message || String(e))
@@ -77,7 +86,15 @@ export default function OrderQueue({ profile, onNavigate }) {
   const loadLines = useCallback(async (fbSoId) => {
     setLinesLoading((prev) => ({ ...prev, [fbSoId]: true }))
     try {
-      const rows = await getQueueLines(fbSoId)
+      const lineRows = await getQueueLines(fbSoId)
+      // S17 A2: shipped / invoiced per line from the ship and posting mirrors. A failed read leaves the chips off.
+      let ship = {}
+      try {
+        ship = await getLineShipStates(lineRows.map((l) => l.fb_soitem_id))
+      } catch (e) {
+        console.warn('ship state read failed:', e?.message || e)
+      }
+      const rows = lineRows.map((l) => ({ ...l, ship: ship[l.fb_soitem_id] || null }))
       setLinesBySo((prev) => ({ ...prev, [fbSoId]: rows }))
       // D-FB-33: Fishbowl on-hand for the parts on these lines
       const partNums = rows.map((l) => (l.part_num || l.product_num || '').toUpperCase()).filter(Boolean)
@@ -322,16 +339,33 @@ export default function OrderQueue({ profile, onNavigate }) {
     [orders],
   )
 
+  // D-ASM-27: flagged lines of the SOs in the queue, per filter → { [filter]: { lines, soIds } }.
+  const signalSets = useMemo(() => {
+    const open = new Set(orders.map((o) => o.fb_so_id))
+    const out = {}
+    for (const [key, f] of Object.entries(SIGNAL_FILTERS)) {
+      const lines = flagged.filter((l) => open.has(l.fb_so_id) && f.match(l))
+      out[key] = { lines, soIds: new Set(lines.map((l) => l.fb_so_id)) }
+    }
+    return out
+  }, [orders, flagged])
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
     return orders.filter((o) => {
-      if (tab === 'queue' && !(o.pending_lines > 0)) return false
+      // A signal filter looks across every open SO: a flagged line has usually left Pending already (Assembly and
+      // Purchasing flags set the disposition), so the Queue tab's pending rule would hide it.
+      if (signalFilter) {
+        if (!signalSets[signalFilter]?.soIds.has(o.fb_so_id)) return false
+      } else if (tab === 'queue' && !(o.pending_lines > 0)) return false
       if (salesmanFilter !== 'all' && o.salesman !== salesmanFilter) return false
       if (!q) return true
       return [o.so_number, o.customer_name, o.customer_po, o.linked_co_number, o.salesman, partIndex[o.fb_so_id]]
         .some((v) => v && String(v).toLowerCase().includes(q))
     })
-  }, [orders, tab, salesmanFilter, search, partIndex])
+  }, [orders, tab, salesmanFilter, search, partIndex, signalFilter, signalSets])
+
+  const highlight = signalFilter ? SIGNAL_FILTERS[signalFilter].match : null
 
   const queueCount = orders.filter((o) => o.pending_lines > 0).length
   const pendingLines = orders.reduce((s, o) => s + (o.pending_lines || 0), 0)
@@ -417,6 +451,24 @@ export default function OrderQueue({ profile, onNavigate }) {
             <option value="all">All salespeople</option>
             {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
+          {/* D-ASM-27: Ashley's pick flags. Needs CO lines still go through Create CO. */}
+          <div className="flex items-center gap-1">
+            {Object.entries(SIGNAL_FILTERS).map(([key, f]) => {
+              const n = signalSets[key]?.lines.length || 0
+              const on = signalFilter === key
+              return (
+                <button
+                  key={key}
+                  onClick={() => setSignalFilter(on ? null : key)}
+                  title={on ? 'Show every order again' : `Only orders with a line flagged in Fishbowl: ${f.label}`}
+                  className={`px-3 py-1.5 rounded text-xs border transition-colors ${on ? 'text-white border-transparent' : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'}`}
+                  style={on ? { backgroundColor: '#B8222E' } : undefined}
+                >
+                  {f.label} ({n})
+                </button>
+              )
+            })}
+          </div>
           <span className="text-xs text-gray-600">
             Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship · Prod Due: last component off the machine (<span className="text-gray-500">T</span> = SkyNet target until scheduled; assembly, plating and finishing not included)
           </span>
@@ -441,7 +493,8 @@ export default function OrderQueue({ profile, onNavigate }) {
           <div className="text-center py-12 bg-red-900/20 rounded-lg border border-red-900 text-red-300 text-sm">{loadError}</div>
         ) : visible.length === 0 ? (
           <div className="text-center py-12 bg-gray-900 rounded-lg border border-gray-800 text-gray-500">
-            {tab === 'queue' ? 'Nothing pending — every open order line has a disposition.' : 'No open Fishbowl orders match.'}
+            {signalFilter ? `No open order has a line ${SIGNAL_FILTERS[signalFilter].label.toLowerCase()}.`
+              : tab === 'queue' ? 'Nothing pending — every open order line has a disposition.' : 'No open Fishbowl orders match.'}
           </div>
         ) : (
           <div className="space-y-2">
@@ -467,6 +520,7 @@ export default function OrderQueue({ profile, onNavigate }) {
                 purchaseComps={purchaseComps}
                 expandedLines={expandedLines}
                 onToggleLineDetail={toggleLineDetail}
+                highlight={highlight}
               />
             ))}
           </div>

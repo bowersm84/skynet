@@ -122,6 +122,43 @@ export const MANUAL_DISPOSITIONS = [
   { value: 'pending', label: 'Back to pending' },
 ]
 
+// ── Fishbowl pick signals (S17 A2, D-ASM-06 / D-ASM-26) ─────────────────────
+// fb_sales_order_lines.fb_pick_signal, recorded by fb_apply_pick_signals from the bridge's pick mirror. The first
+// three are Ashley's flags (a held pick line with that destination); the rest are where the pick stands.
+export const PICK_SIGNAL_LABELS = {
+  assembly: 'Assembly',
+  production: 'Production',
+  purchasing: 'Purchasing',
+  held: 'Held',
+  reserved: 'Reserved',
+  picked: 'Picked',
+  started: 'Picking',
+  entered: 'Pick entered',
+}
+export const FLAG_SIGNALS = ['assembly', 'production', 'purchasing']
+
+// D-ASM-27: the Order Queue's signal filters. Needs CO = flagged for Production and not yet on a CO line;
+// production still goes through Create CO (D-ASM-06).
+export const SIGNAL_FILTERS = {
+  needs_co: {
+    label: 'Needs CO',
+    match: (l) => l.fb_pick_signal === 'production' && !l.customer_order_line_id && !['production', 'covered'].includes(l.disposition),
+  },
+  assembly: { label: 'Assembly flagged', match: (l) => l.fb_pick_signal === 'assembly' },
+  purchasing: { label: 'Purchasing flagged', match: (l) => l.fb_pick_signal === 'purchasing' },
+}
+
+// SO card pills from loaded lines (each carrying `ship` from v_fb_line_ship_state): Shipped when every Sale line
+// (type 10) has shipped what was ordered, Invoiced when every one has a postso post date (D-ASM-14).
+export function orderShipPills(lines) {
+  const sale = (lines || []).filter((l) => l.type_id === 10 && !l.removed_at)
+  if (sale.length === 0) return { shipped: false, invoiced: false }
+  return {
+    shipped: sale.every((l) => Number(l.ship?.qty_shipped || 0) >= Number(l.qty_ordered || 0) && Number(l.ship?.qty_shipped || 0) > 0),
+    invoiced: sale.every((l) => !!l.ship?.invoiced_at),
+  }
+}
+
 export const RESOLUTION_LABELS = {
   part: 'SkyNet part',
   kit: 'Kit SKU',
@@ -311,6 +348,7 @@ const LINE_SELECT = `
   qty_ordered, qty_fulfilled, qty_to_fulfill, effective_due_date, due_date_is_default, remaining_parts_ship_date,
   customer_part_num, rev_level, resolution, disposition, disposition_at, disposition_note,
   part_id, kit_sku_id, customer_order_line_id, removed_at, parent_fb_soitem_id,
+  fb_pick_signal, fb_pick_num, fb_pick_dest, fb_pick_status, fb_pick_signal_at, disposition_source,
   part:parts(part_number, part_type, is_active),
   kit:kit_skus(part_number),
   co_line:customer_order_lines(line_number, status, quantity_ordered, quantity_fulfilled, components_needed, customer_order:customer_orders(co_number)),
@@ -326,6 +364,42 @@ export async function getQueueLines(fbSoId) {
     .order('line_number', { ascending: true })
   if (error) throw error
   return data || []
+}
+
+// S17 A2: shipped / invoiced state per Fishbowl line from v_fb_line_ship_state (the bridge 1.11 ship and posting
+// mirrors). → { [fb_soitem_id]: { qty_shipped, first_shipped_at, last_shipped_at, carriers, tracking_nums,
+// ship_nums, any_packed, invoiced_at, any_journal_posted } }; a line with no shipment and no posting has no entry.
+export async function getLineShipStates(fbSoitemIds) {
+  const ids = [...new Set((fbSoitemIds || []).filter((v) => v !== null && v !== undefined))]
+  const out = {}
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error } = await supabase
+      .from('v_fb_line_ship_state')
+      .select('fb_soitem_id, qty_shipped, first_shipped_at, last_shipped_at, carriers, tracking_nums, ship_nums, any_packed, invoiced_at, any_journal_posted')
+      .in('fb_soitem_id', ids.slice(i, i + 200))
+    if (error) throw error
+    for (const r of data || []) out[r.fb_soitem_id] = r
+  }
+  return out
+}
+
+// D-ASM-27: every live line carrying one of Ashley's flags, for the Needs CO / Assembly / Purchasing filter counts.
+// The caller keeps only lines of SOs that are open in the queue. A few hundred rows at most; paged anyway.
+export async function getFlaggedLines() {
+  const out = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from('fb_sales_order_lines')
+      .select('fb_soitem_id, fb_so_id, fb_pick_signal, customer_order_line_id, disposition')
+      .in('fb_pick_signal', FLAG_SIGNALS)
+      .is('removed_at', null)
+      .order('fb_soitem_id', { ascending: true })
+      .range(from, from + 999)
+    if (error) throw error
+    out.push(...(data || []))
+    if (!data || data.length < 1000) break
+  }
+  return out
 }
 
 // D-FB-51: the part numbers on each open SO, for the queue search — product, part and the customer's

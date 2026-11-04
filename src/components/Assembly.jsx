@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { FEATURES } from '../config'
 import { getEffectiveQty } from '../lib/effectiveQty'
 import {
   Package,
@@ -185,8 +186,10 @@ export default function Assembly({ profile, onUpdate }) {
         // If work_order_assemblies has records, check each one independently
         if (wo.work_order_assemblies && wo.work_order_assemblies.length > 0) {
           for (const woa of wo.work_order_assemblies) {
-            // Skip finished goods — they don't need assembly
-            if (woa.assembly?.part_type === 'finished_good') continue
+            // Skip finished goods — they don't need assembly. S17 B.1 (D-ASM-30, the D-NEST-13 deferred item): with
+            // the assembly module on, a finished-good sub-assembly (SK2003-10A inside SK2003-42A) is real assembly work
+            // and must reach 'complete' or its parent stays blocked, so the skip only holds while the module is off.
+            if (!FEATURES.ASSEMBLY_MODULE && woa.assembly?.part_type === 'finished_good') continue
 
             // Get jobs linked to THIS specific assembly
             const woaJobs = wo.jobs?.filter(j => j.work_order_assembly_id === woa.id) || []

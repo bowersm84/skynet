@@ -30,6 +30,33 @@ export const FEATURES = {
   ASSEMBLY_MODULE: false,
 
   /**
+   * Assembly Board and checklist review (S17 Batch B, D-ASM-31; B2, D-ASM-32/33) — Jody's build board (requests,
+   * builds by assembler, create / assign / release / cancel) as a Mainframe header page, and Roger's checklist
+   * family review as the Armory tab "Assembly checklists" (also reachable at /assembly-board and
+   * /assembly-checklists). Reads the S17 B1 / B2 schema (Docs/migrations/2026-11-05_S17_B1_assembly_builds.sql,
+   * ..._B2_assemblers_avatars_settings.sql).
+   *
+   * When false: no Assembly Board button, no Assembly checklists tab, both paths fall through to the Mainframe,
+   * nothing else changes.
+   * TEST: on (the Amplify TEST build sets VITE_ENV_LABEL=test, the same switch as the TEST banner).
+   * PROD: off until the assembly cutover (D-ASM-12) — then replace this with `true`.
+   */
+  ASSEMBLY_BOARD: import.meta.env?.VITE_ENV_LABEL === 'test',
+
+  /**
+   * Customer Orders page on the toolbar (S17 B2, D-ASM-33). Retired: orders come from Fishbowl through the Order
+   * Queue, Demand moved to the Command page, Stock Requests to the Order Queue, and the Order Queue's salesperson
+   * filter replaces My Orders. Nobody needs the page (Matt).
+   *
+   * When false: no Customer Orders button. The page (Orders and My Orders tabs) still opens at /customer-orders and
+   * from in-app links (Order Queue "Open in Customer Orders", the notifications bell) — a safety net for one sprint;
+   * its code is removed in its own batch after S17. The CO object and Create CO are unchanged either way.
+   *
+   * 2026-11-05  off (Matt)
+   */
+  CUSTOMER_ORDERS_PAGE: false,
+
+  /**
    * Raw Material Checkout Kiosk — rack staging device + material finalize on
    * completion paths. When false: the MaterialKiosk route is hidden and no
    * new material-kiosk UI renders. The existing in-kiosk material step and the

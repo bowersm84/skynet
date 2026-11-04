@@ -218,7 +218,8 @@ const buildProjection = (jobs) => {
   return map
 }
 
-export default function Schedule({ user, profile, onNavigate, canEdit = false }) {
+// heightClass: the page's fixed height; the Command page passes a shorter one under its Demand tab strip (S17 B2).
+export default function Schedule({ user, profile, onNavigate, canEdit = false, heightClass = 'h-[calc(100vh-180px)]' }) {
   const [unassignedJobs, setUnassignedJobs] = useState([])
   const [scheduledJobs, setScheduledJobs] = useState([])
   const [machines, setMachines] = useState([])
@@ -2548,13 +2549,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
       ? (isUnplanned ? 'UNPLANNED' : 'MAINTENANCE')
       : (job.component?.part_number || job.job_number)
 
-    // Time range string — live: projected/truncated spans show their
-    // effective times; the real schedule stays in the popup.
-    const timeRange = proj
-      ? `${formatTime(new Date(proj.start))} – ${formatTime(new Date(proj.end))}`
-      : job.scheduled_start
-        ? `${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
-        : ''
+    // S17 B2c (D-ASM-33): no time line on the card, so its three lines have room; start–end lives in the hover popup.
 
     return (
       <div className="flex flex-col justify-center min-w-0 w-full leading-tight py-0.5">
@@ -2634,13 +2629,6 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             ].filter(Boolean).join(' · ') || '\u00A0'}
           </div>
         )}
-
-        {/* Line 4 (large) / Line 3 (medium): Time range */}
-        {sizeTier !== 'small' && timeRange && (
-          <div className="truncate text-white/50 text-[10px]">
-            {timeRange}
-          </div>
-        )}
       </div>
     )
   }
@@ -2657,7 +2645,7 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
   }
 
   return (
-    <div className="h-[calc(100vh-180px)] flex flex-col">
+    <div className={`${heightClass} flex flex-col`}>
       {/* Header Bar */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-4">
@@ -3998,6 +3986,11 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
         const range = job.scheduled_start
           ? `${formatDate(job.scheduled_start)} ${formatTime(job.scheduled_start)}${job.scheduled_end ? ` – ${formatTime(job.scheduled_end)}` : ''}`
           : null
+        // S17 B2c: the card no longer prints its time line, so a projected / truncated live span (what the line
+        // used to show) is given here when it differs from the schedule.
+        const proj = getLiveSpan(job.id)
+        const liveRange = proj ? `${formatTime(new Date(proj.start))} – ${formatTime(new Date(proj.end))}` : null
+        const showLive = liveRange && (!job.scheduled_start || !range.endsWith(liveRange))
         const CARD_W = 300
         const CARD_H = 210
         const left = Math.max(8, Math.min(hoverCard.x + 14, window.innerWidth - CARD_W - 8))
@@ -4035,6 +4028,9 @@ export default function Schedule({ user, profile, onNavigate, canEdit = false })
             {qtyLine && <p className="text-gray-400 text-xs mt-1">{qtyLine}</p>}
             {hoverCard.showRange && range && (
               <p className="text-gray-500 text-xs mt-1">{range}</p>
+            )}
+            {hoverCard.showRange && showLive && (
+              <p className="text-sky-300/80 text-xs mt-0.5">Live {liveRange}</p>
             )}
           </div>
         )

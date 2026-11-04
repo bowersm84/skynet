@@ -35,7 +35,8 @@ import {
   History,
   PackageOpen,
   LayoutGrid,
-  Flag
+  Flag,
+  Calculator
 } from 'lucide-react'
 import BOMUpload from '../components/BOMUpload'
 import PartHistoryModal from '../components/PartHistoryModal'
@@ -45,6 +46,9 @@ import ReorderPointsTab from '../components/fbinventory/ReorderPointsTab'
 import RoutingTemplatesTab from '../components/RoutingTemplatesTab'
 import UsersTab from './UsersTab'
 import CustomersTab from './CustomersTab'
+import AssemblyChecklists from './AssemblyChecklists'
+import CostingRulesTab from '../components/CostingRulesTab'
+import { FEATURES } from '../config'
 import { userRoles, hasRole, canWriteMasterData, canReceive } from '../lib/roles'
 import { FULL_BAR_IN, isPieceLength, fmtCount, shelfSplit, shelfValue, lengthRows, barEquivalents, countSystem } from '../lib/materialLengths'
 
@@ -64,8 +68,10 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
   const TAB_ACCESS_BY_ROLE = {
     // S13 D-FBINV-03: 'fb_stock' / 'fb_reorder' (Fishbowl Inventory group) go LAST in every
     // array so no role's default tab moves. Writes inside Reorder Points: admin + purchaser.
-    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users', 'fb_stock', 'fb_reorder'],
-    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'fb_stock', 'fb_reorder'],
+    // S17 B2 (D-ASM-33 / D-ASM-34): 'assembly_checklists' (admin, compliance; only while FEATURES.ASSEMBLY_BOARD)
+    // and 'costing_rules' (admin) go after those, for the same reason.
+    admin:            ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'customers', 'users', 'fb_stock', 'fb_reorder', 'assembly_checklists', 'costing_rules'],
+    compliance:       ['assemblies', 'components', 'materials', 'barsizes', 'routing', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'fb_stock', 'fb_reorder', 'assembly_checklists'],
     finishing:        ['inventory', 'adjustments', 'reconciliation', 'receiving'],
     machinist:        ['inventory', 'adjustments', 'reconciliation', 'rmforecast'],
     // 'customers' stays first so the scheduler's default Armory tab is unchanged.
@@ -76,6 +82,7 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
     purchaser:        ['assemblies', 'components', 'routing', 'materials', 'barsizes', 'material_master', 'blank_master', 'inventory', 'adjustments', 'reconciliation', 'rmforecast', 'receiving', 'replenishment', 'fb_stock', 'fb_reorder'],
   }
   const visibleTabIds = [...new Set(userRoles(profile).flatMap(r => TAB_ACCESS_BY_ROLE[r] || []))]
+    .filter(id => id !== 'assembly_checklists' || FEATURES.ASSEMBLY_BOARD)
   const canSeeTab = (tabId) => visibleTabIds.includes(tabId)
 
   // Default to first visible tab for this role (falls back to 'assemblies' for admin)
@@ -2420,6 +2427,8 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
                 { id: 'fb_reorder', label: 'Reorder Points', icon: Flag, count: fbBelowCount || null },
                 { id: 'customers', label: 'Customers', icon: Users, count: null },
                 { id: 'users', label: 'Users', icon: Users, count: null },
+                { id: 'assembly_checklists', label: 'Assembly checklists', icon: ClipboardCheck, count: null },
+                { id: 'costing_rules', label: 'Costing rules', icon: Calculator, count: null },
               ]
               const FINISHED_GOODS_TAB_IDS = ['assemblies', 'components', 'routing']
               // S13 D-FBINV-03: Fishbowl Inventory group. Batch C adds 'fb_monthend' here.
@@ -4758,6 +4767,12 @@ export default function Armory({ profile, navPayload = null, onNavPayloadConsume
 
         {/* Users Tab */}
         {activeTab === 'users' && <UsersTab profile={profile} />}
+
+        {/* S17 B2 (D-ASM-33): Roger's checklist review, moved here from its own header button */}
+        {activeTab === 'assembly_checklists' && <AssemblyChecklists profile={profile} embedded />}
+
+        {/* S17 B2 (D-ASM-34): Costing rules — app_settings category 'costing' */}
+        {activeTab === 'costing_rules' && <CostingRulesTab profile={profile} />}
       </div>
 
       {/* Part Modal */}

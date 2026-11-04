@@ -1,12 +1,16 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { Search, RefreshCw, Loader2, X } from 'lucide-react'
+import { Search, RefreshCw, Loader2, X, Plus } from 'lucide-react'
+import { supabase } from '../lib/supabase'
 import SOCard from '../components/orderqueue/SOCard'
 import ConvertToCOModal from '../components/orderqueue/ConvertToCOModal'
 import PurchaseComponentsModal from '../components/orderqueue/PurchaseComponentsModal'
 import SyncStatusBanner from '../components/orderqueue/SyncStatusBanner'
 import ExceptionsTab from '../components/orderqueue/ExceptionsTab'
 import RecentChangesTab from '../components/orderqueue/RecentChangesTab'
-import { canActOnOrderQueue } from '../lib/roles'
+import StockRequestsView from '../components/demand/StockRequestsView'
+import StockRequestModal from '../components/StockRequestModal'
+import { countOpenStockRequests } from '../lib/customerOrders'
+import { canActOnOrderQueue, hasRole, isReadOnlyRole } from '../lib/roles'
 import {
   getSyncState, getQueueOrders, getQueueLines, getQueuePartIndex, getInventoryFor, getOpenExceptions, getRecentEvents,
   setDisposition, reresolveLines, ackEvent, DISPOSITION_LABELS, getLineDetail, getPurchaseComponents,
@@ -19,12 +23,17 @@ const PURCHASE_ASKS_PART_TYPES = ['assembly', 'finished_good']
 
 // OrderQueue — FB1. Every Issued / In Progress Fishbowl sales order, mirrored live by the bridge,
 // waiting for a per-line call: ship from stock, purchase, assembly, ignore — or Create CO (D-FB-50 retired "covered"),
-// which drops the line into Customer Orders → Demand exactly like a hand-keyed CO (D-FB-12/13/26).
-// Exceptions (D-FB-15) and the change feed (fb_sync_events) live on their own tabs.
+// which drops the line into Demand (Command page since S17 B2, D-ASM-33) exactly like a hand-keyed CO (D-FB-12/13/26).
+// Exceptions (D-FB-15), the change feed (fb_sync_events) and warehouse stock requests (D-STKREQ-01, moved from
+// Customer Orders, D-ASM-33) live on their own tabs; New Stock Request (admin / assembly) is on the Stock Requests tab.
 export default function OrderQueue({ profile, onNavigate }) {
   const canAct = canActOnOrderQueue(profile)
+  const canRaiseStock = hasRole(profile, 'admin', 'assembly') && !isReadOnlyRole(profile?.role)
 
-  const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes'
+  const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes' | 'stock_requests'
+  const [stockOpen, setStockOpen] = useState(null)          // open stock requests, for the tab label
+  const [stockRefreshKey, setStockRefreshKey] = useState(0)
+  const [showStockModal, setShowStockModal] = useState(false)
   const [orders, setOrders] = useState([])
   const [partIndex, setPartIndex] = useState({})       // { [fb_so_id]: 'part numbers on the SO' } — D-FB-51 search
   const [loading, setLoading] = useState(true)
@@ -169,6 +178,21 @@ export default function OrderQueue({ profile, onNavigate }) {
     }
   }, [])
 
+  // The Stock requests tab's "(n open)". A failed count is logged; the label shows … until the next refresh.
+  const loadStockCount = useCallback(async () => {
+    try {
+      setStockOpen(await countOpenStockRequests(supabase))
+    } catch (e) {
+      console.warn('stock request count failed:', e?.message || e)
+    }
+  }, [])
+  // Stable, so the stock request list does not reload on every render of this page.
+  const handleStockLoaded = useCallback((rows) => setStockOpen(rows.filter((r) => r.status === 'open').length), [])
+  const handleNavigateToWO = useCallback(
+    (woNumber) => onNavigate?.('mainframe', { woLookupSearch: woNumber, orderLookupTab: 'work_orders' }),
+    [onNavigate]
+  )
+
   // Initial load. Acting roles first sweep unresolved lines against the parts master
   // (D-FB-23) so a part added in the Armory since the last visit lights up its SO lines.
   useEffect(() => {
@@ -179,12 +203,12 @@ export default function OrderQueue({ profile, onNavigate }) {
         try { await reresolveLines() } catch (e) { console.warn('fb_reresolve_lines skipped:', e?.message || e) }
       }
       if (!cancelled) {
-        await Promise.all([loadOrders(), refreshSync(), loadExceptions()])
+        await Promise.all([loadOrders(), refreshSync(), loadExceptions(), loadStockCount()])
       }
     })()
     const t = setInterval(refreshSync, 30000)
     return () => { cancelled = true; clearInterval(t) }
-  }, [canAct, loadOrders, refreshSync, loadExceptions])
+  }, [canAct, loadOrders, refreshSync, loadExceptions, loadStockCount])
 
   // Tab-specific loads
   useEffect(() => {
@@ -194,12 +218,13 @@ export default function OrderQueue({ profile, onNavigate }) {
 
   const refreshAll = useCallback(async () => {
     setLoading(true)
+    setStockRefreshKey((k) => k + 1)
     await Promise.all([
-      loadOrders(), refreshSync(), loadExceptions(),
+      loadOrders(), refreshSync(), loadExceptions(), loadStockCount(),
       ...(tab === 'changes' ? [loadEvents()] : []),
       ...[...expanded].map((id) => loadLines(id)),
     ])
-  }, [loadOrders, refreshSync, loadExceptions, loadEvents, loadLines, expanded, tab])
+  }, [loadOrders, refreshSync, loadExceptions, loadStockCount, loadEvents, loadLines, expanded, tab])
 
   const toggleExpanded = useCallback((fbSoId) => {
     setExpanded((prev) => {
@@ -428,51 +453,80 @@ export default function OrderQueue({ profile, onNavigate }) {
         <button onClick={() => setTab('changes')} className={tabClass('changes')}>
           Recent Changes
         </button>
+        <button onClick={() => setTab('stock_requests')} className={tabClass('stock_requests')}>
+          Stock Requests <span className="ml-1 text-xs text-gray-500">({stockOpen === null ? '…' : stockOpen} open)</span>
+        </button>
         <span className="ml-auto text-xs text-gray-600 pr-2">{pendingLines.toLocaleString()} pending line{pendingLines === 1 ? '' : 's'}</span>
       </div>
 
-      {/* Filters (list tabs only) */}
-      {listTab && (
+      {/* Toolbar: the filters on the list tabs; New Stock Request (admin / assembly) on the Stock Requests tab only (S17 B2c). */}
+      {(listTab || (canRaiseStock && tab === 'stock_requests')) && (
         <div className="flex flex-wrap items-center gap-3 mb-4">
-          <div className="relative flex-1 min-w-[240px] max-w-md">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="SO #, customer, PO, CO #, part #"
-              className="w-full pl-9 pr-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
-            />
-          </div>
-          <select
-            value={salesmanFilter}
-            onChange={(e) => setSalesmanFilter(e.target.value)}
-            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
-          >
-            <option value="all">All salespeople</option>
-            {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-          {/* D-ASM-27: Ashley's pick flags. Needs CO lines still go through Create CO. */}
-          <div className="flex items-center gap-1">
-            {Object.entries(SIGNAL_FILTERS).map(([key, f]) => {
-              const n = signalSets[key]?.lines.length || 0
-              const on = signalFilter === key
-              return (
-                <button
-                  key={key}
-                  onClick={() => setSignalFilter(on ? null : key)}
-                  title={on ? 'Show every order again' : `Only orders with a line flagged in Fishbowl: ${f.label}`}
-                  className={`px-3 py-1.5 rounded text-xs border transition-colors ${on ? 'text-white border-transparent' : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'}`}
-                  style={on ? { backgroundColor: '#B8222E' } : undefined}
-                >
-                  {f.label} ({n})
-                </button>
-              )
-            })}
-          </div>
-          <span className="text-xs text-gray-600">
-            Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship · Prod Due: last component off the machine (<span className="text-gray-500">T</span> = SkyNet target until scheduled; assembly, plating and finishing not included)
-          </span>
+          {listTab && (
+            <>
+              <div className="relative flex-1 min-w-[240px] max-w-md">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="SO #, customer, PO, CO #, part #"
+                  className="w-full pl-9 pr-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+                />
+              </div>
+              <select
+                value={salesmanFilter}
+                onChange={(e) => setSalesmanFilter(e.target.value)}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-skynet-accent"
+              >
+                <option value="all">All salespeople</option>
+                {salesmen.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </>
+          )}
+          {canRaiseStock && tab === 'stock_requests' && (
+            <button
+              onClick={() => setShowStockModal(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm rounded transition-colors"
+            >
+              <Plus size={14} /> New Stock Request
+            </button>
+          )}
+          {listTab && (
+            <>
+              {/* D-ASM-27: Ashley's pick flags. Needs CO lines still go through Create CO. */}
+              <div className="flex items-center gap-1">
+                {Object.entries(SIGNAL_FILTERS).map(([key, f]) => {
+                  const n = signalSets[key]?.lines.length || 0
+                  const on = signalFilter === key
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setSignalFilter(on ? null : key)}
+                      title={on ? 'Show every order again' : `Only orders with a line flagged in Fishbowl: ${f.label}`}
+                      className={`px-3 py-1.5 rounded text-xs border transition-colors ${on ? 'text-white border-transparent' : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'}`}
+                      style={on ? { backgroundColor: '#B8222E' } : undefined}
+                    >
+                      {f.label} ({n})
+                    </button>
+                  )
+                })}
+              </div>
+              <span className="text-xs text-gray-600">
+                Due: <span className="text-amber-400">*</span> no real date entered in Fishbowl · <span className="text-cyan-400">R</span> Remaining Parts Ship Date · Avail: Fishbowl stock available to ship · Prod Due: last component off the machine (<span className="text-gray-500">T</span> = SkyNet target until scheduled; assembly, plating and finishing not included)
+              </span>
+            </>
+          )}
         </div>
+      )}
+
+      {tab === 'stock_requests' && (
+        <StockRequestsView
+          profile={profile}
+          setActionStatus={setActionStatus}
+          refreshKey={stockRefreshKey}
+          onNavigateToWO={handleNavigateToWO}
+          onLoaded={handleStockLoaded}
+        />
       )}
 
       {tab === 'exceptions' && (
@@ -525,6 +579,19 @@ export default function OrderQueue({ profile, onNavigate }) {
             ))}
           </div>
         )
+      )}
+
+      {showStockModal && (
+        <StockRequestModal
+          isOpen={showStockModal}
+          onClose={() => setShowStockModal(false)}
+          onSuccess={() => {
+            setActionStatus({ type: 'success', message: 'Stock request submitted.' })
+            setStockRefreshKey((k) => k + 1)
+            loadStockCount()
+          }}
+          profile={profile}
+        />
       )}
 
       {purchaseTarget && (

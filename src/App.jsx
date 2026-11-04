@@ -2,13 +2,13 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { FEATURES } from './config'
-import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet, Inbox } from 'lucide-react'
+import { Calendar, LayoutDashboard, Database, Monitor, ChevronDown, KeyRound, LogOut, ShoppingCart, FileCheck, FileSpreadsheet, Inbox, Wrench } from 'lucide-react'
 import Login from './pages/Login'
 import SetPassword from './pages/SetPassword'
 import ForgotPassword from './pages/ForgotPassword'
 import ConfirmInvite from './pages/ConfirmInvite'
 import Mainframe from './pages/Mainframe'
-import Schedule from './pages/Schedule'
+import Command from './pages/Command'
 import Kiosk from './pages/Kiosk'
 import MaterialKiosk from './pages/MaterialKiosk'
 import TravelerKiosk from './pages/TravelerKiosk'
@@ -20,6 +20,8 @@ import CustomerOrders from './pages/CustomerOrders'
 import OrderQueue from './pages/OrderQueue'
 import CertRepository from './pages/CertRepository'
 import Reports from './pages/Reports'
+import AssemblyBoard from './pages/AssemblyBoard'
+import AssemblyChecklists from './pages/AssemblyChecklists'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
@@ -43,6 +45,13 @@ const DASHBOARDS = [
   { label: 'Pricing Portal', path: '/pricing' },
 ]
 
+// Office pages that also open from a path of their own. S17 B (D-ASM-31): the assembly pages, only while
+// FEATURES.ASSEMBLY_BOARD is on. S17 B2 (D-ASM-33): /customer-orders keeps the page reachable once it is off the toolbar.
+const PAGE_PATHS = {
+  '/customer-orders': 'customer_orders',
+  ...(FEATURES.ASSEMBLY_BOARD ? { '/assembly-board': 'assembly_board', '/assembly-checklists': 'assembly_checklists' } : {}),
+}
+
 // Main authenticated app component
 function MainApp() {
   const [user, setUser] = useState(null)
@@ -53,6 +62,8 @@ function MainApp() {
   // The restored value is validated against role access once the profile
   // loads (one-shot effect below the access flags).
   const [currentPage, setCurrentPage] = useState(() => {
+    // S17 B / B2: /assembly-board, /assembly-checklists and /customer-orders open their page directly.
+    if (PAGE_PATHS[window.location.pathname]) return PAGE_PATHS[window.location.pathname]
     try {
       return localStorage.getItem('skynet.currentPage') || 'mainframe'
     } catch {
@@ -224,6 +235,9 @@ function MainApp() {
   // FB1 (D-FB-13): Order Queue — Fishbowl SOs awaiting disposition. Read set is broad
   // (CS sees everything); acting is order_processor/admin, enforced inside the page and the RPCs.
   const canAccessOrderQueueFlag = canAccessOrderQueue(profile)
+  // S17 B (D-ASM-31): Jody's Assembly Board (admin / assembly) and Roger's checklist review (admin / compliance).
+  const canAccessAssemblyBoard = FEATURES.ASSEMBLY_BOARD && hasRole(profile, 'admin', 'assembly')
+  const canAccessAssemblyChecklists = FEATURES.ASSEMBLY_BOARD && hasRole(profile, 'admin', 'compliance')
 
   // Cert Repository — visible to ALL authenticated roles (read-only for most;
   // write actions gated to admin/compliance inside the page). SKY64 + SKY67.
@@ -251,6 +265,10 @@ function MainApp() {
     try {
       localStorage.setItem('skynet.currentPage', currentPage)
     } catch { /* storage unavailable — persistence is best-effort */ }
+    // Leaving a page opened by its own path: drop the path, so a refresh restores the page in use.
+    if (PAGE_PATHS[window.location.pathname] && PAGE_PATHS[window.location.pathname] !== currentPage) {
+      window.history.replaceState(null, '', '/')
+    }
   }, [currentPage])
 
   // D-NAV-02: validate the RESTORED page against role access exactly once,
@@ -264,12 +282,16 @@ function MainApp() {
     const blocked =
       (currentPage === 'schedule' && !canAccessSchedule) ||
       (currentPage === 'customer_orders' && !canAccessCustomerOrders) ||
+      // S17 B2 (D-ASM-33): off the toolbar, Customer Orders is not restored from storage; its path still opens it.
+      (currentPage === 'customer_orders' && !FEATURES.CUSTOMER_ORDERS_PAGE && window.location.pathname !== '/customer-orders') ||
       (currentPage === 'order_queue' && !canAccessOrderQueueFlag) ||
       (currentPage === 'armory' && !canAccessArmory) ||
       (currentPage === 'certs' && !canAccessCerts) ||
-      (currentPage === 'reports' && !canAccessReports)
+      (currentPage === 'reports' && !canAccessReports) ||
+      (currentPage === 'assembly_board' && !canAccessAssemblyBoard) ||
+      (currentPage === 'assembly_checklists' && !canAccessAssemblyChecklists)
     if (blocked) setCurrentPage('mainframe')
-  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessOrderQueueFlag, canAccessArmory, canAccessCerts, canAccessReports])
+  }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessOrderQueueFlag, canAccessArmory, canAccessCerts, canAccessReports, canAccessAssemblyBoard, canAccessAssemblyChecklists])
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
   const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
@@ -283,6 +305,8 @@ function MainApp() {
       case 'order_queue': return 'Order Queue'
       case 'certs': return 'Cert Repository'
       case 'reports': return 'Reports'
+      case 'assembly_board': return 'Assembly Board'
+      case 'assembly_checklists': return 'Assembly Checklists'
       default: return 'Mainframe'
     }
   }
@@ -383,8 +407,8 @@ function MainApp() {
               </button>
             )}
             
-            {/* Customer Orders button - shown when on Mainframe and user has access */}
-            {currentPage === 'mainframe' && canAccessCustomerOrders && (
+            {/* Customer Orders button - retired behind FEATURES.CUSTOMER_ORDERS_PAGE (S17 B2, D-ASM-33); /customer-orders still opens it */}
+            {currentPage === 'mainframe' && FEATURES.CUSTOMER_ORDERS_PAGE && canAccessCustomerOrders && (
               <button
                 onClick={() => setCurrentPage('customer_orders')}
                 className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
@@ -402,6 +426,17 @@ function MainApp() {
               >
                 <Inbox size={18} />
                 <span className="text-sm font-medium">Order Queue</span>
+              </button>
+            )}
+
+            {/* S17 B (D-ASM-31): Assembly Board (admin / assembly), FEATURES.ASSEMBLY_BOARD only. Checklists moved to an Armory tab (B2, D-ASM-33). */}
+            {currentPage === 'mainframe' && canAccessAssemblyBoard && (
+              <button
+                onClick={() => setCurrentPage('assembly_board')}
+                className="flex items-center gap-2 px-4 py-2 rounded transition-colors text-gray-400 hover:text-white hover:bg-gray-800"
+              >
+                <Wrench size={18} />
+                <span className="text-sm font-medium">Assembly Board</span>
               </button>
             )}
 
@@ -541,7 +576,7 @@ function MainApp() {
           />
         )}
         {currentPage === 'schedule' && canAccessSchedule && (
-          <Schedule user={user} profile={profile} onNavigate={setCurrentPage} canEdit={canEditSchedule} />
+          <Command user={user} profile={profile} onNavigate={setCurrentPage} canEdit={canEditSchedule} />
         )}
         {currentPage === 'armory' && canAccessArmory && (
           <Armory
@@ -566,6 +601,12 @@ function MainApp() {
         )}
         {currentPage === 'reports' && canAccessReports && (
           <Reports profile={profile} />
+        )}
+        {currentPage === 'assembly_board' && canAccessAssemblyBoard && (
+          <AssemblyBoard profile={profile} />
+        )}
+        {currentPage === 'assembly_checklists' && canAccessAssemblyChecklists && (
+          <AssemblyChecklists profile={profile} />
         )}
       </main>
 

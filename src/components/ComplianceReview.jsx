@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
-import { FEATURES } from '../config'
+import { assemblyNextStatus } from '../lib/finishingCompletion'
 import { releaseCOAllocationsIfWODead } from '../lib/customerOrders'
 import { evaluateJobShortfall } from '../lib/shortfall'
 import { promoteToPartDocument } from '../lib/documents'
@@ -836,10 +836,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         if (externalSteps && externalSteps.length > 0) {
           nextStatus = 'ready_for_outsourcing'
         } else {
-          const partType = parentJob?.component?.part_type
-          nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-            ? 'pending_tco'
-            : 'ready_for_assembly'
+          nextStatus = await assemblyNextStatus(jobId) // S17 B.1 (D-ASM-30)
         }
 
         // Propagate rework outcome up to the job so WO Lookup can flag it
@@ -1532,11 +1529,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         if (externalSteps && externalSteps.length > 0) {
           nextStatus = 'ready_for_outsourcing'
         } else {
-          const job = jobs.find(j => j.id === jobId)
-          const partType = job?.component?.part_type
-          nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-            ? 'pending_tco'
-            : 'ready_for_assembly'
+          nextStatus = await assemblyNextStatus(jobId) // S17 B.1 (D-ASM-30)
         }
       }
 
@@ -1702,10 +1695,7 @@ export default function ComplianceReview({ jobs, onUpdate, profile, onNavigateTo
         if (externalSteps && externalSteps.length > 0) {
           nextStatus = 'ready_for_outsourcing'
         } else {
-          const partType = job.component?.part_type
-          nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-            ? 'pending_tco'
-            : 'ready_for_assembly'
+          nextStatus = await assemblyNextStatus(job.id) // S17 B.1 (D-ASM-30)
         }
       }
 

@@ -353,6 +353,16 @@ export async function getStockRequests(supabase) {
   return data || []
 }
 
+// How many stock requests are open — the Order Queue's "Stock requests (n open)" tab label (S17 B2).
+export async function countOpenStockRequests(supabase) {
+  const { count, error } = await supabase
+    .from('stock_requests')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'open')
+  if (error) throw error
+  return count || 0
+}
+
 // Open stock requests shaped like Demand-tab lines (same field names as
 // getAllOpenCOLines output) so DemandView can merge them into part groups.
 export async function getOpenStockRequestLines(supabase) {

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
-import { FEATURES } from '../config'
+import { assemblyNextStatus } from '../lib/finishingCompletion'
 import { Truck, Upload, Check, AlertCircle, ChevronDown, ChevronRight, FileText, Clock, RotateCcw, Plus, Combine, Pencil, X } from 'lucide-react'
 import CombineLikeProductsModal from './CombineLikeProductsModal'
 
@@ -614,10 +614,7 @@ export default function OutsourcedJobs({ profile }) {
     }
     setSaving(true)
     try {
-      const partType = row.job?.part?.part_type
-      const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-        ? 'pending_tco'
-        : 'ready_for_assembly'
+      const nextStatus = await assemblyNextStatus(row.job?.id) // S17 B.1 (D-ASM-30)
       const { error } = await supabase.rpc('cancel_outsourced_send', {
         p_finishing_send_id: row.batch.id,
         p_job_routing_step_id: row.step.id,
@@ -832,10 +829,7 @@ export default function OutsourcedJobs({ profile }) {
                 && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
 
               if (allExternalComplete) {
-                const partType = send.job?.part?.part_type
-                const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-                  ? 'pending_tco'
-                  : 'ready_for_assembly'
+                const nextStatus = await assemblyNextStatus(jobId) // S17 B.1 (D-ASM-30)
                 const { error: jobErr } = await supabase
                   .from('jobs')
                   .update({ status: nextStatus, updated_at: new Date().toISOString() })
@@ -977,10 +971,7 @@ export default function OutsourcedJobs({ profile }) {
           && allSteps.every(s => ['complete', 'skipped', 'removed'].includes(s.status))
         if (!allExternalComplete) continue
 
-        const partType = r.job?.part?.part_type
-        const nextStatus = (partType === 'finished_good' || !FEATURES.ASSEMBLY_MODULE)
-          ? 'pending_tco'
-          : 'ready_for_assembly'
+        const nextStatus = await assemblyNextStatus(jobId) // S17 B.1 (D-ASM-30)
         await supabase
           .from('jobs')
           .update({ status: nextStatus, updated_at: new Date().toISOString() })

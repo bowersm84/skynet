@@ -22,6 +22,7 @@ interface InviteUserPayload {
   email: string
   full_name: string
   role: string
+  roles?: string[]
   home_location_id?: string | null
   can_float?: boolean
   can_approve_compliance?: boolean
@@ -32,6 +33,7 @@ interface InviteNoEmailPayload {
   username: string
   full_name: string
   role: string
+  roles?: string[]
   home_location_id?: string | null
   can_float?: boolean
   can_approve_compliance?: boolean
@@ -90,6 +92,7 @@ Deno.serve(async (req) => {
           data: {
             full_name: payload.full_name,
             role: payload.role,
+            roles: payload.roles ?? [],
             username: payload.email.split('@')[0],
             location: 'Leesburg',
             home_location_id: payload.home_location_id ?? null,
@@ -104,7 +107,7 @@ Deno.serve(async (req) => {
         }
 
         // Defensive: handle_new_user trigger doesn't pick up newer
-        // metadata fields (is_salesperson). Patch the profile row to
+        // metadata fields (is_salesperson, roles). Patch the profile row to
         // ensure all flags are correctly applied. The trigger creates
         // the profiles row synchronously, so it exists by now.
         if (data.user?.id) {
@@ -112,6 +115,7 @@ Deno.serve(async (req) => {
             .from('profiles')
             .update({
               role: payload.role,
+              roles: payload.roles ?? [],
               full_name: payload.full_name,
               home_location_id: payload.home_location_id ?? null,
               can_float: payload.can_float ?? false,
@@ -177,6 +181,7 @@ Deno.serve(async (req) => {
             username,
             full_name: payload.full_name,
             role: payload.role,
+            roles: payload.roles ?? [],
             location: 'Leesburg',
             home_location_id: homeLocationId,
             can_float: payload.can_float ?? false,
@@ -193,6 +198,7 @@ Deno.serve(async (req) => {
           .from('profiles')
           .update({
             role: payload.role,
+            roles: payload.roles ?? [],
             full_name: payload.full_name,
             home_location_id: homeLocationId,
             can_float: payload.can_float ?? false,
@@ -335,6 +341,7 @@ Deno.serve(async (req) => {
 
         const allowed = [
           'role',
+          'roles',
           'full_name',
           'home_location_id',
           'can_float',

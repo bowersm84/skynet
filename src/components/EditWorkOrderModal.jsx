@@ -21,6 +21,10 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
   const [priority, setPriority] = useState('normal')
   // Existing assemblies with their jobs (editable quantities)
   const [existingAssemblies, setExistingAssemblies] = useState([])
+  // D-WOLOOKUP-QTYEDIT02: jobs that hang directly off the WO (component stock
+  // runs — CreateWorkOrderModal writes no work_order_assemblies row for a
+  // manufactured part). Same editable-quantity shape as assembly jobs.
+  const [componentJobs, setComponentJobs] = useState([])
 
   // New assemblies to add
   const [newAssemblies, setNewAssemblies] = useState([])
@@ -106,6 +110,7 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     setNewComponents([])
     setShowAddCompFor(null)
     setBomComponentsByAssembly({})
+    setComponentJobs([])
 
     // Build existing assemblies with their jobs
     const woStockQty = workOrder.stock_quantity || 0
@@ -172,6 +177,27 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
       }
     })
     setExistingAssemblies(assemblies)
+
+    // D-WOLOOKUP-QTYEDIT02: component stock runs have no work_order_assemblies
+    // row, so their jobs never appear above. Surface them here with the same
+    // editable-quantity rules (D-WOLOOKUP-QTYEDIT01). Merged members and
+    // cancelled jobs are left out — the RPC refuses the former and the latter
+    // are history.
+    const looseJobs = (freshJobs || [])
+      .filter(j => !j.work_order_assembly_id && !['cancelled', 'merged'].includes(j.status))
+      .sort((a, b) => (a.job_number || '').localeCompare(b.job_number || ''))
+    setComponentJobs(looseJobs.map(j => ({
+      id: j.id,
+      jobNumber: j.job_number,
+      componentId: j.component?.id || j.component_id || null,
+      componentPartNumber: j.component?.part_number || '',
+      componentDescription: j.component?.description || '',
+      quantity: j.quantity,
+      originalQuantity: j.quantity,
+      status: j.status,
+      isEditable: ['pending_compliance', 'ready', 'assigned', 'in_setup'].includes(j.status),
+      isScheduled: ['assigned', 'in_setup'].includes(j.status)
+    })))
 
     if (!canEditAllocations) return
 
@@ -528,6 +554,9 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
     if (newAllocations.length > 0) return true
     if (allocationsToDeactivate.length > 0) return true
     if (newComponents.length > 0) return true
+    for (const j of componentJobs) {
+      if (j.quantity !== j.originalQuantity) return true
+    }
     for (const a of existingAssemblies) {
       if (a.orderQuantity !== a.originalOrderQuantity) return true
       if (a.additionalForStock !== a.originalAdditionalForStock) return true
@@ -596,6 +625,16 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
               if (jobErr) throw jobErr
             }
           }
+        }
+      }
+
+      // D-WOLOOKUP-QTYEDIT02: component stock-run jobs. Always through the RPC —
+      // it accepts pending_compliance/ready as well as scheduled, writes the
+      // audit row, and stamps the traveler stale only when the job is scheduled.
+      for (const job of componentJobs) {
+        if (job.quantity !== job.originalQuantity && job.isEditable) {
+          const res = await updateJobQuantity(job.id, job.quantity, `Work order ${workOrder.wo_number} edit`)
+          if (res?.window_note) windowNotes.push(`${job.jobNumber}: ${res.window_note}`)
         }
       }
 
@@ -1063,6 +1102,63 @@ export default function EditWorkOrderModal({ isOpen, onClose, workOrder, onSucce
           <div className="border-t border-gray-700 pt-4 mb-4">
             <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">Products on this Order</h3>
           </div>
+
+          {/* D-WOLOOKUP-QTYEDIT02: component stock-run jobs (no assembly row) */}
+          {componentJobs.length > 0 && (
+            <div className="mb-4 border border-gray-700 rounded-lg overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800/50 flex items-center justify-between">
+                <div>
+                  <span className="text-white font-medium">Component jobs</span>
+                  <span className="text-gray-500 text-sm ml-2">stock run — no assembly on this order</span>
+                </div>
+                {!componentJobs.every(j => j.isEditable) && (
+                  <span className="text-xs text-gray-600" title="Production has started on a job — quantity locked. Use a lot split or merge.">🔒</span>
+                )}
+              </div>
+              <div className="border-t border-gray-700 divide-y divide-gray-800">
+                {componentJobs.map((job, jIdx) => (
+                  <div key={job.id} className="px-4 py-2 pl-10 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Wrench size={12} className="text-gray-500" />
+                      <div>
+                        <span className="text-gray-300 text-sm font-mono">{job.jobNumber}</span>
+                        <span className="text-gray-500 text-sm ml-2">{job.componentPartNumber}</span>
+                        <p className="text-xs text-gray-600">{job.componentDescription}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min="1"
+                        value={job.quantity}
+                        onChange={e => {
+                          const updated = [...componentJobs]
+                          updated[jIdx] = { ...updated[jIdx], quantity: parseInt(e.target.value) || 1 }
+                          setComponentJobs(updated)
+                        }}
+                        disabled={!job.isEditable}
+                        className={`w-20 px-2 py-1 bg-gray-800 border rounded text-white text-sm text-center focus:border-skynet-accent focus:outline-none ${
+                          job.isEditable ? 'border-gray-600' : 'border-gray-700 text-gray-500 cursor-not-allowed'
+                        }`}
+                      />
+                      <span className={`text-xs px-2 py-0.5 rounded border ${
+                        job.isEditable
+                          ? 'border-purple-700 text-purple-300 bg-purple-900/30'
+                          : 'border-gray-700 text-gray-500 bg-gray-800'
+                      }`}>
+                        {job.status.replace(/_/g, ' ')}
+                      </span>
+                      {job.isScheduled && job.quantity !== job.originalQuantity && (
+                        <span className="text-[10px] text-cyan-300" title="Scheduled job — traveler will be flagged stale and Compliance notified on save">
+                          stamps traveler
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Existing Assemblies */}
           {existingAssemblies.map((assembly, aIdx) => {

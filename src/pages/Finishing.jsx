@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { kioskAuthLockedMessage, isKioskOnly, KIOSK_ONLY_MESSAGE } from '../lib/kioskAuth'
 import { uploadDocument, getDocumentUrl } from '../lib/s3'
 import { buildTravelerHTML, fetchCOAllocationsForTraveler, fetchAssemblyChainForTraveler, fetchMergeInfoForTraveler } from '../lib/traveler'
 import { summarizeWOAllocations, formatWODueDate } from '../lib/workOrderDisplay'
@@ -89,6 +90,8 @@ export default function Finishing() {
   const deviceIdRef = useRef(getKioskDeviceId())
   // Finishing machine anchor for the current session, captured at login.
   const finishingMachineIdRef = useRef(null)
+  // Expiry (epoch seconds) of the kiosk-authenticate token (D-ASM-41).
+  const tokenExpiresAtRef = useRef(null)
 
   // Auth state
   const [pin, setPin] = useState('')
@@ -992,6 +995,19 @@ export default function Finishing() {
     }
   }, [operator])
 
+  // D-ASM-41: the kiosk token lasts 8 h and is never refreshed. Sign out a
+  // minute before it lapses (the machine Kiosk's 'jwt_expiry' reason) rather
+  // than leave the station signed in with a dead token — empty queue, failed writes.
+  useEffect(() => {
+    if (!operator) return
+    const interval = setInterval(() => {
+      const exp = tokenExpiresAtRef.current
+      if (exp && Date.now() >= exp * 1000 - 60 * 1000) handleLogout('jwt_expiry')
+    }, 30000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operator])
+
   // Keyboard support for PIN entry
   useEffect(() => {
     if (operator) return
@@ -1044,18 +1060,48 @@ export default function Finishing() {
     setAuthError(null)
 
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('pin_code', pin)
+      // D-ASM-41: the PIN is checked server-side by kiosk-authenticate — the
+      // Traveler Kiosk call (TravelerKiosk.jsx:138-158) — so the browser never
+      // reads profiles.pin_code. The anchor is the first finishing TANK by code
+      // (the row the session watcher and the kiosk_sessions insert below use);
+      // with no commissioned tank, the first active commissioned machine.
+      const { data: tanks } = await supabase
+        .from('machines')
+        .select('id')
+        .eq('machine_type', 'finishing')
+        .eq('finishing_role', 'tank')
         .eq('is_active', true)
-        .single()
-
-      if (error) {
-        if (error.code === 'PGRST116') { setAuthError('Invalid PIN'); setPin('') }
-        else throw error
-        return
+        .eq('is_commissioned', true)
+        .order('code', { ascending: true })
+        .limit(1)
+      let anchorId = tanks?.[0]?.id
+      if (!anchorId) {
+        const { data: anyMachine } = await supabase
+          .from('machines').select('id').eq('is_active', true).eq('is_commissioned', true)
+          .order('display_order').limit(1)
+        anchorId = anyMachine?.[0]?.id
       }
+      if (!anchorId) { setAuthError('No active machine available'); setPin(''); return }
+
+      const { data: auth, error: authErr } = await supabase.functions.invoke('kiosk-authenticate', {
+        body: { pin, machine_id: anchorId, device_id: deviceIdRef.current, kiosk: 'finishing' }, // D-ASM-49
+      })
+      if (authErr || !auth?.success) { setAuthError((await kioskAuthLockedMessage(authErr)) || 'Invalid PIN'); setPin(''); return }
+      if (isKioskOnly(auth.operator)) { setAuthError(KIOSK_ONLY_MESSAGE); setPin(''); return }
+
+      const { error: sessionErr } = await supabase.auth.setSession({
+        access_token: auth.access_token,
+        refresh_token: auth.refresh_token,
+      })
+      if (sessionErr) {
+        console.error('setSession failed:', sessionErr)
+        setAuthError('Authentication failed'); setPin(''); return
+      }
+      // Placeholder refresh token — re-PIN at expiry, never auto-refresh.
+      supabase.auth.stopAutoRefresh()
+      tokenExpiresAtRef.current = auth.expires_at ?? null
+
+      const data = auth.operator
 
       // Session enforcement — deactivate this operator's other FINISHING sessions,
       // then create this one. Admin users are exempt. D-KIOSK-04: machine-kiosk
@@ -1151,8 +1197,16 @@ export default function Finishing() {
       } catch (err) {
         console.error('Session deactivation error (non-blocking):', err)
       }
+      // D-ASM-41: drop the kiosk token after the row above is closed (that
+      // write needs it), so the next PIN starts from no session.
+      try {
+        await supabase.auth.signOut({ scope: 'local' })
+      } catch (err) {
+        console.error('Sign-out error (non-blocking):', err)
+      }
     }
 
+    tokenExpiresAtRef.current = null
     finishingMachineIdRef.current = null
     setOperator(null)
     setActiveBatches([])

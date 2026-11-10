@@ -154,16 +154,14 @@ export default function PackingSlipTab({ mode, profile }) {
     setSaving(true)
     setPinError(null)
     try {
-      const { data, error: pinLookupError } = await supabase
-        .from('profiles').select('id, full_name, username')
-        .eq('pin_code', pin).eq('is_active', true).single()
-      if (pinLookupError) {
-        if (pinLookupError.code === 'PGRST116') { setPinError('Invalid PIN'); setPin(''); return }
-        throw pinLookupError
-      }
+      // The PIN vault resolves the PIN on the server (D-ASM-43). A wrong or
+      // locked PIN is a result ({ ok: false, message }), not an error.
+      const { data, error: pinLookupError } = await supabase.rpc('pin_resolve', { p_pin: pin })
+      if (pinLookupError) throw pinLookupError
+      if (!data?.ok) { setPinError(data?.message || 'Invalid PIN'); setPin(''); return }
       setPinOpen(false)
       setPin('')
-      await doSave(data.id)
+      await doSave(data.profile_id)
     } catch (err) {
       console.error('PIN confirm failed:', err)
       setPinError('Could not verify PIN')

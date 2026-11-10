@@ -41,6 +41,17 @@ interface InviteNoEmailPayload {
   temp_password: string
 }
 
+// Kiosk-only account (D-ASM-46): no email, no office login — a placeholder
+// address, a server-generated password nobody holds, and a temporary PIN the
+// tablet makes them replace at first sign-in.
+interface InviteKioskOnlyPayload {
+  username: string
+  full_name: string
+  temp_pin: string
+  role?: string
+  roles?: string[]
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -106,12 +117,13 @@ Deno.serve(async (req) => {
           return jsonResponse({ error: error.message }, 400)
         }
 
-        // Defensive: handle_new_user trigger doesn't pick up newer
-        // metadata fields (is_salesperson, roles). Patch the profile row to
-        // ensure all flags are correctly applied. The trigger creates
-        // the profiles row synchronously, so it exists by now.
+        // handle_new_user creates every new profile as an inactive viewer and
+        // takes nothing that grants access from the sign-up data (D-ASM-51), so
+        // this patch sets the role, the flags and is_active itself. The trigger
+        // creates the row synchronously; the patch confirms it found it.
+        let warning: string | null = null
         if (data.user?.id) {
-          const { error: patchErr } = await adminClient
+          const { data: patched, error: patchErr } = await adminClient
             .from('profiles')
             .update({
               role: payload.role,
@@ -121,12 +133,17 @@ Deno.serve(async (req) => {
               can_float: payload.can_float ?? false,
               can_approve_compliance: payload.can_approve_compliance ?? false,
               is_salesperson: payload.is_salesperson ?? false,
+              is_active: true,
             })
             .eq('id', data.user.id)
-          if (patchErr) {
-            console.error('Profile patch after invite failed:', patchErr)
-            // Non-fatal: invite was sent, user can still accept; admin
-            // can edit profile after.
+            .select('id')
+          if (patchErr || !patched || patched.length !== 1) {
+            console.error('Profile patch after invite failed:', patchErr ?? 'no profile row')
+            // Non-fatal: the invite was sent. The person is left as an inactive
+            // viewer until an admin finishes the profile in the Users tab.
+            warning = `Invitation sent, but ${payload.full_name}'s profile could not be set up` +
+              (patchErr ? ` (${patchErr.message})` : ' (no profile row was found)') +
+              '. They are an inactive viewer until you set their role (Edit) and activate them (Activate) in the Users tab.'
           }
         }
 
@@ -143,7 +160,7 @@ Deno.serve(async (req) => {
         })
         if (auditErr) console.error('audit_logs insert failed:', auditErr)
 
-        return jsonResponse({ success: true, user: data.user })
+        return jsonResponse({ success: true, user: data.user, ...(warning ? { warning } : {}) })
       }
 
       case 'invite_no_email': {
@@ -194,7 +211,9 @@ Deno.serve(async (req) => {
           return jsonResponse({ error: createErr?.message || 'Failed to create auth user' }, 400)
         }
 
-        const { error: patchErr } = await adminClient
+        // Sets everything that grants access itself (D-ASM-51): the trigger only
+        // provides the row, as an inactive viewer. No row found is a failure too.
+        const { data: patched, error: patchErr } = await adminClient
           .from('profiles')
           .update({
             role: payload.role,
@@ -208,10 +227,11 @@ Deno.serve(async (req) => {
             must_change_password: true,
           })
           .eq('id', created.user.id)
+          .select('id')
 
-        if (patchErr) {
+        if (patchErr || !patched || patched.length !== 1) {
           await adminClient.auth.admin.deleteUser(created.user.id)
-          return jsonResponse({ error: `Profile setup failed: ${patchErr.message}` }, 500)
+          return jsonResponse({ error: `Profile setup failed: ${patchErr?.message ?? 'no profile row was created'}` }, 500)
         }
 
         const { error: auditErr } = await adminClient.from('audit_logs').insert({
@@ -220,6 +240,103 @@ Deno.serve(async (req) => {
           details: {
             username,
             role: payload.role,
+            full_name: payload.full_name,
+            target_type: 'user',
+            target_id: created.user.id,
+          },
+        })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
+
+        return jsonResponse({ success: true, user_id: created.user.id })
+      }
+
+      case 'invite_kiosk_only': {
+        const payload = body.payload as InviteKioskOnlyPayload
+        if (!payload?.username || !payload?.full_name || !payload?.temp_pin) {
+          return jsonResponse({ error: 'Missing required fields: username, full_name, temp_pin' }, 400)
+        }
+
+        const username = payload.username.trim().toLowerCase()
+        if (!USERNAME_RE.test(username)) {
+          return jsonResponse({ error: 'Invalid username. Use 2-40 letters, digits, dot, underscore, or hyphen.' }, 400)
+        }
+        const role = payload.role || 'assembly'
+        const roles = (payload.roles ?? []).filter((r) => r && r !== role)
+        const tempPin = String(payload.temp_pin).trim()
+
+        const placeholderEmail = `${username}${PLACEHOLDER_DOMAIN}`
+
+        const { data: clash } = await adminClient
+          .from('profiles')
+          .select('id, username, email')
+          .or(`username.ilike.${username},email.ilike.${placeholderEmail}`)
+          .limit(1)
+        if (clash && clash.length > 0) {
+          return jsonResponse({ error: 'Username or placeholder email already in use.' }, 400)
+        }
+
+        // Nobody is told this password and it is never returned or logged:
+        // the account has no office login, only the kiosk PIN.
+        const password = crypto.randomUUID() + crypto.randomUUID()
+
+        const { data: created, error: createErr } = await adminClient.auth.admin.createUser({
+          email: placeholderEmail,
+          password,
+          email_confirm: true,
+          user_metadata: {
+            username,
+            full_name: payload.full_name,
+            role,
+            roles,
+            location: 'Leesburg',
+            kiosk_only: true,
+          },
+        })
+
+        if (createErr || !created?.user) {
+          return jsonResponse({ error: createErr?.message || 'Failed to create auth user' }, 400)
+        }
+
+        // Sets everything that grants access itself (D-ASM-51): the trigger only
+        // provides the row, as an inactive viewer. No row found is a failure too.
+        // profiles.username is generated from the email prefix, so it is not written here.
+        const { data: patched, error: patchErr } = await adminClient
+          .from('profiles')
+          .update({
+            role,
+            roles,
+            full_name: payload.full_name,
+            home_location_id: null,
+            can_float: false,
+            can_approve_compliance: false,
+            is_salesperson: false,
+            is_active: true,
+            kiosk_only: true,
+            must_change_password: false,
+          })
+          .eq('id', created.user.id)
+          .select('id')
+
+        if (patchErr || !patched || patched.length !== 1) {
+          await adminClient.auth.admin.deleteUser(created.user.id)
+          return jsonResponse({ error: `Profile setup failed: ${patchErr?.message ?? 'no profile row was created'}` }, 500)
+        }
+
+        const { error: pinErr } = await adminClient.rpc('profile_pin_admin_set', {
+          p_profile_id: created.user.id,
+          p_temp_pin: tempPin,
+        })
+        if (pinErr) {
+          await adminClient.auth.admin.deleteUser(created.user.id)
+          return jsonResponse({ error: pinErr.message }, 400)
+        }
+
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'user_invited_kiosk_only',
+          details: {
+            username,
+            role,
             full_name: payload.full_name,
             target_type: 'user',
             target_id: created.user.id,
@@ -316,15 +433,38 @@ Deno.serve(async (req) => {
         const { user_id } = body.payload || {}
         if (!user_id) return jsonResponse({ error: 'Missing user_id' }, 400)
 
-        const { error } = await adminClient
-          .from('profiles')
-          .update({ pin_code: null })
-          .eq('id', user_id)
+        // The PIN vault (D-ASM-43): no direct write to a PIN column.
+        const { error } = await adminClient.rpc('profile_pin_clear', { p_profile_id: user_id })
         if (error) return jsonResponse({ error: error.message }, 400)
 
         const { error: auditErr } = await adminClient.from('audit_logs').insert({
           operator_id: caller.id,
           event_type: 'pin_reset',
+          details: {
+            target_type: 'user',
+            target_id: user_id,
+          },
+        })
+        if (auditErr) console.error('audit_logs insert failed:', auditErr)
+
+        return jsonResponse({ success: true })
+      }
+
+      case 'set_temp_pin': {
+        const { user_id, temp_pin } = body.payload || {}
+        if (!user_id || !temp_pin) return jsonResponse({ error: 'Missing user_id or temp_pin' }, 400)
+
+        // Raises "A PIN is 4 to 6 digits" or "Choose a different temporary PIN"
+        // — passed through for the admin to read.
+        const { error } = await adminClient.rpc('profile_pin_admin_set', {
+          p_profile_id: user_id,
+          p_temp_pin: String(temp_pin).trim(),
+        })
+        if (error) return jsonResponse({ error: error.message }, 400)
+
+        const { error: auditErr } = await adminClient.from('audit_logs').insert({
+          operator_id: caller.id,
+          event_type: 'temp_pin_set',
           details: {
             target_type: 'user',
             target_id: user_id,

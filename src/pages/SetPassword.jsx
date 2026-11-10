@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { hasRole } from '../lib/roles'
 
-const PIN_REQUIRED_ROLES = ['machinist', 'admin', 'finishing']
+// Roles that sign in at a kiosk with a PIN (D-ASM-39: assembly too; primary or roles[]).
+const PIN_REQUIRED_ROLES = ['machinist', 'admin', 'finishing', 'assembly']
 
 export default function SetPassword() {
   const navigate = useNavigate()
@@ -26,15 +28,16 @@ export default function SetPassword() {
       // Look up the role to decide whether we need a PIN
       const { data: profile } = await supabase
         .from('profiles')
-        .select('role, pin_code')
+        .select('role, roles, has_pin')
         .eq('id', session.user.id)
         .single()
 
       if (profile) {
         setUserRole(profile.role)
-        // Show PIN fields only if role requires it AND pin_code is currently null
-        // (avoids forcing a PIN reset during a password reset)
-        setNeedsPin(PIN_REQUIRED_ROLES.includes(profile.role) && !profile.pin_code)
+        // Show PIN fields only if role requires it AND no PIN is on file
+        // (avoids forcing a PIN reset during a password reset). has_pin comes
+        // from the PIN vault; the PIN itself is never readable (D-ASM-43).
+        setNeedsPin(hasRole(profile, ...PIN_REQUIRED_ROLES) && !profile.has_pin)
       }
 
       setSessionReady(true)
@@ -118,20 +121,17 @@ export default function SetPassword() {
     }
 
     // Save PIN if collected
+    // Through the PIN vault (D-ASM-43): no PIN is on file yet, so no current
+    // PIN is passed. A refusal ("Choose a different PIN", a lock) is a result
+    // ({ ok: false, message }), not an error.
     if (needsPin) {
-      const { data: { session } } = await supabase.auth.getSession()
-      const { error: pinError } = await supabase
-        .from('profiles')
-        .update({ pin_code: pin })
-        .eq('id', session.user.id)
+      const { data: pinResult, error: pinError } = await supabase.rpc('profile_pin_set', {
+        p_new_pin: pin,
+        p_current_pin: null,
+      })
 
-      if (pinError) {
-        // Most likely cause: PIN already in use by another operator (uniqueness constraint)
-        if (pinError.code === '23505' || /unique|duplicate/i.test(pinError.message)) {
-          setError('That PIN is already in use by another operator. Please choose a different 4-digit PIN.')
-        } else {
-          setError(`Could not save PIN: ${pinError.message}`)
-        }
+      if (pinError || !pinResult?.ok) {
+        setError(pinError ? `Could not save PIN: ${pinError.message}` : (pinResult?.message || 'Could not save PIN.'))
         setLoading(false)
         return
       }

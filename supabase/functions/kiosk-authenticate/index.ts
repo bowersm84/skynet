@@ -6,10 +6,14 @@
 // run subsequent queries as `authenticated` instead of `anon`.
 //
 // Fail-closed semantics:
-//   - 0 PIN matches  → 401 'Invalid credentials'
-//   - 1 PIN match    → success
-//   - >=2 matches    → 401 'Invalid credentials' (PIN collision —
-//                       admin must reset one operator's PIN)
+//   - The PIN is checked by pin_authenticate (the PIN vault, D-ASM-43),
+//     which answers one match or none — PINs are unique in the vault.
+//   - no match           → 401 'Invalid credentials'
+//   - too many misses    → 429 'Too many attempts' + retry_after_seconds
+//                          (5 in 10 min from this device, or 30 in 10 min
+//                          from this address, D-ASM-44)
+//   - role not admitted on this kiosk → 401 'Invalid credentials'
+//     (D-ASM-49; a valid PIN that is not admitted is not a miss)
 //
 // Generic 401 messaging only — never leak which field was wrong.
 
@@ -23,12 +27,53 @@ const corsHeaders = {
 }
 
 const SHIFT_SECONDS = 60 * 60 * 8 // 8 hours
-const ALLOWED_ROLES = ['machinist', 'admin', 'finishing', 'display']
+// Each kiosk admits its own roles (D-ASM-49). The page names its kiosk; a
+// missing or unknown value is the machine kiosk, so a browser still running an
+// older bundle keeps working.
+const KIOSK_SURFACES = ['machine', 'material', 'traveler', 'kit', 'finishing', 'assembly']
+// The shop kiosks: the PRIMARY role only, as PROD ran before S17 Batch C.
+const SHOP_KIOSK_ROLES = ['machinist', 'admin', 'finishing', 'display']
+// The assembly kiosk: the primary role OR any entry of roles[].
+const ASSEMBLY_KIOSK_ROLES = ['assembly', 'admin']
+
+function resolveSurface(value: unknown): string {
+  return typeof value === 'string' && KIOSK_SURFACES.includes(value) ? value : 'machine'
+}
+
+// A kiosk-only account (an assembler, D-ASM-46) is admitted on the assembly
+// kiosk only (D-ASM-48).
+function admitted(surface: string, profile: { role: string; roles?: unknown; kiosk_only?: boolean }): boolean {
+  if (surface === 'assembly') {
+    const roles = [profile.role, ...(Array.isArray(profile.roles) ? profile.roles : [])]
+    return roles.some((r) => ASSEMBLY_KIOSK_ROLES.includes(r))
+  }
+  if (profile.kiosk_only === true) return false
+  return SHOP_KIOSK_ROLES.includes(profile.role)
+}
+
+// The database role a kiosk-only account's token runs as (D-ASM-50): a
+// Postgres role granted to authenticator with only what the assembly kiosk
+// needs (migration 2026-11-10_S17_C4_kiosk_assembler_role.sql). Every other
+// profile keeps 'authenticated'. To switch the tablet-only sessions back to the
+// ordinary role, set this to 'authenticated' and redeploy.
+const KIOSK_ONLY_DB_ROLE = 'kiosk_assembler'
 
 interface AuthPayload {
   pin?: string
   machine_id?: string
   device_id?: string | null
+  kiosk?: string
+}
+
+// Misses are counted twice (D-ASM-44), because every kiosk in the shop shares
+// one public address: per device (address + the kiosk's own device id) —
+// 5 misses in 10 minutes lock that device — and per address — 30 misses in
+// 10 minutes lock the address, which still stops a guesser who rotates
+// device ids. The address is the first entry of x-forwarded-for, which the
+// gateway sets; a client-supplied value does not come first.
+function throttleKeys(req: Request, deviceId: string | null): { device: string; address: string } {
+  const ip = (req.headers.get('x-forwarded-for') ?? '').split(',')[0].trim() || 'unknown'
+  return { device: `ip:${ip}|dev:${deviceId || 'none'}`, address: `ip:${ip}` }
 }
 
 Deno.serve(async (req) => {
@@ -41,6 +86,7 @@ Deno.serve(async (req) => {
     const pin = typeof body?.pin === 'string' ? body.pin.trim() : ''
     const machineId = typeof body?.machine_id === 'string' ? body.machine_id.trim() : ''
     const deviceId = typeof body?.device_id === 'string' ? body.device_id : null
+    const surface = resolveSurface(body?.kiosk)
 
     if (!pin || pin.length < 4 || !machineId) {
       return jsonResponse({ error: 'Invalid credentials' }, 401)
@@ -51,41 +97,31 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
     )
 
-    // PIN lookup. Pull up to 2 rows so we can detect a collision and
-    // fail closed (rather than silently picking one and mis-attributing
-    // every subsequent action — AS9100 / FAA traceability requirement).
-    const { data: matches, error: lookupErr } = await adminClient
-      .from('profiles')
-      .select('id, full_name, username, role, email, home_location_id, can_float, can_approve_compliance, is_active')
-      .eq('pin_code', pin)
-      .eq('is_active', true)
-      .limit(2)
+    // PIN lookup in the vault (D-ASM-43). The vault holds each PIN once, so
+    // there is one match or none; every miss is counted against the device
+    // and the address (D-ASM-44).
+    const keys = throttleKeys(req, deviceId)
+    const { data: result, error: lookupErr } = await adminClient.rpc('pin_authenticate', {
+      p_pin: pin,
+      p_throttle_key: keys.device,
+      p_scope_key: keys.address,
+    })
 
-    if (lookupErr) {
+    if (lookupErr || !result) {
       console.error('kiosk-authenticate lookup error:', lookupErr)
       return jsonResponse({ error: 'Invalid credentials' }, 401)
     }
 
-    if (!matches || matches.length === 0 || matches.length > 1) {
-      // Audit collisions so admins can spot when a PIN reset is needed.
-      if (matches && matches.length > 1) {
-        const { error: auditErr } = await adminClient.from('audit_logs').insert({
-          event_type: 'kiosk_pin_collision',
-          details: {
-            matched_count: matches.length,
-            device_id: deviceId,
-            target_type: 'machine',
-            target_id: machineId,
-          },
-        })
-        if (auditErr) console.error('audit_logs insert failed:', auditErr)
+    if (!result.ok) {
+      if (result.reason === 'locked') {
+        return jsonResponse({ error: 'Too many attempts', retry_after_seconds: result.retry_after_seconds }, 429)
       }
       return jsonResponse({ error: 'Invalid credentials' }, 401)
     }
 
-    const profile = matches[0]
+    const profile = result.profile
 
-    if (!ALLOWED_ROLES.includes(profile.role)) {
+    if (!admitted(surface, profile)) {
       return jsonResponse({ error: 'Invalid credentials' }, 401)
     }
 
@@ -126,7 +162,8 @@ Deno.serve(async (req) => {
       {
         sub: profile.id,
         aud: 'authenticated',
-        role: 'authenticated',
+        // A kiosk-only account is admitted on the assembly kiosk only (admitted()).
+        role: profile.kiosk_only === true ? KIOSK_ONLY_DB_ROLE : 'authenticated',
         iss: `${Deno.env.get('SUPABASE_URL')}/auth/v1`,
         iat,
         exp,
@@ -135,11 +172,13 @@ Deno.serve(async (req) => {
           kiosk: true,
           kiosk_machine_id: machineId,
           kiosk_device_id: deviceId,
+          kiosk_surface: surface,
         },
         user_metadata: {
           full_name: profile.full_name,
           role: profile.role,
           username: profile.username,
+          must_change_pin: profile.must_change_pin === true,
         },
       },
       key,
@@ -177,6 +216,11 @@ Deno.serve(async (req) => {
         home_location_id: profile.home_location_id,
         can_float: profile.can_float,
         can_approve_compliance: profile.can_approve_compliance,
+        roles: Array.isArray(profile.roles) ? profile.roles : [],
+        must_change_pin: profile.must_change_pin === true,
+        kiosk_only: profile.kiosk_only === true,
+        avatar_icon: profile.avatar_icon ?? null,
+        avatar_color: profile.avatar_color ?? null,
       },
     })
   } catch (err) {

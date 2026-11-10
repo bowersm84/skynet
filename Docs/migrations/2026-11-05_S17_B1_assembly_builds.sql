@@ -241,9 +241,11 @@ CREATE TABLE IF NOT EXISTS public.assembly_lot_index (
 );
 ALTER TABLE public.assembly_lot_sequence ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.assembly_lot_index ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS assembly_lot_sequence_read ON public.assembly_lot_sequence;
+CREATE POLICY assembly_lot_sequence_read ON public.assembly_lot_sequence FOR SELECT TO authenticated USING (true);
 DROP POLICY IF EXISTS assembly_lot_index_read ON public.assembly_lot_index;
 CREATE POLICY assembly_lot_index_read ON public.assembly_lot_index FOR SELECT TO authenticated USING (true);
-GRANT SELECT ON public.assembly_lot_index TO authenticated;
+GRANT SELECT ON public.assembly_lot_sequence, public.assembly_lot_index TO authenticated;
 REVOKE ALL ON public.assembly_lot_sequence, public.assembly_lot_index FROM anon;
 
 -- ---------------------------------------------------------------------------

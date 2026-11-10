@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { kioskAuthLockedMessage, isKioskOnly, KIOSK_ONLY_MESSAGE } from '../lib/kioskAuth'
 import { FEATURES } from '../config'
 import { lotAllowed, deriveConsumed } from '../lib/materialIssues'
 import PinPad from '../components/PinPad'
@@ -155,9 +156,10 @@ export default function MaterialKiosk() {
       if (!anchorId) { setAuthError('No active machine available'); setPin(''); return }
 
       const { data, error } = await supabase.functions.invoke('kiosk-authenticate', {
-        body: { pin, machine_id: anchorId, device_id: deviceIdRef.current },
+        body: { pin, machine_id: anchorId, device_id: deviceIdRef.current, kiosk: 'material' }, // D-ASM-49
       })
-      if (error || !data?.success) { setAuthError('Invalid PIN'); setPin(''); return }
+      if (error || !data?.success) { setAuthError((await kioskAuthLockedMessage(error)) || 'Invalid PIN'); setPin(''); return }
+      if (isKioskOnly(data.operator)) { setAuthError(KIOSK_ONLY_MESSAGE); setPin(''); return }
 
       const { error: sessionErr } = await supabase.auth.setSession({
         access_token: data.access_token,

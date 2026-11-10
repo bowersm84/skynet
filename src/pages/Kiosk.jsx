@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { kioskAuthLockedMessage, isKioskOnly, KIOSK_ONLY_MESSAGE } from '../lib/kioskAuth'
 import { resolveCompletionStatus } from '../lib/finishingCompletion'
 import { getRunTarget, isPaperworkStale, fetchActiveMembers } from '../lib/jobMerge'
 import { setupUpdateData, logMachineIdle } from '../lib/jobSetup'
@@ -1841,15 +1842,17 @@ export default function Kiosk() {
             pin,
             machine_id: machine.id,
             device_id: deviceIdRef.current,
+            kiosk: 'machine', // D-ASM-49: each kiosk admits its own roles
           },
         }
       )
 
       if (authErr || !authData?.access_token || !authData?.operator) {
-        setAuthError('Invalid PIN')
+        setAuthError((await kioskAuthLockedMessage(authErr)) || 'Invalid PIN')
         setPin('')
         return
       }
+      if (isKioskOnly(authData.operator)) { setAuthError(KIOSK_ONLY_MESSAGE); setPin(''); return }
 
       const profile = authData.operator
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { UserPlus, RefreshCw, KeyRound, Lock, Power, Edit2, X, Check } from 'lucide-react'
+import { UserPlus, RefreshCw, KeyRound, Lock, Power, Edit2, X, Check, Hash, Tablet } from 'lucide-react'
 
 const ROLE_OPTIONS = [
   { value: 'admin', label: 'Admin' },
@@ -55,6 +55,8 @@ export default function UsersTab({ profile }) {
   const [locations, setLocations] = useState([])
   const [loading, setLoading] = useState(true)
   const [showInviteModal, setShowInviteModal] = useState(false)
+  const [showKioskUserModal, setShowKioskUserModal] = useState(false)
+  const [tempPinUser, setTempPinUser] = useState(null)
   const [editingUser, setEditingUser] = useState(null)
   const [actionStatus, setActionStatus] = useState(null) // {type: 'success'|'error', message: string}
 
@@ -67,7 +69,7 @@ export default function UsersTab({ profile }) {
     setLoading(true)
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, email, full_name, username, role, roles, home_location_id, can_float, can_approve_compliance, is_salesperson, is_active, pin_code, created_at')
+      .select('id, email, full_name, username, role, roles, home_location_id, can_float, can_approve_compliance, is_salesperson, is_active, has_pin, must_change_pin, kiosk_only, created_at')
       .order('created_at', { ascending: false })
     if (error) {
       setActionStatus({ type: 'error', message: `Failed to load users: ${error.message}` })
@@ -117,7 +119,10 @@ export default function UsersTab({ profile }) {
   const handleInvite = async (form) => {
     const result = await callManageUsers('invite', form)
     if (result?.success) {
-      setActionStatus({ type: 'success', message: `Invitation sent to ${form.email}` })
+      // D-ASM-51: if the profile could not be set up, the person is an inactive viewer until an admin edits them.
+      setActionStatus(result.warning
+        ? { type: 'warning', message: result.warning }
+        : { type: 'success', message: `Invitation sent to ${form.email}` })
       setShowInviteModal(false)
       await loadUsers()
     }
@@ -166,10 +171,39 @@ export default function UsersTab({ profile }) {
   }
 
   const handleResetPin = async (user) => {
-    if (!confirm(`Reset PIN for ${user.full_name || user.email}? They will be prompted to create a new PIN on next kiosk login.`)) return
+    const consequence = user.kiosk_only
+      ? 'They have no office login, so they cannot sign in anywhere until you set a temporary PIN.'
+      : 'They will be prompted to create a new PIN on next kiosk login.'
+    if (!confirm(`Reset PIN for ${user.full_name || user.email}? ${consequence}`)) return
     const result = await callManageUsers('reset_pin', { user_id: user.id })
     if (result?.success) {
       setActionStatus({ type: 'success', message: `PIN reset for ${user.full_name || user.email}` })
+      await loadUsers()
+    }
+  }
+
+  // D-ASM-46: assemblers with no email and no office login — a name, a
+  // username and a temporary PIN the tablet makes them replace.
+  const handleInviteKioskOnly = async (form) => {
+    const result = await callManageUsers('invite_kiosk_only', form)
+    if (result?.success) {
+      setActionStatus({
+        type: 'success',
+        message: `${form.full_name} added. Give them their temporary PIN — the tablet will make them choose their own the first time they sign in.`,
+      })
+      setShowKioskUserModal(false)
+      await loadUsers()
+    }
+  }
+
+  const handleSetTempPin = async ({ user_id, temp_pin, full_name }) => {
+    const result = await callManageUsers('set_temp_pin', { user_id, temp_pin })
+    if (result?.success) {
+      setActionStatus({
+        type: 'success',
+        message: `Temporary PIN set for ${full_name}. Give it to them — the tablet will make them choose their own at the next sign-in.`,
+      })
+      setTempPinUser(null)
       await loadUsers()
     }
   }
@@ -201,9 +235,21 @@ export default function UsersTab({ profile }) {
 
   const getStatusBadge = (user) => {
     if (!user.is_active) return <span className="px-2 py-0.5 text-xs bg-red-900/40 text-red-300 rounded">Disabled</span>
-    if (!user.pin_code) return <span className="px-2 py-0.5 text-xs bg-amber-900/40 text-amber-300 rounded">No PIN</span>
+    if (!user.has_pin) return <span className="px-2 py-0.5 text-xs bg-amber-900/40 text-amber-300 rounded">No PIN</span>
     return <span className="px-2 py-0.5 text-xs bg-green-900/40 text-green-300 rounded">Active</span>
   }
+
+  // D-ASM-46 badges beside the status.
+  const getAccountBadges = (user) => (
+    <>
+      {user.kiosk_only && (
+        <span className="ml-1 px-2 py-0.5 text-xs bg-sky-900/40 text-sky-300 rounded">Kiosk only</span>
+      )}
+      {user.must_change_pin && (
+        <span className="ml-1 px-2 py-0.5 text-xs bg-amber-900/40 text-amber-300 rounded">Temporary PIN</span>
+      )}
+    </>
+  )
 
   return (
     <div className="p-6">
@@ -212,17 +258,27 @@ export default function UsersTab({ profile }) {
           <h2 className="text-2xl font-bold text-white">Users</h2>
           <p className="text-gray-500 text-sm mt-1">Manage SkyNet operator accounts and permissions</p>
         </div>
-        <button
-          onClick={() => setShowInviteModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded transition-colors"
-        >
-          <UserPlus size={16} /> Invite User
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowKioskUserModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 rounded transition-colors"
+          >
+            <Tablet size={16} /> Add assembler (kiosk only)
+          </button>
+          <button
+            onClick={() => setShowInviteModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded transition-colors"
+          >
+            <UserPlus size={16} /> Invite User
+          </button>
+        </div>
       </div>
 
       {actionStatus && (
         <div className={`mb-4 p-3 rounded text-sm flex justify-between items-center ${
-          actionStatus.type === 'success' ? 'bg-green-900/40 text-green-300 border border-green-800' : 'bg-red-900/40 text-red-300 border border-red-800'
+          actionStatus.type === 'success' ? 'bg-green-900/40 text-green-300 border border-green-800'
+            : actionStatus.type === 'warning' ? 'bg-amber-900/40 text-amber-200 border border-amber-700'
+            : 'bg-red-900/40 text-red-300 border border-red-800'
         }`}>
           <span>{actionStatus.message}</span>
           <button onClick={() => setActionStatus(null)}><X size={14} /></button>
@@ -257,7 +313,7 @@ export default function UsersTab({ profile }) {
                       <span key={r} className="ml-1 text-xs px-1.5 py-0.5 bg-skynet-accent/15 text-skynet-accent rounded capitalize">+{r.replace('_', ' ')}</span>
                     ))}
                   </td>
-                  <td className="px-4 py-3">{getStatusBadge(user)}</td>
+                  <td className="px-4 py-3">{getStatusBadge(user)}{getAccountBadges(user)}</td>
                   <td className="px-4 py-3 text-xs text-gray-400">
                     {user.can_approve_compliance && <span className="mr-2">+ Compliance Approver</span>}
                     {user.can_float && <span className="mr-2">+ Floater</span>}
@@ -270,17 +326,27 @@ export default function UsersTab({ profile }) {
                       <IconButton title="Edit permissions" onClick={() => setEditingUser(user)}>
                         <Edit2 size={14} />
                       </IconButton>
-                      <IconButton title="Resend invite" onClick={() => handleResendInvite(user.email)}>
-                        <RefreshCw size={14} />
-                      </IconButton>
-                      {isNoEmail ? (
-                        <IconButton title="Set password" onClick={() => setSetPasswordUser(user)}>
-                          <KeyRound size={14} />
+                      {/* Kiosk-only accounts (D-ASM-46) have no office login: no invite,
+                          no password — a temporary PIN instead. */}
+                      {user.kiosk_only ? (
+                        <IconButton title="Set temporary PIN" onClick={() => setTempPinUser(user)}>
+                          <Hash size={14} />
                         </IconButton>
                       ) : (
-                        <IconButton title="Send reset email" onClick={() => handleResetPassword(user.email)}>
-                          <Lock size={14} />
-                        </IconButton>
+                        <>
+                          <IconButton title="Resend invite" onClick={() => handleResendInvite(user.email)}>
+                            <RefreshCw size={14} />
+                          </IconButton>
+                          {isNoEmail ? (
+                            <IconButton title="Set password" onClick={() => setSetPasswordUser(user)}>
+                              <KeyRound size={14} />
+                            </IconButton>
+                          ) : (
+                            <IconButton title="Send reset email" onClick={() => handleResetPassword(user.email)}>
+                              <Lock size={14} />
+                            </IconButton>
+                          )}
+                        </>
                       )}
                       <IconButton title="Reset PIN" onClick={() => handleResetPin(user)}>
                         <KeyRound size={14} />
@@ -330,6 +396,181 @@ export default function UsersTab({ profile }) {
           onSubmit={handleSetPassword}
         />
       )}
+
+      {showKioskUserModal && (
+        <AddKioskUserModal
+          onSubmit={handleInviteKioskOnly}
+          onClose={() => setShowKioskUserModal(false)}
+        />
+      )}
+
+      {tempPinUser && (
+        <SetTempPinModal
+          user={tempPinUser}
+          onSubmit={handleSetTempPin}
+          onClose={() => setTempPinUser(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+// A temporary PIN: 4 digits, because every kiosk PIN pad takes 4 (the vault
+// accepts 4 to 6; D-ASM-44).
+const TEMP_PIN_RE = /^\d{4}$/
+const TEMP_PIN_COPY = 'Give them this PIN. The tablet will make them choose their own the first time they sign in.'
+
+function TempPinInput({ value, onChange }) {
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\D/g, '').slice(0, 4))}
+      className="w-full px-3 py-3 bg-gray-800 border border-gray-700 rounded text-white text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-skynet-accent"
+      placeholder="0000"
+      inputMode="numeric"
+      maxLength={4}
+      autoComplete="off"
+      required
+    />
+  )
+}
+
+function AddKioskUserModal({ onSubmit, onClose }) {
+  const [fullName, setFullName] = useState('')
+  const [username, setUsername] = useState('')
+  const [tempPin, setTempPin] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError(null)
+    const uname = username.trim().toLowerCase()
+    if (!fullName.trim()) { setError('Enter their full name.'); return }
+    if (!/^[a-z0-9._-]{2,40}$/.test(uname)) { setError('Username must be 2-40 characters, letters/digits/._- only.'); return }
+    if (!TEMP_PIN_RE.test(tempPin)) { setError('The temporary PIN is 4 digits.'); return }
+    setSubmitting(true)
+    try {
+      await onSubmit({ full_name: fullName.trim(), username: uname, temp_pin: tempPin, role: 'assembly' })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-md">
+        <div className="flex justify-between items-center p-5 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">Add assembler (kiosk only)</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-white"><X size={18} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <p className="text-sm text-gray-400">
+            No email and no office login — they sign in on the assembly tablet with a PIN only.
+          </p>
+
+          {error && (
+            <div className="p-3 rounded bg-red-900/40 text-red-300 border border-red-800 text-sm">{error}</div>
+          )}
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Full Name</label>
+            <input
+              type="text"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white focus:outline-none focus:border-skynet-accent"
+              required
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Username</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white font-mono focus:outline-none focus:border-skynet-accent"
+              placeholder="jsmith"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Temporary PIN</label>
+            <TempPinInput value={tempPin} onChange={setTempPin} />
+            <p className="text-gray-500 text-xs mt-2">{TEMP_PIN_COPY}</p>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-800">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-400 hover:text-white">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded disabled:opacity-50"
+            >
+              {submitting ? 'Adding...' : 'Add assembler'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function SetTempPinModal({ user, onSubmit, onClose }) {
+  const [tempPin, setTempPin] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (!TEMP_PIN_RE.test(tempPin)) { setError('The temporary PIN is 4 digits.'); return }
+    setSubmitting(true)
+    try {
+      await onSubmit({ user_id: user.id, temp_pin: tempPin, full_name: user.full_name || user.username })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-sm">
+        <div className="flex justify-between items-center p-5 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">
+            Temporary PIN for {user.full_name || user.username}
+          </h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-white"><X size={18} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          {error && (
+            <div className="p-3 rounded bg-red-900/40 text-red-300 border border-red-800 text-sm">{error}</div>
+          )}
+          <TempPinInput value={tempPin} onChange={setTempPin} />
+          <p className="text-gray-500 text-xs">{TEMP_PIN_COPY}</p>
+          <div className="flex justify-end gap-2 pt-3 border-t border-gray-800">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-gray-400 hover:text-white">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="px-4 py-2 bg-skynet-accent hover:bg-blue-600 text-white rounded disabled:opacity-50"
+            >
+              {submitting ? 'Setting...' : 'Set temporary PIN'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

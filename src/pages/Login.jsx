@@ -23,9 +23,18 @@ export default function Login({ onLogin }) {
     if (trimmed.includes('@')) {
       email = trimmed
     } else {
-      const { data: lookedUp } = await supabase.rpc('get_email_by_username', {
+      const { data: lookedUp, error: lookupErr } = await supabase.rpc('get_email_by_username', {
         p_username: trimmed,
       })
+      // D-ASM-42: a refused or failed lookup is reported, never papered over
+      // with a guessed address — the guess hid a revoked grant for five days.
+      // No match (null) still falls back to the Skybolt address.
+      if (lookupErr) {
+        console.error('get_email_by_username failed:', lookupErr)
+        setError('Sign-in lookup failed — use your full email')
+        setLoading(false)
+        return
+      }
       email = lookedUp || `${trimmed}${SKYBOLT_DOMAIN}`
     }
 

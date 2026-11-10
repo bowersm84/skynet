@@ -44,6 +44,18 @@ export const FEATURES = {
   ASSEMBLY_BOARD: import.meta.env?.VITE_ENV_LABEL === 'test',
 
   /**
+   * Assembly kiosk and build TV (S17 Batch C, D-ASM-39 / D-ASM-40) — the assemblers' tablet at /assembly-kiosk
+   * (PIN sign-in through kiosk-authenticate; my builds / open builds; start with lots; checklist sign-offs; pause,
+   * resume, closeout) and the four-column build TV at /dashboards/assembly. Reads the S17 C1 / C2a functions
+   * (Docs/migrations/2026-11-05_S17_C1_assembly_kiosk_rpcs.sql, 2026-11-10_S17_C2a_pin_vault.sql).
+   *
+   * When false: /assembly-kiosk does not exist, and /dashboards/assembly shows today's board (finishing batches
+   * and jobs ready for assembly) exactly as before.
+   * TEST: on (VITE_ENV_LABEL=test). PROD: off until the assembly cutover (D-ASM-12).
+   */
+  ASSEMBLY_KIOSK: import.meta.env?.VITE_ENV_LABEL === 'test',
+
+  /**
    * Customer Orders page on the toolbar (S17 B2, D-ASM-33). Retired: orders come from Fishbowl through the Order
    * Queue, Demand moved to the Command page, Stock Requests to the Order Queue, and the Order Queue's salesperson
    * filter replaces My Orders. Nobody needs the page (Matt).

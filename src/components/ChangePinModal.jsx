@@ -9,13 +9,14 @@ export default function ChangePinModal({ profile, onClose, onSuccess }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
-  const isCreating = !profile?.pin_code  // No current PIN => "Create" mode
+  // D-ASM-43: the PIN itself is never readable; has_pin says whether one is on file.
+  const isCreating = !profile?.has_pin  // No PIN on file => "Create" mode
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError(null)
 
-    // Validate new PIN format
+    // Every kiosk PIN pad takes 4 digits, so the office form does too.
     if (!/^\d{4}$/.test(newPin)) {
       setError('PIN must be exactly 4 digits.')
       return
@@ -24,43 +25,31 @@ export default function ChangePinModal({ profile, onClose, onSuccess }) {
       setError('New PINs do not match.')
       return
     }
-
-    // If we're changing (not creating), validate current PIN
-    if (!isCreating) {
-      if (!/^\d{4}$/.test(currentPin)) {
-        setError('Current PIN must be 4 digits.')
-        return
-      }
-      if (currentPin !== profile.pin_code) {
-        setError('Current PIN is incorrect.')
-        return
-      }
-    }
-
-    if (newPin === profile?.pin_code) {
-      setError('New PIN must be different from your current PIN.')
+    if (!isCreating && !/^\d{4}$/.test(currentPin)) {
+      setError('Current PIN must be 4 digits.')
       return
     }
 
     setSubmitting(true)
 
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({ pin_code: newPin })
-      .eq('id', profile.id)
+    // The vault checks the current PIN, "same as now" and "in use" on the
+    // server. A refusal is a result ({ ok: false, message }), not an error.
+    const { data, error: rpcError } = await supabase.rpc('profile_pin_set', {
+      p_new_pin: newPin,
+      p_current_pin: isCreating ? null : currentPin,
+    })
 
-    if (updateError) {
-      if (updateError.code === '23505' || /unique|duplicate/i.test(updateError.message)) {
-        setError('That PIN is already in use by another operator. Please choose a different 4-digit PIN.')
-      } else {
-        setError(`Could not update PIN: ${updateError.message}`)
-      }
-      setSubmitting(false)
+    setSubmitting(false)
+    if (rpcError) {
+      setError(`Could not update PIN: ${rpcError.message}`)
+      return
+    }
+    if (!data?.ok) {
+      setError(data?.message || 'Could not update PIN.')
       return
     }
 
-    setSubmitting(false)
-    if (onSuccess) onSuccess(newPin)
+    if (onSuccess) onSuccess()
     onClose()
   }
 

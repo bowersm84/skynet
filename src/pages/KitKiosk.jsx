@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { kioskAuthLockedMessage, isKioskOnly, KIOSK_ONLY_MESSAGE } from '../lib/kioskAuth'
 import { FEATURES } from '../config'
 import PinPad from '../components/PinPad'
 import KitSearch from '../components/kitregistry/KitSearch'
@@ -286,9 +287,10 @@ export default function KitKiosk() {
       if (!anchorId) { setBootError('No active machine available'); setBootPin(''); return }
 
       const { data, error } = await supabase.functions.invoke('kiosk-authenticate', {
-        body: { pin: bootPin, machine_id: anchorId, device_id: deviceIdRef.current },
+        body: { pin: bootPin, machine_id: anchorId, device_id: deviceIdRef.current, kiosk: 'kit' }, // D-ASM-49
       })
-      if (error || !data?.success) { setBootError('Invalid PIN'); setBootPin(''); return }
+      if (error || !data?.success) { setBootError((await kioskAuthLockedMessage(error)) || 'Invalid PIN'); setBootPin(''); return }
+      if (isKioskOnly(data.operator)) { setBootError(KIOSK_ONLY_MESSAGE); setBootPin(''); return }
 
       const { error: sessionErr } = await supabase.auth.setSession({
         access_token: data.access_token,
@@ -827,19 +829,14 @@ export default function KitKiosk() {
     setSaving(true)
     setSavePinError(null)
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, username')
-        .eq('pin_code', savePin)
-        .eq('is_active', true)
-        .single()
-      if (error) {
-        if (error.code === 'PGRST116') { setSavePinError('Invalid PIN'); setSavePin(''); return }
-        throw error
-      }
+      // The PIN vault resolves the PIN on the server (D-ASM-43). A wrong or
+      // locked PIN is a result ({ ok: false, message }), not an error.
+      const { data, error } = await supabase.rpc('pin_resolve', { p_pin: savePin })
+      if (error) throw error
+      if (!data?.ok) { setSavePinError(data?.message || 'Invalid PIN'); setSavePin(''); return }
       setPinPromptOpen(false)
       setSavePin('')
-      await doSave(data.id, data.full_name || data.username || '')
+      await doSave(data.profile_id, data.full_name || '')
     } catch (err) {
       console.error('PIN confirm failed:', err)
       setSavePinError('Could not verify PIN')

@@ -443,12 +443,12 @@ export default function Mainframe({ user, profile, canCreateWorkOrders = false, 
     }
   }, [])
 
-  // Soft-prompt the user to create their kiosk PIN if their role needs one and pin_code is null.
-  // Reappears each new session until they create a PIN.
+  // Soft-prompt the user to create their kiosk PIN if their role needs one and none is on file.
+  // Reappears each new session until they create a PIN. has_pin comes from the PIN vault (D-ASM-43);
+  // assembly joins the list and roles[] counts (D-ASM-39).
   useEffect(() => {
     if (!profile) return
-    const PIN_REQUIRED_ROLES = ['machinist', 'admin', 'finishing']
-    const needsPinNow = PIN_REQUIRED_ROLES.includes(profile.role) && !profile.pin_code
+    const needsPinNow = hasRole(profile, 'machinist', 'admin', 'finishing', 'assembly') && !profile.has_pin
     if (needsPinNow && !pinPromptDismissed) {
       setShowPinPrompt(true)
     }

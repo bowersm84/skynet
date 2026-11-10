@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Droplets, Flame, Wind, AlertTriangle, Clock, Package } from 'lucide-react'
+import { FEATURES } from '../../config'
+import { Avatar } from '../../components/AvatarPicker'
+import { formatMinutes, waveLabel, tvColumns } from '../../lib/assemblyKioskMath'
+import { Droplets, Flame, Wind, AlertTriangle, Clock, Package, Play, CheckCircle } from 'lucide-react'
 
 const STAGE_CONFIG = {
   wash: { label: 'Wash', icon: Droplets, color: 'bg-blue-600 text-blue-100' },
@@ -8,7 +11,8 @@ const STAGE_CONFIG = {
   dry: { label: 'Dry', icon: Wind, color: 'bg-yellow-600 text-yellow-100' }
 }
 
-export default function AssemblyDisplay() {
+// Today's board (finishing batches and jobs ready for assembly) — what PROD shows until the assembly cutover.
+function FinishingFeedDisplay() {
   const [finishingData, setFinishingData] = useState([])
   const [assemblyData, setAssemblyData] = useState([])
   const [loading, setLoading] = useState(true)
@@ -355,4 +359,120 @@ export default function AssemblyDisplay() {
       </div>
     </div>
   )
+}
+
+// ── Build TV (S17 Batch C, D-ASM-40) ────────────────────────────────────────
+// Fed by v_assembly_tv (open builds, plus complete and released in the last 24 hours); running minutes come
+// from v_assembly_kiosk_builds. Four columns: Running (avatar and minutes), Late, Waiting (oldest due first),
+// Done today. Large type, refreshed every 30 s, no interaction. It runs signed in, like the other TVs.
+const TV_REFRESH_MS = 30000
+const PRIORITY_BAR = { critical: 'bg-red-500', high: 'bg-amber-400', normal: 'bg-gray-600', low: 'bg-gray-700' }
+
+function tvDate(value) {
+  if (!value) return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value))
+  const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+function TvCard({ row, minutes, lotPrefix, show }) {
+  const wave = waveLabel(row)
+  return (
+    <div className="relative rounded-xl bg-gray-900 border border-gray-800 pl-5 pr-4 py-3 overflow-hidden">
+      <span className={`absolute left-0 top-0 bottom-0 w-2 ${PRIORITY_BAR[row.priority] || PRIORITY_BAR.normal}`} />
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-3xl font-bold text-white truncate">{row.part_number}</span>
+        <span className="text-2xl text-gray-300 font-mono shrink-0">{Number(row.quantity).toLocaleString()}</span>
+      </div>
+      <div className="flex items-center gap-3 mt-1 text-xl text-gray-400">
+        <span className="font-mono">{row.build_number}</span>
+        {wave && <span className="text-indigo-300">{wave}</span>}
+        {row.late && show !== 'late' && <span className="text-red-400 font-semibold">LATE</span>}
+      </div>
+      <div className="flex items-center gap-3 mt-2 text-xl">
+        {row.assigned_name
+          ? <><Avatar icon={row.avatar_icon} color={row.avatar_color} name={row.assigned_name} size={36} /><span className="text-gray-200 truncate">{row.assigned_name}</span></>
+          : <span className="text-gray-500">Unassigned</span>}
+        {show === 'running' && minutes != null && <span className="ml-auto text-green-300 font-mono">{formatMinutes(minutes)}</span>}
+        {(show === 'late' || show === 'waiting') && tvDate(row.earliest_due) && (
+          <span className={`ml-auto ${show === 'late' ? 'text-red-300' : 'text-gray-300'}`}>Due {tvDate(row.earliest_due)}</span>
+        )}
+        {show === 'done' && row.assembly_lot_number && <span className="ml-auto text-green-300 font-mono">{lotPrefix}{row.assembly_lot_number}</span>}
+      </div>
+    </div>
+  )
+}
+
+function TvColumn({ title, icon, tone, rows, render }) {
+  const Icon = icon
+  return (
+    <section className="flex flex-col min-h-0 bg-gray-950/60 rounded-2xl border border-gray-800">
+      <h2 className={`flex items-center gap-3 px-5 py-4 text-3xl font-bold ${tone}`}>
+        <Icon size={32} /> {title} <span className="ml-auto text-gray-400 font-mono">{rows.length}</span>
+      </h2>
+      <div className="flex-1 min-h-0 overflow-hidden px-4 pb-4 space-y-3">
+        {rows.length === 0 ? <p className="text-gray-600 text-2xl px-1">—</p> : rows.map(render)}
+      </div>
+    </section>
+  )
+}
+
+function AssemblyBuildsTV() {
+  const [rows, setRows] = useState([])
+  const [minutesById, setMinutesById] = useState({})
+  const [lotPrefix, setLotPrefix] = useState('')
+  const [error, setError] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const [tv, open, prefix] = await Promise.all([
+        supabase.from('v_assembly_tv').select('*'),
+        supabase.from('v_assembly_kiosk_builds').select('id, minutes_total'),
+        supabase.from('app_settings').select('value').eq('key', 'assembly_lot_prefix_display').maybeSingle(),
+      ])
+      if (tv.error) throw tv.error
+      setRows(tv.data || [])
+      setMinutesById(Object.fromEntries((open.data || []).map((r) => [r.id, Number(r.minutes_total)])))
+      setLotPrefix(typeof prefix.data?.value === 'string' ? prefix.data.value : '')
+      setError(null)
+      setLastUpdated(new Date())
+    } catch (err) {
+      setError(err?.message || String(err))
+    }
+  }, [])
+
+  useEffect(() => {
+    document.title = 'Assembly Display'
+    load()
+    const t = setInterval(load, TV_REFRESH_MS)
+    return () => { clearInterval(t); document.title = 'SkyNet MES' }
+  }, [load])
+
+  const { running, late, waiting, doneToday } = tvColumns(rows)
+  return (
+    <div className="h-screen bg-skynet-dark text-white flex flex-col p-6 gap-5 overflow-hidden">
+      <header className="flex items-center justify-between">
+        <h1 className="text-5xl font-bold">Assembly</h1>
+        <div className="text-right text-gray-400 text-2xl">
+          {error ? <span className="text-red-400">{error}</span> : lastUpdated && <>Updated {lastUpdated.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</>}
+        </div>
+      </header>
+      <div className="flex-1 min-h-0 grid grid-cols-4 gap-5">
+        <TvColumn title="Running" icon={Play} tone="text-green-400" rows={running}
+          render={(r) => <TvCard key={r.id} row={r} minutes={minutesById[r.id]} show="running" />} />
+        <TvColumn title="Late" icon={AlertTriangle} tone="text-red-400" rows={late}
+          render={(r) => <TvCard key={r.id} row={r} show="late" />} />
+        <TvColumn title="Waiting" icon={Clock} tone="text-amber-300" rows={waiting}
+          render={(r) => <TvCard key={r.id} row={r} show="waiting" />} />
+        <TvColumn title="Done today" icon={CheckCircle} tone="text-sky-300" rows={doneToday}
+          render={(r) => <TvCard key={r.id} row={r} lotPrefix={lotPrefix} show="done" />} />
+      </div>
+    </div>
+  )
+}
+
+// With FEATURES.ASSEMBLY_KIOSK (TEST) the TV shows builds; without it (PROD), today's board, unchanged.
+export default function AssemblyDisplay() {
+  return FEATURES.ASSEMBLY_KIOSK ? <AssemblyBuildsTV /> : <FinishingFeedDisplay />
 }

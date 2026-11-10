@@ -22,6 +22,7 @@ import CertRepository from './pages/CertRepository'
 import Reports from './pages/Reports'
 import AssemblyBoard from './pages/AssemblyBoard'
 import AssemblyChecklists from './pages/AssemblyChecklists'
+import AssemblyKiosk from './pages/AssemblyKiosk'
 import AssemblyDisplay from './pages/dashboards/AssemblyDisplay'
 import ProductionDisplay from './pages/dashboards/ProductionDisplay'
 import PresidentsBridge from './pages/dashboards/PresidentsBridge'
@@ -35,6 +36,7 @@ import LoadingScreen from './components/LoadingScreen'
 import ChangePinModal from './components/ChangePinModal'
 import NotificationsBell from './components/NotificationsBell'
 import ForceChangePassword from './components/ForceChangePassword'
+import { KioskOnlyNotice, OfficeRoute } from './components/KioskOnlyGate'
 
 const DASHBOARDS = [
   { label: 'Production Dashboard', path: '/dashboards/production' },
@@ -254,7 +256,8 @@ function MainApp() {
   // D-CPROG-02: one Dashboards entry per customer program the user is rostered on. RLS on
   // customer_programs returns only those, so nobody else ever sees the entry.
   useEffect(() => {
-    if (!profile?.id || !FEATURES.CUSTOMER_PROGRAMS) return
+    // D-ASM-48: a kiosk-only account gets no office query, this one included.
+    if (!profile?.id || profile.kiosk_only || !FEATURES.CUSTOMER_PROGRAMS) return
     let alive = true
     listMyCustomerPrograms().then(rows => { if (alive) setCustomerPrograms(rows) })
     return () => { alive = false }
@@ -294,7 +297,8 @@ function MainApp() {
   }, [profile, currentPage, canAccessSchedule, canAccessCustomerOrders, canAccessOrderQueueFlag, canAccessArmory, canAccessCerts, canAccessReports, canAccessAssemblyBoard, canAccessAssemblyChecklists])
 
   // Roles that have a kiosk PIN — these users see Change PIN in the user dropdown
-  const hasKioskPin = ['machinist', 'admin', 'finishing'].includes(profile?.role)
+  // Roles kiosk-authenticate admits that sign in at the office too (D-ASM-39: primary or roles[]).
+  const hasKioskPin = hasRole(profile, 'machinist', 'admin', 'finishing', 'assembly')
 
   // Get page title for header
   const getPageTitle = () => {
@@ -331,8 +335,23 @@ function MainApp() {
     }} />
   }
 
+  // D-ASM-48: kiosk-only accounts (assemblers) get the tablet and nothing else. Ahead of every office route, the
+  // toolbar and every office component, so nothing of the office mounts or queries for them.
+  if (profile?.kiosk_only) {
+    return <KioskOnlyNotice />
+  }
+
   if (showLoadingScreen) {
     return <LoadingScreen onComplete={() => setShowLoadingScreen(false)} />
+  }
+
+  // Nothing of the office mounts before the profile says who this is (the loading animation can end first).
+  if (!profile) {
+    return (
+      <div className="min-h-screen bg-skynet-dark flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-skynet-accent border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    )
   }
 
   if (profile?.must_change_password) {
@@ -545,7 +564,7 @@ function MainApp() {
                       className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 transition-colors text-left"
                     >
                       <KeyRound size={14} />
-                      {profile?.pin_code ? 'Change Kiosk PIN' : 'Create Kiosk PIN'}
+                      {profile?.has_pin ? 'Change Kiosk PIN' : 'Create Kiosk PIN'}
                     </button>
                   )}
                   {hasKioskPin && (
@@ -622,9 +641,10 @@ function MainApp() {
         <ChangePinModal
           profile={profile}
           onClose={() => setShowChangePinModal(false)}
-          onSuccess={(newPin) => {
-            // Update local profile state so subsequent dropdown reflects "Change" not "Create"
-            setProfile(prev => prev ? { ...prev, pin_code: newPin } : prev)
+          onSuccess={() => {
+            // Update local profile state so subsequent dropdown reflects "Change" not "Create".
+            // The PIN itself never reaches the browser (D-ASM-43).
+            setProfile(prev => prev ? { ...prev, has_pin: true, must_change_pin: false } : prev)
           }}
         />
       )}
@@ -680,29 +700,36 @@ function App() {
             FEATURES.KIT_STC_REGISTRY inside the page. Deliberately NOT a Mainframe tab. */}
         <Route path="/kits" element={<KitKiosk />} />
 
+        {/* Assembly Kiosk — the assemblers' tablet (S17 Batch C, D-ASM-40). PIN auth via
+            kiosk-authenticate. Exists only while FEATURES.ASSEMBLY_KIOSK (TEST); on PROD the
+            path falls through to the main app. */}
+        {FEATURES.ASSEMBLY_KIOSK && <Route path="/assembly-kiosk" element={<AssemblyKiosk />} />}
+
         {/* Pricing Portal — office session only (no PIN); self-gated by
             FEATURES.PRICING_PORTAL and canViewPricing inside the page. Reached
             from the Dashboards dropdown; deliberately NOT a Mainframe tab. */}
-        <Route path="/pricing" element={<Pricing />} />
+        {/* D-ASM-48: every office page outside MainApp is wrapped in OfficeRoute — a kiosk-only
+            session gets the kiosk-only notice and the page never mounts. */}
+        <Route path="/pricing" element={<OfficeRoute><Pricing /></OfficeRoute>} />
 
         {/* Assembly display - TV dashboard, no login required */}
-        <Route path="/dashboards/assembly" element={<AssemblyDisplay />} />
-        <Route path="/dashboards/production" element={<ProductionDisplay />} />
-        <Route path="/dashboards/sales" element={<SalesDashboard />} />
+        <Route path="/dashboards/assembly" element={<OfficeRoute><AssemblyDisplay /></OfficeRoute>} />
+        <Route path="/dashboards/production" element={<OfficeRoute><ProductionDisplay /></OfficeRoute>} />
+        <Route path="/dashboards/sales" element={<OfficeRoute><SalesDashboard /></OfficeRoute>} />
 
         {/* Giza Dashboard - office session, every role views; writes gated in the page and by
             the program RPCs (S15 Batch B, D-GIZA-08). Self-gated by FEATURES.PROGRAM_TRACKER. */}
-        <Route path="/dashboards/giza" element={<GizaDashboard />} />
+        <Route path="/dashboards/giza" element={<OfficeRoute><GizaDashboard /></OfficeRoute>} />
 
         {/* Customer program dashboards (S16, D-CPROG) — Kaytech first. Office session; only the
             program's roster gets data back (RLS). Self-gated by FEATURES.CUSTOMER_PROGRAMS. */}
-        <Route path="/dashboards/program/:code" element={<CustomerProgramDashboard />} />
+        <Route path="/dashboards/program/:code" element={<OfficeRoute><CustomerProgramDashboard /></OfficeRoute>} />
 
         {/* President's Bridge - auth + role gated (president + admin) */}
-        <Route path="/bridge" element={<PresidentsBridge />} />
+        <Route path="/bridge" element={<OfficeRoute><PresidentsBridge /></OfficeRoute>} />
 
         {/* Print traveler route - opens in new tab */}
-        <Route path="/print/traveler/:jobId" element={<PrintTraveler />} />
+        <Route path="/print/traveler/:jobId" element={<OfficeRoute><PrintTraveler /></OfficeRoute>} />
 
         {/* Main app - requires Supabase authentication */}
         <Route path="/*" element={<MainApp />} />

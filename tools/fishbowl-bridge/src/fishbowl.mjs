@@ -1,5 +1,6 @@
-// fishbowl.mjs — minimal Fishbowl Advanced REST client: login, logout, data-query (read) and, since
-// v1.7 (D-PRICE-53), ONE write path: importRows -> POST /api/import/<name>. Nothing else writes.
+// fishbowl.mjs — minimal Fishbowl Advanced REST client: login, logout, data-query (read) and two write paths:
+// importRows -> POST /api/import/<name> (v1.7, D-PRICE-53, called only from push.mjs) and, since v1.12 (S17 D1,
+// D-ASM-52), call() for the manufacture-order endpoints (called only from mo.mjs, behind its fences).
 // node:http is used deliberately: /api/data-query is a GET with a SQL body, which fetch() refuses to send.
 import http from 'node:http'
 
@@ -76,7 +77,9 @@ export class Fishbowl {
       Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/sql',
     }, sql)
     if (res.status === 401) {
-      // session expired or server restarted — re-login once and retry
+      // session expired or server restarted — re-login once and retry. Logged (bridge 1.12): with two bridges on
+      // one Fishbowl user, a 401 mid-cycle can mean the other bridge's login ended this session.
+      this.log.warn('fishbowl 401 on data-query — session ended; logging in again and retrying once')
       this.token = null
       await this.login()
       res = await this._call('GET', '/api/data-query', {
@@ -104,6 +107,7 @@ export class Fishbowl {
     const headers = () => ({ Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' })
     let res = await this._call('POST', path, headers(), body, this.cfg.importTimeoutMs)
     if (res.status === 401) {
+      this.log.warn(`fishbowl 401 on import ${name} — session ended; logging in again and retrying once`)
       this.token = null
       await this.login()
       res = await this._call('POST', path, headers(), body, this.cfg.importTimeoutMs)
@@ -112,6 +116,26 @@ export class Fishbowl {
       throw new FishbowlError(`import ${name} failed (${res.status}): ${String(res.body).slice(0, 1500)}`, res.status, res.body)
     }
     return { status: res.status, body: res.body }
+  }
+
+  // v1.12 (S17 D1): one JSON call to the REST API — GET, POST or DELETE on /api/... — returning
+  // { status, body } with the body parsed when it is JSON. Never throws on an HTTP status: the caller decides.
+  // Only mo.mjs calls it with a method other than GET.
+  async call(method, path, body) {
+    if (!/^\/api\//.test(path)) throw new FishbowlError(`call: path must start with /api/: ${path}`, 0, '')
+    await this.ensureSession()
+    const payload = body === undefined ? undefined : JSON.stringify(body)
+    const headers = () => ({ Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' })
+    let res = await this._call(method, path, headers(), payload)
+    if (res.status === 401) {
+      this.log.warn(`fishbowl 401 on ${method} ${path} — session ended; logging in again and retrying once`)
+      this.token = null
+      await this.login()
+      res = await this._call(method, path, headers(), payload)
+    }
+    let parsed = res.body
+    try { parsed = res.body === '' ? null : JSON.parse(res.body) } catch { /* not JSON: keep the text */ }
+    return { status: res.status, body: parsed }
   }
 
   // Convenience: run several statements inside one session (per_cycle mode logs in/out around them).

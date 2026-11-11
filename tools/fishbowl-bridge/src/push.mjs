@@ -10,6 +10,7 @@
 // fb_push_auto never treats it as a real push. A command's own dry_run flag is honoured the same way.
 import { syncProducts, syncCustomers } from './pricing.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
+import { MO_KINDS, runMoCommand } from './mo.mjs'
 
 // D-ASM-23 dispatch table: kind -> the Fishbowl import name(s) to post, in order (configurable because the names
 // are Fishbowl's), and the mirror to re-read after a real push. It is resolved inside the handler's try, so a kind
@@ -37,6 +38,65 @@ export function pushHandler(kind) {
   return Object.hasOwn(PUSH_KINDS, kind) ? PUSH_KINDS[kind] : null
 }
 
+// S17 D1 (D-ASM-52): FB_PUSH_KINDS, the kinds this bridge may execute. Checked before anything else: a claimed
+// command of another kind is finished failed and never executed. Without the key: the four pricing kinds.
+export const DEFAULT_PUSH_KINDS = ['prices', 'rules', 'tree', 'groups']
+export function kindEnabled(kind, cfg) {
+  const kinds = Array.isArray(cfg.push?.kinds) ? cfg.push.kinds : DEFAULT_PUSH_KINDS
+  return typeof kind === 'string' && kinds.includes(kind)
+}
+
+// S17 D1 (D-ASM-52): the MO commands. Their own write gate — FB_MO_ENABLED, FB_MO_DRY_RUN — not the pricing one, and
+// the fence in mo.mjs. After Fishbowl answers one of them in a way the probe did not, every later MO command is
+// failed unexecuted until the bridge restarts (hard rule 4).
+export { moFenceRefusal } from './mo.mjs'
+let moHalt = null
+export function moHaltState() { return moHalt }
+export function resetMoHalt() { moHalt = null }
+
+export function moGate(cfg) {
+  if (!cfg.mo?.enabled) return { write: false, why: 'FB_MO_ENABLED is not true' }
+  if (cfg.mo?.dryRun) return { write: false, why: 'FB_MO_DRY_RUN is true' }
+  return { write: true, why: null }
+}
+
+async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo }) {
+  const gate = moGate(cfg)
+  const dryRun = Boolean(cmd.dry_run) || !gate.write
+  const base = { dry_run: dryRun, forced: !cmd.dry_run && !gate.write, reason: !cmd.dry_run && !gate.write ? gate.why : null, host: cfg.host, version: cfg.version }
+  if (moHalt) {
+    const msg = `MO writes are stopped on this bridge since command #${moHalt.id} (${moHalt.message.slice(0, 200)}) — restart it after checking Fishbowl`
+    log.warn(`push #${cmd.id} ${cmd.kind}: ${msg}`)
+    await sky.pushFinish(cmd.id, false, { ...base, executed: false }, msg.slice(0, 2000))
+    return
+  }
+  let result
+  try {
+    result = { ...(await runMoCommand(fb, cmd, { cfg, log, dryRun })), ...base }
+  } catch (e) {
+    if (e.halt) moHalt = { id: cmd.id, message: e.message }
+    const msg = e.plain ? e.message : `${e.name || 'Error'}: ${e.message}`
+    log.error(`push #${cmd.id} ${cmd.kind} failed: ${msg}`)
+    try { await sky.pushFinish(cmd.id, false, { ...base, halted: Boolean(e.halt) }, msg.slice(0, 2000)) } catch (e2) { log.error(`push #${cmd.id}: could not record failure: ${e2.message}`) }
+    return
+  }
+  log.info(`push #${cmd.id} ${cmd.kind}: ${dryRun ? `DRY RUN${base.forced ? ` (forced: ${base.reason})` : ''}` : 'done'} — MO ${result.mo_number ?? '?'}${result.fb_mo_id ? ` (id ${result.fb_mo_id})` : ''}${result.status ? ` · ${result.status}` : ''}${'created' in result ? ` · created ${result.created}` : ''}${'deleted' in result ? ` · deleted ${result.deleted}` : ''}${'closed' in result ? ` · closed ${result.closed}` : ''}`)
+  await sky.pushFinish(cmd.id, true, result, null)
+  // Fresh read-back: the MO's mirror rows are re-read in the same cycle (real writes only). An MO this command
+  // deleted is marked removed in the mirror instead (D-ASM-57): the audit tail would re-read it, find nothing and
+  // leave it as last seen.
+  if (!dryRun && result.fb_mo_id && result.deleted === true && result.existed === true && removeMo) {
+    try {
+      const n = await removeMo([result.fb_mo_id])
+      log.info(`push #${cmd.id}: MO ${result.mo_number} (id ${result.fb_mo_id}) marked removed in the mirror (${n} row)`)
+    } catch (e) {
+      log.warn(`push #${cmd.id}: MO ${result.fb_mo_id} could not be marked removed in the mirror (${e.message}) — it is gone from Fishbowl; the mirror keeps it as last seen`)
+    }
+  } else if (!dryRun && refreshMo && result.fb_mo_id && result.deleted !== true) {
+    try { await refreshMo([result.fb_mo_id]) } catch (e) { log.error(`push #${cmd.id}: MO mirror refresh failed (the audit tail will catch up): ${e.message}`) }
+  }
+}
+
 export function importsFor(kind, cfg) {
   const handler = pushHandler(kind)
   if (!handler) throw new Error(`unknown push kind: ${kind}`)
@@ -58,11 +118,21 @@ function rowsOf(payload, key) {
 }
 
 // Runs at most `max` queued commands. Never throws for a Fishbowl error: that is recorded on the command.
-export async function runPushCommands(fb, sky, { cfg, log, max = 3 } = {}) {
+export async function runPushCommands(fb, sky, { cfg, log, max = 3, refreshMo = null, removeMo = null } = {}) {
   let ran = 0
   for (; ran < max; ran++) {
     const cmd = await sky.pushNext(cfg.host)
     if (!cmd) break
+    if (!kindEnabled(cmd.kind, cfg)) {
+      const msg = `kind not enabled on this bridge: ${cmd.kind}`
+      log.warn(`push #${cmd.id} ${cmd.kind}: ${msg} — finished failed, not executed`)
+      try { await sky.pushFinish(cmd.id, false, { executed: false, host: cfg.host, version: cfg.version }, msg) } catch (e2) { log.error(`push #${cmd.id}: could not record failure: ${e2.message}`) }
+      continue
+    }
+    if (MO_KINDS.has(cmd.kind)) {
+      await runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo })
+      continue
+    }
     const gate = canPushFor(cfg)
     const dryRun = Boolean(cmd.dry_run) || !gate.ok
     const forced = !cmd.dry_run && !gate.ok

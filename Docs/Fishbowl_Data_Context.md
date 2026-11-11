@@ -137,3 +137,32 @@ overlap is harmless — the upsert is keyed on `fb_soitem_id`. The backfill is ~
 
 Because the cursor is `so.dateLastModified`, *any* touch to an order re-reads all of its lines. That is the point:
 a price corrected on a two-year-old order flows through on the next nightly run.
+
+## Manufacture orders through the REST API (S17 D1, probed on the live Fishbowl 2026-11-11)
+
+The one write besides the pricing imports (D-ASM-52): bridge 1.12 creates, issues, cancels and closes short the
+assembly MOs, and only for parts starting `SKYTEST-` while D1 runs. Probed with three disposable MOs on BOM
+`SKYTEST-STUD-ASSEMBLY` (id 2407): `SKYTEST-PROBE-1` (qty 1, id 5714), `SKYTEST-PROBE-2` (qty 1001, id 5715) and a
+26-character number (id 5716). All three were deleted; a read afterwards found no MO, MO item, WO, WO item, pick or
+pick item for a `SKYTEST-` part and every test lot back at 500 with nothing committed. Reference:
+help.fishbowlinventory.com/advanced/s/apidocs/manufactureorders.html. The `skynet-bridge` user needed no extra right
+for any call below.
+
+| Call | Body | What Fishbowl does |
+|---|---|---|
+| `POST /api/manufacture-orders` | `{"number":"SKYTEST-PROBE-1","locationGroup":{"id":1},"configurations":[{"bom":{"id":2407},"quantity":"1"}]}` | 200 with the MO, status Entered. Fishbowl expands the BOM into the configuration's items (finished good + raw goods), sets `dateScheduled` to now, class None. 27–37 ms. |
+| `GET /api/manufacture-orders/:id` | — | The MO as JSON; 404 once deleted. |
+| `GET /api/manufacture-orders?moNumber=X` | — | Paged `{totalCount, results:[{id, number, bomNumber, status, locationGroup, …}]}`. Whether it matches exactly is not proven: compare `number` yourself. |
+| `POST /api/manufacture-orders/:id/issue` | none | 200, status Issued, `dateIssued` set. Creates WO `<MO>:001` (status Entered, `qtyTarget` = quantity), a WO item per BOM line, and one pick `W<MO>:001` (`pick.typeId` 10, status 10) with one pick item per raw good (`orderTypeId` 30, qty = quantity × BOM qty). No source tag, no lot, nothing committed on any tag: lots are chosen when the pick is worked or at Quick Fulfill. 44–47 ms. |
+| `POST /api/manufacture-orders/:id/unissue` | none | 200, status back to Entered. The WO, its items, the pick and its items are deleted; the MO items stay. |
+| `DELETE /api/manufacture-orders/:id` | none | 200 with an empty body — only when Entered. An Issued MO answers **400 "The manufacture order status must be Entered in order to be deleted."**: unissue first. |
+| `POST /api/manufacture-orders/:id/close-short` | none | Not probed (it needs a partly fulfilled MO). |
+
+- **Number.** A custom alphanumeric number is accepted. `mo.num` is `varchar(25)` and the API **silently truncates**
+  a longer number to 25 characters (the 26-character request was stored as `SKYTEST-PROBE-ABCDEFGHIJK`, no error), so
+  the caller must refuse anything over 25 itself. The WO number is the MO number plus `:001` (`wo.num varchar(30)`).
+- **Too little stock does not stop an issue.** 1,001 of each component against 1,000 on hand issued normally; the
+  shortage shows only when the pick is worked or at fulfil time.
+- **Status ids.** `mo`: 10 Entered, 20 Issued, 50 Partial, 60 Fulfilled, 70 Closed Short, 80 Void. `wo`: 10 Entered,
+  30 Started, 40 Fulfilled. `moitem.typeId`: 50 the configuration (parent of the others), 10 finished good, 20 raw good.
+- **Author.** `lastModified.username` is `skynet-bridge` on every MO the bridge touches.

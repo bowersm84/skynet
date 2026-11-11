@@ -4,13 +4,14 @@ import { supabase } from '../lib/supabase'
 import { hasRole } from '../lib/roles'
 import {
   listOpenRequests, listBoard, listAssemblers, lastBuildQty, tagLotsForPart,
-  searchAssemblyParts, createBuild, assignBuild, releaseBuild, cancelBuild, reworkLot,
+  searchAssemblyParts, createBuild, assignBuild, releaseBuild, cancelBuild, reworkLot, linkBuildMo, retryBuildMo,
   BUILD_STATUS_LABELS, BUILD_KIND_LABELS, POST_STATUS_LABELS, PRIORITIES, ACTIVE_BUILD_STATUSES,
 } from '../lib/assembly'
 import { getSettings } from '../lib/appSettings'
 import { DEFAULT_AVATAR_COLOR } from '../lib/avatars'
 import { Avatar } from '../components/AvatarPicker'
 import { formatDateShort, formatDateTime } from '../lib/fishbowl'
+import PostCards, { MoChip, LinkMoDialog } from '../components/assembly/PostCards'
 
 // AssemblyBoard — S17 Batch B (D-ASM-04 / D-ASM-20 / D-ASM-31), revised in B2 (D-ASM-32). Jody's office board: Order
 // Queue lines dispositioned Assembly arrive as requests grouped by part; a build is created from them (or from
@@ -66,6 +67,9 @@ export default function AssemblyBoard({ profile }) {
   const [assignFor, setAssignFor] = useState(null)   // a build → Assign dialog
   const [cancelFor, setCancelFor] = useState(null)   // a build → Cancel dialog
   const [scratchOpen, setScratchOpen] = useState(false)
+  const [postCount, setPostCount] = useState(null)   // S17 D1: cards still waiting for Ashley
+  const [linkFor, setLinkFor] = useState(null)       // S17 D1: a build → Link MO dialog
+  const [createError, setCreateError] = useState(null) // D-ASM-56: the server's sentence, shown in the New build dialog
 
   const load = useCallback(async () => {
     try {
@@ -91,6 +95,23 @@ export default function AssemblyBoard({ profile }) {
     const t = setInterval(load, 60000)
     return () => clearInterval(t)
   }, [load])
+
+  // Creating a build: the server's refusal (no checklist, not approved, unknown part — D-ASM-56) is shown in the
+  // dialog itself, where the person is looking, not on the page behind it.
+  const create = async (args, okMessage, close) => {
+    setBusy(true)
+    setCreateError(null)
+    try {
+      await createBuild(args)
+      setStatus({ type: 'success', message: okMessage })
+      close()
+      await load()
+    } catch (e) {
+      setCreateError(e?.message || String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   // Runs an RPC, shows its own message on failure, reloads on success.
   const act = async (fn, okMessage) => {
@@ -126,7 +147,6 @@ export default function AssemblyBoard({ profile }) {
     ]
   }, [floor, assemblers])
   const awaitingRelease = builds.filter((b) => b.status === 'complete')
-  const readyToPost = builds.filter((b) => b.fb_post_status === 'ready_to_post')
 
   if (!canAct) {
     return <div className="max-w-3xl mx-auto p-6 text-gray-400">The Assembly Board is for the assembly team and admins.</div>
@@ -228,7 +248,9 @@ export default function AssemblyBoard({ profile }) {
                       <BuildCard key={b.id} build={b} lotPrefix={lotPrefix} busy={busy}
                         onAssign={() => setAssignFor(b)}
                         onCancel={() => setCancelFor(b)}
-                        onRelease={() => act(() => releaseBuild(b.id), `${b.build_number} released.`)} />
+                        onRelease={() => act(() => releaseBuild(b.id), `${b.build_number} released.`)}
+                        onLinkMo={() => setLinkFor(b)}
+                        onRetryMo={() => act(() => retryBuildMo(b.id), `${b.build_number}: the MO is queued for the bridge again.`)} />
                     ))}
                   </div>
                 </div>
@@ -242,25 +264,35 @@ export default function AssemblyBoard({ profile }) {
               render={(b) => (
                 <button disabled={busy} onClick={() => act(() => releaseBuild(b.id), `${b.build_number} released.`)} className={btnPrimary}>Release</button>
               )} />
-            <ShortList title="Ready to post" empty="Nothing waiting for Fishbowl." rows={readyToPost}
-              note="Ashley posts these in Fishbowl from the post card (Batch D)."
-              render={(b) => <Chip className="bg-blue-900/40 text-blue-300 border-blue-800">{POST_STATUS_LABELS[b.fb_post_status]}</Chip>} />
+            {/* S17 D1 (D-ASM-54): the same post cards as the Order Queue's Ready to post tab, compact. */}
+            <div className="bg-gray-900 rounded-lg border border-gray-800">
+              <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2">
+                <h3 className="text-white font-semibold">Ready to post</h3>
+                <span className="text-xs text-gray-600">{postCount ?? '…'}</span>
+                <span className="text-xs text-gray-500 ml-auto">Ashley posts these in Fishbowl — Order Queue › Ready to post</span>
+              </div>
+              <PostCards profile={profile} compact onCount={setPostCount} />
+            </div>
           </section>
         </>
       )}
 
       {createFor && (
-        <CreateFromRequestDialog request={createFor} description={partInfo[createFor.part_id]} busy={busy}
-          onClose={() => setCreateFor(null)}
-          onCreate={async (args) => { if (await act(() => createBuild(args), `Build created for ${args.partNumber}.`)) setCreateFor(null) }} />
+        <CreateFromRequestDialog request={createFor} description={partInfo[createFor.part_id]} busy={busy} error={createError}
+          onClose={() => { setCreateFor(null); setCreateError(null) }}
+          onCreate={(args) => create(args, `Build created for ${args.partNumber}.`, () => setCreateFor(null))} />
       )}
       {scratchOpen && (
-        <CreateFromScratchDialog busy={busy} onClose={() => setScratchOpen(false)}
-          onCreate={async (args) => { if (await act(() => createBuild(args), `${BUILD_KIND_LABELS[args.buildKind]} build created for ${args.partNumber}.`)) setScratchOpen(false) }} />
+        <CreateFromScratchDialog busy={busy} error={createError} onClose={() => { setScratchOpen(false); setCreateError(null) }}
+          onCreate={(args) => create(args, `${BUILD_KIND_LABELS[args.buildKind]} build created for ${args.partNumber}.`, () => setScratchOpen(false))} />
       )}
       {assignFor && (
         <AssignDialog build={assignFor} assemblers={assemblers} busy={busy} onClose={() => setAssignFor(null)}
           onAssign={async (person) => { if (await act(() => assignBuild(assignFor.id, person.id), `${assignFor.build_number} assigned to ${person.full_name}.`)) setAssignFor(null) }} />
+      )}
+      {linkFor && (
+        <LinkMoDialog card={linkFor} busy={busy} onClose={() => setLinkFor(null)}
+          onLink={async (n) => { if (await act(() => linkBuildMo(linkFor.id, n), `${linkFor.build_number} linked to Fishbowl MO ${n}.`)) setLinkFor(null) }} />
       )}
       {cancelFor && (
         <CancelDialog build={cancelFor} busy={busy} onClose={() => setCancelFor(null)}
@@ -270,7 +302,7 @@ export default function AssemblyBoard({ profile }) {
   )
 }
 
-function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease }) {
+function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease, onLinkMo, onRetryMo }) {
   const p = PRIORITY_STYLE[b.priority] || PRIORITY_STYLE.normal
   const released = b.status === 'released'
   return (
@@ -295,6 +327,17 @@ function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease })
       )}
       {b.assembly_lot_number && <div className="font-mono text-cyan-300">Lot {lotPrefix}{b.assembly_lot_number}</div>}
       {b.build_kind === 'rework' && !b.assembly_lot_number && <div className="font-mono text-gray-500">Rework of {b.rework_source_lot} → {reworkLot(b.rework_source_lot)}</div>}
+      {/* S17 D1 (D-ASM-52/55): the build's Fishbowl MO, Retry after an error, Link MO… for a hand-made one. */}
+      {(b.fb_mo_num || (b.fb_mo_state && b.fb_mo_state !== 'none')) && <div><MoChip number={b.fb_mo_num} state={b.fb_mo_state} error={b.fb_mo_error} /></div>}
+      {b.fb_mo_state === 'error' && (
+        <div className="text-red-300 bg-red-950/40 border border-red-900 rounded px-2 py-1 space-y-1">
+          <div>{b.fb_mo_error || 'The bridge could not create the MO.'}</div>
+          {b.status !== 'cancelled' && <button disabled={busy} onClick={onRetryMo} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>Retry</button>}
+        </div>
+      )}
+      {!b.checklist_template_id && !released && (
+        <div className="text-amber-200 bg-amber-950/40 border border-amber-800 rounded px-2 py-1" title="No checklist family was found for this part when the build was made">No checklist — the kiosk has no steps for this build</div>
+      )}
       {released ? (
         <Chip className="bg-blue-900/40 text-blue-300 border-blue-800" title={b.released_at ? `Released ${formatDateTime(b.released_at)}` : ''}>{POST_STATUS_LABELS[b.fb_post_status] || b.fb_post_status}</Chip>
       ) : (
@@ -309,6 +352,7 @@ function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease })
             <button disabled={busy} onClick={onCancel} className={`${btn} bg-gray-900 border-gray-800 text-gray-400 hover:text-red-300`}>Cancel</button>
           )}
           {b.status === 'complete' && <button disabled={busy} onClick={onRelease} className={btnPrimary}>Release</button>}
+          <button disabled={busy} onClick={onLinkMo} title="Link a Fishbowl MO made by hand" className={`${btn} bg-gray-900 border-gray-800 text-gray-400 hover:text-white ml-auto`}>Link MO…</button>
         </div>
       )}
     </div>
@@ -340,6 +384,11 @@ function ShortList({ title, rows, empty, note, render }) {
   )
 }
 
+// D-ASM-56: why the server would not create the build, in its own words.
+function CreateError({ message }) {
+  return <div role="alert" className="text-sm text-red-300 bg-red-950/40 border border-red-900 rounded px-3 py-2">{message}</div>
+}
+
 function PrioritySelect({ value, onChange }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className={field}>
@@ -350,7 +399,7 @@ function PrioritySelect({ value, onChange }) {
 
 // Create build from a part's open requests. Quantity starts at the larger of the requests' total and the last
 // released build of the part; both are shown so Jody can see where the number came from.
-function CreateFromRequestDialog({ request, description, busy, onClose, onCreate }) {
+function CreateFromRequestDialog({ request, description, busy, error, onClose, onCreate }) {
   const [last, setLast] = useState(undefined)
   const [qty, setQty] = useState(String(Math.ceil(Number(request.qty_total || 0))))
   const [priority, setPriority] = useState('normal')
@@ -379,6 +428,7 @@ function CreateFromRequestDialog({ request, description, busy, onClose, onCreate
       <label className="block text-xs text-gray-400">Note
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} className={`${field} mt-1`} />
       </label>
+      {error && <CreateError message={error} />}
       <div className="flex justify-end gap-2 pt-1">
         <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">Close</button>
         <button disabled={busy || !(Number.isInteger(n) && n > 0)} className={btnPrimary}
@@ -392,7 +442,7 @@ function CreateFromRequestDialog({ request, description, busy, onClose, onCreate
 
 // Stock, special and rework builds have no request. A rework build names the lot it reworks; its own lot is that
 // lot with R appended (D-ASM-02). Program builds start from the Giza dashboard (Batch C), not here.
-function CreateFromScratchDialog({ busy, onClose, onCreate }) {
+function CreateFromScratchDialog({ busy, error, onClose, onCreate }) {
   const [term, setTerm] = useState('')
   const [results, setResults] = useState([])
   const [part, setPart] = useState(null)
@@ -479,6 +529,7 @@ function CreateFromScratchDialog({ busy, onClose, onCreate }) {
           <label className="block text-xs text-gray-400">Note
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} className={`${field} mt-1`} />
           </label>
+          {error && <CreateError message={error} />}
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">Close</button>
             <button disabled={busy || !ok} className={btnPrimary}

@@ -854,7 +854,11 @@ function WorkScreen({ build, operator, run, reload, onBack, onClosed }) {
       </div>
       <div className="space-y-3">
         <h3 className="text-2xl text-white font-semibold">Checklist</h3>
-        {(build.steps || []).length === 0 && <p className="text-gray-500 text-xl">This build has no checklist steps.</p>}
+        {(build.steps || []).length === 0 && (
+          <p className="text-amber-200 text-xl bg-amber-950/40 border border-amber-800 rounded-xl px-4 py-3">
+            No checklist — this build has no steps to sign. Tell Jody before you go on.
+          </p>
+        )}
         {(build.steps || []).map((s) => <StepRow key={s.step_id} step={s} onSign={(step) => setMode({ type: 'sign', step })} />)}
       </div>
     </div>

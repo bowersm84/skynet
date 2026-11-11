@@ -10,6 +10,9 @@ import RecentChangesTab from '../components/orderqueue/RecentChangesTab'
 import StockRequestsView from '../components/demand/StockRequestsView'
 import StockRequestModal from '../components/StockRequestModal'
 import { countOpenStockRequests } from '../lib/customerOrders'
+import { countPostCards } from '../lib/assembly'
+import PostCards from '../components/assembly/PostCards'
+import { FEATURES } from '../config'
 import { canActOnOrderQueue, hasRole, isReadOnlyRole } from '../lib/roles'
 import {
   getSyncState, getQueueOrders, getQueueLines, getQueuePartIndex, getInventoryFor, getOpenExceptions, getRecentEvents,
@@ -30,7 +33,9 @@ export default function OrderQueue({ profile, onNavigate }) {
   const canAct = canActOnOrderQueue(profile)
   const canRaiseStock = hasRole(profile, 'admin', 'assembly') && !isReadOnlyRole(profile?.role)
 
-  const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes' | 'stock_requests'
+  const [tab, setTab] = useState('queue') // 'queue' | 'all' | 'exceptions' | 'changes' | 'stock_requests' | 'post'
+  // S17 D1 (D-ASM-54): Ashley's Ready to post cards, behind the Assembly Board flag (TEST only). null until counted.
+  const [postCount, setPostCount] = useState(null)
   const [stockOpen, setStockOpen] = useState(null)          // open stock requests, for the tab label
   const [stockRefreshKey, setStockRefreshKey] = useState(0)
   const [showStockModal, setShowStockModal] = useState(false)
@@ -209,6 +214,16 @@ export default function OrderQueue({ profile, onNavigate }) {
     const t = setInterval(refreshSync, 30000)
     return () => { cancelled = true; clearInterval(t) }
   }, [canAct, loadOrders, refreshSync, loadExceptions, loadStockCount])
+
+  // S17 D1: the Ready to post count, every 15 s while the page is open (the tab itself polls its cards every 12 s).
+  useEffect(() => {
+    if (!FEATURES.ASSEMBLY_BOARD) return undefined
+    let alive = true
+    const count = () => countPostCards().then((n) => { if (alive) setPostCount(n) }).catch((e) => console.warn('post card count failed:', e?.message || e))
+    count()
+    const t = setInterval(() => { if (!document.hidden) count() }, 15000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
 
   // Tab-specific loads
   useEffect(() => {
@@ -456,6 +471,11 @@ export default function OrderQueue({ profile, onNavigate }) {
         <button onClick={() => setTab('stock_requests')} className={tabClass('stock_requests')}>
           Stock Requests <span className="ml-1 text-xs text-gray-500">({stockOpen === null ? '…' : stockOpen} open)</span>
         </button>
+        {FEATURES.ASSEMBLY_BOARD && (
+          <button onClick={() => setTab('post')} className={tabClass('post')}>
+            Ready to post <span className={`ml-1 text-xs ${postCount ? 'text-blue-300' : 'text-gray-500'}`}>{postCount === null ? '…' : postCount}</span>
+          </button>
+        )}
         <span className="ml-auto text-xs text-gray-600 pr-2">{pendingLines.toLocaleString()} pending line{pendingLines === 1 ? '' : 's'}</span>
       </div>
 
@@ -528,6 +548,8 @@ export default function OrderQueue({ profile, onNavigate }) {
           onLoaded={handleStockLoaded}
         />
       )}
+
+      {FEATURES.ASSEMBLY_BOARD && tab === 'post' && <PostCards profile={profile} onCount={setPostCount} />}
 
       {tab === 'exceptions' && (
         <ExceptionsTab events={exceptions} loading={exceptionsLoading} canAct={canAct} ackingId={ackingId} onAck={handleAck} onOpenCO={openCO}

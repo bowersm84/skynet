@@ -160,6 +160,9 @@ export class SkyNet {
     return this.rpc('fb_upsert_shipments', { p_ships: ships, p_cartons: cartons, p_items: items, p_rev_to: revTo })
   }
 
+  // Bridge 1.12 (S17 D1c, D-ASM-57): an MO the bridge deleted (mo_cancel) is marked removed and loses its WO rows.
+  markMosRemoved(moIds) { return this.rpc('fb_mark_mos_removed', { p_mo_ids: moIds }) }
+
   upsertManufactureOrders(mos, moItems, wos, woItems, consumed, revTo = null) {
     return this.rpc('fb_upsert_manufacture_orders', {
       p_mos: mos, p_mo_items: moItems, p_wos: wos, p_wo_items: woItems, p_consumed: consumed, p_rev_to: revTo,

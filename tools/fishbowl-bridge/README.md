@@ -203,6 +203,32 @@ command. No new kinds in 1.11.
 
 No one-shot is needed for 1.11: the first cycle after the migration backfills each family and loads tags and postings.
 
+### Manufacture orders (v1.12, S17 D1, D-ASM-52…55)
+SkyNet queues `mo_create` when an assembly build is created, `mo_cancel` when it is cancelled and `mo_close_short`
+when its post is verified with pieces left (all by triggers; migration `2026-11-11_S17_D1_fishbowl_mo_posting.sql`).
+The bridge executes them in `src/mo.mjs` with the request bodies probed on the live Fishbowl on 2026-11-11
+(`Docs/Fishbowl_Data_Context.md`, "Manufacture orders through the REST API"):
+
+| Kind | What the bridge does | Result |
+|---|---|---|
+| `mo_create` | BOM must exist and be active; an MO that already has the number is reused (`created: false`); otherwise `POST /api/manufacture-orders`; then `POST …/issue` while it is Entered | `{fb_mo_id, mo_number, status, created}` |
+| `mo_cancel` | find by id or number; refuse if anything is fulfilled; unissue if Issued; `DELETE`; confirm a 404. Already gone counts as deleted | `{deleted: true}` |
+| `mo_close_short` | `POST …/close-short` on an Issued or Partial MO | `{closed: true}` |
+
+**Fences.** A kind not in `FB_PUSH_KINDS` is failed unexecuted. Writes need `FB_MO_ENABLED=true` (separate from the
+pricing switch `FB_PUSH_ENABLED`); otherwise every MO command is a forced dry run. `FB_WRITE_PART_PREFIX` (default
+`SKYTEST-`) must be set, equal the command's `write_part_prefix`, and start the BOM number and every part on the BOM
+or MO — the SQL refuses to queue anything else too. An MO number over 25 characters is refused (Fishbowl would cut it
+short silently). If Fishbowl answers a write in a way the probe did not, the command fails and every later MO
+command is failed unexecuted until the bridge is restarted — it never retries blind. After every real MO command the
+MO's mirror rows are re-read in the same cycle; afterwards the mos audit tail keeps them current every cycle. An MO the
+bridge deletes (`mo_cancel`) is marked removed in the mirror instead, through `fb_mark_mos_removed` (migration
+`2026-11-11_S17_D1c_mo_mirror_removed.sql`, D-ASM-57); the audit tail alone never notices a deleted MO.
+
+**TEST run (Matt's PC):** `FB_PUSH_KINDS=mo_create,mo_cancel,mo_close_short`, `FB_MO_ENABLED=true`,
+`FB_PUSH_AUTO=false`, `FB_TAGS_INTERVAL_MS=60000`; `FB_PUSH_ENABLED` stays off. A 401 that forces a re-login is now
+logged as a warning, so two bridges on the one Fishbowl user show up in the log if they collide.
+
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`
 2. Copy `.env.example` to `.env` and fill in `FB_PASS`, `SB_ANON_KEY`, `SB_BRIDGE_PASSWORD` (and `SB_URL` for PROD).

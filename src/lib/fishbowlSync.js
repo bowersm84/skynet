@@ -32,8 +32,12 @@ export async function loadFbBridgeState() {
 
 // Never select `payload`: a Rev 82 rules push stores about 1 MB of rows.
 const HISTORY_COLS = 'id, kind, status, dry_run, options, import_name, row_count, requested_by, requested_at, started_at, finished_at, bridge_host, result, error, note'
+// Pricing kinds only: since S17 D1 the queue also carries assembly MO commands (mo_*), which belong to the
+// Assembly Board and must not crowd this history, keep it polling, or offer a pricing user their Cancel.
+export const PRICING_PUSH_KINDS = ['prices', 'rules', 'tree', 'groups']
 export async function loadFbPushCommands(limit = 20) {
-  const { data, error } = await supabase.from('fb_push_commands').select(HISTORY_COLS).order('id', { ascending: false }).limit(limit)
+  const { data, error } = await supabase.from('fb_push_commands').select(HISTORY_COLS).in('kind', PRICING_PUSH_KINDS)
+    .order('id', { ascending: false }).limit(limit)
   if (error) throw error
   return data || []
 }

@@ -174,3 +174,26 @@ export const setStep = (stepId, fields = {}) => rpc('assembly_step_set', {
 // Moves parts into another family (Roger's merge). → parts updated
 export const setPartFamily = (partNumbers, familyKey) =>
   rpc('assembly_part_set_family', { p_part_numbers: partNumbers, p_family_key: familyKey })
+
+// ── Fishbowl MO and posting (S17 D1, D-ASM-52…55) ───────────────────────────
+// Ashley's post cards: released builds waiting to post, posted, mismatched, or verified in the last 24 h.
+export async function listPostCards() {
+  const { data, error } = await supabase.from('v_assembly_post_cards').select('*').order('released_at', { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
+// The Order Queue tab's count: cards that still need Ashley (not verified).
+export async function countPostCards() {
+  const { count, error } = await supabase.from('v_assembly_post_cards').select('id', { count: 'exact', head: true })
+    .in('fb_post_status', ['ready_to_post', 'posted', 'mismatch'])
+  if (error) throw error
+  return count || 0
+}
+
+// Re-check against the Fishbowl mirror now (admin / assembly / order processor). → builds whose status changed
+export const verifyPosts = (buildIds = null) => rpc('assembly_verify_posts', { p_build_ids: buildIds })
+// Link a hand-made Fishbowl MO by its number (D-ASM-55).
+export const linkBuildMo = (buildId, moNumber) => rpc('assembly_build_link_mo', { p_build_id: buildId, p_mo_num: moNumber })
+// Ask the bridge again after an MO error.
+export const retryBuildMo = (buildId) => rpc('assembly_build_mo_retry', { p_build_id: buildId })

@@ -25,7 +25,7 @@ import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { runPushCommands, canPushFor } from './push.mjs'
 import { syncShipmentLots, attachShipmentLots, sweepSince, syncShipsForSos } from './shipments.mjs'
 import { syncPurchasing, loadStatusNames, poWindowSince, changedSince } from './purchasing.mjs'
-import { FAMILIES, runFamily, sweepBoms } from './audit.mjs'
+import { FAMILIES, runFamily, sweepBoms, refreshMos } from './audit.mjs'
 import { makeGuard } from './guard.mjs'
 import { loadTagScope, syncTags, tagSweepDue } from './tags.mjs'
 import { syncPostings } from './postings.mjs'
@@ -291,7 +291,7 @@ const PUSH_RETRY_MS = 900000
 async function pushCycleGuarded() {
   if (Date.now() < pushPausedUntil) return
   try {
-    await runPushCommands(fb, sky, { cfg: config, log, max: config.push.maxPerCycle })
+    await runPushCommands(fb, sky, { cfg: config, log, max: config.push.maxPerCycle, refreshMo: (ids) => refreshMos(fb, sky, ids), removeMo: (ids) => sky.markMosRemoved(ids) })
   } catch (e) {
     pushPausedUntil = Date.now() + PUSH_RETRY_MS
     log.error(`push cycle failed, retrying in ${PUSH_RETRY_MS / 60000} min: ${e.message}`)
@@ -620,6 +620,7 @@ async function main() {
   log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'} rules=${pricing.last_rules_at || 'never'} tree=${pricing.last_tree_at || 'never'} valuation=${pricing.last_valuation_at || 'never'}`)
   const gate = canPushFor(config)
   log.info(`fishbowl push: ${gate.ok ? 'ENABLED (real writes to Fishbowl)' : `dry run only (${gate.why})`}; auto=${config.push.autoEnabled}`)
+  log.info(`push kinds this bridge may execute (FB_PUSH_KINDS): ${config.push.kinds.join(', ') || 'none'} · MO writes (FB_MO_ENABLED): ${config.mo.enabled ? (config.mo.dryRun ? 'on, DRY RUN (FB_MO_DRY_RUN)' : 'ON') : 'off (forced dry run)'} · write prefix (FB_WRITE_PART_PREFIX): ${config.mo.writePartPrefix ? JSON.stringify(config.mo.writePartPrefix) : 'NOT SET — every MO command refused'}`)
   if (backfill) {
     try {
       await backfillPricing()

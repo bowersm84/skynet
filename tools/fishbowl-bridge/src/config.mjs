@@ -34,9 +34,14 @@ const num = (k, d) => {
   const v = process.env[k]
   return v === undefined || v === '' ? d : Number(v)
 }
+// A comma-separated list; a missing key gives the default, a key set to nothing gives an empty list.
+const list = (k, d) => {
+  const v = process.env[k]
+  return String(v === undefined ? d : v).split(',').map((x) => x.trim()).filter(Boolean)
+}
 
 export const config = {
-  version: '1.11.0',
+  version: '1.12.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -102,6 +107,24 @@ export const config = {
     // fb_push_auto: after the nightly products poll, queue prices + rules pushes when the book in effect changed
     autoEnabled: String(process.env.FB_PUSH_AUTO ?? 'true').trim().toLowerCase() !== 'false',
     maxPerCycle: num('FB_PUSH_MAX_PER_CYCLE', 3),
+    // S17 D1 (D-ASM-52): the command kinds this bridge may execute. A claimed command of any other kind is finished
+    // `failed` with "kind not enabled on this bridge" and is never executed. The default is the four pricing kinds,
+    // exactly what a bridge executed before 1.12, so one upgraded without this key behaves as it did. The TEST MO
+    // run sets FB_PUSH_KINDS=mo_create,mo_cancel,mo_close_short, which keeps every pricing kind off.
+    kinds: list('FB_PUSH_KINDS', 'prices,rules,tree,groups'),
+  },
+  // S17 D1 (D-ASM-52): manufacture orders. Separate from FB_PUSH_ENABLED, which stays the pricing switch.
+  //   FB_MO_ENABLED         only the literal `true` lets an mo_* command write to Fishbowl; otherwise it runs as a
+  //                         forced dry run (result.dry_run = true; SkyNet marks the build's MO as an error)
+  //   FB_MO_DRY_RUN         only the literal `true`: log the request bodies, write nothing
+  //   FB_WRITE_PART_PREFIX  default SKYTEST-. An mo_* handler refuses unless the BOM number starts with it AND the
+  //                         command's payload.write_part_prefix equals it. Set to nothing, it refuses everything.
+  mo: {
+    enabled: String(process.env.FB_MO_ENABLED ?? '').trim().toLowerCase() === 'true',
+    dryRun: String(process.env.FB_MO_DRY_RUN ?? '').trim().toLowerCase() === 'true',
+    writePartPrefix: String(process.env.FB_WRITE_PART_PREFIX ?? 'SKYTEST-').trim(),
+    // The location group a new MO is made in (FB_MO_LOCATION_GROUP_ID, default 1 = Main, where the SKYTEST- stock is).
+    locationGroupId: num('FB_MO_LOCATION_GROUP_ID', 1),
   },
   rulesTreeEnabled: String(process.env.RULES_TREE_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   // D-FB-54 shipments poller (bridge 1.9): Fishbowl's shipped component lots -> fb_shipment_lots -> kit lots.

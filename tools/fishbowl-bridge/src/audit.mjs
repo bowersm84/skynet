@@ -209,6 +209,14 @@ async function upsertMos(sky, payload, revTo = null) {
   return n
 }
 
+// Bridge 1.12 (S17 D1): re-read a few MOs whole and send them to the mirror now, without moving the mos cursor.
+// Called right after an mo_* command so SkyNet sees the MO the command made or changed within the same cycle.
+export async function refreshMos(fb, sky, moIds) {
+  const list = [...new Set(moIds.map(Number).filter(Number.isFinite))]
+  if (list.length === 0) return 0
+  return upsertMos(sky, await fetchMos(fb, list), null)
+}
+
 // --- boms -> fb_upsert_boms ---------------------------------------------------------------------------
 export function mapBom(r) {
   return {

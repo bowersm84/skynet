@@ -20,11 +20,11 @@ import { kioskAuthLockedMessage } from '../lib/kioskAuth'
 import { BUILD_KIND_LABELS, STEP_TYPE_LABELS } from '../lib/assembly'
 import {
   listKioskBuilds, getKioskBuild, myOpenSession, listComponents, startBuild, clockIn, clockOut, signStep, closeoutBuild,
-  resolvePin, changeOwnPin, lotPrefixDisplay,
+  resolvePin, changeOwnPin, lotPrefixDisplay, listPulledLots, stepDistinctFrom,
 } from '../lib/assemblyKiosk'
 import {
   splitBoard, waveLabel, sortLots, togglePick, isPicked, coverage, lotsPayload, isSignStep, inspectorStep,
-  isNewLotSet, newLotSetText, formatMinutes, isAssemblyOperator, appendKey,
+  isNewLotSet, newLotSetText, formatMinutes, isAssemblyOperator, appendKey, pulledLotsByComponent, signerRule,
 } from '../lib/assemblyKioskMath'
 import {
   Wrench, LogOut, ArrowLeft, Loader2, CheckCircle, XCircle, AlertTriangle, Pause, Play, RefreshCw,
@@ -165,7 +165,8 @@ function PinEntry({ title, subtitle, error, busy, onSubmit, buttonLabel = 'Enter
 
 // Collect one or two people's PINs, echoing each name before it is used. The PIN is resolved on the server
 // (assembly_pin_resolve); the same person twice is refused here; `exclude` refuses one person (the assembler,
-// where a check must be someone else). onDone([{ pin, profile_id, full_name }]).
+// where a check must be someone else) — for every signer, or only signer `exclude.at` when it is set.
+// onDone([{ pin, profile_id, full_name }]).
 function PeopleCheck({ titles, subtitle, initialError = null, exclude = null, run, onDone, onCancel }) {
   const [collected, setCollected] = useState([])
   const [pending, setPending] = useState(null)
@@ -179,7 +180,7 @@ function PeopleCheck({ titles, subtitle, initialError = null, exclude = null, ru
     try {
       const r = await run(() => resolvePin(pin))
       if (!r?.ok) { setError(r?.message || 'PIN not recognized'); return }
-      if (exclude && r.profile_id === exclude.id) { setError(exclude.message); return }
+      if (exclude && (exclude.at === undefined || exclude.at === index) && r.profile_id === exclude.id) { setError(exclude.message); return }
       if (collected.some((c) => c.profile_id === r.profile_id)) { setError('That is the same person — a different person must sign'); return }
       setPending({ pin, profile_id: r.profile_id, full_name: r.full_name })
     } catch (err) {
@@ -217,6 +218,46 @@ function PeopleCheck({ titles, subtitle, initialError = null, exclude = null, ru
       )}
       <PinEntry key={index} title={titles[index]} subtitle={subtitle} error={error} busy={busy} onSubmit={handlePin} buttonLabel="Check PIN" />
       <button type="button" onClick={onCancel} className="text-gray-400 hover:text-white text-lg px-4 py-3">Cancel</button>
+    </div>
+  )
+}
+
+// D-ASM-58: what a lot check approves, kept on screen beside (or above) the PIN pad for every signer. groups:
+// pulledLotsByComponent(...) — null while loading. Sized so eight components fit on a tablet without scrolling.
+function PulledLotsPanel({ build, groups, error, lead = 'Check the lots pulled for' }) {
+  return (
+    <div className="w-full md:flex-1 min-w-0 bg-gray-800 rounded-2xl border border-gray-700 p-4 self-stretch">
+      <div className="text-gray-400 text-base">{lead}</div>
+      <div className="text-white text-2xl font-bold leading-tight">
+        {build.build_number} · <span className="font-mono">{build.part_number}</span>
+        <span className="text-gray-300 font-normal"> × {Number(build.quantity).toLocaleString()}</span>
+      </div>
+      {error ? <div className="mt-3"><ErrorBox message={error} /></div>
+        : groups === null ? <div className="text-gray-400 text-lg flex items-center gap-2 mt-3"><Loader2 className="animate-spin" /> Loading the lots…</div>
+          : groups.length === 0 ? <p className="text-amber-300 text-lg mt-3">No lots are recorded for this build — do not sign; tell Jody.</p>
+            : (
+              <table className="w-full mt-2">
+                <thead className="text-gray-400 text-sm uppercase">
+                  <tr><th className="text-left font-medium py-1">Part</th><th className="text-left font-medium py-1">Lot</th><th className="text-right font-medium py-1">Qty</th></tr>
+                </thead>
+                <tbody className="divide-y divide-gray-700">
+                  {groups.map((g) => (
+                    <tr key={g.part} className="align-top">
+                      <td className="py-1 pr-3">
+                        <div className="text-white text-lg font-mono font-bold leading-tight">{g.part}</div>
+                        {g.description && <div className="text-gray-400 text-sm leading-tight truncate max-w-[22rem]">{g.description}</div>}
+                      </td>
+                      <td className="py-1 pr-3">
+                        {g.lots.map((l) => <div key={l.lot} className="text-cyan-300 text-xl font-mono font-bold leading-6">{l.lot}</div>)}
+                      </td>
+                      <td className="py-1 text-right">
+                        {g.lots.map((l) => <div key={l.lot} className="text-white text-xl leading-6">{Number(l.qty).toLocaleString()}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
     </div>
   )
 }
@@ -477,18 +518,25 @@ function StartScreen({ build, operator, run, onBack, onStarted }) {
     }
   }
 
+  // Only when the server asks (app_settings.assembly_lot_new_set_second_pin; off since D-ASM-58): the second person
+  // sees the lots being started, as the Component check signer does.
   if (secondCheck) {
     return (
-      <PeopleCheck
-        key={secondCheck.attempt}
-        titles={['Second person: check the pull']}
-        subtitle={secondCheck.text}
-        initialError={secondCheck.error}
-        exclude={{ id: operator.id, message: 'The second check must be a different person' }}
-        run={run}
-        onDone={(people) => start(people[0].pin)}
-        onCancel={() => setSecondCheck(null)}
-      />
+      <div className="w-full max-w-6xl flex flex-col md:flex-row md:items-start gap-6">
+        <PulledLotsPanel build={build} groups={pulledLotsByComponent(lotsPayload(picks), components)} lead="Lots chosen for" />
+        <div className="md:w-[26rem] shrink-0 flex flex-col items-center">
+          <PeopleCheck
+            key={secondCheck.attempt}
+            titles={['Second person: check the pull']}
+            subtitle={secondCheck.text}
+            initialError={secondCheck.error}
+            exclude={{ id: operator.id, message: 'The second check must be a different person' }}
+            run={run}
+            onDone={(people) => start(people[0].pin)}
+            onCancel={() => setSecondCheck(null)}
+          />
+        </div>
+      </div>
     )
   }
 
@@ -566,6 +614,26 @@ function SignFlow({ build, step, run, onDone, onCancel }) {
   const [fatal, setFatal] = useState(null)
   const [busy, setBusy] = useState(false)
   const unit = step.unit ? ` ${step.unit}` : ''
+  // D-ASM-58: a lot check (pull_check, "Component check") shows the pulled lots beside the pad for every signer,
+  // and a step that must not be signed by the assembler says so in words and refuses their PIN as first signer.
+  const isLotCheck = step.type === 'pull_check'
+  const [distinctFrom, setDistinctFrom] = useState(null)
+  const [pulled, setPulled] = useState(null)
+  const [pulledError, setPulledError] = useState(null)
+  useEffect(() => {
+    let alive = true
+    // A failed read leaves the plain wording; the server still refuses the assembler as first signer.
+    stepDistinctFrom(step.step_id).then((v) => { if (alive) setDistinctFrom(v) }).catch(() => {})
+    return () => { alive = false }
+  }, [step.step_id])
+  useEffect(() => {
+    if (!isLotCheck) return undefined
+    let alive = true
+    Promise.all([listPulledLots(build.id, build.wave_current), listComponents(build.id, build.wave_current)])
+      .then(([rows, components]) => { if (alive) setPulled(pulledLotsByComponent(rows, components)) })
+      .catch((err) => { if (alive) setPulledError(messageOf(err)) })
+    return () => { alive = false }
+  }, [isLotCheck, build.id, build.wave_current])
 
   const restart = () => {
     setFailed(null)
@@ -638,18 +706,26 @@ function SignFlow({ build, step, run, onDone, onCancel }) {
     : [`${step.label} — sign-off`]
   const sample = step.sample ? `Sample: ${step.sample} pieces` : null
   const readingsLine = readings && readings.length ? `Readings: ${readings.join(', ')}${unit}` : null
-  return (
-    <div className="w-full flex flex-col items-center gap-3">
+  const pad = (
+    <div className={`flex flex-col items-center gap-3 ${isLotCheck ? 'md:w-[26rem] shrink-0' : 'w-full'}`}>
       {busy && <div className="text-gray-300 text-xl flex items-center gap-2"><Loader2 className="animate-spin" /> Signing…</div>}
       <PeopleCheck
         key={peopleKey}
         titles={titles}
-        subtitle={[readingsLine, sample, Number(step.pins) >= 2 ? 'Two different people' : null].filter(Boolean).join(' · ') || 'Enter your PIN'}
+        subtitle={[readingsLine, sample, signerRule(step.pins, distinctFrom)].filter(Boolean).join(' · ') || 'Enter your PIN'}
         initialError={pinError}
+        exclude={distinctFrom && build.assigned_to ? { id: build.assigned_to, at: 0, message: 'The assembler cannot sign this check — someone else must' } : null}
         run={run}
         onDone={(people) => submit(people.map((p) => p.pin))}
         onCancel={onCancel}
       />
+    </div>
+  )
+  if (!isLotCheck) return pad
+  return (
+    <div className="w-full max-w-6xl flex flex-col md:flex-row md:items-start gap-6">
+      <PulledLotsPanel build={build} groups={pulled} error={pulledError} />
+      {pad}
     </div>
   )
 }

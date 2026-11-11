@@ -174,3 +174,33 @@ export function appendKey(value, key, { decimal = false, maxLength = 7 } = {}) {
   if (v === '0') return key
   return v + key
 }
+
+// D-ASM-58: what a Component check approves — the pulled lots grouped by component, in bill-of-materials order
+// (the order assembly_kiosk_components returns), each with its description. rows: [{ part, lot, qty }] from
+// assembly_component_lots or from the start screen's picks (lotsPayload); components: listComponents rows.
+export function pulledLotsByComponent(rows, components) {
+  const order = new Map((components || []).map((c, i) => [c.component_part_number, i]))
+  const desc = new Map((components || []).map((c) => [c.component_part_number, c.part_description || '']))
+  const byPart = new Map()
+  for (const r of rows || []) {
+    if (!r?.part) continue
+    if (!byPart.has(r.part)) byPart.set(r.part, { part: r.part, description: desc.get(r.part) || '', lots: [], total: 0 })
+    const g = byPart.get(r.part)
+    const qty = Number(r.qty) || 0
+    const same = g.lots.find((l) => l.lot === r.lot)
+    if (same) same.qty += qty
+    else g.lots.push({ lot: r.lot, qty })
+    g.total += qty
+  }
+  const groups = [...byPart.values()]
+  for (const g of groups) g.lots.sort((a, b) => String(a.lot).localeCompare(String(b.lot), undefined, { numeric: true }))
+  return groups.sort((a, b) => (order.get(a.part) ?? 1e9) - (order.get(b.part) ?? 1e9) || a.part.localeCompare(b.part))
+}
+
+// D-ASM-58: who may sign, in plain words. distinctFrom is the step's distinct_from (puller, crimper, assembler);
+// the server compares the first signer with the build's assembler whichever it is.
+export function signerRule(pins, distinctFrom) {
+  const two = Number(pins) >= 2
+  if (distinctFrom) return two ? 'Two different people · the first is not the assembler' : 'Checked by someone other than the assembler'
+  return two ? 'Two different people' : null
+}

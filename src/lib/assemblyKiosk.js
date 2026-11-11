@@ -51,6 +51,23 @@ export async function listComponents(buildId, wave) {
   return (rows || []).filter((r) => Number(r.wave) === Number(wave))
 }
 
+// D-ASM-58: the lots pulled for a build's wave — what the Component check approves — as [{ part, lot, qty }].
+// The tablet-only role may read assembly_component_lots (C4).
+export async function listPulledLots(buildId, wave) {
+  const { data, error } = await supabase.from('assembly_component_lots')
+    .select('component_part_number, lot_number, qty').eq('build_id', buildId).eq('wave', wave)
+  if (error) throw error
+  return (data || []).map((r) => ({ part: r.component_part_number, lot: r.lot_number, qty: r.qty }))
+}
+
+// D-ASM-58: a step's distinct_from (who may not sign it: puller, crimper, assembler), which the kiosk view's steps
+// do not carry. → the value, or null.
+export async function stepDistinctFrom(stepId) {
+  const { data, error } = await supabase.from('assembly_checklist_steps').select('distinct_from').eq('id', stepId).maybeSingle()
+  if (error) throw error
+  return data?.distinct_from ?? null
+}
+
 export const startBuild = (buildId, lots, secondPin = null) =>
   rpc('assembly_build_start', { p_build_id: buildId, p_lots: lots, p_second_pin: secondPin })
 

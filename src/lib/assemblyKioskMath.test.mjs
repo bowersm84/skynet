@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   sortBuilds, splitBoard, waveLabel, sortLots, togglePick, coverage, lotsPayload,
   pendingSignoffs, inspectorStep, isNewLotSet, newLotSetText, formatMinutes, isAssemblyOperator, appendKey,
-  tvColumns,
+  tvColumns, pulledLotsByComponent, signerRule,
 } from './assemblyKioskMath.js'
 
 test('TV: every build in exactly one column; running wins over late; done only today', () => {
@@ -116,4 +116,32 @@ test('minutes, operator gate, number pad', () => {
   assert.equal(appendKey('12', '.'), '12')
   assert.equal(appendKey('', '.', { decimal: true }), '0.')
   assert.equal(appendKey('1234567', '8'), '1234567')
+})
+
+test('D-ASM-58: pulled lots grouped by component in BOM order, lots merged and sorted', () => {
+  const components = [
+    { component_part_number: 'SKYTEST-STUD', part_description: 'Stud' },
+    { component_part_number: 'SKYTEST-SPRING', part_description: 'Spring' },
+    { component_part_number: 'SKYTEST-CUP', part_description: 'Cup' },
+  ]
+  const rows = [
+    { part: 'SKYTEST-CUP', lot: '100583', qty: 4 },
+    { part: 'SKYTEST-STUD', lot: '100452', qty: 4 },
+    { part: 'SKYTEST-STUD', lot: '100236', qty: 5 },
+    { part: 'SKYTEST-STUD', lot: '100236', qty: 1 },
+    { part: 'OFF-BOM', lot: '1', qty: 2 },
+  ]
+  assert.deepEqual(pulledLotsByComponent(rows, components), [
+    { part: 'SKYTEST-STUD', description: 'Stud', lots: [{ lot: '100236', qty: 6 }, { lot: '100452', qty: 4 }], total: 10 },
+    { part: 'SKYTEST-CUP', description: 'Cup', lots: [{ lot: '100583', qty: 4 }], total: 4 },
+    { part: 'OFF-BOM', description: '', lots: [{ lot: '1', qty: 2 }], total: 2 },
+  ])
+  assert.deepEqual(pulledLotsByComponent(null, components), [])
+})
+
+test('D-ASM-58: signer wording for one and two PINs, with and without a not-the-assembler rule', () => {
+  assert.equal(signerRule(1, 'puller'), 'Checked by someone other than the assembler')
+  assert.equal(signerRule(2, 'puller'), 'Two different people · the first is not the assembler')
+  assert.equal(signerRule(2, null), 'Two different people')
+  assert.equal(signerRule(1, null), null)
 })

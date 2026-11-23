@@ -31,7 +31,10 @@ WITH service_role_only_tables AS (
     'import_parts_staging',
     'pricing_counters',  -- D-PRICE-40: quote / price-list number counters, reached only via pricing_next_number (SECURITY DEFINER)
     'fb_shipment_lots',  -- D-KSTC-37: Fishbowl shipment-lot mirror; read only by kit_attach_fb_shipment_lots (SECURITY DEFINER)
-    'price_items_cents_backup_dprice70'  -- D-PRICE-71: D-PRICE-70 before-images (2,951 rows); no app, function or view reads it
+    'price_items_cents_backup_dprice70',  -- D-PRICE-71: D-PRICE-70 before-images (2,951 rows); no app, function or view reads it
+    'inventory_month_end_fg',    -- month-end inventory snapshot — written by cron via capture_inventory_month_end; no app access
+    'inventory_month_end_raw',   -- month-end inventory snapshot — written by cron via capture_inventory_month_end; no app access
+    'inventory_month_end_runs'   -- month-end inventory snapshot — written by cron via capture_inventory_month_end; no app access
   ]) AS table_name
 ),
 

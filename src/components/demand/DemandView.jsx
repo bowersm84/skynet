@@ -3,6 +3,10 @@ import { Plus, Search, ChevronRight, Loader2 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAllOpenCOLines, getOpenStockRequestLines } from '../../lib/customerOrders'
 import CreateWorkOrderModal from '../CreateWorkOrderModal'
+import FbClosedReviewPanel, { FbStateBadge } from '../FbClosedReviewPanel'
+import ReleaseDemandLinesModal from '../ReleaseDemandLinesModal'
+import { getCOLineFbStates } from '../../lib/fbClosedLines'
+import { hasRole } from '../../lib/roles'
 import { formatDate, formatDateShort, PRIORITY_BADGE } from './format'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,15 +29,27 @@ export default function DemandView({ profile, setActionStatus }) {
   const [selectedLineIds, setSelectedLineIds] = useState(() => new Set())
   const [crossPartWarning, setCrossPartWarning] = useState(null) // partId being warned about
   const [showCreateWO, setShowCreateWO] = useState(false)
+  // D-FBCLOSE-01: manual Release from Demand (admin, scheduler, order_processor)
+  const [releaseTarget, setReleaseTarget] = useState(null)
+  const canRelease = hasRole(profile, 'admin', 'scheduler', 'order_processor')
+  // D-FBCLOSE-01: bumped after a Release so the review panel re-reads its list
+  const [fbReviewRefresh, setFbReviewRefresh] = useState(0)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  // D-FBCLOSE-01: { quiet: true } refreshes in place, without swapping the view for the spinner
+  const load = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setLoading(true)
     try {
       const [coLines, stockLines] = await Promise.all([
         getAllOpenCOLines(supabase),
         getOpenStockRequestLines(supabase),
       ])
-      setLines([...coLines, ...stockLines])
+      // D-FBCLOSE-01: Fishbowl's state per CO line, for the row badge
+      const fbStates = await getCOLineFbStates(supabase, coLines.map(l => l.line_id))
+      const coWithFb = coLines.map(l => {
+        const st = fbStates.get(l.line_id)
+        return st ? { ...l, fb_state: st.fb_state, fb_so_numbers: st.so_numbers, fb_completed_at: st.fb_completed_at } : l
+      })
+      setLines([...coWithFb, ...stockLines])
     } catch (err) {
       setActionStatus({ type: 'error', message: `Failed to load demand: ${err.message}` })
     } finally {
@@ -230,9 +246,13 @@ export default function DemandView({ profile, setActionStatus }) {
 
   if (lines.length === 0) {
     return (
-      <div className="text-center py-16 bg-gray-900 rounded-lg border border-gray-800 text-gray-400">
-        No open demand. Customer order lines and warehouse stock requests will appear here once entered.
-      </div>
+      <>
+        {/* D-FBCLOSE-01: the review list shows even when Demand is empty; same key as below keeps its state */}
+        <FbClosedReviewPanel key="fb-closed-review" profile={profile} setActionStatus={setActionStatus} onChanged={() => load({ quiet: true })} refreshKey={fbReviewRefresh} />
+        <div className="text-center py-16 bg-gray-900 rounded-lg border border-gray-800 text-gray-400">
+          No open demand. Customer order lines and warehouse stock requests will appear here once entered.
+        </div>
+      </>
     )
   }
 
@@ -257,6 +277,9 @@ export default function DemandView({ profile, setActionStatus }) {
           Sort: {sortMode === 'demand' ? 'Total demand ↓' : 'Earliest target ↑'}
         </button>
       </div>
+
+      {/* D-FBCLOSE-01: lines Fishbowl already shipped that still have a work order */}
+      <FbClosedReviewPanel key="fb-closed-review" profile={profile} setActionStatus={setActionStatus} onChanged={() => load({ quiet: true })} refreshKey={fbReviewRefresh} />
 
       <div className="space-y-2 pb-24">
         {groups.length === 0 ? (
@@ -366,6 +389,7 @@ export default function DemandView({ profile, setActionStatus }) {
                           <th className="px-3 py-2 text-left" title="Fishbowl's live due date (* = Fishbowl default, no real date entered)">FB Due</th>
                           <th className="px-3 py-2 text-left">Priority</th>
                           <th className="px-3 py-2 text-left" title="Components production needs to make for this line (D-FB-42)">Components</th>
+                          <th className="px-3 py-2 text-right" title="Fishbowl state and Release (D-FBCLOSE-01)"></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -434,6 +458,22 @@ export default function DemandView({ profile, setActionStatus }) {
                                   <span className="text-gray-400 truncate inline-block max-w-[220px] align-middle">{line.components_needed}</span>
                                 ) : <span className="text-gray-600">—</span>}
                               </td>
+                              <td className="px-3 py-2 text-right whitespace-nowrap">
+                                {!line.is_stock_request && (
+                                  <span className="inline-flex items-center gap-2">
+                                    <FbStateBadge state={line.fb_state} soNumbers={line.fb_so_numbers} completedAt={line.fb_completed_at} />
+                                    {canRelease && (
+                                      <button
+                                        onClick={() => setReleaseTarget([line])}
+                                        className="px-2 py-0.5 text-[11px] rounded border border-gray-600 text-gray-300 hover:text-white hover:border-gray-400"
+                                        title="Take this line off Demand: shipped from stock, cancelled or duplicate (D-FBCLOSE-01)"
+                                      >
+                                        Release
+                                      </button>
+                                    )}
+                                  </span>
+                                )}
+                              </td>
                             </tr>
                           )
                         })}
@@ -471,6 +511,15 @@ export default function DemandView({ profile, setActionStatus }) {
             >
               Clear
             </button>
+            {canRelease && selectedCoLinesOnly.length > 0 && (
+              <button
+                onClick={() => setReleaseTarget(selectedCoLinesOnly)}
+                className="px-3 py-1.5 text-sm rounded border border-gray-600 text-gray-300 hover:text-white hover:border-gray-400"
+                title="Take the selected lines off Demand (D-FBCLOSE-01)"
+              >
+                Release {selectedCoLinesOnly.length}
+              </button>
+            )}
             {canCreateWO && (
               <button
                 onClick={() => setShowCreateWO(true)}
@@ -485,6 +534,16 @@ export default function DemandView({ profile, setActionStatus }) {
         </div>
         )
       })()}
+
+      {releaseTarget && (
+        <ReleaseDemandLinesModal
+          lines={releaseTarget}
+          profile={profile}
+          setActionStatus={setActionStatus}
+          onClose={() => setReleaseTarget(null)}
+          onDone={() => { setReleaseTarget(null); clearSelection(); load({ quiet: true }); setFbReviewRefresh(n => n + 1) }}
+        />
+      )}
 
       {showCreateWO && canCreateWO && (
         <CreateWorkOrderModal

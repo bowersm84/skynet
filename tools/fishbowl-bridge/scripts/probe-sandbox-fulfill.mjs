@@ -12,8 +12,11 @@
 //   6. No secret is printed or saved: the login goes through the bridge's own client (never logged here), and every
 //      saved request and response passes redact().
 //   7. Sales orders, shipments, payments and scheduled tasks are never touched.
-// Output: logs/probe-sandbox-fulfill.jsonl (run log), logs/probe-sandbox-fulfill.state.json (ids between steps),
-// logs/probe-sandbox-apidocs/ (the server's own docs). logs/ is git-ignored.
+// Output: logs/<PROBE_LOG_NAME>.jsonl (run log) and logs/<PROBE_LOG_NAME>.state.json (ids between steps); PROBE_LOG_NAME
+// defaults to probe-sandbox-fulfill (probe 1); probe 2 runs as probe-sandbox-cost. logs/probe-sandbox-apidocs/ holds the
+// server's own docs. logs/ is git-ignored.
+// Probe 2 rules (D-ASM-59): never send rawGoods on a fulfill — the finished pick lines decide what is consumed — and
+// always send the finished good's destination (Receiving, location 3, unless PROBE_DEST_LOCATION_ID says otherwise).
 import fs from 'node:fs'
 import http from 'node:http'
 import { resolve, dirname } from 'node:path'
@@ -22,11 +25,13 @@ import { Fishbowl } from '../src/fishbowl.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const LOG_DIR = resolve(ROOT, 'logs')
-const RUN_LOG = resolve(LOG_DIR, 'probe-sandbox-fulfill.jsonl')
-const STATE_FILE = resolve(LOG_DIR, 'probe-sandbox-fulfill.state.json')
+const LOG_NAME = String(process.env.PROBE_LOG_NAME || 'probe-sandbox-fulfill').replace(/[^A-Za-z0-9._-]/g, '')
+const RUN_LOG = resolve(LOG_DIR, `${LOG_NAME}.jsonl`)
+const STATE_FILE = resolve(LOG_DIR, `${LOG_NAME}.state.json`)
 const DOCS_DIR = resolve(LOG_DIR, 'probe-sandbox-apidocs')
 export const PART_PREFIX = 'SKYTEST-'
 export const MO_PREFIX = 'SBX-PROBE-'
+const RECEIVING = 3
 const BOM_NUMBER = 'SKYTEST-STUD-ASSEMBLY'
 
 // ── Fences 1 and 2: the target ────────────────────────────────────────────────────────────────────────────
@@ -115,6 +120,7 @@ async function openSandbox() {
   // Every write goes through here: parts fence, then the call, then the run log.
   const write = async (method, path, body, { parts, what }) => {
     assertParts(parts, what || `${method} ${path}`)
+    if (path.endsWith('/fulfill') && body && Object.hasOwn(body, 'rawGoods')) throw new Error('rule: a fulfill never sends rawGoods (D-ASM-59) — refusing')
     const r = await fb.call(method, path, body)
     writes++
     record({ kind: 'write', method, path, parts, body: body ?? null, status: r.status, response: r.body })
@@ -131,8 +137,15 @@ async function openSandbox() {
 // ── Helpers for the steps ─────────────────────────────────────────────────────────────────────────────────
 function need(n) {
   const m = state().mos[n]
-  if (!m) throw new Error(`no SBX-PROBE-${n} in ${STATE_FILE} — run "mo ${n}" first`)
+  if (!m) throw new Error(`no MO "${n}" in ${STATE_FILE} — run "mo ${n}" first`)
   return m
+}
+function moNumber(key) {
+  const k = String(key ?? '')
+  const number = /^\d{1,3}$/.test(k) ? `${MO_PREFIX}${k}` : k
+  if (!/^SBX-[A-Z0-9-]+$/.test(number)) throw new Error(`MO key ${k}: use a number or a name starting SBX- (letters, digits, dashes)`)
+  if (number.length > 25) throw new Error(`${number} is over 25 characters`)
+  return number
 }
 async function moIds(s, moId) {
   const wo = await s.q(`SELECT wo.id AS woId, wo.num AS woNum FROM wo JOIN moitem mi ON mi.id = wo.moItemId WHERE mi.moId = ${Number(moId)}`)
@@ -151,10 +164,6 @@ async function pickRows(s, pickId) {
     LEFT JOIN trackinginfo ti ON ti.recordId = pi.id AND ti.tableId = -1515431424 AND ti.partTrackingId = 1
     WHERE pi.pickId = ${Number(pickId)} ORDER BY p.num`)
 }
-function overrideLot(part) {
-  const map = Object.fromEntries(String(process.env.PROBE_OVERRIDE_LOTS || '').split(',').filter((x) => x.includes('=')).map((x) => x.split('=')))
-  return map[part] || 'SBX-NOT-THIS-LOT'
-}
 function pickLines(body) {
   return (body?.pickItems || []).map((pi) => ({
     id: pi.id, part: pi.part?.name, status: pi.status, qty: pi.quantity, finishable: pi.finishable,
@@ -162,6 +171,92 @@ function pickLines(body) {
     currentTag: pi.currentTag ? `tag ${pi.currentTag.number} @ ${pi.currentTag.location?.name}` : null,
     lot: (pi.tracking?.trackingItems || []).map((t) => t.value).join(',') || null,
   }))
+}
+
+// ── Probe 2: one build's facts, and the differences between two builds ───────────────────────────────────
+// Fishbowl's table ids, as seen in inventorylog / costlayer / trackinginfo rows on this server (probe 1).
+const T_PICKITEM = -1515431424
+const T_WOITEM = -355941248
+const T_INVLOG = -1081854656
+const COST_LOTS = [
+  ['SKYTEST-STUD', '2.00', ['SBX-CA-STUD', 'SBX-CB-STUD']],
+  ['SKYTEST-SPRING', '0.50', ['SBX-CA-SPRING', 'SBX-CB-SPRING']],
+  ['SKYTEST-CUP', '0.75', ['SBX-CA-CUP', 'SBX-CB-CUP']],
+  ['SKYTEST-PIN', '0.25', ['SBX-CA-PIN', 'SBX-CB-PIN']],
+]
+const inList = (xs) => (xs.length ? xs.map(Number).join(',') : '0')
+async function buildFacts(s, m) {
+  const moId = Number(m.moId)
+  const woId = Number(m.woId)
+  const mo = (await s.q(`SELECT mo.id, mo.num, ms.name AS status, mo.dateIssued, mo.dateCompleted, mo.userId FROM mo LEFT JOIN mostatus ms ON ms.id = mo.statusId WHERE mo.id = ${moId}`))[0] ?? null
+  const moItems = await s.q(`SELECT mi.id, p.num AS partNum, mi.typeId, mi.qtyToFulfill, mi.qtyFulfilled, mi.totalCost, mi.statusId FROM moitem mi JOIN part p ON p.id = mi.partId
+    WHERE mi.moId = ${moId} ORDER BY mi.typeId, p.num`)
+  const wo = (await s.q(`SELECT wo.id, wo.num, ws.name AS status, wo.qtyOrdered, wo.qtyTarget, wo.qtyScrapped, wo.cost, wo.locationId, wo.dateStarted, wo.dateFinished, wo.userId
+    FROM wo LEFT JOIN wostatus ws ON ws.id = wo.statusId WHERE wo.id = ${woId}`))[0] ?? null
+  const woItems = await s.q(`SELECT wi.id, wi.typeId, p.num AS partNum, wi.qtyTarget, wi.qtyUsed, wi.qtyScrapped, wi.cost, wi.standardCost FROM woitem wi JOIN part p ON p.id = wi.partId
+    WHERE wi.woId = ${woId} ORDER BY wi.typeId, p.num`)
+  const wiList = inList(woItems.map((w) => w.id))
+  const pickItems = await s.q(`SELECT pi.id, p.num AS partNum, pi.qty, pis.name AS status, pi.srcLocationId, ti.info AS lot FROM pickitem pi JOIN part p ON p.id = pi.partId
+    LEFT JOIN pickitemstatus pis ON pis.id = pi.statusId LEFT JOIN trackinginfo ti ON ti.recordId = pi.id AND ti.tableId = ${T_PICKITEM} AND ti.partTrackingId = 1
+    WHERE pi.woItemId IN (${wiList}) ORDER BY p.num, ti.info`)
+  const piList = inList(pickItems.map((p) => p.id))
+  // the work order's tracking: the finished good's lot and each component's consumed lot, on the woitem rows
+  const tracking = await s.q(`SELECT ti.id, p.num AS partNum, wi.typeId, ti.info AS lot, ti.qty FROM trackinginfo ti JOIN woitem wi ON wi.id = ti.recordId JOIN part p ON p.id = wi.partId
+    WHERE ti.tableId = ${T_WOITEM} AND ti.recordId IN (${wiList}) ORDER BY wi.typeId, p.num, ti.info`)
+  const inventoryLog = await s.q(`SELECT il.id, ilt.name AS type, p.num AS partNum, il.changeQty, il.cost, il.info, il.begLocationId, il.endLocationId, il.tableId, il.userId, il.dateCreated,
+      (SELECT GROUP_CONCAT(ts.TRACKVALUE ORDER BY ts.TRACKVALUE) FROM invlogtrackingsummary ts WHERE ts.INVLOGID = il.id) AS lots
+    FROM inventorylog il JOIN part p ON p.id = il.partId LEFT JOIN inventorylogtype ilt ON ilt.id = il.typeId
+    WHERE (il.tableId = ${T_WOITEM} AND il.recordId IN (${wiList})) OR (il.tableId = ${T_PICKITEM} AND il.recordId IN (${piList})) ORDER BY il.id`)
+  const ilList = inList(inventoryLog.map((r) => r.id))
+  // which cost layer each inventory-log row drew on, and where that layer came from (an add's note, or a build)
+  const layerUse = await s.q(`SELECT x.id, x.inventoryLogId, il.typeId AS logTypeId, p.num AS partNum, x.qty, ROUND(cl.orgTotalCost / NULLIF(cl.orgQty, 0), 4) AS layerUnitCost,
+      cl.tableId AS layerTableId, src.info AS layerSource, (SELECT GROUP_CONCAT(ts.TRACKVALUE) FROM invlogtrackingsummary ts WHERE ts.INVLOGID = src.id) AS layerLot
+    FROM inventorylogtocostlayer x JOIN costlayer cl ON cl.id = x.costLayerId JOIN part p ON p.id = cl.partId JOIN inventorylog il ON il.id = x.inventoryLogId
+    LEFT JOIN inventorylog src ON cl.tableId = ${T_INVLOG} AND src.id = cl.recordId
+    WHERE x.inventoryLogId IN (${ilList}) ORDER BY p.num, x.inventoryLogId`)
+  const layers = await s.q(`SELECT cl.id, p.num AS partNum, cls.name AS status, cl.orgQty, cl.orgTotalCost, ROUND(cl.orgTotalCost / NULLIF(cl.orgQty, 0), 4) AS unitCost, cl.qty, cl.totalCost, cl.tableId
+    FROM costlayer cl JOIN part p ON p.id = cl.partId LEFT JOIN costlayerstatus cls ON cls.id = cl.statusId
+    WHERE (cl.tableId = ${T_WOITEM} AND cl.recordId IN (${wiList})) OR (cl.tableId = ${T_INVLOG} AND cl.recordId IN (${ilList})) ORDER BY p.num`)
+  const fgLot = tracking.find((t) => Number(t.typeId) === 10)?.lot ?? null
+  const finishedLot = fgLot ? await s.q(`SELECT tag.id, tag.num, tag.qty, tag.qtyCommitted, loc.name AS location FROM tag JOIN part p ON p.id = tag.partId JOIN location loc ON loc.id = tag.locationId
+    JOIN trackingtext tt ON tt.tagId = tag.id AND tt.partTrackingId = 1 WHERE p.num = ${sqlStr(BOM_NUMBER)} AND tt.info = ${sqlStr(fgLot)}`) : []
+  const postwo = await s.q(`SELECT pw.id, pw.statusId, pw.postDate, pw.datePosted, pw.extTxnNumber, pw.extRefNumber FROM postwo pw WHERE pw.woId = ${woId} ORDER BY pw.id`)
+  const postwoItems = postwo.length ? await s.q(`SELECT pwi.id, pwi.postWoId, p.num AS partNum, wi.typeId, pwi.postedTotalCost, pwi.extTxnLineId FROM postwoitem pwi
+    JOIN woitem wi ON wi.id = pwi.woItemId JOIN part p ON p.id = wi.partId WHERE pwi.postWoId IN (${inList(postwo.map((p) => p.id))}) ORDER BY wi.typeId, p.num`) : []
+  // post rows written while the build's inventory moved (five seconds either side). Not matched by id: an Adjust
+  // post's refId is a part id, so an id match pulls in unrelated rows.
+  const posts = await s.q(`SELECT po.id, pt.name AS type, po.amount, po.quantity, po.postedTotalCost, po.orderTypeId, po.orderId, po.refId, po.refItemId, po.refNumber, po.statusId, po.dateCreated
+    FROM post po LEFT JOIN posttype pt ON pt.id = po.typeId
+    WHERE po.dateCreated BETWEEN (SELECT DATE_SUB(MIN(dateCreated), INTERVAL 5 SECOND) FROM inventorylog WHERE id IN (${ilList}))
+      AND (SELECT DATE_ADD(MAX(dateCreated), INTERVAL 5 SECOND) FROM inventorylog WHERE id IN (${ilList})) ORDER BY po.id`)
+  return { mo, moItems, wo, woItems, pickItems, tracking, inventoryLog, layerUse, layers, finishedLot, postwo, postwoItems, posts,
+    placeholders: { [mo?.num ?? '-']: '<MO>', [wo?.num ?? '-']: '<WO>', [fgLot ?? '-']: '<finished lot>' } }
+}
+// Drop what is expected to differ (ids, order numbers, timestamps, user) and name the MO, WO and finished lot alike.
+const KEEP_ID = new Set(['typeId', 'statusId', 'begLocationId', 'endLocationId', 'srcLocationId', 'locationId', 'tableId', 'orderTypeId', 'logTypeId', 'layerTableId', 'partTrackingId'])
+function normalRow(row, ph) {
+  const out = {}
+  for (const [k, v] of Object.entries(row || {})) {
+    if (k === 'id' || k === 'num' || k === 'userId' || /^date/i.test(k) || k === 'postDate' || (/Id$/.test(k) && !KEEP_ID.has(k))) continue
+    let x = v
+    if (typeof x === 'string') for (const [from, to] of Object.entries(ph)) if (from !== '-') x = x.split(from).join(to)
+    out[k] = x
+  }
+  return JSON.stringify(out, Object.keys(out).sort())
+}
+function diffBuilds(A, B) {
+  const sections = ['mo', 'moItems', 'wo', 'woItems', 'pickItems', 'tracking', 'inventoryLog', 'layerUse', 'layers', 'finishedLot', 'postwo', 'postwoItems', 'posts']
+  const out = {}
+  for (const sec of sections) {
+    const rows = (F) => [].concat(F[sec] ?? []).map((r) => normalRow(r, F.placeholders))
+    const a = rows(A)
+    const b = rows(B)
+    const onlyA = [...a]
+    const onlyB = []
+    for (const r of b) { const i = onlyA.indexOf(r); if (i >= 0) onlyA.splice(i, 1); else onlyB.push(r) }
+    out[sec] = onlyA.length || onlyB.length ? { onlyA, onlyB } : 'same'
+  }
+  return out
 }
 
 // ── Steps ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -193,11 +288,10 @@ const steps = {
     } finally { await s.close() }
   },
 
-  // T2: create and issue SBX-PROBE-<n> for the test BOM, quantity 2 (or the third argument).
+  // T2: create and issue an MO for the test BOM, quantity 2 (or the second argument). The key is a number (probe 1:
+  // SBX-PROBE-<n>) or a full name starting SBX- (probe 2: SBX-COST-API, SBX-COST-HAND); either is the state key.
   async mo(n, qty = '2') {
-    if (!/^\d{1,3}$/.test(String(n))) throw new Error('usage: mo <n> [qty]')
-    const number = `${MO_PREFIX}${n}`
-    if (number.length > 25) throw new Error(`${number} is over 25 characters`)
+    const number = moNumber(n)
     const s = await openSandbox()
     try {
       if ((await s.q(`SELECT id FROM mo WHERE num = ${sqlStr(number)}`)).length) throw new Error(`${number} already exists in the sandbox`)
@@ -245,35 +339,103 @@ const steps = {
     } finally { await s.close() }
   },
 
-  // T5 (and T7): fulfill. mode = early | omit | rawgoods | override. Produced 1, scrapped 1, finished lot as given.
-  async fulfill(n, mode = 'omit', lot = 'SBX-80001') {
+  // Fulfill: produced and scrapped quantities and the finished lot as given; the destination always sent (Receiving
+  // unless PROBE_DEST_LOCATION_ID); rawGoods never sent (D-ASM-59), so the finished pick lines decide what is consumed.
+  // Probe 1's "rawgoods" and "override" runs are recorded in its results file; they are not repeatable from here.
+  async fulfill(n, produced = '1', scrapped = '1', lot = 'SBX-80001') {
     const m = need(n)
+    if (!/^\d+$/.test(String(produced)) || !/^\d+$/.test(String(scrapped))) throw new Error('usage: fulfill <key> <produced> <scrapped> <finished lot>')
     const s = await openSandbox()
     try {
       const wo = await s.read(`/api/work-orders/${m.woId}`)
       const items = wo.body?.woItems || []
       const fg = items.find((it) => it.type?.id === 10 || it.type?.name === 'Finished Good')
       if (!fg) throw new Error('no finished-good item on the work order')
-      const dest = Number(process.env.PROBE_DEST_LOCATION_ID || fg.destLocation?.id || 0)
-      if (!dest) throw new Error('no destination location: the finished good has no destLocation; set PROBE_DEST_LOCATION_ID')
+      const dest = Number(process.env.PROBE_DEST_LOCATION_ID || RECEIVING)
       const body = {
-        finishedGoods: [{ itemId: fg.id, quantityUsed: '1', quantityScrapped: '1', destinationLocationId: dest,
+        finishedGoods: [{ itemId: fg.id, quantityUsed: String(produced), quantityScrapped: String(scrapped), destinationLocationId: dest,
           tracking: { trackingItems: [{ partTracking: { id: 1 }, value: lot }] } }],
         splitWorkOrder: false,
       }
-      if (mode === 'rawgoods' || mode === 'override') {
-        body.rawGoods = items.filter((it) => it.type?.id === 20 || it.type?.name === 'Raw Good').map((it) => ({
-          itemId: it.id,
-          consumeItems: (it.consumeItems || []).filter((ci) => ci.pickItemId).map((ci) => ({
-            quantity: String(ci.quantity), uom: { id: ci.uom?.id }, pickItemId: ci.pickItemId,
-            // override: PROBE_OVERRIDE_LOTS="PART=LOT,..." names a real other lot per part; otherwise a lot that does not exist
-            ...(mode === 'override' ? { tracking: { trackingItems: [{ partTracking: { id: 1 }, value: overrideLot(it.part?.name) }] } } : {}),
-          })),
-        }))
-      }
       const parts = items.map((it) => it.part?.name).filter(Boolean)
-      const r = await s.write('POST', `/api/work-orders/${m.woId}/fulfill`, body, { parts, what: `fulfill WO ${m.woId} (${mode})` })
-      show({ mode, request: body, status: r.status, response: r.status >= 300 ? r.body : { status: r.body?.status, number: r.body?.number } })
+      const r = await s.write('POST', `/api/work-orders/${m.woId}/fulfill`, body, { parts, what: `fulfill WO ${m.woId}` })
+      show({ request: body, status: r.status, response: r.status >= 300 ? r.body : { status: r.body?.status, number: r.body?.number } })
+    } finally { await s.close() }
+  },
+
+  // Probe 2 T1 (and after T2 and each build), read-only: the costing method and accounting settings, then every
+  // SKYTEST- part's cost, on-hand, open cost layers and recent cost history, and the probe-2 lots.
+  async costing() {
+    const s = await openSandbox()
+    try {
+      const settings = (await s.q(`SELECT sysKey, sysValue FROM sysproperties WHERE sysKey LIKE 'Acct%' OR sysKey LIKE '%Cost%' OR sysKey LIKE '%Accounting%' ORDER BY sysKey`))
+        .map((r) => (/pass|token|secret|ticket|session|user|login|key$|path|file|url|host/i.test(r.sysKey) ? { sysKey: r.sysKey, sysValue: '<not shown>' } : r))
+      const parts = await s.q(`SELECT p.id, p.num, p.stdCost, p.inventoryAccountId, p.cogsAccountId, p.adjustmentAccountId, p.scrapAccountId, p.varianceAccountId,
+          pc.avgCost, pc.qty AS costQty, pc.totalCost, (SELECT COALESCE(SUM(tag.qty), 0) FROM tag WHERE tag.partId = p.id) AS onHand
+        FROM part p LEFT JOIN partcost pc ON pc.partId = p.id WHERE p.num LIKE 'SKYTEST-%' ORDER BY p.num`)
+      const openLayers = await s.q(`SELECT p.num AS partNum, cl.id, cls.name AS status, cl.orgQty, cl.orgTotalCost, ROUND(cl.orgTotalCost / NULLIF(cl.orgQty, 0), 4) AS unitCost, cl.qty, cl.totalCost,
+          cl.tableId, cl.recordId, src.info AS source, cl.dateCreated
+        FROM costlayer cl JOIN part p ON p.id = cl.partId LEFT JOIN costlayerstatus cls ON cls.id = cl.statusId LEFT JOIN inventorylog src ON cl.tableId = ${T_INVLOG} AND src.id = cl.recordId
+        WHERE p.num LIKE 'SKYTEST-%' AND cl.qty <> 0 ORDER BY p.num, cl.id`)
+      const history = await s.q(`SELECT p.num AS partNum, h.dateCaptured, h.avgCost, h.stdCost, h.nextCost, h.quantity, h.totalCost FROM partcosthistory h JOIN part p ON p.id = h.partId
+        WHERE p.num LIKE 'SKYTEST-%' ORDER BY h.dateCaptured DESC, p.num LIMIT 12`)
+      const lots = COST_LOTS.flatMap(([, , l]) => l)
+      const costLots = await s.q(`SELECT p.num AS partNum, tt.info AS lot, tag.qty, tag.qtyCommitted, loc.name AS location FROM tag JOIN part p ON p.id = tag.partId JOIN location loc ON loc.id = tag.locationId
+        JOIN trackingtext tt ON tt.tagId = tag.id AND tt.partTrackingId = 1 WHERE p.num LIKE 'SKYTEST-%' AND tt.info IN (${lots.map(sqlStr).join(',')}) ORDER BY p.num, tt.info, loc.name`)
+      show({ sandbox: s.sandbox, settings, parts, openLayers, history, costLots })
+    } finally { await s.close() }
+  },
+
+  // Probe 2 T2: costed stock. 20 of each lot into Stock (location 1) at the entered unit cost, one add per lot, in
+  // the table's order. Refuses if any of the lots already exists; stops at the first refusal (no retry). Then every
+  // posting, inventory-log and cost-layer row the adds wrote.
+  async 'add-stock'() {
+    const QTY = '20'
+    const STOCK = 1
+    const NOTE = 'SBX probe 2 cost control (S17 D2) - sandbox only'
+    const s = await openSandbox()
+    try {
+      const lots = COST_LOTS.flatMap(([, , l]) => l)
+      const existing = await s.q(`SELECT DISTINCT info FROM trackingtext WHERE info IN (${lots.map(sqlStr).join(',')})
+        UNION SELECT DISTINCT info FROM trackinginfo WHERE info IN (${lots.map(sqlStr).join(',')})`)
+      if (existing.length) throw new Error(`lot(s) ${existing.map((r) => r.info).join(', ')} already in the sandbox — refusing a second add`)
+      const ids = Object.fromEntries((await s.q(`SELECT id, num FROM part WHERE num IN (${COST_LOTS.map((a) => sqlStr(a[0])).join(',')})`)).map((r) => [r.num, Number(r.id)]))
+      const before = { post: (await s.q('SELECT MAX(id) AS m FROM post'))[0].m, invlog: (await s.q('SELECT MAX(id) AS m FROM inventorylog'))[0].m, layer: (await s.q('SELECT MAX(id) AS m FROM costlayer'))[0].m }
+      const calls = []
+      for (const [part, unitCost, partLots] of COST_LOTS) {
+        if (!ids[part]) throw new Error(`${part} is not in the sandbox`)
+        for (const lot of partLots) {
+          const body = { location: { id: STOCK }, quantity: QTY, uom: { id: 1 }, unitCost, note: NOTE, trackingItems: [{ partTracking: { id: 1 }, value: lot }] }
+          const r = await s.write('POST', `/api/parts/${ids[part]}/inventory/add`, body, { parts: [part], what: `add ${QTY} ${part} lot ${lot} at ${unitCost}` })
+          calls.push({ part, lot, unitCost, status: r.status, response: r.status >= 300 ? r.body : undefined })
+          if (r.status >= 300) { show({ calls }); throw new Error(`add ${part} lot ${lot} answered ${r.status} — stopping here, no retry`) }
+        }
+      }
+      const posts = await s.q(`SELECT po.id, pt.name AS type, po.amount, po.quantity, po.postedTotalCost, po.orderTypeId, po.refId, po.refItemId, po.refNumber, po.statusId
+        FROM post po LEFT JOIN posttype pt ON pt.id = po.typeId WHERE po.id > ${Number(before.post)} ORDER BY po.id`)
+      const invlog = await s.q(`SELECT il.id, ilt.name AS type, p.num AS partNum, il.changeQty, il.cost, il.info, il.begLocationId, il.endLocationId, il.tableId, il.recordId
+        FROM inventorylog il JOIN part p ON p.id = il.partId LEFT JOIN inventorylogtype ilt ON ilt.id = il.typeId WHERE il.id > ${Number(before.invlog)} ORDER BY il.id`)
+      const layers = await s.q(`SELECT cl.id, p.num AS partNum, cl.orgQty, cl.orgTotalCost, ROUND(cl.orgTotalCost / NULLIF(cl.orgQty, 0), 4) AS unitCost, cl.qty, cl.totalCost, cl.tableId, cl.recordId
+        FROM costlayer cl JOIN part p ON p.id = cl.partId WHERE cl.id > ${Number(before.layer)} ORDER BY cl.id`)
+      show({ before, calls, posts, invlog, layers })
+    } finally { await s.close() }
+  },
+
+  // Probe 2 T6, read-only: both builds side by side, then every difference once ids, order numbers, timestamps and
+  // the user are set aside (the MO, WO and finished lot are named <MO>, <WO>, <finished lot> in both). The full read
+  // is saved under logs/ for the results file.
+  async compare(a = 'SBX-COST-API', b = 'SBX-COST-HAND') {
+    const ma = need(a)
+    const mb = need(b)
+    const s = await openSandbox()
+    try {
+      const builds = { [a]: await buildFacts(s, ma), [b]: await buildFacts(s, mb) }
+      const statuses = { postStatus: await s.q('SELECT id, name FROM poststatus ORDER BY id'), postOrderStatus: await s.q('SELECT id, name FROM postorderstatus ORDER BY id'),
+        costLayerStatus: await s.q('SELECT id, name FROM costlayerstatus ORDER BY id') }
+      const diff = diffBuilds(builds[a], builds[b])
+      const file = resolve(LOG_DIR, `${LOG_NAME}-compare-${Date.now()}.json`)
+      fs.writeFileSync(file, JSON.stringify(redact({ a, b, builds, statuses, diff }), null, 2))
+      show({ builds, statuses, diff, saved: file })
     } finally { await s.close() }
   },
 
@@ -314,7 +476,7 @@ const steps = {
     if (!flat.includes(m.pickNum) && !flat.includes(`:${m.pickId}`) && !flat.includes(`"${m.pickId}"`)) {
       throw new Error(`legacy: the body does not name this probe's pick (${m.pickNum} / ${m.pickId}) — refusing`)
     }
-    const namedParts = [...flat.matchAll(/"(?:Num|Number|PartNum|PartNumber)"\s*:\s*"([^"]+)"/g)].map((x) => x[1]).filter((v) => !v.startsWith('W') && !/^\d+$/.test(v) && !v.startsWith(MO_PREFIX))
+    const namedParts = [...flat.matchAll(/"(?:Num|Number|PartNum|PartNumber)"\s*:\s*"([^"]+)"/g)].map((x) => x[1]).filter((v) => !v.startsWith('W') && !/^\d+$/.test(v) && !v.startsWith('SBX-'))
     const s = await openSandbox()
     try {
       const parts = await pickPartNums(s, m.pickId)

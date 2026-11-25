@@ -120,18 +120,20 @@ export class Fishbowl {
 
   // v1.12 (S17 D1): one JSON call to the REST API — GET, POST or DELETE on /api/... — returning
   // { status, body } with the body parsed when it is JSON. Never throws on an HTTP status: the caller decides.
-  // Only mo.mjs calls it with a method other than GET.
-  async call(method, path, body) {
+  // In the bridge, only mo.mjs and woPost.mjs (v1.13, D-ASM-61: the pick save through /api/legacy/external and the
+  // work-order fulfill) call it with a method other than GET, behind their fences; the sandbox scripts in scripts/
+  // use it the same way. timeoutMs (optional, v1.13) overrides the client's ceiling for this call, as importRows does.
+  async call(method, path, body, timeoutMs = null) {
     if (!/^\/api\//.test(path)) throw new FishbowlError(`call: path must start with /api/: ${path}`, 0, '')
     await this.ensureSession()
     const payload = body === undefined ? undefined : JSON.stringify(body)
     const headers = () => ({ Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' })
-    let res = await this._call(method, path, headers(), payload)
+    let res = await this._call(method, path, headers(), payload, timeoutMs)
     if (res.status === 401) {
       this.log.warn(`fishbowl 401 on ${method} ${path} — session ended; logging in again and retrying once`)
       this.token = null
       await this.login()
-      res = await this._call(method, path, headers(), payload)
+      res = await this._call(method, path, headers(), payload, timeoutMs)
     }
     let parsed = res.body
     try { parsed = res.body === '' ? null : JSON.parse(res.body) } catch { /* not JSON: keep the text */ }

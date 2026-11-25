@@ -166,3 +166,30 @@ for any call below.
 - **Status ids.** `mo`: 10 Entered, 20 Issued, 50 Partial, 60 Fulfilled, 70 Closed Short, 80 Void. `wo`: 10 Entered,
   30 Started, 40 Fulfilled. `moitem.typeId`: 50 the configuration (parent of the others), 10 finished good, 20 raw good.
 - **Author.** `lastModified.username` is `skynet-bridge` on every MO the bridge touches.
+
+### Posting a work order automatically (`wo_post`, bridge 1.13, D-ASM-61 — proven on the 26.11 sandbox only)
+
+Probes 1 and 2 (D-ASM-59, D-ASM-60; `Docs/probes/2026-11-24_*`) ran this sequence on the Fishbowl 26.11 sandbox. It is
+not available on live Fishbowl 25.9: the bridge refuses unless the server version is at least `FB_WO_POST_MIN_VERSION`
+(26.11), read from `databaseversion.alterCommand` (`Fishbowl v2026.11` → `26.11`).
+
+| Step | Call | Body | Success |
+|---|---|---|---|
+| 1 | `POST /api/picks/:id/start` — only while the pick is Entered | none | 200, `status` `Started`; the lines go Started, source location set, nothing committed, no lot |
+| 2 | `POST /api/legacy/external/GetPickRq` | `{"GetPickRq":{"PickNum":"W<MO>:001"}}` | see below; the answer's `GetPickRs.Pick` is the legacy pick (`PickItems.PickItem[]`, line `Status` a number, pick `Status` a word) |
+| 3 | `POST /api/legacy/external/SavePickRq` | `{"SavePickRq":{"Pick":<the pick>}}` with each line to finish set to `Status` 40, `Tag` {`TagID`, `Num`, `PartNum`, `Location` (the line's), `Quantity`, `QuantityCommitted`, `Tracking`, `TypeID` 30} and `Tracking` {`TrackingItem`: {`PartTracking` (the line part's), `TrackingValue`: lot}}; other lines unchanged | see below; each line Finished on that lot (`trackinginfo` table −1515431424) |
+| 4 | `GET /api/work-orders/:id` | — | the finished-good item (`type.id` 10); its `id` is `woitem.id` |
+| 5 | `POST /api/work-orders/:id/fulfill` | `{"finishedGoods":[{"itemId":…,"quantityUsed":"<good>","quantityScrapped":"<bad>","destinationLocationId":3,"tracking":{"trackingItems":[{"partTracking":{"id":1},"value":"<lot>"}]}}],"splitWorkOrder":false}` — **never `rawGoods`** | 200, `status` `Fulfilled`; MO Fulfilled; components consumed from the pick lines' lots; finished lot received at the destination |
+
+- **The legacy wrapper's success test.** It answers HTTP 200 whether or not the request worked. Success is
+  `FbiJson.FbiMsgsRs.statusCode` = 1000 **and** the inner `<Name>Rs.statusCode` = 1000 (`GetPickRs`, `SavePickRs`).
+  A malformed body is refused inside the answer (probe 1: "No unmarshaller for element PickNum"). The answer also
+  carries `FbiJson.Ticket` (the session): never log or store it.
+- **Never `GET /api/picks/:id`.** It can source and save a split of the pick (D-ASM-59). Read picks by SQL; fetch the
+  pick for saving with `GetPickRq` only.
+- **Status ids seen.** `pickstatus`: 10 Entered, 20 Started, 30 Committed, 40 Finished. `pickitemstatus`: 5 Short,
+  6 Hold, 10 Entered, 11 EnteredNew, 20 Started, 30 Committed, 40 Finished. The probes saw 10, 20 and 40 on work-order
+  pick lines; the bridge refuses any other.
+- **Costs (D-ASM-60).** Average Costing: components are charged at the part's average cost, not the lot's; the
+  scrapped unit's cost is absorbed into the good units; the work-order posting is one `postwo` (status 70, For
+  Journal Entry) and a `postwoitem` per item, no `post` rows — the same as a hand post.

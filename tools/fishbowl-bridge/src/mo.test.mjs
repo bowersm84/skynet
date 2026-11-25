@@ -180,3 +180,18 @@ test('executor: FB_MO_ENABLED off -> forced dry run; an unexpected answer stops 
   assert.equal(moHaltState().id, 1)
   resetMoHalt()
 })
+
+test('fence "*" (D-ASM-61): every part when both sides are "*"; refused when only one side is; an empty prefix still refuses', async () => {
+  const boms = [{ id: 1095, num: 'SK40S5-12S', activeFlag: true, parts: ['SK40S5-12S', 'SK4C12P'] }]
+  const star = fakeFishbowl({ boms })
+  const r = await runMoCommand(star, create({ bom_number: 'SK40S5-12S', write_part_prefix: '*' }), { cfg: cfg({ writePartPrefix: '*' }), log: quiet, dryRun: true })
+  assert.equal(star.calls.length, 0) // dry run: allowed through the fence, nothing written
+  assert.deepEqual(r.would.map((w) => w.call), ['POST /api/manufacture-orders', 'POST /api/manufacture-orders/<new id>/issue'])
+  const bridgeOnly = fakeFishbowl({ boms })
+  await assert.rejects(runMoCommand(bridgeOnly, create({ bom_number: 'SK40S5-12S' }), { cfg: cfg({ writePartPrefix: '*' }), log: quiet, dryRun: false }), /payload write_part_prefix "SKYTEST-" is not this bridge's "\*"/)
+  const payloadOnly = fakeFishbowl({ boms })
+  await assert.rejects(runMoCommand(payloadOnly, create({ bom_number: 'SK40S5-12S', write_part_prefix: '*' }), { cfg: cfg(), log: quiet, dryRun: false }), /payload write_part_prefix "\*" is not this bridge's "SKYTEST-"/)
+  const empty = fakeFishbowl({ boms })
+  await assert.rejects(runMoCommand(empty, create({ bom_number: 'SK40S5-12S', write_part_prefix: '' }), { cfg: cfg({ writePartPrefix: '' }), log: quiet, dryRun: false }), /FB_WRITE_PART_PREFIX is not set/)
+  assert.equal(bridgeOnly.calls.length + payloadOnly.calls.length + empty.calls.length, 0)
+})

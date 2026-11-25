@@ -18,7 +18,7 @@ export const BUILD_STATUS_LABELS = {
 }
 export const BUILD_KIND_LABELS = { order: 'Order', stock: 'Stock', special: 'Special', rework: 'Rework', program: 'Program' }
 export const POST_STATUS_LABELS = {
-  not_posted: 'Not posted', ready_to_post: 'Ready to post', posted: 'Posted', verified: 'Verified', mismatch: 'Mismatch',
+  not_posted: 'Not posted', ready_to_post: 'Ready to post', posting: 'Posting', post_failed: 'Post failed', posted: 'Posted', verified: 'Verified', mismatch: 'Mismatch',
   not_applicable: 'No Fishbowl post',
 }
 export const PRIORITIES = ['critical', 'high', 'normal', 'low']
@@ -186,7 +186,7 @@ export async function listPostCards() {
 // The Order Queue tab's count: cards that still need Ashley (not verified).
 export async function countPostCards() {
   const { count, error } = await supabase.from('v_assembly_post_cards').select('id', { count: 'exact', head: true })
-    .in('fb_post_status', ['ready_to_post', 'posted', 'mismatch'])
+    .in('fb_post_status', ['ready_to_post', 'post_failed', 'posted', 'mismatch'])
   if (error) throw error
   return count || 0
 }
@@ -197,3 +197,5 @@ export const verifyPosts = (buildIds = null) => rpc('assembly_verify_posts', { p
 export const linkBuildMo = (buildId, moNumber) => rpc('assembly_build_link_mo', { p_build_id: buildId, p_mo_num: moNumber })
 // Ask the bridge again after an MO error.
 export const retryBuildMo = (buildId) => rpc('assembly_build_mo_retry', { p_build_id: buildId })
+// S17 D2a (D-ASM-61): ask the bridge to post the build again after a failed automatic post.
+export const retryBuildPost = (buildId) => rpc('assembly_build_post_retry', { p_build_id: buildId })

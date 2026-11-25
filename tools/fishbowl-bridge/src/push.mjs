@@ -11,6 +11,7 @@
 import { syncProducts, syncCustomers } from './pricing.mjs'
 import { syncProductTree, syncPricingRules } from './rulesTree.mjs'
 import { MO_KINDS, runMoCommand } from './mo.mjs'
+import { WO_POST_KIND, runWoPost } from './woPost.mjs'
 
 // D-ASM-23 dispatch table: kind -> the Fishbowl import name(s) to post, in order (configurable because the names
 // are Fishbowl's), and the mirror to re-read after a real push. It is resolved inside the handler's try, so a kind
@@ -60,8 +61,17 @@ export function moGate(cfg) {
   return { write: true, why: null }
 }
 
-async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo }) {
-  const gate = moGate(cfg)
+// S17 D2a (D-ASM-61): wo_post has the MO gate and then its own switch, FB_WO_POST_ENABLED.
+export function woPostGate(cfg) {
+  const g = moGate(cfg)
+  if (!g.write) return g
+  if (!cfg.mo?.postEnabled) return { write: false, why: 'FB_WO_POST_ENABLED is not true' }
+  return { write: true, why: null }
+}
+
+async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo, refreshTags, fishbowlVersion }) {
+  const isPost = cmd.kind === WO_POST_KIND
+  const gate = isPost ? woPostGate(cfg) : moGate(cfg)
   const dryRun = Boolean(cmd.dry_run) || !gate.write
   const base = { dry_run: dryRun, forced: !cmd.dry_run && !gate.write, reason: !cmd.dry_run && !gate.write ? gate.why : null, host: cfg.host, version: cfg.version }
   if (moHalt) {
@@ -72,7 +82,8 @@ async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo }) {
   }
   let result
   try {
-    result = { ...(await runMoCommand(fb, cmd, { cfg, log, dryRun })), ...base }
+    const out = isPost ? await runWoPost(fb, cmd, { cfg, log, dryRun, fishbowlVersion }) : await runMoCommand(fb, cmd, { cfg, log, dryRun })
+    result = { ...out, ...base }
   } catch (e) {
     if (e.halt) moHalt = { id: cmd.id, message: e.message }
     const msg = e.plain ? e.message : `${e.name || 'Error'}: ${e.message}`
@@ -80,7 +91,11 @@ async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo }) {
     try { await sky.pushFinish(cmd.id, false, { ...base, halted: Boolean(e.halt) }, msg.slice(0, 2000)) } catch (e2) { log.error(`push #${cmd.id}: could not record failure: ${e2.message}`) }
     return
   }
-  log.info(`push #${cmd.id} ${cmd.kind}: ${dryRun ? `DRY RUN${base.forced ? ` (forced: ${base.reason})` : ''}` : 'done'} — MO ${result.mo_number ?? '?'}${result.fb_mo_id ? ` (id ${result.fb_mo_id})` : ''}${result.status ? ` · ${result.status}` : ''}${'created' in result ? ` · created ${result.created}` : ''}${'deleted' in result ? ` · deleted ${result.deleted}` : ''}${'closed' in result ? ` · closed ${result.closed}` : ''}`)
+  if (isPost) {
+    log.info(`push #${cmd.id} ${cmd.kind}: ${dryRun ? `DRY RUN${base.forced ? ` (forced: ${base.reason})` : ''}` : 'done'} — MO ${result.mo_number ?? '?'}${result.fb_mo_id ? ` (id ${result.fb_mo_id})` : ''} · produced ${result.produced} · scrapped ${result.scrapped} · lot ${result.finished_lot}${result.resumed ? ' · resumed' : ''}${result.already ? ' · already posted' : ''}`)
+  } else {
+    log.info(`push #${cmd.id} ${cmd.kind}: ${dryRun ? `DRY RUN${base.forced ? ` (forced: ${base.reason})` : ''}` : 'done'} — MO ${result.mo_number ?? '?'}${result.fb_mo_id ? ` (id ${result.fb_mo_id})` : ''}${result.status ? ` · ${result.status}` : ''}${'created' in result ? ` · created ${result.created}` : ''}${'deleted' in result ? ` · deleted ${result.deleted}` : ''}${'closed' in result ? ` · closed ${result.closed}` : ''}`)
+  }
   await sky.pushFinish(cmd.id, true, result, null)
   // Fresh read-back: the MO's mirror rows are re-read in the same cycle (real writes only). An MO this command
   // deleted is marked removed in the mirror instead (D-ASM-57): the audit tail would re-read it, find nothing and
@@ -94,6 +109,11 @@ async function runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo }) {
     }
   } else if (!dryRun && refreshMo && result.fb_mo_id && result.deleted !== true) {
     try { await refreshMo([result.fb_mo_id]) } catch (e) { log.error(`push #${cmd.id}: MO mirror refresh failed (the audit tail will catch up): ${e.message}`) }
+  }
+  // D-ASM-61: after a real post, the tags poll once in the same cycle, so the finished lot reaches SkyNet's read-back
+  // without waiting for the next tags interval. A failure only logs.
+  if (isPost && !dryRun && refreshTags) {
+    try { await refreshTags() } catch (e) { log.warn(`push #${cmd.id}: tags refresh after the post failed (the next tags poll will catch up): ${e.message}`) }
   }
 }
 
@@ -118,7 +138,7 @@ function rowsOf(payload, key) {
 }
 
 // Runs at most `max` queued commands. Never throws for a Fishbowl error: that is recorded on the command.
-export async function runPushCommands(fb, sky, { cfg, log, max = 3, refreshMo = null, removeMo = null } = {}) {
+export async function runPushCommands(fb, sky, { cfg, log, max = 3, refreshMo = null, removeMo = null, refreshTags = null, fishbowlVersion = null } = {}) {
   let ran = 0
   for (; ran < max; ran++) {
     const cmd = await sky.pushNext(cfg.host)
@@ -129,8 +149,8 @@ export async function runPushCommands(fb, sky, { cfg, log, max = 3, refreshMo = 
       try { await sky.pushFinish(cmd.id, false, { executed: false, host: cfg.host, version: cfg.version }, msg) } catch (e2) { log.error(`push #${cmd.id}: could not record failure: ${e2.message}`) }
       continue
     }
-    if (MO_KINDS.has(cmd.kind)) {
-      await runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo })
+    if (MO_KINDS.has(cmd.kind) || cmd.kind === WO_POST_KIND) {
+      await runMo(fb, sky, cmd, { cfg, log, refreshMo, removeMo, refreshTags, fishbowlVersion })
       continue
     }
     const gate = canPushFor(cfg)

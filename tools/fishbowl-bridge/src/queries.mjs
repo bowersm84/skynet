@@ -13,6 +13,9 @@ const strList = (vals) => (vals || [])
   .map((s) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`)
   .join(',') || 'NULL'
 
+// Bridge v1.13: one MySQL string literal, escaped like strList but never trimmed (a lot is compared exactly).
+const strLit = (s) => `'${String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
+
 // Bridge v1.11: an id list that can never become `IN ()` (empty -> NULL, which matches nothing).
 const inIds = (ids) => idList(ids || []) || 'NULL'
 
@@ -476,4 +479,48 @@ export const q = {
   // Reconciliation and backfill: Issued (20) + In Progress (25) only (D-FB-11 / D-FB-17).
   openSos: 'SELECT id, statusId, dateLastModified FROM so WHERE statusId IN (20,25)',
   statusOf: (ids) => `SELECT id, statusId, dateLastModified FROM so WHERE id IN (${idList(ids)})`,
+
+  // ── Bridge 1.13 (S17 D2a, D-ASM-61) ──────────────────────────────────────────────────────────────────────
+  // The server version (fbVersion.mjs) and the company name (the sandbox scripts' check). Column names as the
+  // sandbox probe read them on 26.11 (D-ASM-59).
+  fishbowlVersion: 'SELECT version, alterCommand FROM databaseversion ORDER BY version DESC LIMIT 1',
+  companyName: 'SELECT id, name FROM company ORDER BY id LIMIT 5',
+
+  // The automatic post (woPost.mjs). Every read it makes before, between and after its writes. Column names and
+  // table ids as probes 1 and 2 read them on the 26.11 sandbox (-1515431424 = pick history, -355941248 = woitem).
+  woPostMo: (moId) => `SELECT mo.id, mo.num, mo.statusId, mo.locationGroupId FROM mo WHERE mo.id = ${Number(moId)}`,
+  woPostWorkOrders: (moId) => `SELECT wo.id AS woId, wo.num AS woNum, wo.statusId, wo.qtyOrdered, wo.qtyTarget, wo.locationGroupId
+    FROM wo JOIN moitem mi ON mi.id = wo.moItemId WHERE mi.moId = ${Number(moId)} ORDER BY wo.id`,
+  woPostWoItems: (woId) => `SELECT wi.id AS woItemId, wi.typeId, wi.partId, part.num AS partNum, wi.qtyTarget, wi.qtyUsed, wi.qtyScrapped
+    FROM woitem wi JOIN part ON part.id = wi.partId WHERE wi.woId = ${Number(woId)} ORDER BY wi.typeId, wi.id`,
+  woPostPicks: (woId) => `SELECT DISTINCT pick.id AS pickId, pick.num AS pickNum, pick.statusId, pick.locationGroupId
+    FROM pickitem pi JOIN woitem wi ON wi.id = pi.woItemId JOIN pick ON pick.id = pi.pickId
+    WHERE wi.woId = ${Number(woId)} ORDER BY pick.id`,
+  woPostPickLines: (pickId) => `SELECT pi.id AS pickItemId, pi.woItemId, pi.orderTypeId, pi.partId, part.num AS partNum, pi.qty, pi.statusId,
+      pi.srcLocationId, srcLoc.name AS srcLocationName, pi.srcTagId, srcTag.num AS srcTagNum, ti.info AS lotNumber
+    FROM pickitem pi
+    LEFT JOIN part ON part.id = pi.partId
+    LEFT JOIN location srcLoc ON srcLoc.id = pi.srcLocationId
+    LEFT JOIN tag srcTag ON srcTag.id = pi.srcTagId
+    LEFT JOIN trackinginfo ti ON ti.recordId = pi.id AND ti.tableId = -1515431424 AND ti.partTrackingId = 1
+    WHERE pi.pickId = ${Number(pickId)} ORDER BY pi.id`,
+  // On-hand tags of one part and lot that a pick line can be finished from: object tags (type 30, the TypeID the
+  // probe's SavePickRq sent), lowest id first.
+  woPostLotTags: (partNum, lot) => `SELECT tag.id AS tagId, tag.num AS tagNum, tag.qty, tag.qtyCommitted, tag.locationId,
+      loc.name AS locationName, loc.locationGroupId
+    FROM tag JOIN part ON part.id = tag.partId JOIN location loc ON loc.id = tag.locationId
+    JOIN trackingtext tt ON tt.tagId = tag.id AND tt.partTrackingId = 1
+    WHERE part.num = ${strLit(partNum)} AND tt.info = ${strLit(lot)} AND tag.typeId = 30 AND tag.qty > 0 ORDER BY tag.id`,
+  // Any on-hand tag of the finished part carrying the finished lot, wherever it is.
+  woPostFinishedLotTags: (partNum, lot) => `SELECT tag.id AS tagId, tag.num AS tagNum, tag.qty, tag.locationId, loc.name AS locationName
+    FROM tag JOIN part ON part.id = tag.partId JOIN location loc ON loc.id = tag.locationId
+    JOIN trackingtext tt ON tt.tagId = tag.id AND tt.partTrackingId = 1
+    WHERE part.num = ${strLit(partNum)} AND tt.info = ${strLit(lot)} AND tag.qty > 0 ORDER BY tag.id`,
+  woPostPartTracking: (partNums) => `SELECT part.num AS partNum, ptt.partTrackingId
+    FROM parttotracking ptt JOIN part ON part.id = ptt.partId WHERE part.num IN (${strList(partNums)}) ORDER BY part.num, ptt.partTrackingId`,
+  woPostLocation: (id) => `SELECT id, name, activeFlag, locationGroupId FROM location WHERE id = ${Number(id)}`,
+  // The lot(s) a work order put on its finished good (trackinginfo on the woitem, table -355941248): scripts/try-wo-post.mjs facts.
+  woFinishedLots: (woId) => `SELECT wi.id AS woItemId, ti.info AS lotNumber, ti.qty
+    FROM woitem wi JOIN trackinginfo ti ON ti.recordId = wi.id AND ti.tableId = -355941248 AND ti.partTrackingId = 1
+    WHERE wi.woId = ${Number(woId)} AND wi.typeId = 10 ORDER BY ti.id`,
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, Loader2, Copy, Check, X, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
-import { listPostCards, verifyPosts, linkBuildMo, retryBuildMo, BUILD_KIND_LABELS } from '../../lib/assembly'
-import { postStatusText, postTone, mismatchSentences, moStateWords, needsPosting } from '../../lib/assemblyPostMath'
+import { listPostCards, verifyPosts, linkBuildMo, retryBuildMo, retryBuildPost, BUILD_KIND_LABELS } from '../../lib/assembly'
+import { postStatusText, postTone, mismatchSentences, moStateWords, needsPosting, postNote } from '../../lib/assemblyPostMath'
 import { hasRole, isReadOnlyRole } from '../../lib/roles'
 import { formatDateTime } from '../../lib/fishbowl'
 
@@ -11,6 +11,9 @@ import { formatDateTime } from '../../lib/fishbowl'
 // and says Verified, or Mismatch with what differs. Rows come from v_assembly_post_cards; the list polls every 12 s
 // (TEST's realtime publication does not carry these tables). Used as the Order Queue's "Ready to post" tab and as the
 // Assembly Board's Ready to post list (compact). Actions are server-gated to admin / assembly / order processor.
+// S17 D2a (D-ASM-61): when automatic posting is on, the bridge posts a qualifying build itself. "Posting" shows the
+// card for reference only (nothing to key); "Automatic post failed" gives the reason, a retry and the hand-post
+// fields; a hand post (Ready to post) says why it was not posted automatically.
 const POLL_MS = 12000
 
 const TONE = {
@@ -19,6 +22,8 @@ const TONE = {
   posted: 'bg-cyan-900/40 text-cyan-200 border-cyan-800',
   verified: 'bg-green-900/40 text-green-300 border-green-800',
   mismatch: 'bg-red-900/40 text-red-300 border-red-800',
+  posting: 'bg-indigo-900/40 text-indigo-200 border-indigo-800',
+  post_failed: 'bg-red-900/40 text-red-300 border-red-800',
 }
 const fmtQty = (v) => (v === null || v === undefined ? '—' : Number(v).toLocaleString())
 const btn = 'px-3 py-1.5 rounded text-xs border transition-colors disabled:opacity-50 inline-flex items-center gap-1'
@@ -56,6 +61,16 @@ function CopyButton({ value, label }) {
       className={`p-1.5 rounded border ${done ? 'border-green-700 text-green-300' : 'border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'}`}>
       {done ? <Check size={14} /> : <Copy size={14} />}
     </button>
+  )
+}
+
+// The same value for reference only (an automatic post in flight): no step number, no copy control, smaller.
+function RefField({ label, value }) {
+  return (
+    <div className="bg-gray-950/40 border border-gray-800 rounded px-3 py-2 min-w-0">
+      <div className="text-[11px] uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="font-mono text-sm text-gray-300 truncate">{value === null || value === undefined || value === '' ? '—' : value}</div>
+    </div>
   )
 }
 
@@ -113,12 +128,15 @@ export function LinkMoDialog({ card, busy, onClose, onLink }) {
   )
 }
 
-function PostCard({ card: c, canAct, busy, onRecheck, onLink, onRetry }) {
+function PostCard({ card: c, canAct, busy, onRecheck, onLink, onRetry, onRetryPost }) {
   const tone = postTone(c)
   const sentences = c.fb_post_status === 'mismatch' ? mismatchSentences(c.fb_post_diff) : []
   const components = Array.isArray(c.component_lots) ? c.component_lots : []
+  const posting = c.fb_post_status === 'posting'
+  const failed = c.fb_post_status === 'post_failed'
+  const note = postNote(c)
   return (
-    <div className={`bg-gray-900 rounded-lg border ${tone === 'mismatch' ? 'border-red-800' : tone === 'verified' ? 'border-green-900' : 'border-gray-800'}`}>
+    <div className={`bg-gray-900 rounded-lg border ${tone === 'mismatch' || tone === 'post_failed' ? 'border-red-800' : tone === 'verified' ? 'border-green-900' : tone === 'posting' ? 'border-indigo-900' : 'border-gray-800'}`}>
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2 flex-wrap">
         <span className="font-mono text-white">{c.build_number}</span>
         <span className="font-mono text-gray-200">{c.part_number}</span>
@@ -147,14 +165,48 @@ function PostCard({ card: c, canAct, busy, onRecheck, onLink, onRetry }) {
           <div className="text-sm text-red-300">Fishbowl does not match what SkyNet recorded. Re-check, or open the MO in Fishbowl.</div>
         )}
 
-        <div>
-          <div className="text-xs text-gray-400 mb-2">Key into Fishbowl Quick Fulfill, in this order</div>
-          <div className="grid gap-2 md:grid-cols-3">
-            <KeyField step={1} label="MO number" value={c.fb_mo_num} hint="No MO yet — link one" />
-            <KeyField step={2} label="Quantity to post" value={c.good_quantity === null || c.good_quantity === undefined ? null : String(c.good_quantity)} hint="No good count yet" />
-            <KeyField step={3} label="Finished lot" value={c.assembly_lot_number} hint="No lot yet" />
+        {posting && (
+          <div className="text-sm text-indigo-200 bg-indigo-950/40 border border-indigo-900 rounded px-3 py-2 flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" /> The bridge is posting this build to Fishbowl. Nothing to key.
           </div>
-        </div>
+        )}
+        {failed && (
+          <div className="text-sm text-red-300 bg-red-950/40 border border-red-900 rounded px-3 py-2 space-y-2">
+            <div className="flex items-start gap-2"><AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{note || 'The automatic post failed.'}</span></div>
+            <div className="text-xs text-red-200/80">Fix the cause and retry, or post it by hand in Fishbowl.</div>
+            {canAct && (
+              <button disabled={busy} onClick={onRetryPost} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>
+                {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Retry automatic post
+              </button>
+            )}
+          </div>
+        )}
+        {c.fb_post_status === 'ready_to_post' && note && (
+          <div className="text-xs text-gray-300 bg-gray-800/60 border border-gray-700 rounded px-3 py-2">{note}</div>
+        )}
+        {c.fb_post_status === 'verified' && c.fb_post_method === 'auto' && (
+          <div className="text-xs text-green-300">Posted by the bridge.</div>
+        )}
+
+        {posting ? (
+          <div>
+            <div className="text-xs text-gray-500 mb-2">For reference</div>
+            <div className="grid gap-2 md:grid-cols-3">
+              <RefField label="MO number" value={c.fb_mo_num} />
+              <RefField label="Quantity" value={c.good_quantity === null || c.good_quantity === undefined ? null : String(c.good_quantity)} />
+              <RefField label="Finished lot" value={c.assembly_lot_number} />
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="text-xs text-gray-400 mb-2">Key into Fishbowl Quick Fulfill, in this order</div>
+            <div className="grid gap-2 md:grid-cols-3">
+              <KeyField step={1} label="MO number" value={c.fb_mo_num} hint="No MO yet — link one" />
+              <KeyField step={2} label="Quantity to post" value={c.good_quantity === null || c.good_quantity === undefined ? null : String(c.good_quantity)} hint="No good count yet" />
+              <KeyField step={3} label="Finished lot" value={c.assembly_lot_number} hint="No lot yet" />
+            </div>
+          </div>
+        )}
 
         <div>
           <div className="text-xs text-gray-400 mb-1">Component lots (BOM order)</div>
@@ -168,7 +220,7 @@ function PostCard({ card: c, canAct, busy, onRecheck, onLink, onRetry }) {
                   <tr key={`${x.part}|${x.lot}`}>
                     <td className="py-1 font-mono text-gray-200">{x.part}</td>
                     <td className="py-1 text-xs text-gray-500 hidden md:table-cell">{x.description || ''}</td>
-                    <td className="py-1 font-mono text-cyan-300"><span className="inline-flex items-center gap-2">{x.lot}<CopyButton value={x.lot} label={`${x.part} lot`} /></span></td>
+                    <td className={`py-1 font-mono ${posting ? 'text-gray-300' : 'text-cyan-300'}`}><span className="inline-flex items-center gap-2">{x.lot}{!posting && <CopyButton value={x.lot} label={`${x.part} lot`} />}</span></td>
                     <td className="py-1 text-right font-mono text-gray-300">{fmtQty(x.qty)}</td>
                   </tr>
                 ))}
@@ -188,7 +240,7 @@ function PostCard({ card: c, canAct, busy, onRecheck, onLink, onRetry }) {
           {c.mo_status && <span className="pt-2">· Fishbowl MO {c.mo_status}</span>}
           {canAct && (
             <span className="ml-auto flex gap-2 pt-2">
-              {c.fb_post_status !== 'verified' && <button disabled={busy} onClick={onLink} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>Link MO…</button>}
+              {c.fb_post_status !== 'verified' && !posting && <button disabled={busy} onClick={onLink} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>Link MO…</button>}
               <button disabled={busy} onClick={onRecheck} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>
                 {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Re-check now
               </button>
@@ -244,6 +296,7 @@ export default function PostCards({ profile, compact = false, onCount }) {
   }
   const recheck = (c) => act(c, () => verifyPosts([c.id]), `${c.build_number} re-checked against Fishbowl.`)
   const retry = (c) => act(c, () => retryBuildMo(c.id), `${c.build_number}: the MO is queued for the bridge again.`)
+  const retryPost = (c) => act(c, () => retryBuildPost(c.id), `${c.build_number}: the post is queued for the bridge again.`)
 
   const banner = status && (
     <div className={`p-3 rounded text-sm flex justify-between items-center ${status.type === 'success' ? 'bg-green-900/40 text-green-300 border border-green-800' : 'bg-red-900/40 text-red-300 border border-red-800'}`}>
@@ -283,7 +336,7 @@ export default function PostCards({ profile, compact = false, onCount }) {
                   </button>
                   {isOpen && (
                     <div className="px-3 pb-3">
-                      <PostCard card={c} canAct={canAct} busy={busyId === c.id} onRecheck={() => recheck(c)} onLink={() => setLinkFor(c)} onRetry={() => retry(c)} />
+                      <PostCard card={c} canAct={canAct} busy={busyId === c.id} onRecheck={() => recheck(c)} onLink={() => setLinkFor(c)} onRetry={() => retry(c)} onRetryPost={() => retryPost(c)} />
                     </div>
                   )}
                 </div>
@@ -304,7 +357,7 @@ export default function PostCards({ profile, compact = false, onCount }) {
         <div className="text-center py-16 bg-gray-900 rounded-lg border border-gray-800 text-gray-400">Nothing waiting to post. Released assembly builds appear here.</div>
       ) : cards.map((c) => (
         <PostCard key={c.id} card={c} canAct={canAct} busy={busyId === c.id}
-          onRecheck={() => recheck(c)} onLink={() => setLinkFor(c)} onRetry={() => retry(c)} />
+          onRecheck={() => recheck(c)} onLink={() => setLinkFor(c)} onRetry={() => retry(c)} onRetryPost={() => retryPost(c)} />
       ))}
       {dialog}
     </div>

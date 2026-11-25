@@ -41,7 +41,7 @@ const list = (k, d) => {
 }
 
 export const config = {
-  version: '1.12.0',
+  version: '1.13.0',
   host: os.hostname(),
   fb: {
     host: process.env.FB_HOST || '192.168.1.251',
@@ -117,14 +117,22 @@ export const config = {
   //   FB_MO_ENABLED         only the literal `true` lets an mo_* command write to Fishbowl; otherwise it runs as a
   //                         forced dry run (result.dry_run = true; SkyNet marks the build's MO as an error)
   //   FB_MO_DRY_RUN         only the literal `true`: log the request bodies, write nothing
-  //   FB_WRITE_PART_PREFIX  default SKYTEST-. An mo_* handler refuses unless the BOM number starts with it AND the
-  //                         command's payload.write_part_prefix equals it. Set to nothing, it refuses everything.
+  //   FB_WRITE_PART_PREFIX  default SKYTEST-. An mo_* or wo_post handler refuses unless the BOM number starts with it
+  //                         AND the command's payload.write_part_prefix equals it. Set to nothing, it refuses everything;
+  //                         set to *, it allows every part (and the payload's prefix must then be * too) (D-ASM-61).
   mo: {
     enabled: String(process.env.FB_MO_ENABLED ?? '').trim().toLowerCase() === 'true',
     dryRun: String(process.env.FB_MO_DRY_RUN ?? '').trim().toLowerCase() === 'true',
     writePartPrefix: String(process.env.FB_WRITE_PART_PREFIX ?? 'SKYTEST-').trim(),
     // The location group a new MO is made in (FB_MO_LOCATION_GROUP_ID, default 1 = Main, where the SKYTEST- stock is).
     locationGroupId: num('FB_MO_LOCATION_GROUP_ID', 1),
+    // S17 D2a (D-ASM-61): automatic posting of a finished build (kind wo_post). A second switch on top of FB_MO_ENABLED.
+    //   FB_WO_POST_ENABLED      only the literal `true` lets a wo_post command write; otherwise it runs as a forced dry run
+    //   FB_WO_POST_MIN_VERSION  the lowest Fishbowl version the handler will post to (default 26.11, the proven one)
+    //   FB_WO_POST_TIMEOUT_MS   ceiling for the pick-save and fulfill calls (default 120000)
+    postEnabled: String(process.env.FB_WO_POST_ENABLED ?? '').trim().toLowerCase() === 'true',
+    postMinVersion: String(process.env.FB_WO_POST_MIN_VERSION ?? '26.11').trim() || '26.11',
+    postTimeoutMs: num('FB_WO_POST_TIMEOUT_MS', 120000),
   },
   rulesTreeEnabled: String(process.env.RULES_TREE_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   // D-FB-54 shipments poller (bridge 1.9): Fishbowl's shipped component lots -> fb_shipment_lots -> kit lots.

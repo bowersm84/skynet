@@ -29,6 +29,7 @@ import { FAMILIES, runFamily, sweepBoms, refreshMos } from './audit.mjs'
 import { makeGuard } from './guard.mjs'
 import { loadTagScope, syncTags, tagSweepDue } from './tags.mjs'
 import { syncPostings } from './postings.mjs'
+import { readFishbowlVersion } from './fbVersion.mjs'
 
 const log = makeLogger(config.logDir)
 const fb = new Fishbowl(config.fb, log)
@@ -44,6 +45,9 @@ let pricing = null          // in-memory copy of fb_sync_state.last_*_at / histo
 const PRICING_RETRY_MS = 900000
 let stopping = false
 let failures = 0
+// S17 D2a (D-ASM-61): the Fishbowl server version (major.minor, e.g. 25.9 or 26.11), read once per cycle and sent in
+// the heartbeat (fb_sync_state.fishbowl_version). wo_post refuses while it is unknown or below FB_WO_POST_MIN_VERSION.
+let fishbowlVersion = null
 // D-FB-54: SO ids whose shipment lots still need reading. Filled by the tail, the reconciler and the nightly
 // sweep; an id leaves the set only after its read succeeded, so a failed read is retried next cycle. In memory
 // on purpose: the first shipments step after start-up queues the SHIPMENTS_SWEEP_DAYS window, so a restart or a
@@ -291,7 +295,12 @@ const PUSH_RETRY_MS = 900000
 async function pushCycleGuarded() {
   if (Date.now() < pushPausedUntil) return
   try {
-    await runPushCommands(fb, sky, { cfg: config, log, max: config.push.maxPerCycle, refreshMo: (ids) => refreshMos(fb, sky, ids), removeMo: (ids) => sky.markMosRemoved(ids) })
+    await runPushCommands(fb, sky, {
+      cfg: config, log, max: config.push.maxPerCycle, fishbowlVersion,
+      refreshMo: (ids) => refreshMos(fb, sky, ids), removeMo: (ids) => sky.markMosRemoved(ids),
+      // D-ASM-61: after a real post, one tags poll in the same cycle (the finished lot reaches the read-back now).
+      refreshTags: () => tagsStep(),
+    })
   } catch (e) {
     pushPausedUntil = Date.now() + PUSH_RETRY_MS
     log.error(`push cycle failed, retrying in ${PUSH_RETRY_MS / 60000} min: ${e.message}`)
@@ -508,6 +517,23 @@ function familyField(name, r) {
   return `${name}=-`
 }
 
+// D-ASM-61: read the Fishbowl server version inside the cycle's session. A failed or unreadable read logs a warning
+// and keeps the last value; it never fails the cycle. Logged the first time and whenever it changes.
+async function refreshFishbowlVersion() {
+  try {
+    const { raw, version } = await readFishbowlVersion(fb)
+    if (!version) { log.warn(`fishbowl version: could not read a version from databaseversion (${JSON.stringify(raw)}); keeping ${fishbowlVersion ?? 'none'}`); return }
+    if (version !== fishbowlVersion) {
+      log.info(fishbowlVersion === null
+        ? `fishbowl server version ${version} (databaseversion ${JSON.stringify(raw)})`
+        : `fishbowl server version changed: ${fishbowlVersion} -> ${version} (databaseversion ${JSON.stringify(raw)})`)
+      fishbowlVersion = version
+    }
+  } catch (e) {
+    log.warn(`fishbowl version: read failed (${e.message}); keeping ${fishbowlVersion ?? 'none'}`)
+  }
+}
+
 async function cycle() {
   const once = process.argv.includes('--once')
   const started = Date.now()
@@ -516,6 +542,7 @@ async function cycle() {
     // answer it, the cycle fails as it always has: last_error, the banner turns red, the loop backs off.
     const [{ maxRev }] = await fb.query(q.maxRev)
     const max = Number(maxRev) || 0
+    await refreshFishbowlVersion()
     const t = await guarded('so', () => tail(max), { retryMs: FEED_RETRY_MS })
     const fam = await auditCycle(max)
     let reconciled = null
@@ -544,6 +571,7 @@ async function cycle() {
   const lastError = guard.failing(LAST_ERROR_FAMILIES).join(' | ') || null
   await sky.heartbeat({
     last_rev: lastRev, version: config.version, host: config.host, last_error: lastError ? lastError.slice(0, 500) : null,
+    fishbowl_version: fishbowlVersion,
     reconciled: result.reconciled !== null, cycleMs, families: guard.snapshot(HEARTBEAT_FAMILIES),
   })
   if (result.orders > 0 || result.reconciled) {
@@ -620,7 +648,7 @@ async function main() {
   log.info(`pricing clocks: customers=${pricing.last_customers_at || 'never'} products=${pricing.last_products_at || 'never'} history=${pricing.last_history_at || 'never'} cursor=${pricing.history_cursor || 'none'} rules=${pricing.last_rules_at || 'never'} tree=${pricing.last_tree_at || 'never'} valuation=${pricing.last_valuation_at || 'never'}`)
   const gate = canPushFor(config)
   log.info(`fishbowl push: ${gate.ok ? 'ENABLED (real writes to Fishbowl)' : `dry run only (${gate.why})`}; auto=${config.push.autoEnabled}`)
-  log.info(`push kinds this bridge may execute (FB_PUSH_KINDS): ${config.push.kinds.join(', ') || 'none'} · MO writes (FB_MO_ENABLED): ${config.mo.enabled ? (config.mo.dryRun ? 'on, DRY RUN (FB_MO_DRY_RUN)' : 'ON') : 'off (forced dry run)'} · write prefix (FB_WRITE_PART_PREFIX): ${config.mo.writePartPrefix ? JSON.stringify(config.mo.writePartPrefix) : 'NOT SET — every MO command refused'}`)
+  log.info(`push kinds this bridge may execute (FB_PUSH_KINDS): ${config.push.kinds.join(', ') || 'none'} · MO writes (FB_MO_ENABLED): ${config.mo.enabled ? (config.mo.dryRun ? 'on, DRY RUN (FB_MO_DRY_RUN)' : 'ON') : 'off (forced dry run)'} · write prefix (FB_WRITE_PART_PREFIX): ${config.mo.writePartPrefix ? JSON.stringify(config.mo.writePartPrefix) : 'NOT SET — every MO command refused'} · automatic post (FB_WO_POST_ENABLED): ${config.mo.postEnabled ? 'ON' : 'off (forced dry run)'}, Fishbowl ${config.mo.postMinVersion} or later`)
   if (backfill) {
     try {
       await backfillPricing()

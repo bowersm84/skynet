@@ -17,10 +17,12 @@ export const MO_KINDS = new Set(['mo_create', 'mo_cancel', 'mo_close_short'])
 export const MO_NUMBER_MAX = 25 // mo.num is varchar(25); the API silently cuts a longer number (probe, 2026-11-11)
 const NUMBER_RE = /^[A-Za-z0-9][A-Za-z0-9 ._\-/#]*$/ // what the bridge will put in a SQL literal or a URL
 const STATUS = { 10: 'Entered', 20: 'Issued', 50: 'Partial', 60: 'Fulfilled', 70: 'Closed Short', 80: 'Void' }
-const statusName = (id) => STATUS[Number(id)] || `status ${id}`
-const sqlStr = (s) => `'${String(s).replace(/'/g, "''")}'`
+export const statusName = (id) => STATUS[Number(id)] || `status ${id}`
+export const sqlStr = (s) => `'${String(s).replace(/'/g, "''")}'`
 const ok2xx = (s) => s >= 200 && s < 300
-const message = (body) => (body && typeof body === 'object' ? body.message || JSON.stringify(body) : String(body ?? '')).slice(0, 300)
+// A legacy-wrapper answer carries the session Ticket; it never goes into a message (D-ASM-61).
+const SECRET_KEYS = /^(ticket|token|authorization|password)$/i
+const message = (body) => (body && typeof body === 'object' ? body.message || JSON.stringify(body, (k, v) => (SECRET_KEYS.test(k) ? undefined : v)) : String(body ?? '')).slice(0, 300)
 
 export class MoRefusal extends Error {
   constructor(msg) { super(msg); this.name = 'MoRefusal'; this.plain = true }
@@ -37,18 +39,19 @@ export function moFenceRefusal(payload, bomNumber, cfg) {
   const prefix = String(cfg.mo?.writePartPrefix ?? '').trim()
   if (!prefix) return 'FB_WRITE_PART_PREFIX is not set on this bridge'
   if (payload?.write_part_prefix !== prefix) return `payload write_part_prefix ${JSON.stringify(payload?.write_part_prefix ?? null)} is not this bridge's ${JSON.stringify(prefix)}`
-  if (typeof bomNumber !== 'string' || !bomNumber.startsWith(prefix)) return `BOM ${JSON.stringify(bomNumber ?? null)} does not start with ${JSON.stringify(prefix)}`
+  if (prefix !== '*' && (typeof bomNumber !== 'string' || !bomNumber.startsWith(prefix))) return `BOM ${JSON.stringify(bomNumber ?? null)} does not start with ${JSON.stringify(prefix)}`
   return null
 }
 
 // The fence's Fishbowl half: every part on the BOM / MO starts with the prefix.
 function partsRefusal(partNums, cfg, what) {
   const prefix = String(cfg.mo?.writePartPrefix ?? '').trim()
+  if (prefix === '*') return null // '*' = every part (D-ASM-61); an empty prefix is refused by moFenceRefusal before this runs
   const off = [...new Set(partNums.filter((n) => typeof n !== 'string' || !n.startsWith(prefix)))]
   return off.length ? `${what} has part(s) outside ${JSON.stringify(prefix)}: ${off.slice(0, 5).join(', ')}` : null
 }
 
-function checkNumber(label, v, max = null) {
+export function checkNumber(label, v, max = null) {
   if (typeof v !== 'string' || v.trim() === '') throw refuse(`${label} is missing`)
   if (max !== null && v.length > max) throw refuse(`${label} ${JSON.stringify(v)} is longer than ${max} characters (Fishbowl would cut it short)`)
   if (!NUMBER_RE.test(v)) throw refuse(`${label} ${JSON.stringify(v)} has characters the bridge will not send`)
@@ -67,7 +70,7 @@ async function bomPartNums(fb, bomId) {
   return rows.map((r) => r.partNum)
 }
 
-async function findMo(fb, { id = null, num = null }) {
+export async function findMo(fb, { id = null, num = null }) {
   const where = id !== null && id !== undefined && id !== '' ? `mo.id = ${Number(id)}` : `mo.num = ${sqlStr(num)}`
   const rows = await fb.query(`SELECT mo.id, mo.num, mo.statusId FROM mo WHERE ${where}`)
   return rows.length ? { id: Number(rows[0].id), num: rows[0].num, statusId: Number(rows[0].statusId) } : null
@@ -80,7 +83,7 @@ async function moItems(fb, moId) {
 }
 
 // The MO's BOM (its configuration row, typeId 50) and parts, through the full fence.
-async function fenceExistingMo(fb, mo, payload, cfg) {
+export async function fenceExistingMo(fb, mo, payload, cfg) {
   const items = await moItems(fb, mo.id)
   const bomNum = items.find((i) => i.typeId === 50)?.bomNum ?? items.find((i) => i.bomNum)?.bomNum ?? null
   const why = moFenceRefusal(payload, bomNum, cfg) || partsRefusal(items.filter((i) => i.typeId !== 50).map((i) => i.partNum), cfg, `MO ${mo.num}`)
@@ -89,11 +92,22 @@ async function fenceExistingMo(fb, mo, payload, cfg) {
 }
 
 // --- writes -----------------------------------------------------------------------------------------------
-function writer(fb, log, cmdId, writes) {
+// How one answer is recorded in `writes` and on the log line. The default is the MO answer ({id, number, status}),
+// exactly as the three MO commands have always recorded it; wo_post passes its own (legacy and fulfill answers have
+// other shapes, D-ASM-61).
+const moAnswer = (r) => ({
+  entry: { id: r.body?.id ?? null, number: r.body?.number ?? null, moStatus: r.body?.status ?? null },
+  note: `${r.body?.id ? ` · MO id ${r.body.id}` : ''}${r.body?.number ? ` ${r.body.number}` : ''}${r.body?.status && typeof r.body.status === 'string' ? ` · ${r.body.status}` : ''}`,
+})
+
+// opts.timeoutMs: a ceiling for these calls, passed to Fishbowl.call (D-ASM-61; null = the client's default).
+// opts.describe: (answer) => { entry, note } — see moAnswer.
+export function writer(fb, log, cmdId, writes, { timeoutMs = null, describe = moAnswer } = {}) {
   return async (method, path, body, expect) => {
-    const r = await fb.call(method, path, body)
-    writes.push({ call: `${method} ${path}`, status: r.status, id: r.body?.id ?? null, number: r.body?.number ?? null, moStatus: r.body?.status ?? null })
-    log.info(`push #${cmdId} ${method} ${path} -> ${r.status}${r.body?.id ? ` · MO id ${r.body.id}` : ''}${r.body?.number ? ` ${r.body.number}` : ''}${r.body?.status && typeof r.body.status === 'string' ? ` · ${r.body.status}` : ''}`)
+    const r = timeoutMs ? await fb.call(method, path, body, timeoutMs) : await fb.call(method, path, body)
+    const d = describe(r)
+    writes.push({ call: `${method} ${path}`, status: r.status, ...d.entry })
+    log.info(`push #${cmdId} ${method} ${path} -> ${r.status}${d.note}`)
     if (!ok2xx(r.status)) throw unexpected(`${method} ${path} answered ${r.status}: ${message(r.body)}`)
     if (expect) {
       const bad = expect(r.body)

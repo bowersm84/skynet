@@ -5259,3 +5259,22 @@ Probe of November 24, 2026 against the Fishbowl 26.11 sandbox SKYFB-TEST (databa
 | Difference a reviewer would care about | Quality: the API record carries scrapped 1 on the finished-good line; the hand record carries 0, because the screen cannot record it. Accounting: none between the routes. Both builds charge the part average, not the lot's own price. |
 
 The only other difference is the receipt row's cost column ($0.0431 vs $0.0565). It is the finished good's average cost just before each receipt and differs only because the API build ran first. Not run: live Fishbowl's accounting settings were not read. No route is chosen by this entry. (Matt/Claude/CC, 2026-11-24)
+
+### D-ASM-61 — The bridge posts a released build to Fishbowl (Batch D2a)
+Matt approved building route A of the Nov 12 handoff on November 24, 2026, after probes 1 and 2 (D-ASM-59, D-ASM-60). On release, SkyNet queues a wo_post command for a build that qualifies; bridge 1.13 finishes the work order's pick lines on the lots the tablet recorded (GetPickRq then SavePickRq through /api/legacy/external), fulfills the work order with the good count as produced, the bad count as scrapped, the SkyNet finished lot and Receiving as destination, never sending rawGoods, and SkyNet's read-back confirms it. Database: Docs/migrations/2026-11-24_S17_D2a_auto_post.sql (TEST, migration s17_d2a_auto_post).
+
+| Point | Decision |
+|---|---|
+| When | At release, when app_settings.fb_auto_post_enabled is true. Seeded false. |
+| Which builds | Order, stock and special builds with a bridge-made MO, one wave, good + bad equal to the build quantity, and exactly one lot per component. Anything else stays a hand post, with the reason on the card. |
+| Fishbowl version | 26.11 or later only (fb_auto_post_min_version, and FB_WO_POST_MIN_VERSION on the bridge). The bridge reports the server version in its heartbeat. Live is 25.9, so nothing posts to live until it is upgraded. |
+| Switches | SkyNet: fb_auto_post_enabled. Bridge: wo_post in FB_PUSH_KINDS, FB_MO_ENABLED and FB_WO_POST_ENABLED; without the last a command is a forced dry run. |
+| Failure | No automatic retry. The build shows Automatic post failed with the reason; a person retries (assembly_build_post_retry) or posts by hand. The handler works from the state it reads, so a retry after a finished pick only fulfills, and an MO already fulfilled with the lot on hand is reported as done. An answer the probes did not see halts MO and work-order writes until the bridge is restarted. |
+| Read-back | Also compares the quantity each component line used with BOM quantity x (good + bad), for every post. After a real automatic post it compares scrapped with the bad count; a hand post cannot record scrap, so it is not compared there. |
+| Fence | fb_write_part_prefix and FB_WRITE_PART_PREFIX: empty means no part, * means every part, and the two sides must match. This replaces "Empty = every part" in D-ASM-52's setting text. |
+| TEST | The TEST bridge now runs against the 26.11 sandbox only (scripts/run-test-sandbox.mjs); TEST's Fishbowl mirrors follow the sandbox from here on. |
+
+Not in this batch: more than one lot per component, short builds (good + bad below the build quantity), rework and program builds, nested assemblies, the clearance add for SkyNet-made components. Open before live use: Fishbowl's answer on whether SavePickRq through the legacy wrapper is supported; a rehearsal of the live upgrade from 25.9; Roger's and Crystalyn's review of D-ASM-60. (Matt/Claude/CC, 2026-11-24)
+
+### D-ASM-62 — A lot in another location is a hand post, not a halt
+Follow-up to D-ASM-61, November 25, 2026. When the lot the tablet recorded sits in a different Fishbowl location from the one the work order's pick line is sourced from, the wo_post handler refuses the post and the build stays a hand post with the reason on its card. It does not halt the bridge. The halt stays reserved for Fishbowl answering a write in a way the probes did not see; this case is one the probes never covered, found by reading before the pick save. The handler never changes a pick line's location to match the tag. Also recorded from the D2a build: the handler starts a pick that is still Entered before saving it (as probe 1 did), refuses a component tracked by anything but lot number, and chooses object tags (type 30) only. To prove before live use, with split lots and short builds: finishing a pick line from a tag in another location. (Matt/Claude/CC, 2026-11-25)

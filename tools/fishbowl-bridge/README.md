@@ -229,6 +229,61 @@ bridge deletes (`mo_cancel`) is marked removed in the mirror instead, through `f
 `FB_PUSH_AUTO=false`, `FB_TAGS_INTERVAL_MS=60000`; `FB_PUSH_ENABLED` stays off. A 401 that forces a re-login is now
 logged as a warning, so two bridges on the one Fishbowl user show up in the log if they collide.
 
+### Automatic posting (v1.13, S17 D2a, D-ASM-61)
+When `app_settings.fb_auto_post_enabled` is true, releasing a qualifying build queues a `wo_post` command (migration
+`2026-11-24_S17_D2a_auto_post.sql`): an order, stock or special build with a bridge-made MO, one wave, good + bad equal
+to the build quantity and one lot per component. Anything else stays a hand post on Ashley's Ready to post card, with
+the reason. `src/woPost.mjs` then posts it the way probes 1 and 2 proved on the Fishbowl 26.11 sandbox
+(`Docs/Fishbowl_Data_Context.md`, "Posting a work order automatically"):
+
+1. Checks the payload, the fence and the Fishbowl version, then reads Fishbowl by SQL: the MO by id (Issued; the
+   finished good and BOM the build's part), its one work order (not fulfilled, for the build quantity), its one pick
+   (one line per part, the parts the build's lots name, only the statuses the probes saw), a tag for each line still
+   to finish (that part and lot, in the MO's location group, lowest tag id first, the first whose available quantity
+   covers the line — never split), lot-number tracking on every part, the destination, and that the finished lot is
+   not on hand yet.
+2. Starts the pick while it is Entered, then `GetPickRq` and `SavePickRq` through `/api/legacy/external`, each line
+   Finished on its lot's tag; reads the lines back by SQL.
+3. `GET /api/work-orders/:id` for the finished-good item, then `POST …/fulfill` with produced, scrapped, the finished
+   lot and the destination (`fb_post_dest_location_id`, Receiving) — never `rawGoods`.
+4. Reads back by SQL: MO Fulfilled, the finished good's used and scrapped, each component used its pick line's
+   quantity, the finished lot holds the good count at the destination. Then the MO mirror is re-read and the tags
+   poll runs once, so SkyNet's read-back sees the post in the same cycle.
+
+**Switches.** SkyNet: `fb_auto_post_enabled`, `fb_auto_post_min_version` (26.11), `fb_post_dest_location_id` (3).
+Bridge: `wo_post` in `FB_PUSH_KINDS`, `FB_MO_ENABLED=true`, and `FB_WO_POST_ENABLED=true` — without the last, a
+`wo_post` command is a forced dry run (SkyNet shows Automatic post failed); `FB_WO_POST_MIN_VERSION` (default 26.11);
+`FB_WO_POST_TIMEOUT_MS` (default 120000). `FB_WRITE_PART_PREFIX`: empty refuses everything, `*` allows every part, and
+the command's `write_part_prefix` must equal it.
+
+**What refuses (nothing written).** Any payload, fence or version check; an MO that is not Issued; anything in
+Fishbowl that does not fit the build (work orders, picks, lines, a line finished on another lot, a status the probes
+never saw, no single tag covering a line, other tracking, an inactive destination, the finished lot already on hand).
+**A lot in another location** than the one Fishbowl sources the pick line from is a refusal too (D-ASM-62): checked
+before any write when the line's source location is already set, otherwise right after `GetPickRq` — then the pick has
+been started and nothing else was written, which is fine for a hand post or a later retry. `SavePickRq` and the fulfill
+are never sent, and the handler never changes the line's location to match the tag. A refusal fails the command, sets
+no halt (the next command runs normally) and the card shows the reason, ending "post this build by hand" for the
+location case. Nothing retries by itself: a person retries (`assembly_build_post_retry`) or posts by hand. The handler
+works from the state it reads: a pick already finished on the right lots is only fulfilled (`resumed`), and an MO
+already fulfilled with the finished lot on hand is reported as done (`already`).
+
+**What halts.** Anything Fishbowl answers that the probes did not see — a legacy status code other than 1000, a pick
+or line that is not the one read, a line in a status other than the expected one, a fulfill that reads back
+differently (its message says the post went through and must not be posted again) — stops MO and work-order writes on
+the bridge until it is restarted, as for the MO commands.
+
+**TEST.** The TEST bridge runs against the 26.11 sandbox only, from Matt's PC:
+`FB_SANDBOX_URL=http://<sandbox>:2456 node scripts/run-test-sandbox.mjs` (`--dry-run` writes nothing). It takes the
+Fishbowl address from `FB_SANDBOX_URL`, refuses the live server and anything but SkyNet TEST, signs in and refuses
+unless the server is 26.x and the company name starts with `SANDBOX`, then runs the bridge with
+`FB_PUSH_KINDS=mo_create,mo_cancel,mo_close_short,wo_post`, `FB_MO_ENABLED=true`, `FB_WO_POST_ENABLED=true`,
+`FB_WRITE_PART_PREFIX=SKYTEST-`, the pricing push and auto push off. **From D2a on, use this launcher only for TEST:
+TEST's Fishbowl mirrors then follow the sandbox. Do not alternate it with `run-test-mo.mjs` (the live Fishbowl): the
+two servers number their records apart from 2026-11-24 on, and mixing them would corrupt TEST's mirrors.**
+`scripts/try-wo-post.mjs` drives the same handlers against the sandbox with no SkyNet (`mo`, `post … [--dry-run]
+[--pick-only]`, `cancel`, `facts`; MO numbers `SBX-D2A-…`, `SKYTEST-` parts only).
+
 ## Setup (dev PC against TEST, or the Fishbowl server against PROD)
 1. `cd tools/fishbowl-bridge && npm install`
 2. Copy `.env.example` to `.env` and fill in `FB_PASS`, `SB_ANON_KEY`, `SB_BRIDGE_PASSWORD` (and `SB_URL` for PROD).

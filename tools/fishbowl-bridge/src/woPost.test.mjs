@@ -97,7 +97,6 @@ const REFUSALS = [
   ['C8 finished good not tracked by lot alone', { world: (w) => { w.tracking[PART] = [1, 4] } }, /SKYTEST-STUD-ASSEMBLY is tracked by 1, 4/],
   ['C9 destination missing', { cmd: cmd({ destination_location_id: 77 }) }, /destination location 77 is not in Fishbowl/],
   ['C9 destination inactive', { world: (w) => { w.locations[3].activeFlag = false } }, /destination location 3 \(Receiving\) is not active/],
-  ['C10 finished lot already on hand', { world: (w) => { w.tags.push({ tagId: 105999, tagNum: '149999', part: PART, lot: '80004', qty: 3, locationId: 3, locationName: 'Receiving', locationGroupId: 1, typeId: 30 }) } }, /finished lot 80004 of SKYTEST-STUD-ASSEMBLY is already on hand/],
 ]
 for (const [name, setup, re] of REFUSALS) {
   test(`4. refusal, nothing written — ${name}`, async () => {
@@ -262,6 +261,78 @@ test('13d. a lot in the source location wins over a lower tag id elsewhere', asy
   }))
   const r = await runWoPost(fb, cmd(), ctx({ dryRun: true }))
   assert.deepEqual(r.would.find((x) => x.lines).lines.find((l) => l.part === 'SKYTEST-PIN').tag_id, 104799)
+})
+
+// ── 14. A finished lot that already exists is posted into (D-ASM-64) ───────────────────────────────────────────────
+// SkyNet numbers a finished lot by its combination of component lots, so another build from the same lots carries
+// the same lot: 3 of lot 80004 already sit in Receiving (tag 105999) from an earlier build.
+const lotOnHand = (qty = 3) => (w) => {
+  w.tags.push({ tagId: 105999, tagNum: '149999', part: PART, lot: '80004', qty, qtyCommitted: 0, locationId: 3, locationName: 'Receiving', locationGroupId: 1, typeId: 30 })
+}
+
+test('14a. the lot already on hand and the MO Issued: it posts normally, with the lot before and after in the result', async () => {
+  const fb = fakeFishbowl(world(lotOnHand(3)))
+  const r = await runWoPost(fb, cmd(), ctx())
+  assert.deepEqual(sent(fb), ['POST /api/picks/21700/start', 'POST /api/legacy/external/GetPickRq', 'POST /api/legacy/external/SavePickRq',
+    'GET /api/work-orders/9400', 'POST /api/work-orders/9400/fulfill'])
+  assert.equal(r.status, 'Fulfilled')
+  assert.deepEqual(r.finished_lot_before, { qty: 3, tags: [{ tag_id: 105999, tag_num: '149999', qty: 3, location_id: 3, location: 'Receiving' }] })
+  assert.equal(r.finished_lot_after.qty, 13)
+  assert.equal(r.finished_lot_after.tags.length, 2)
+  // the fulfill body is the same whether or not the lot exists
+  assert.deepEqual(fb.calls[4].body.finishedGoods[0].tracking, { trackingItems: [{ partTracking: { id: 1 }, value: '80004' }] })
+})
+
+test('14b. a lot that exists only in another location: posts, and the quantity before at the destination is 0', async () => {
+  const fb = fakeFishbowl(world((w) => {
+    w.tags.push({ tagId: 105998, tagNum: '149998', part: PART, lot: '80004', qty: 4, qtyCommitted: 0, locationId: 1, locationName: 'Stock', locationGroupId: 1, typeId: 30 })
+  }))
+  const r = await runWoPost(fb, cmd(), ctx())
+  assert.equal(r.finished_lot_before.qty, 0)
+  assert.equal(r.finished_lot_before.tags.length, 1)
+  assert.equal(r.finished_lot_after.qty, 10)
+})
+
+test('14c. after the fulfill, the lot holding less than produced at the destination -> MoUnexpected that says the post went through', async () => {
+  const fb = fakeFishbowl(world((w) => { w.afterFulfill = (x) => { x.tags.find((t) => t.tagId === 106000).qty = 4 } }))
+  await assert.rejects(runWoPost(fb, cmd(), ctx()), (e) => e instanceof MoUnexpected && e.halt === true
+    && /The post went through in Fishbowl/.test(e.message)
+    && /lot 80004 holds 4 at location 3 after the fulfill; it held 0 before and 10 were produced/.test(e.message))
+})
+
+test('14d. after the fulfill, the lot holding less than it held before -> MoUnexpected', async () => {
+  const fb = fakeFishbowl(world((w) => {
+    lotOnHand(30)(w)
+    w.afterFulfill = (x) => { x.tags.find((t) => t.tagId === 105999).qty = 5 } // 5 + 10 = 15 < 30
+  }))
+  await assert.rejects(runWoPost(fb, cmd(), ctx()), (e) => e instanceof MoUnexpected && /holds 15 at location 3 after the fulfill; it held 30 before/.test(e.message))
+})
+
+test('14e. no exact before + produced match: more than that, or between produced and before + produced, does not throw', async () => {
+  // more: someone received more of the lot in the same seconds (3 + 10 + 5 = 18)
+  const more = fakeFishbowl(world((w) => {
+    lotOnHand(3)(w)
+    w.afterFulfill = (x) => { x.tags.push({ tagId: 106001, tagNum: '150001', part: PART, lot: '80004', qty: 5, qtyCommitted: 0, locationId: 3, locationName: 'Receiving', locationGroupId: 1, typeId: 30 }) }
+  }))
+  assert.equal((await runWoPost(more, cmd(), ctx())).finished_lot_after.qty, 18)
+  // between: someone picked 2 from the lot in the same seconds (3 + 10 - 2 = 11; at least produced and at least before)
+  const between = fakeFishbowl(world((w) => {
+    lotOnHand(3)(w)
+    w.afterFulfill = (x) => { x.tags.find((t) => t.tagId === 105999).qty = 1 }
+  }))
+  assert.equal((await runWoPost(between, cmd(), ctx())).finished_lot_after.qty, 11)
+})
+
+test('14f. dry run with the lot on hand: nothing sent, and `would` says the lot exists', async () => {
+  const fb = fakeFishbowl(world(lotOnHand(3)))
+  const r = await runWoPost(fb, cmd(), ctx({ dryRun: true }))
+  assert.equal(fb.calls.length, 0)
+  assert.deepEqual(r.finished_lot_before.qty, 3)
+  const ful = r.would.find((x) => x.call.endsWith('/fulfill'))
+  assert.equal(ful.note, 'finished lot 80004 already exists: 3 at Receiving; the fulfill adds 10 to it')
+  assert.equal(ful.finished_lot_before.qty, 3)
+  const fresh = await runWoPost(fakeFishbowl(), cmd(), ctx({ dryRun: true }))
+  assert.equal(fresh.would.find((x) => x.call.endsWith('/fulfill')).note, undefined)
 })
 
 // ── 3. Never GET /api/picks/:id — checked over every fake every test made (runs last) ─────────────────────────

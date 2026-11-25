@@ -238,16 +238,30 @@ export async function planPost(fb, p, cfg) {
   if (!dest) throw refuse(`destination location ${p.destId} is not in Fishbowl`)
   if (!truthy(dest.activeFlag)) throw refuse(`destination location ${p.destId} (${dest.name}) is not active`)
 
-  // 10. The finished lot is not on hand already (a lot is received once).
-  if (lotOnHand.length > 0) {
-    throw refuse(`finished lot ${p.finishedLot} of ${p.partNumber} is already on hand in Fishbowl (tag ${lotOnHand[0].tagNum} at ${lotOnHand[0].locationName ?? lotOnHand[0].locationId}); a lot is received once`)
-  }
-
+  // 10. The finished lot may already be on hand, and that is normal (D-ASM-64): SkyNet numbers a finished lot by its
+  //     combination of component lots (assembly_lot_index), so every build made from the same component lots carries
+  //     the same finished lot. Nothing refuses here; the lot's quantity at the destination is recorded, and the
+  //     fulfill adds to it.
   return {
     already: false, mo, locationGroupId, wo, fgWoItemId, pick, lines, toFinish,
     needStart: toFinish.length > 0 && pick.statusId === ENTERED,
     destination: { id: Number(dest.id), name: dest.name },
+    finishedLotBefore: lotAt(lotOnHand, p.destId),
   }
+}
+
+// The finished lot's on-hand tags, and its quantity at the destination (0 when it has none there) (D-ASM-64).
+function lotAt(tags, destId) {
+  const list = (tags || []).map((t) => ({ tag_id: Number(t.tagId), tag_num: String(t.tagNum), qty: Number(t.qty || 0), location_id: Number(t.locationId), location: t.locationName ?? null }))
+  return { qty: list.filter((t) => t.location_id === destId).reduce((s, t) => s + t.qty, 0), tags: list }
+}
+
+// The dry run's note when the finished lot already exists.
+function lotNote(before, p, destination) {
+  if (!before?.tags?.length) return null
+  const elsewhere = before.tags.filter((t) => t.location_id !== p.destId).reduce((s, t) => s + t.qty, 0)
+  return `finished lot ${p.finishedLot} already exists: ${before.qty} at ${destination?.name ?? `location ${p.destId}`}` +
+    `${elsewhere ? `, ${elsewhere} elsewhere` : ''}; the fulfill adds ${p.produced} to it`
 }
 
 // ── E. Writes ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -356,11 +370,13 @@ function wouldCalls(plan, p) {
     would.push({ call: `POST ${LEGACY}/SavePickRq`, lines: plan.toFinish.map((l) => ({ pickItemId: l.pickItemId, part: l.part, qty: l.qty, Status: FINISHED, lot: l.lot, tag_id: l.tag.tagId, tag_num: l.tag.tagNum, location_id: l.tag.locationId })) })
   }
   would.push({ call: `GET /api/work-orders/${plan.wo.id}` })
-  would.push({ call: `POST /api/work-orders/${plan.wo.id}/fulfill`, body: fulfillBody(plan.fgWoItemId, p) })
+  const note = lotNote(plan.finishedLotBefore, p, plan.destination)
+  would.push({ call: `POST /api/work-orders/${plan.wo.id}/fulfill`, body: fulfillBody(plan.fgWoItemId, p),
+    finished_lot_before: plan.finishedLotBefore, ...(note ? { note } : {}) })
   return would
 }
 
-function resultOf(plan, p, { writes, resumed = false, status = null, would = null }) {
+function resultOf(plan, p, { writes, resumed = false, status = null, would = null, before = undefined, after = undefined }) {
   return {
     fb_mo_id: plan.mo.id, mo_number: plan.mo.num,
     wo_id: plan.wo?.id ?? null, wo_number: plan.wo?.num ?? null, pick_id: plan.pick?.id ?? null, pick_number: plan.pick?.num ?? null,
@@ -371,6 +387,8 @@ function resultOf(plan, p, { writes, resumed = false, status = null, would = nul
       ? { part: l.part, lot: l.lot, tag_id: l.tag.tagId, tag_num: l.tag.tagNum, qty: l.qty }
       : { part: l.part, lot: l.lot, tag_id: l.srcTagId === null ? null : Number(l.srcTagId), tag_num: l.srcTagNum, qty: l.qty })),
     resumed, already: Boolean(plan.already), writes,
+    ...(before !== undefined ? { finished_lot_before: before } : {}),
+    ...(after !== undefined ? { finished_lot_after: after } : {}),
     ...(would ? { would } : {}),
   }
 }
@@ -406,6 +424,9 @@ async function fulfill(fb, plan, p, write, timeoutMs) {
   if (Number(fgs[0].id) !== plan.fgWoItemId) throw unexpected(`work order ${plan.wo.num}'s finished-good item is ${fgs[0].id} over the REST API and ${plan.fgWoItemId} in the database`)
   if (fgs[0].part?.name && fgs[0].part.name !== p.partNumber) throw unexpected(`work order ${plan.wo.num}'s finished good is ${fgs[0].part.name}, not ${p.partNumber}`)
 
+  // D-ASM-64: the finished lot as it stands just before the fulfill (another build may already have received it).
+  const before = lotAt(await fb.query(q.woPostFinishedLotTags(p.partNumber, p.finishedLot)), p.destId)
+
   const body = guardFulfillBody(fulfillBody(plan.fgWoItemId, p))
   await write('POST', `/api/work-orders/${plan.wo.id}/fulfill`, body, (b) => (b?.status !== 'Fulfilled' ? `the fulfill left the work order ${JSON.stringify(b?.status ?? null)}` : null))
 
@@ -424,10 +445,14 @@ async function fulfill(fb, plan, p, write, timeoutMs) {
     const used = items.filter((i) => Number(i.typeId) === 20 && i.partNum === l.part).reduce((s, i) => s + Number(i.qtyUsed || 0), 0)
     if (used !== l.qty) diffs.push(`${l.part} shows ${used} used, not the pick line's ${l.qty}`)
   }
-  const lotTags = await fb.query(q.woPostFinishedLotTags(p.partNumber, p.finishedLot))
-  const atDest = lotTags.filter((t) => Number(t.locationId) === p.destId).reduce((s, t) => s + Number(t.qty || 0), 0)
-  if (atDest !== p.produced) diffs.push(`lot ${p.finishedLot} holds ${atDest} at location ${p.destId}, not ${p.produced}`)
+  // The lot must hold at least what was produced and at least what it held before. Not an exact before + produced
+  // match: on live stock someone can pick from the lot in the same seconds, and a halt stops every MO write (D-ASM-64).
+  const after = lotAt(await fb.query(q.woPostFinishedLotTags(p.partNumber, p.finishedLot)), p.destId)
+  if (after.qty < p.produced || after.qty < before.qty) {
+    diffs.push(`lot ${p.finishedLot} holds ${after.qty} at location ${p.destId} after the fulfill; it held ${before.qty} before and ${p.produced} were produced`)
+  }
   if (diffs.length) throw postedButDiffers(plan.mo.num, diffs.join('; '))
+  return { before, after }
 }
 
 async function runSteps(fb, cmd, { cfg, log, dryRun, fishbowlVersion }, { pickOnly = false } = {}) {
@@ -442,15 +467,16 @@ async function runSteps(fb, cmd, { cfg, log, dryRun, fishbowlVersion }, { pickOn
   if (dryRun) {
     const would = wouldCalls(plan, p)
     log.info(`push #${cmd.id} wo_post: DRY RUN — would ${would.map((w) => w.call).join(', then ')}`)
-    return resultOf(plan, p, { writes: [], resumed, would })
+    return resultOf(plan, p, { writes: [], resumed, would, before: plan.finishedLotBefore })
   }
   const writes = []
   const timeoutMs = cfg.mo?.postTimeoutMs || null
   const write = writer(fb, log, cmd.id, writes, { timeoutMs, describe: describeAnswer })
   await finishPick(fb, plan, write, log, cmd.id)
   if (pickOnly) return { ...resultOf(plan, p, { writes, resumed, status: statusName(plan.mo.statusId) }), pick_only: true }
-  await fulfill(fb, plan, p, write, timeoutMs)
-  return resultOf(plan, p, { writes, resumed, status: 'Fulfilled' })
+  const lot = await fulfill(fb, plan, p, write, timeoutMs)
+  if (lot.before.tags.length) log.info(`push #${cmd.id} wo_post: finished lot ${p.finishedLot} already existed (${lot.before.qty} at location ${p.destId}); now ${lot.after.qty}`)
+  return resultOf(plan, p, { writes, resumed, status: 'Fulfilled', before: lot.before, after: lot.after })
 }
 
 // Runs one claimed wo_post command to the end. Returns the result for fb_push_finish; throws MoRefusal (nothing

@@ -190,6 +190,10 @@ not available on live Fishbowl 25.9: the bridge refuses unless the server versio
 - **Status ids seen.** `pickstatus`: 10 Entered, 20 Started, 30 Committed, 40 Finished. `pickitemstatus`: 5 Short,
   6 Hold, 10 Entered, 11 EnteredNew, 20 Started, 30 Committed, 40 Finished. The probes saw 10, 20 and 40 on work-order
   pick lines; the bridge refuses any other.
+- **Receiving into a lot that already exists (D-ASM-64).** Normal: SkyNet numbers a finished lot by its combination of
+  component lots, so several builds carry the same lot. Proven on the sandbox 2026-11-25: SBX-D2A-4 fulfilled 2 into
+  `SBX-82001`, which already held 3 in Receiving; Fishbowl **added to the existing tag** (141768, 3 → 5) and made no
+  second tag. The fulfill body is the same either way (the tracking value is the lot number).
 - **Costs (D-ASM-60).** Average Costing: components are charged at the part's average cost, not the lot's; the
   scrapped unit's cost is absorbed into the good units; the work-order posting is one `postwo` (status 70, For
   Journal Entry) and a `postwoitem` per item, no `post` rows — the same as a hand post.

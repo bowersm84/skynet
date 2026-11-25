@@ -240,14 +240,17 @@ the reason. `src/woPost.mjs` then posts it the way probes 1 and 2 proved on the 
    finished good and BOM the build's part), its one work order (not fulfilled, for the build quantity), its one pick
    (one line per part, the parts the build's lots name, only the statuses the probes saw), a tag for each line still
    to finish (that part and lot, in the MO's location group, lowest tag id first, the first whose available quantity
-   covers the line — never split), lot-number tracking on every part, the destination, and that the finished lot is
-   not on hand yet.
+   covers the line — never split), lot-number tracking on every part, the destination, and the finished lot's
+   on-hand quantity at the destination. The finished lot may already exist: SkyNet numbers it by its combination of
+   component lots, so every build from the same lots carries the same lot, and the fulfill adds to it (D-ASM-64).
 2. Starts the pick while it is Entered, then `GetPickRq` and `SavePickRq` through `/api/legacy/external`, each line
    Finished on its lot's tag; reads the lines back by SQL.
 3. `GET /api/work-orders/:id` for the finished-good item, then `POST …/fulfill` with produced, scrapped, the finished
    lot and the destination (`fb_post_dest_location_id`, Receiving) — never `rawGoods`.
 4. Reads back by SQL: MO Fulfilled, the finished good's used and scrapped, each component used its pick line's
-   quantity, the finished lot holds the good count at the destination. Then the MO mirror is re-read and the tags
+   quantity, and the finished lot holds at least the good count and at least what it held just before the fulfill at
+   the destination (not an exact before + produced match: live stock can move in the same seconds). The result carries
+   `finished_lot_before` and `finished_lot_after`. Then the MO mirror is re-read and the tags
    poll runs once, so SkyNet's read-back sees the post in the same cycle.
 
 **Switches.** SkyNet: `fb_auto_post_enabled`, `fb_auto_post_min_version` (26.11), `fb_post_dest_location_id` (3).
@@ -258,7 +261,8 @@ the command's `write_part_prefix` must equal it.
 
 **What refuses (nothing written).** Any payload, fence or version check; an MO that is not Issued; anything in
 Fishbowl that does not fit the build (work orders, picks, lines, a line finished on another lot, a status the probes
-never saw, no single tag covering a line, other tracking, an inactive destination, the finished lot already on hand).
+never saw, no single tag covering a line, other tracking, an inactive destination). A finished lot already on hand
+is not a refusal: it is posted into (D-ASM-64); an MO already Fulfilled with the lot on hand is reported as done.
 **A lot in another location** than the one Fishbowl sources the pick line from is a refusal too (D-ASM-62): checked
 before any write when the line's source location is already set, otherwise right after `GetPickRq` — then the pick has
 been started and nothing else was written, which is fine for a hand post or a later retry. `SavePickRq` and the fulfill

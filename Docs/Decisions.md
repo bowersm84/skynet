@@ -5278,3 +5278,19 @@ Not in this batch: more than one lot per component, short builds (good + bad bel
 
 ### D-ASM-62 — A lot in another location is a hand post, not a halt
 Follow-up to D-ASM-61, November 25, 2026. When the lot the tablet recorded sits in a different Fishbowl location from the one the work order's pick line is sourced from, the wo_post handler refuses the post and the build stays a hand post with the reason on its card. It does not halt the bridge. The halt stays reserved for Fishbowl answering a write in a way the probes did not see; this case is one the probes never covered, found by reading before the pick save. The handler never changes a pick line's location to match the tag. Also recorded from the D2a build: the handler starts a pick that is still Entered before saving it (as probe 1 did), refuses a component tracked by anything but lot number, and chooses object tags (type 30) only. To prove before live use, with split lots and short builds: finishing a pick line from a tag in another location. (Matt/Claude/CC, 2026-11-25)
+
+### D-ASM-63 — Release review: the lead checks a build before it is released (Batch D2b)
+Matt's call of November 25, 2026, after the first automatic post on TEST (AB-00024, verified 15 seconds after release): with D-ASM-61, Release is the last human step before Fishbowl changes, and it was one click. Jody reviews a build before release the way she does on paper today: she looks over the paperwork for signatures and errors and samples a few pieces. Database: Docs/migrations/2026-11-25_S17_D2b_release_review.sql (TEST, migration s17_d2b_release_review).
+
+| Point | Decision |
+|---|---|
+| The review | Release opens one screen: the build, who built it, the lots pulled and who checked them, every sign-off with who signed, when and the readings, earlier reviews, and what release will do in Fishbowl. |
+| What the lead records | Pieces sampled (at least 1, her call how many), pass or fail, and an optional note. Her signed-in account is the signature; no extra PIN. |
+| A failed sample or wrong paperwork | Send back, with a required reason. The build returns to the tablet as a paused build; nothing posts. The lots, sign-offs and finished lot stay, and a step can be signed again. |
+| Counts | The lead may correct good and bad, with a required reason. The corrected counts are what posts; the counts before and after are kept in assembly_release_reviews. |
+| Blocked | A PIN step that is unsigned or failed blocks release until it is fixed on the tablet. |
+| Which builds | Every build, hand posts included. Program builds are reviewed and released the same way but cannot be sent back or have their counts corrected here, because their closeout writes the Giza ledger. |
+| The checklist's Release step | Signed by the review, for the nine checklists that carry one. |
+| Switch | app_settings.assembly_release_review_required, seeded true. While true, the one-click assembly_build_release refuses unless the reviewed release calls it. The app no longer calls it. |
+
+Not in this batch: making the lead tick which sign-offs must be redone (the review flags sign-offs made before a send-back instead); a read-only review for released builds; Roger's confirmation of the sample rule and the count-correction rule, which Matt is to get. (Matt/Claude/CC, 2026-11-25)

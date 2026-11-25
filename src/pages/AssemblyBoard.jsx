@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 import { hasRole } from '../lib/roles'
 import {
   listOpenRequests, listBoard, listAssemblers, lastBuildQty, tagLotsForPart,
-  searchAssemblyParts, createBuild, assignBuild, releaseBuild, cancelBuild, reworkLot, linkBuildMo, retryBuildMo,
+  searchAssemblyParts, createBuild, assignBuild, cancelBuild, reworkLot, linkBuildMo, retryBuildMo, listSentBack,
   BUILD_STATUS_LABELS, BUILD_KIND_LABELS, POST_STATUS_LABELS, PRIORITIES, ACTIVE_BUILD_STATUSES,
 } from '../lib/assembly'
 import { getSettings } from '../lib/appSettings'
@@ -12,6 +12,8 @@ import { DEFAULT_AVATAR_COLOR } from '../lib/avatars'
 import { Avatar } from '../components/AvatarPicker'
 import { formatDateShort, formatDateTime } from '../lib/fishbowl'
 import PostCards, { MoChip, LinkMoDialog } from '../components/assembly/PostCards'
+import ReleaseReviewDialog from '../components/assembly/ReleaseReviewDialog'
+import { releasedMessage } from '../lib/assemblyReviewMath'
 
 // AssemblyBoard — S17 Batch B (D-ASM-04 / D-ASM-20 / D-ASM-31), revised in B2 (D-ASM-32). Jody's office board: Order
 // Queue lines dispositioned Assembly arrive as requests grouped by part; a build is created from them (or from
@@ -66,6 +68,7 @@ export default function AssemblyBoard({ profile }) {
   const [createFor, setCreateFor] = useState(null)   // a v_assembly_requests_open row → Create build dialog
   const [assignFor, setAssignFor] = useState(null)   // a build → Assign dialog
   const [cancelFor, setCancelFor] = useState(null)   // a build → Cancel dialog
+  const [reviewFor, setReviewFor] = useState(null)   // S17 D2b (D-ASM-63): a complete build → Release review dialog
   const [scratchOpen, setScratchOpen] = useState(false)
   const [postCount, setPostCount] = useState(null)   // S17 D1: cards still waiting for Ashley
   const [linkFor, setLinkFor] = useState(null)       // S17 D1: a build → Link MO dialog
@@ -75,7 +78,12 @@ export default function AssemblyBoard({ profile }) {
     try {
       const [rq, bd, as, st] = await Promise.all([listOpenRequests(), listBoard(), listAssemblers(), getSettings()])
       setRequests(rq)
-      setBuilds(bd)
+      // D-ASM-63: the lead's latest send-back is not in v_assembly_builds_board; read it for the open builds and merge it in.
+      // The board still loads if this read fails: the send-back line is a hint, not the record.
+      const open = bd.filter((b) => !['released', 'cancelled'].includes(b.status)).map((b) => b.id)
+      let sentBack = {}
+      try { sentBack = await listSentBack(open) } catch (e) { console.warn('send-back read failed:', e?.message || e) }
+      setBuilds(bd.map((b) => (sentBack[b.id] ? { ...b, ...sentBack[b.id] } : b)))
       setAssemblers(as)
       setSettings(st)
       const ids = [...new Set(rq.map((r) => r.part_id).filter(Boolean))]
@@ -248,7 +256,7 @@ export default function AssemblyBoard({ profile }) {
                       <BuildCard key={b.id} build={b} lotPrefix={lotPrefix} busy={busy}
                         onAssign={() => setAssignFor(b)}
                         onCancel={() => setCancelFor(b)}
-                        onRelease={() => act(() => releaseBuild(b.id), `${b.build_number} released.`)}
+                        onRelease={() => setReviewFor(b)}
                         onLinkMo={() => setLinkFor(b)}
                         onRetryMo={() => act(() => retryBuildMo(b.id), `${b.build_number}: the MO is queued for the bridge again.`)} />
                     ))}
@@ -262,7 +270,7 @@ export default function AssemblyBoard({ profile }) {
           <section className="grid md:grid-cols-2 gap-3">
             <ShortList title="Awaiting release" empty="Nothing complete and waiting." rows={awaitingRelease}
               render={(b) => (
-                <button disabled={busy} onClick={() => act(() => releaseBuild(b.id), `${b.build_number} released.`)} className={btnPrimary}>Release</button>
+                <button disabled={busy} onClick={() => setReviewFor(b)} className={btnPrimary}>Review and release</button>
               )} />
             {/* S17 D1 (D-ASM-54): the same post cards as the Order Queue's Ready to post tab, compact. */}
             <div className="bg-gray-900 rounded-lg border border-gray-800">
@@ -297,6 +305,12 @@ export default function AssemblyBoard({ profile }) {
       {cancelFor && (
         <CancelDialog build={cancelFor} busy={busy} onClose={() => setCancelFor(null)}
           onCancel={async (reason) => { if (await act(() => cancelBuild(cancelFor.id, reason), `${cancelFor.build_number} cancelled.`)) setCancelFor(null) }} />
+      )}
+      {/* S17 D2b (D-ASM-63): every release goes through the review (assembly_build_release_reviewed). */}
+      {reviewFor && (
+        <ReleaseReviewDialog build={reviewFor} lotPrefix={lotPrefix} canAct={canAct} onClose={() => setReviewFor(null)}
+          onReleased={async (result) => { setReviewFor(null); setStatus({ type: 'success', message: releasedMessage(result) }); await load() }}
+          onSentBack={async (num) => { setReviewFor(null); setStatus({ type: 'success', message: `${num} sent back to the tablet.` }); await load() }} />
       )}
     </div>
   )
@@ -335,6 +349,10 @@ function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease, o
           {b.status !== 'cancelled' && <button disabled={busy} onClick={onRetryMo} className={`${btn} bg-gray-800 border-gray-700 text-gray-200 hover:text-white`}>Retry</button>}
         </div>
       )}
+      {/* S17 D2b (D-ASM-63): the lead sent this build back from the release review */}
+      {b.sent_back_at && ['paused', 'in_progress', 'complete'].includes(b.status) && (
+        <div className="text-amber-200 bg-amber-950/40 border border-amber-800 rounded px-2 py-1" title={`Sent back ${formatDateTime(b.sent_back_at)}`}>Sent back: {b.sent_back_reason || '—'}</div>
+      )}
       {!b.checklist_template_id && !released && (
         <div className="text-amber-200 bg-amber-950/40 border border-amber-800 rounded px-2 py-1" title="No checklist family was found for this part when the build was made">No checklist — the kiosk has no steps for this build</div>
       )}
@@ -351,7 +369,7 @@ function BuildCard({ build: b, lotPrefix, busy, onAssign, onCancel, onRelease, o
           {b.status === 'paused' && (
             <button disabled={busy} onClick={onCancel} className={`${btn} bg-gray-900 border-gray-800 text-gray-400 hover:text-red-300`}>Cancel</button>
           )}
-          {b.status === 'complete' && <button disabled={busy} onClick={onRelease} className={btnPrimary}>Release</button>}
+          {b.status === 'complete' && <button disabled={busy} onClick={onRelease} className={btnPrimary}>Review and release</button>}
           <button disabled={busy} onClick={onLinkMo} title="Link a Fishbowl MO made by hand" className={`${btn} bg-gray-900 border-gray-800 text-gray-400 hover:text-white ml-auto`}>Link MO…</button>
         </div>
       )}
@@ -375,6 +393,7 @@ function ShortList({ title, rows, empty, note, render }) {
               <span className="font-mono text-gray-300">{b.part_number}</span>
               <span className="text-gray-500 text-xs">× {fmtQty(b.good_quantity ?? b.quantity)}</span>
               {b.assembly_lot_number && <span className="font-mono text-xs text-cyan-300">lot {b.assembly_lot_number}</span>}
+              {b.sent_back_at && <span className="text-xs text-amber-300" title={b.sent_back_reason || ''}>Reviewed before</span>}
               <span className="ml-auto">{render(b)}</span>
             </div>
           ))}

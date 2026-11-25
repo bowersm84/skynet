@@ -54,7 +54,19 @@ export function createBuild(args) {
 // build already had (benches stay in the table, unused, for the equipment-tracking wave).
 export const assignBuild = (buildId, profileId) =>
   rpc('assembly_build_assign', { p_build_id: buildId, p_bench_id: null, p_profile_id: profileId })
-export const releaseBuild = (buildId) => rpc('assembly_build_release', { p_build_id: buildId })
+// S17 D2b (D-ASM-63): the release review. getBuildReview returns everything the lead looks over; releaseBuildReviewed
+// records the sample check (and a count correction, when good/bad are given) and releases; sendBuildBack returns the
+// build to the tablet with a reason. The one-click assembly_build_release is no longer called by the app.
+export const getBuildReview = (buildId) => rpc('assembly_build_review', { p_build_id: buildId })
+export const releaseBuildReviewed = (buildId, { sampleQty, note = null, good = null, bad = null, countReason = null }) =>
+  rpc('assembly_build_release_reviewed', {
+    p_build_id: buildId, p_sample_qty: sampleQty, p_sample_result: 'pass', p_note: note,
+    p_good: good, p_bad: bad, p_count_reason: countReason,
+  })
+export const sendBuildBack = (buildId, { reason, sampleQty = null, sampleResult = null, note = null }) =>
+  rpc('assembly_build_send_back', {
+    p_build_id: buildId, p_reason: reason, p_sample_qty: sampleQty, p_sample_result: sampleResult, p_note: note,
+  })
 export const cancelBuild = (buildId, reason) => rpc('assembly_build_cancel', { p_build_id: buildId, p_reason: reason })
 export const assignLot = (buildId) => rpc('assembly_lot_assign', { p_build_id: buildId })
 // lots: [{ part, lot }] → true when this component-lot set has never been built for the part (D-ASM-08 second PIN)
@@ -81,6 +93,16 @@ export async function listBoard({ releasedDays = 7 } = {}) {
     .order('created_at', { ascending: true })
   if (error) throw error
   return data || []
+}
+
+// S17 D2b (D-ASM-63): the lead's latest send-back of each build, which v_assembly_builds_board does not carry.
+// Read from assembly_builds by id and merged in by the caller. → { [id]: { sent_back_reason, sent_back_at } }
+export async function listSentBack(buildIds) {
+  const ids = [...new Set((buildIds || []).filter(Boolean))]
+  if (!ids.length) return {}
+  const { data, error } = await supabase.from('assembly_builds').select('id, sent_back_reason, sent_back_at').in('id', ids)
+  if (error) throw error
+  return Object.fromEntries((data || []).map((r) => [r.id, { sent_back_reason: r.sent_back_reason, sent_back_at: r.sent_back_at }]))
 }
 
 // Active profiles holding the assembly role (primary or in roles[]), with their avatars — the board's columns.

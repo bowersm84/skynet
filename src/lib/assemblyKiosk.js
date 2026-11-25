@@ -21,18 +21,30 @@ const BOARD_COLUMNS = [
   'earliest_due', 'lots_pulled', 'open_sessions', 'minutes_total', 'program_id',
 ].join(', ')
 
+// S17 D2b (D-ASM-63): the lead's send-back (sent_back_reason, sent_back_at) is not in v_assembly_kiosk_builds. It is
+// read from assembly_builds (the tablet-only role may read it) and merged in by id. A failed read leaves the builds as
+// they are: the notice is a hint, and the tablet must keep working.
+async function withSentBack(rows) {
+  const ids = rows.map((r) => r.id).filter(Boolean)
+  if (!ids.length) return rows
+  const { data, error } = await supabase.from('assembly_builds').select('id, sent_back_reason, sent_back_at').in('id', ids)
+  if (error) { console.warn('send-back read failed:', error.message); return rows }
+  const by = new Map((data || []).map((r) => [r.id, r]))
+  return rows.map((r) => ({ ...r, sent_back_reason: by.get(r.id)?.sent_back_reason ?? null, sent_back_at: by.get(r.id)?.sent_back_at ?? null }))
+}
+
 // Open builds (requested / assigned / in_progress / paused) for the board.
 export async function listKioskBuilds() {
   const { data, error } = await supabase.from('v_assembly_kiosk_builds').select(BOARD_COLUMNS)
   if (error) throw error
-  return data || []
+  return withSentBack(data || [])
 }
 
 // One open build with the current wave's checklist (steps), or null once it has left the open list.
 export async function getKioskBuild(buildId) {
   const { data, error } = await supabase.from('v_assembly_kiosk_builds').select('*').eq('id', buildId).maybeSingle()
   if (error) throw error
-  return data || null
+  return data ? (await withSentBack([data]))[0] : null
 }
 
 // The caller's open session on a build, or null.

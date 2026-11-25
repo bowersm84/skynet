@@ -450,6 +450,8 @@ function BuildCard({ build, onOpen }) {
       onClick={() => onOpen(build)}
       className={`text-left w-full rounded-2xl bg-gray-800 border border-gray-700 hover:border-gray-500 border-l-8 ${PRIORITY_BORDER[build.priority] || PRIORITY_BORDER.normal} p-5 active:scale-[0.99] transition-transform`}
     >
+      {/* S17 D2b (D-ASM-63): the lead sent this build back from the release review */}
+      {build.sent_back_at && <div className="mb-3 rounded-xl bg-amber-950/60 border border-amber-700 text-amber-100 text-xl font-semibold px-4 py-2">Sent back by the lead</div>}
       <BuildSummary build={build} />
     </button>
   )
@@ -917,6 +919,12 @@ function WorkScreen({ build, operator, run, reload, onBack, onClosed }) {
   return (
     <div className="w-full max-w-5xl space-y-5">
       <button type="button" onClick={onBack} className="flex items-center gap-2 text-gray-400 hover:text-white text-xl py-2"><ArrowLeft size={24} /> Builds</button>
+      {/* S17 D2b (D-ASM-63): why the lead sent it back; it leaves the tablet at closeout, so nothing to dismiss */}
+      {build.sent_back_at && (
+        <div className="rounded-xl bg-amber-950/60 border border-amber-700 text-amber-100 text-2xl font-semibold px-5 py-4">
+          Sent back by the lead: {build.sent_back_reason || '—'}
+        </div>
+      )}
       <BuildSummary build={build} />
       {notice && <div className="rounded-xl bg-green-900/40 border border-green-700 text-green-100 text-lg px-4 py-3">{notice}</div>}
       <ErrorBox message={error} />
